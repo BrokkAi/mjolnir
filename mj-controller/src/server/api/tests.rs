@@ -2246,6 +2246,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 900,
             final_message: Some("added the line".into()),
+            tool_calls: 4,
         }),
         ..FakeBackend::default()
     });
@@ -2266,6 +2267,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
     assert_eq!(body["turn_id"], 5);
     assert_eq!(body["turn_number"], 3);
     assert_eq!(body["elapsed_ms"], 800);
+    assert_eq!(body["tool_calls"], 4);
     assert_eq!(body["final_message"], "added the line");
     assert_eq!(body["stop_reason"], "end_turn");
     assert_eq!(body["usage"]["scope"], "last_request");
@@ -2293,6 +2295,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 500,
             final_message: None,
+            tool_calls: 0,
         }),
         ..FakeBackend::default()
     });
@@ -4496,6 +4499,7 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 900,
             final_message: Some("Report delivered.".into()),
+            tool_calls: 0,
         }),
         ..FakeBackend::default()
     });

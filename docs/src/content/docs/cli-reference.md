@@ -291,16 +291,19 @@ without a workspace lists them in a workspace named `default`.
 
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints
-the outcome, the turn number, the elapsed time, and the agent's final message,
+the outcome, the elapsed time, the number of tool calls, and the agent's final message,
 and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
 
 The first line of a wait says how the turn ended in the same words as
 `mj sessions --session <id>`, for example
-`finished turn 16 (completed, end of turn) in 5.3s` or
-`error turn 4 (failed: harness inactive) in 30.3s`. With `--json`, the
-`stop_reason` field keeps the harness's own spelling, such as `EndTurn`.
+`turn finished (completed, end of turn) in 5.3s · 4 tool calls` or
+`turn error (failed: harness inactive) in 30.3s`. The tool-call count appears
+when the turn made any. The line carries no turn number: the number `mj prompt`
+prints is the handle `mj wait --turn` takes, not a count. With `--json`, the
+`stop_reason` field keeps the harness's own spelling, such as `EndTurn`, and
+`turn_id` and `tool_calls` are separate fields.
 
 `mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores

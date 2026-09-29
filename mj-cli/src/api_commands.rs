@@ -769,13 +769,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         return vec!["session suspended".to_owned()];
     }
     let mut lines = Vec::new();
-    let mut summary = outcome_name(response.outcome).to_owned();
-    // The same number `mj prompt` printed and `mj wait --turn` takes. The
-    // turn's position in the conversation is a different count, and printing
-    // it here as well made one turn look like two (F-12); it stays in --json.
-    if let Some(turn_id) = response.turn_id {
-        summary.push_str(&format!(" turn {turn_id}"));
-    }
+    // No number: `turn_id` is where the turn's prompt sits in the transcript,
+    // not a count of anything a reader can use, so it stays in --json (I2-5).
+    let mut summary = format!("turn {}", outcome_name(response.outcome));
     // How the turn ended, in the words `mj sessions` and the sub-agent notice
     // use; the harness's own spelling (`EndTurn`) stays in --json (R12-1).
     if let Some(stop_reason) = &response.stop_reason {
@@ -786,6 +782,12 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     }
     if let Some(elapsed_ms) = response.elapsed_ms {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
+    }
+    if let Some(tool_calls) = response.tool_calls.filter(|count| *count > 0) {
+        summary.push_str(&format!(
+            " · {tool_calls} tool call{}",
+            if tool_calls == 1 { "" } else { "s" }
+        ));
     }
     lines.push(summary);
     // The wait's message, the diagnostic and the agent's last message are
@@ -1677,7 +1679,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "quota_limit turn 8 (failed: quota limit reached)");
+        assert_eq!(lines[0], "turn quota_limit (failed: quota limit reached)");
         assert_eq!(
             lines
                 .iter()
@@ -1701,15 +1703,15 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "error (failed: harness inactive)");
+        assert_eq!(lines[0], "turn error (failed: harness inactive)");
 
-        // F-12: `mj prompt` printed "turn 8" and `mj wait` "turn 1" for the
-        // same turn. The wait names it by the number the prompt printed.
+        // I2-5: the transcript position of the turn's prompt is not a turn
+        // count, so the wait prints no number for it.
         let numbered = wait_response(
             "finished",
             serde_json::json!({"turn_id": 8, "turn_number": 1}),
         );
-        assert_eq!(wait_report_lines(&numbered)[0], "finished turn 8");
+        assert_eq!(wait_report_lines(&numbered)[0], "turn finished");
         assert!(
             lines.iter().any(|line| line.contains("job_output-7")),
             "the reason is printed: {lines:?}"
@@ -1799,8 +1801,25 @@ mod tests {
         );
         assert_eq!(
             wait_report_lines(&finished)[0],
-            "finished turn 16 (completed, end of turn) in 5.3s"
+            "turn finished (completed, end of turn) in 5.3s"
         );
+        let worked = wait_response(
+            "finished",
+            serde_json::json!({
+                "stop_reason": "EndTurn", "turn_id": 16, "elapsed_ms": 5300, "tool_calls": 4
+            }),
+        );
+        assert_eq!(
+            wait_report_lines(&worked)[0],
+            "turn finished (completed, end of turn) in 5.3s · 4 tool calls"
+        );
+        let one_call = wait_response("finished", serde_json::json!({"tool_calls": 1}));
+        assert_eq!(
+            wait_report_lines(&one_call)[0],
+            "turn finished · 1 tool call"
+        );
+        let no_calls = wait_response("finished", serde_json::json!({"tool_calls": 0}));
+        assert_eq!(wait_report_lines(&no_calls)[0], "turn finished");
         assert_eq!(
             serde_json::to_value(&finished).unwrap()["stop_reason"],
             "EndTurn",
@@ -1824,7 +1843,7 @@ mod tests {
             );
             assert_eq!(
                 wait_report_lines(&response)[0],
-                format!("{outcome} turn 2 ({words})")
+                format!("turn {outcome} ({words})")
             );
             // The same words `mj sessions --session` prints for that turn.
             let mut session = response.session.clone();

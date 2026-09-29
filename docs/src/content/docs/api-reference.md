@@ -514,6 +514,7 @@ asked about; the wait keeps waiting until that turn actually ends.
   "turn_id": 57,
   "turn_number": 3,
   "elapsed_ms": 42318,
+  "tool_calls": 6,
   "relay": { "state": "connected" },
   "session": { "id": "session-1" }
 }
@@ -549,7 +550,8 @@ response = json.loads(result.stdout)
 
 - `turn_number` is the one-based position of this turn in the conversation, and
   `elapsed_ms` is how long it took from its first item to its last change. Both
-  are absent when the wait ended without a finished turn.
+  are absent when the wait ended without a finished turn. `tool_calls` is how
+  many tool calls the turn made, absent in the same case.
 - `final_message` is the agent's last message of the turn, flattened to text.
 - `diagnostic`, when available, preserves the provider failure's `message`,
   optional `code`, `http_status`, and provider-supplied `reset_at`. The same

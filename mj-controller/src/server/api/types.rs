@@ -460,6 +460,10 @@ pub struct WaitResponse {
     pub turn_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<i64>,
+    /// How many tool calls the turn made. Absent when the wait ended without a
+    /// finished turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
     /// Legacy alias for a worker-owned server retry, retained for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_retry: Option<WaitCapacityRetry>,

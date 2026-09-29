@@ -4291,6 +4291,99 @@ fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
     );
 }
 
+/// A turn's summary counts the tool calls inside the turn's own span, so a
+/// wait can say how much work the turn did without loading its transcript.
+#[test]
+fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let item = |position: u64, body: TranscriptBody| TranscriptItem {
+        stable_id: format!("item:{position}"),
+        position,
+        latest_content_event_ordinal: None,
+        created_at_ms: position as i64 * 100,
+        last_changed_at_ms: position as i64 * 100,
+        body,
+    };
+    let user = |position: u64| {
+        let mut user = item(
+            position,
+            TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "go"})],
+            },
+        );
+        user.stable_id = format!("user:{position}");
+        user
+    };
+    let tool = |position: u64| {
+        item(
+            position,
+            TranscriptBody::Tool {
+                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        )
+    };
+    let agent = |position: u64| {
+        let mut agent = item(
+            position,
+            TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "done"}})],
+                streaming: false,
+            },
+        );
+        agent.latest_content_event_ordinal = Some(position);
+        agent
+    };
+    let items = [
+        user(1),
+        tool(2),
+        tool(3),
+        agent(4),
+        user(5),
+        tool(6),
+        agent(7),
+        user(8),
+        agent(9),
+    ];
+    for (index, item) in items.into_iter().enumerate() {
+        let ordinal = index as u64 + 1;
+        let previous = if ordinal == 1 {
+            RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            event_digest(ordinal - 1)
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &previous,
+            &event_digest(ordinal),
+            &MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(item)],
+                ..MaterializedSessionMutation::default()
+            },
+        )
+        .unwrap();
+    }
+    let calls = |start, end| {
+        load_materialized_turn_summary_from(&database, "session-1", start, end)
+            .unwrap()
+            .tool_calls
+    };
+    assert_eq!(calls(1, 4), 2);
+    assert_eq!(
+        calls(5, 7),
+        1,
+        "the first turn's calls are not counted again"
+    );
+    assert_eq!(calls(8, 9), 0);
+}
+
 /// A finished child session reports the answer of the turn it ran, so a
 /// harness notice recorded after that turn — a resume warning, for instance —
 /// must not take its place. The session-wide newest agent message does take

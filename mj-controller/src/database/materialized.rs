@@ -486,11 +486,20 @@ pub(super) fn load_materialized_turn_summary_from(
         turn_start_position,
         turn_completed_position,
     )?;
+    let tool_calls = connection.query_row(
+        "SELECT COUNT(*)
+         FROM materialized_transcript_items
+         WHERE session_id = ?1 AND position >= ?2 AND position <= ?3
+           AND json_extract(body_json, '$.kind') = 'tool'",
+        params![session_id, turn_start_position, turn_completed_position],
+        |row| row.get::<_, u64>(0),
+    )?;
     Ok(TurnSummary {
         turn_number,
         turn_started_at_ms,
         last_changed_at_ms,
         final_message,
+        tool_calls,
     })
 }
 

@@ -147,6 +147,8 @@ pub struct TurnSummary {
     pub last_changed_at_ms: i64,
     /// The last nonempty agent message the turn produced, flattened to text.
     pub final_message: Option<String>,
+    /// How many tool calls the turn made.
+    pub tool_calls: u64,
 }
 
 /// One page of a session's transcript, ordered by the sequence a reader pages
