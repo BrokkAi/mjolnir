@@ -154,7 +154,7 @@ The per-worker decision logs on Jonathan's host hold 502 decisions across 22 ses
 
 - Quiet is not unified (above).
 - (Closed 2026-09-29.) `Continue` maps to `KeepCurrent` in the activity inference, so a confident `authorized_unfinished` with tasks listed used to leave the continuation blocked behind them for good. The `background` judgment now discharges unneeded tasks: `driver_present` goes false, and the worker's admission check (`relay/commands.rs`, which already tested `driver_present`) lets the continuation through. A worker test pins it.
-- The worker records `Continue` as `Deferred` whether or not `[continuation]` is enabled and whether or not the session is a child; nothing consumes it in those cases, and `mj wait` treats `Deferred` as not finished.
+- (Closed 2026-09-30.) The worker used to record `Continue` as `Deferred` whether or not `[continuation]` was enabled. The setting now travels to the worker at launch (`MJ_CONTINUATION_DISABLED`), and a `Continue` verdict is recorded as `Assessed` with reason `continuation_disabled` when nobody will act on it. Children are excluded by the daemon; they also cannot reach `Continue` because their history holds no user message.
 - Provider-retry submission requires `is_quiet`, so a leftover background command blocks an armed retry.
 - (Closed 2026-09-29.) The dead `RuntimeEvent::ContinuationExpected` and `TurnVerdict::should_retry_server_error` are removed.
 - The proxy runbook now records v5 and v6; v6 is not deployed as of 2026-09-29 and must be before a worker that calls it ships.

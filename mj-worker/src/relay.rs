@@ -193,6 +193,9 @@ pub struct DurableRelay {
     background_work_known: Option<bool>,
     /// Claude AIR tasks that the adapter currently says can be stopped.
     claude_stoppable_tasks: BTreeSet<String>,
+    /// Whether the daemon will act on a `Continue` verdict. Off when the
+    /// launch environment says automatic continuation is disabled.
+    continuation_enabled: bool,
     /// When a Claude background task last completed or failed, until the
     /// harness turn that answers it opens. Claude Code always follows such a
     /// settle with a task-notification turn; publishing the settle time lets
@@ -466,6 +469,7 @@ impl DurableRelay {
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             claude_stoppable_tasks: BTreeSet::new(),
+            continuation_enabled: true,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -838,6 +842,11 @@ impl DurableRelay {
             receipt.identity.require(expected)?;
         }
         Ok(())
+    }
+
+    /// Whether a `Continue` verdict may be parked for the daemon to act on.
+    pub fn set_continuation_enabled(&mut self, enabled: bool) {
+        self.continuation_enabled = enabled;
     }
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {

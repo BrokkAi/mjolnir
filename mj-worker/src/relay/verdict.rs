@@ -283,6 +283,7 @@ impl DurableRelay {
                     a.status = Status::Deferred;
                     "quota_resolution_required"
                 }
+                Action::Continue if !self.continuation_enabled => "continuation_disabled",
                 Action::Continue if self.snapshot.continuation.eligible() => {
                     a.status = Status::Deferred;
                     "authorized_continuation_ready"
@@ -734,6 +735,75 @@ mod settled_task_tests {
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
             .unwrap();
         assert!(relay.activity_facts().background_needed.is_none());
+    }
+
+    #[test]
+    fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+        use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
+        use mj_core::relay::RelayCommandOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        relay.set_continuation_enabled(false);
+        // A real user prompt, so the authorization history is complete and
+        // the verdict can reach `Continue` at all.
+        submit_relay(
+            &mut relay,
+            "original-prompt",
+            prompt("Fix the failing test and push when done."),
+        );
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "original-prompt"
+        );
+        relay
+            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new("Fixed the test. I'll push next.")),
+            )))
+            .unwrap();
+        relay
+            .record_command_completed(
+                "original-prompt",
+                RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "EndTurn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
+        assert!(evidence.authorization.is_some());
+        let verdict = Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+            },
+            work: Judgment {
+                choice: Work::AuthorizedUnfinished,
+                confidence: 0.99,
+            },
+            background: None,
+        };
+        let reason = relay.apply_turn_assessment(generation, verdict).unwrap();
+        assert_eq!(reason, "continuation_disabled");
+        let assessment = relay.snapshot.assessment.as_ref().unwrap();
+        assert_eq!(
+            assessment.status,
+            Status::Assessed,
+            "nothing would consume a deferred one"
+        );
+        assert!(!relay.operational_state().retry_assessment_pending);
     }
 
     #[test]

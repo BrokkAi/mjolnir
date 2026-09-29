@@ -321,6 +321,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
     durable_relay.set_turn_verdict_harness(config.harness);
+    durable_relay.set_continuation_enabled(!mj_core::jev::continuation_disabled_by_environment());
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
