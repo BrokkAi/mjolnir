@@ -290,6 +290,17 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
     Ok(Some(client))
 }
 
+/// Refuse to stop a daemon when the one that would replace it cannot read the
+/// configuration and would exit at startup, leaving the instance stopped.
+/// `action` finishes "The Mjolnir daemon was not ...".
+fn ensure_config_loads(config_path: &Path, action: &str) -> Result<()> {
+    mj_core::config::Config::load_from(config_path).map(|_| ()).map_err(|error| {
+        anyhow!(
+            "{error:#}. The Mjolnir daemon was not {action}; fix the configuration and try again."
+        )
+    })
+}
+
 /// The daemon a restart produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartedDaemon {
@@ -318,6 +329,9 @@ const RESTART_ATTEMPTS: usize = 2;
 /// restart reports someone else's daemon as the one it was asked for.
 pub async fn restart_daemon() -> Result<RestartedDaemon> {
     mj_core::config::ensure_may_control_store(&data_dir(), "restart the Mjolnir daemon")?;
+    // A daemon that cannot read its configuration exits at once. Find that out
+    // while the old one still runs.
+    ensure_config_loads(&mj_core::config::config_path(), "restarted")?;
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     for attempt in 1..=RESTART_ATTEMPTS {
         if let Ok(metadata) = read_metadata_any() {
@@ -567,6 +581,7 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             metadata.pid, metadata.build_version
         ),
     )?;
+    ensure_config_loads(&mj_core::config::config_path(), "replaced")?;
     let mut notice_at = Instant::now() + START_NOTICE_DELAY;
     loop {
         let previous = metadata.clone();
@@ -1274,6 +1289,32 @@ mod tests {
             !metadata_path().exists(),
             "the keep-alive must never start a daemon"
         );
+    }
+    #[test]
+    fn a_configuration_the_new_daemon_cannot_read_refuses_the_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "version = {}\n\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+                 [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        let error = ensure_config_loads(&path, "restarted")
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("FAKE_TOKEN = { from_secret"), "{error}");
+        assert!(error.contains("secrets.toml"), "{error}");
+        assert!(error.contains("was not restarted"), "{error}");
+        fs::write(
+            directory.path().join("secrets.toml"),
+            "FAKE_TOKEN = \"x\"\n",
+        )
+        .unwrap();
+        ensure_config_loads(&path, "restarted").unwrap();
     }
     #[test]
     fn a_restart_onto_this_build_succeeds_and_says_so() {
