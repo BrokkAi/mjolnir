@@ -788,7 +788,8 @@ pub(super) async fn serve_session(
                 let mut steering_deadline = None;
                 let input_verdict = async {
                     if let Some(client) = &verdict_client {
-                        verdict_client::await_input_verdict(spec, client).await
+                        verdict_client::await_input_verdict(spec, client, pending_elicitations)
+                            .await
                     } else {
                         std::future::pending::<verdict_client::VerdictAttempt>().await
                     }

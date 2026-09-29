@@ -85,6 +85,10 @@ impl VerdictAttempt {
                     "failed",
                     "Jev request failed; mj kept the runtime status.".to_owned(),
                 ),
+                (_, "structured_request_open") => (
+                    "suppressed",
+                    "The harness has a question open for the person; mj kept the turn waiting for the answer.".into(),
+                ),
                 ("discarded", _) => (
                     "stale",
                     "New activity superseded this assessment; mj kept the runtime status."
@@ -341,23 +345,54 @@ impl VerdictClient {
 
 /// Lives beside the prompt future, so cancellation and shutdown can always win
 /// while HTTP is pending. Dropping the turn drops the request and its schedule.
+///
+/// This judges questions the agent wrote in chat text. A structured request
+/// the harness has open (an ACP form or permission request, `open_requests`)
+/// is the harness itself waiting for the person, however long they take, so
+/// while one is open the turn is not quiet: Jev is not asked and no verdict is
+/// returned. Returning here ends the turn and drops the prompt, which cancels
+/// the request.
 pub(super) async fn await_input_verdict(
     spec: &super::LaunchSpec,
     client: &VerdictClient,
+    open_requests: &super::PendingElicitations,
 ) -> VerdictAttempt {
-    await_input_verdict_with_cadence(spec, client, mj_core::activity::SILENCE_WORTH_REPORTING).await
+    await_input_verdict_with_cadence(
+        spec,
+        client,
+        open_requests,
+        mj_core::activity::SILENCE_WORTH_REPORTING,
+    )
+    .await
 }
 
 async fn await_input_verdict_with_cadence(
     spec: &super::LaunchSpec,
     client: &VerdictClient,
+    open_requests: &super::PendingElicitations,
     first: Duration,
 ) -> VerdictAttempt {
     use mj_core::activity::verdict::{Decision, TurnPhase, decide};
+    let request_open = || {
+        !open_requests
+            .lock()
+            .expect("pending elicitation lock poisoned")
+            .is_empty()
+    };
     let mut observed = spec.turn_context.parent_activity();
+    // The last moment a structured request was seen open. Silence counts from
+    // its close, like any other activity.
+    let mut request_seen_at: Option<std::time::Instant> = None;
     let mut gap = first;
     let mut next_silence = first;
     loop {
+        if request_open() {
+            request_seen_at = Some(std::time::Instant::now());
+            gap = first;
+            next_silence = first;
+            tokio::time::sleep(first.min(Duration::from_secs(1))).await;
+            continue;
+        }
         let facts = super::turn_stall_facts(spec);
         if observed != spec.turn_context.parent_activity() {
             observed = spec.turn_context.parent_activity();
@@ -366,6 +401,7 @@ async fn await_input_verdict_with_cadence(
         }
         let now = mj_core::clock::epoch_millis();
         let silent = observed.map_or(Duration::ZERO, |at| at.elapsed());
+        let silent = request_seen_at.map_or(silent, |at| silent.min(at.elapsed()));
         if silent < next_silence {
             tokio::time::sleep((next_silence - silent).min(Duration::from_secs(1))).await;
             continue;
@@ -382,6 +418,12 @@ async fn await_input_verdict_with_cadence(
             || generation != spec.turn_context.generation()
         {
             attempt.finish("discarded", "activity_or_generation_changed");
+            continue;
+        }
+        // A native child's request does not mark the parent's activity, so
+        // ask the open requests themselves before declaring the turn quiet.
+        if request_open() {
+            attempt.finish("discarded", "structured_request_open");
             continue;
         }
         match answer {
@@ -563,7 +605,12 @@ mod tests {
         });
         let mut attempt = tokio::time::timeout(
             Duration::from_millis(200),
-            await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(30)),
+            await_input_verdict_with_cadence(
+                &spec,
+                &client,
+                &Default::default(),
+                Duration::from_millis(30),
+            ),
         )
         .await
         .unwrap();
@@ -593,7 +640,12 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(200),
-                await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(5))
+                await_input_verdict_with_cadence(
+                    &spec,
+                    &client,
+                    &Default::default(),
+                    Duration::from_millis(5)
+                )
             )
             .await
             .is_err()
@@ -723,7 +775,12 @@ mod tests {
             spec.turn_context.mark_parent_activity();
             let result = tokio::time::timeout(
                 Duration::from_millis(150),
-                await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(5)),
+                await_input_verdict_with_cadence(
+                    &spec,
+                    &client,
+                    &Default::default(),
+                    Duration::from_millis(5),
+                ),
             )
             .await;
             assert_eq!(result.is_ok(), choice == "user");
@@ -747,12 +804,102 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(250),
-                await_input_verdict_with_cadence(&spec, &client, Duration::from_millis(5))
+                await_input_verdict_with_cadence(
+                    &spec,
+                    &client,
+                    &Default::default(),
+                    Duration::from_millis(5)
+                )
             )
             .await
             .is_err()
         );
         update.await.unwrap();
+        server.await.unwrap();
+    }
+
+    /// An open ACP form (AskUserQuestion, a permission request) is the harness
+    /// asking the person through a structured request. It waits for them
+    /// however long they take; Jev's quiet-turn verdict is only for questions
+    /// written in chat text, and must never end the turn under the form (I1-6).
+    #[tokio::test]
+    async fn an_open_structured_request_is_never_resolved_by_a_classifier_verdict() {
+        let (client, server) = server(response("user")).await;
+        let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.turn_context
+            .reset("Ask me two questions with AskUserQuestion before doing anything.");
+        let open_requests = super::super::PendingElicitations::default();
+        let (answer, mut form) = tokio::sync::oneshot::channel();
+        open_requests
+            .lock()
+            .unwrap()
+            .insert("elicitation-1".into(), answer);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(400),
+                await_input_verdict_with_cadence(
+                    &spec,
+                    &client,
+                    &open_requests,
+                    Duration::from_millis(5)
+                ),
+            )
+            .await
+            .is_err(),
+            "a classifier verdict ended the turn while the form was open"
+        );
+        assert!(
+            !server.is_finished(),
+            "Jev must not be asked while a structured request is open"
+        );
+        server.abort();
+        assert!(open_requests.lock().unwrap().contains_key("elicitation-1"));
+        assert!(
+            matches!(
+                form.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the form stays live"
+        );
+    }
+
+    /// Once the harness withdraws its request, the turn is assessed like any
+    /// other: a question left only in chat text still earns the note.
+    #[tokio::test]
+    async fn a_withdrawn_structured_request_returns_the_turn_to_the_classifier() {
+        let (client, server) = server(response("user")).await;
+        let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.turn_context.reset("Which option should I use?");
+        let open_requests = super::super::PendingElicitations::default();
+        let (answer, _form) = tokio::sync::oneshot::channel();
+        open_requests
+            .lock()
+            .unwrap()
+            .insert("elicitation-1".into(), answer);
+        let withdraw = open_requests.clone();
+        let withdrawn = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            withdraw.lock().unwrap().remove("elicitation-1");
+        });
+        let mut attempt = tokio::time::timeout(
+            Duration::from_secs(5),
+            await_input_verdict_with_cadence(
+                &spec,
+                &client,
+                &open_requests,
+                Duration::from_millis(5),
+            ),
+        )
+        .await
+        .expect("the classifier assesses the turn after the request is withdrawn");
+        attempt.finish("applied", "awaiting_input");
+        withdrawn.await.unwrap();
         server.await.unwrap();
     }
 }
