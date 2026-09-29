@@ -5013,8 +5013,12 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 #[test]
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         viewer_source("function subagentChoiceApplies(", "const SUBAGENT_MODES"),
+        viewer_source(
+            "function workingChildCount(",
+            "function sessionInWorkspace("
+        ),
         viewer_source(
             "function moveSubagentChange(",
             "function moveQueueItemText("
@@ -5025,8 +5029,8 @@ let newDraft = null;
 const snapshot = { profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }] };
 const sessions = {
   parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
-  parked: { id: "parked", lifecycle: "live" },
-  running: { id: "running", lifecycle: "live" },
+  parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
+  running: { id: "running", lifecycle: "live", chat_phase: "running" },
   gone: { id: "gone", lifecycle: "suspended" },
 };
 function sessionById(id) { return sessions[id]; }
@@ -5039,7 +5043,7 @@ draft.subagents = { mode: "all_models" };
 assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"all_models"}', "a changed policy must be sent");
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a harness without delegation tools sends no policy");
-assert(moveStoppedChildren(sessions.parent) === 2, "live and parked children are stopped");
+assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
 "#;
     run_viewer_script(
         "viewer-move-subagents",

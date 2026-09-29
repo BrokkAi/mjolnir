@@ -578,7 +578,8 @@ pub(crate) struct ReviewWizardView<'a> {
     /// harness and profile, so the review must not promise a fresh environment.
     in_place_move: bool,
     source_unavailable: bool,
-    /// Sub-agents the Move stops, as a suspend would.
+    /// Sub-agents the Move stops that had not handed back; idle ones are
+    /// stopped without a word, as a suspend stops them.
     stopped_subagents: usize,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
@@ -679,7 +680,11 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::styled(
             format!(
                 "{} will be stopped; the session is told which when it resumes.",
-                crate::widgets::counted(stopped_subagents, "sub-agent", "sub-agents")
+                crate::widgets::counted(
+                    stopped_subagents,
+                    "working sub-agent",
+                    "working sub-agents"
+                )
             ),
             Style::default().fg(theme::palette().warning),
         ));
@@ -1568,7 +1573,9 @@ pub(crate) fn render_resume_wizard(
                     .as_ref()
                     .is_some_and(|p| p.source_unavailable),
                 stopped_subagents: if wizard.moving {
-                    dashboard.managed_active_child_ids(&wizard.session_id).len()
+                    dashboard
+                        .subagents_not_handed_back(&wizard.session_id)
+                        .len()
                 } else {
                     0
                 },

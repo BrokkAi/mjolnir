@@ -3342,11 +3342,8 @@ function moveSubagentChange(draft) {
   return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
 }
 
-/// Children that are live or parked, which Move stops as a suspend would.
 function moveStoppedChildren(session) {
-  return (session.subagent_session_ids || [])
-    .map(id => sessionById(id))
-    .filter(child => child?.lifecycle === 'live').length;
+  return workingChildCount(session);
 }
 
 function moveQueueItemText(item) {
@@ -3546,7 +3543,7 @@ function renderMoveForm() {
     }
     const stoppedChildren = moveStoppedChildren(session);
     if (stoppedChildren) {
-      moveStep.append(el('p', 'move-warning', `${stoppedChildren} sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
+      moveStep.append(el('p', 'move-warning', `${stoppedChildren} working sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
     }
     if (preparation.conversion) {
       moveStep.append(el('p', '', conversionSummary(preparation.conversion)));
@@ -4079,6 +4076,15 @@ const viewerState = new ViewerRuntimeState(
 );
 
 function sessionById(id) { return viewerState.rows.get(id); }
+/// Children still at their task, which a suspend or a Move stops and loses.
+/// An idle child has handed back and is stopped without a word.
+function workingChildCount(session) {
+  return (session?.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
+    .length;
+}
+
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -6957,10 +6963,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     const session = sessionById(dataset.id);
     // A suspend stops the sub-agents without a checkpoint. Only the ones
     // still at their task lose anything; an idle one has handed back.
-    const workingChildren = (session?.subagent_session_ids || [])
-      .map(id => sessionById(id))
-      .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
-      .length;
+    const workingChildren = workingChildCount(session);
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
       + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')

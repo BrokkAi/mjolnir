@@ -4590,7 +4590,7 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
     assert!(
         parent
             .journal()
-            .contains("Suspend stopped 1 sub-agent: \\\"Fix the parser\\\" (had not handed back)."),
+            .contains("Suspend stopped 1 working sub-agent: \\\"Fix the parser\\\"."),
         "{}",
         parent.journal()
     );

@@ -971,31 +971,39 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
 }
 
 /// The conversation line a person sees when a parent whose suspend stopped
-/// sub-agents resumes. `None` when nothing was stopped.
+/// sub-agents resumes. It names only the children that had not handed back,
+/// since those lost work; the idle ones that had are counted. `None` when
+/// nothing was stopped.
 #[must_use]
 pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
     if stopped.is_empty() {
         return None;
     }
-    let children = stopped
+    let working = stopped
         .iter()
-        .map(|child| {
-            format!(
-                "\"{}\" ({})",
-                child.title,
-                if child.handed_back {
-                    "had handed back"
-                } else {
-                    "had not handed back"
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "Suspend stopped {}: {children}.",
-        crate::text::counted(stopped.len(), "sub-agent", "sub-agents")
-    ))
+        .filter(|child| !child.handed_back)
+        .map(|child| format!("\"{}\"", child.title))
+        .collect::<Vec<_>>();
+    let idle = stopped.len() - working.len();
+    if working.is_empty() {
+        return Some(format!(
+            "Suspend stopped {}.",
+            crate::text::counted(idle, "idle sub-agent", "idle sub-agents")
+        ));
+    }
+    let mut notice = format!(
+        "Suspend stopped {}: {}",
+        crate::text::counted(working.len(), "working sub-agent", "working sub-agents"),
+        working.join(", ")
+    );
+    if idle > 0 {
+        notice.push_str(&format!(
+            "; {} stopped too",
+            crate::text::counted(idle, "idle sub-agent was", "idle sub-agents were")
+        ));
+    }
+    notice.push('.');
+    Some(notice)
 }
 
 /// What a person is told before a suspend stops sub-agents that have not
@@ -1740,8 +1748,39 @@ mod tests {
         );
         assert_eq!(
             stopped_subagents_notice(&lost).unwrap(),
-            "Suspend stopped 2 sub-agents: \"Fix the parser\" (had not handed back), \
-             \"Review the docs\" (had not handed back)."
+            "Suspend stopped 2 working sub-agents: \"Fix the parser\", \"Review the docs\"."
+        );
+
+        // Idle children are counted, not named; the model's note above still
+        // lists every child.
+        let idle_only = [
+            stopped("Done", None, true),
+            stopped("Also done", None, true),
+        ];
+        assert_eq!(
+            stopped_subagents_notice(&idle_only[..1]).unwrap(),
+            "Suspend stopped 1 idle sub-agent."
+        );
+        assert_eq!(
+            stopped_subagents_notice(&idle_only).unwrap(),
+            "Suspend stopped 2 idle sub-agents."
+        );
+        let one_working_one_idle = [lost[0].clone(), idle_only[0].clone()];
+        assert_eq!(
+            stopped_subagents_notice(&one_working_one_idle).unwrap(),
+            "Suspend stopped 1 working sub-agent: \"Fix the parser\"; \
+             1 idle sub-agent was stopped too."
+        );
+        let mixed_many = [
+            lost[0].clone(),
+            lost[1].clone(),
+            idle_only[0].clone(),
+            idle_only[1].clone(),
+        ];
+        assert_eq!(
+            stopped_subagents_notice(&mixed_many).unwrap(),
+            "Suspend stopped 2 working sub-agents: \"Fix the parser\", \"Review the docs\"; \
+             2 idle sub-agents were stopped too."
         );
 
         let one = stopped_subagents_prompt_context(&lost[..1]).unwrap();

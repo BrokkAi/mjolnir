@@ -1972,7 +1972,7 @@ exit 0
                 assert_eq!(mentions(projection, "[session restarted]"), 1);
                 // The person sees one line about the stopped sub-agent.
                 assert_eq!(
-                    mentions(projection, "Suspend stopped 1 sub-agent"),
+                    mentions(projection, "Suspend stopped 1 working sub-agent"),
                     usize::from(stopped_subagents == StoppedSubagents::One),
                     "{:#?}",
                     projection.transcript

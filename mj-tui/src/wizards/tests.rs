@@ -2508,6 +2508,40 @@ fn move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind
     );
 }
 
+/// A Move stops the parent's sub-agents as a suspend does. The review counts
+/// only the ones still at their task; idle ones have handed back and are not
+/// mentioned.
+#[test]
+fn move_review_counts_only_working_subagents() {
+    let review = |working: bool| {
+        let (mut dashboard, _) = dashboard_with_one_subagent();
+        if working {
+            dashboard
+                .session_details
+                .get_mut("child-session")
+                .unwrap()
+                .current_turn_started_at = Some(1);
+        }
+        let request_id = open_move_review(&mut dashboard);
+        assert!(dashboard.apply_move_preparation(request_id, move_preparation()));
+        let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw move review");
+        let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+        rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let idle = review(false);
+    assert!(!idle.contains("will be stopped"), "{idle}");
+    let working = review(true);
+    assert!(
+        working.contains(
+            "1 working sub-agent will be stopped; the session is told which when it resumes."
+        ),
+        "{working}"
+    );
+}
+
 /// A profile-only move on an unchanged target keeps the container, the
 /// workspace, and the untracked files, so the review must not promise a fresh
 /// environment. The fresh-environment wording still has to appear when the
