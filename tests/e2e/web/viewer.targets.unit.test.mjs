@@ -61,3 +61,28 @@ test('resume and move offer the same targets', () => {
   );
   assert.equal(vm.runInContext('freshMoveDraft(session).targetId', context), 'macbook');
 });
+
+test('a new session preselects the daemon default when it is launchable, else the first launchable target', () => {
+  const context = loaded();
+  context.snapshot.profiles = [{ id: 'claude' }, { id: 'codex' }];
+  vm.runInContext("launchDefault = { profile_id: 'codex', target_id: 'podman' }", context);
+  assert.equal(vm.runInContext('freshDraft().targetId', context), 'podman');
+  assert.equal(vm.runInContext('freshDraft().profileId', context), 'codex');
+  // A default that is a missing runtime, or no longer configured, is not offered.
+  vm.runInContext("launchDefault = { profile_id: 'gone', target_id: 'docker' }", context);
+  assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
+  assert.equal(vm.runInContext('freshDraft().profileId', context), 'claude');
+  vm.runInContext('launchDefault = null', context);
+  assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
+});
+
+test('move preselects the session current target when it is offered, not the first', () => {
+  const context = loaded();
+  context.session = {
+    id: 's1',
+    profile_id: 'codex',
+    target_id: 'podman',
+    compatible_resume_targets: ['macbook', 'podman'],
+  };
+  assert.equal(vm.runInContext('freshMoveDraft(session).targetId', context), 'podman');
+});

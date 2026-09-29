@@ -1374,12 +1374,30 @@ function targetLaunchable(id) {
   return !(snapshot?.targets || []).find(target => target.id === id)?.runtime_missing;
 }
 
+// The daemon's saved default pair, read from `/api/v1/options` (the snapshot
+// does not carry it). Null until read, or when nothing was ever saved.
+let launchDefault = null;
+
+async function loadLaunchDefault() {
+  try {
+    launchDefault = (await request('/api/v1/options'))?.default || null;
+  } catch {
+    // The form still works from the lists; it just preselects the first entry.
+  }
+}
+
+// The id a new form starts on: the daemon's default when that entry is offered,
+// else the first offered one.
+function preferredId(items, wanted) {
+  return items.find(item => item.id === wanted)?.id || items[0]?.id || '';
+}
+
 function freshDraft() {
   return {
     workspaceId: selectedWorkspaceId(),
     step: 0,
-    profileId: snapshot?.profiles[0]?.id || '',
-    targetId: launchableTargets(snapshot?.targets)[0]?.id || '',
+    profileId: preferredId(snapshot?.profiles || [], launchDefault?.profile_id),
+    targetId: preferredId(launchableTargets(snapshot?.targets), launchDefault?.target_id),
     bundleId: '',
     projectDirectory: '',
     title: '',
@@ -4239,6 +4257,7 @@ async function refresh() {
     if (eventSource) eventSource.close();
     eventSource = undefined;
     viewerState.install(value);
+    await loadLaunchDefault();
     return presentSnapshot();
   } catch (e) {
     if (e.message === 'unauthorized') showLogin();
