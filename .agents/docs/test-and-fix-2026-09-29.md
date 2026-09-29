@@ -424,3 +424,7 @@ Origin's six new commits merged as `4fa28b54` (`b1655559`, `c5deb2a5` Muse MCP s
 ### Fix wave F14 (RVE-1) — landed
 
 `f0875270`: `hel_tree_running()` in the bare-target stop script (`targets/worker_daemon.rs`) no longer uses awk — a space-padded pid list and a `while read` over `ps` output, skipping blank and zombie rows; the snapshot and group awk calls keep single-line `-v` values only. Checked inline over SSH against macOS awk (the newline failure reproduced; the snapshot awk and the new loop behave). Test `stop_script_is_posix_sh_and_passes_no_multiline_value_to_awk` (every `-v` value is `"$1"` or `"$$"`; `sh -n` and `dash -n` pass). controller 2014 green; fmt clean. Re-verify RVE-1 on the Mac with the next `bin-fixed`.
+
+### Decision (13:35): fix Grok resume (I2-2)
+
+The user wants I2-2 fixed. Opus O4 reproduces it live in an isolated instance (`o4-grok`), names where the Grok bridge's session path goes missing between the staged home, the checkpoint and the restore, and fixes it along the pattern the other harnesses use.
