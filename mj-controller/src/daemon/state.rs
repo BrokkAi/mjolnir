@@ -723,7 +723,10 @@ impl RuntimeState {
         self: &Arc<Self>,
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        blocking(crate::database::prune_settled_startup_deliveries).await?;
+        let pruned = blocking(crate::database::prune_settled_startup_deliveries).await?;
+        if pruned > 0 {
+            tracing::info!(rows = pruned, "pruned settled startup steps");
+        }
         let deliveries = blocking(crate::database::load_startup_deliveries).await?;
         for delivery in deliveries {
             self.start_persisted_startup_delivery(delivery, cancellation);

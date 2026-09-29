@@ -5522,7 +5522,19 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     drop(raw);
     schema::forget_verified_schema(&database);
 
-    let connection = open(&database).unwrap();
+    let log = crate::test_log::CapturedLog::default();
+    let connection = {
+        let _default = tracing::subscriber::set_default(log.clone());
+        open(&database).unwrap()
+    };
+    let logged = log.at_or_above(tracing::Level::INFO);
+    assert_eq!(logged.len(), 1, "{logged:#?}");
+    assert!(
+        logged[0].contains("database migrations applied")
+            && logged[0].contains("from_revision=52")
+            && logged[0].contains(&format!("to_revision={SCHEMA_VERSION}")),
+        "{logged:#?}"
+    );
     let state = schema::read_schema_state(&connection).unwrap();
     assert_eq!(state.revision, SCHEMA_VERSION);
     let floor: i64 = connection

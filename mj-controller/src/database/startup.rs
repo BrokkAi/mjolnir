@@ -228,15 +228,15 @@ pub fn dismiss_startup_group(session_id: &str, group_id: &str) -> Result<()> {
 /// outside any group, and settled groups that a newer group for the same
 /// session has superseded (the API reads only a session's latest group).
 /// Run at daemon start so a store upgraded from a build that kept them does
-/// not carry them forever.
-pub fn prune_settled_startup_deliveries() -> Result<()> {
+/// not carry them forever. Returns how many rows it removed.
+pub fn prune_settled_startup_deliveries() -> Result<usize> {
     submit_database_write("prune settled startup deliveries", move |connection| {
-        connection.execute(
+        let mut removed = connection.execute(
             "DELETE FROM startup_steps WHERE phase='dismissed'
                OR (group_id IS NULL AND phase IN ('done','failed'))",
             [],
         )?;
-        connection.execute(
+        removed += connection.execute(
             "DELETE FROM startup_steps AS old
               WHERE old.group_id IS NOT NULL AND old.phase IN ('done','failed')
                 AND old.group_id <> (
@@ -246,7 +246,7 @@ pub fn prune_settled_startup_deliveries() -> Result<()> {
                      ORDER BY latest.sequence DESC LIMIT 1)",
             [],
         )?;
-        Ok(())
+        Ok(removed)
     })
 }
 
@@ -350,7 +350,8 @@ mod tests {
             )
             .unwrap();
         drop(connection);
-        prune_settled_startup_deliveries().unwrap();
+        assert_eq!(prune_settled_startup_deliveries().unwrap(), 3);
+        assert_eq!(prune_settled_startup_deliveries().unwrap(), 0);
         assert_eq!(
             remaining(),
             vec!["startup-legacy-failed", "startup-latest-done"],

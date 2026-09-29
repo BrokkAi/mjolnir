@@ -888,6 +888,13 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
         })?;
+    if recorded == Some(SCHEMA_VERSION) && version < SCHEMA_VERSION {
+        tracing::info!(
+            from_revision = version,
+            to_revision = SCHEMA_VERSION,
+            "database migrations applied"
+        );
+    }
     if recorded != Some(SCHEMA_VERSION) {
         bail!(
             "Mjolnir database migration ledger {:?} does not match schema {}",
