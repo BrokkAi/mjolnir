@@ -1405,6 +1405,10 @@ fn the_sidecar_uses_the_worker_relay_coordinator() {
 async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
     let mut fixture = Fixture::new(true);
     std::fs::write(fixture.profile_home.join("auth.json"), b"{}\n").unwrap();
+    // What an earlier reviewer on another harness left in this role's home.
+    let earlier = fixture.worker_root.join("reviewer/runtime-profile");
+    std::fs::create_dir_all(&earlier).unwrap();
+    std::fs::write(earlier.join("config.toml"), b"earlier\n").unwrap();
     let mut muse = config(0);
     muse.harness = HarnessKind::Muse;
     let body = fixture.start(muse).await;
@@ -1427,6 +1431,10 @@ async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
     assert!(
         config_home.join("muse").join("auth.json").is_file(),
         "{recorded:?}"
+    );
+    assert!(
+        !config_home.join("config.toml").exists(),
+        "the whole home the variable names is replaced"
     );
     // Its sessions stay in the reviewer's home, out of the person's own data.
     let data_home = PathBuf::from(recorded["XDG_DATA_HOME"].as_deref().unwrap());

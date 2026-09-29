@@ -132,11 +132,19 @@ async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
         .expect("Muse runtime stopped unexpectedly")
 }
 
-/// Open a session with project memory through a fake muse-acp whose host
-/// grants session MCP, withholds it, or could not start. Returns the run's
-/// outcome, whether the session was configured, and the MCP server names the
-/// adapter received.
-async fn open_with_memory(host: &str) -> (Result<()>, bool, Vec<Vec<String>>) {
+/// What opening a session through the fake muse-acp produced.
+struct Opened {
+    outcome: Result<()>,
+    configured: bool,
+    warnings: Vec<String>,
+    /// The MCP server names each `session/new` carried.
+    received: Vec<Vec<String>>,
+}
+
+/// Open a session through a fake muse-acp whose host grants session MCP,
+/// withholds it, or could not start. A session carries project memory; a
+/// reviewer carries its analyzer server instead.
+async fn open_muse(host: &str, reviewer: bool) -> Opened {
     let root = tempfile::tempdir().unwrap();
     let script = root.path().join("muse_acp.py");
     let log = root.path().join("mcp.jsonl");
@@ -186,7 +194,7 @@ for line in sys.stdin:
         ]),
         cwd: root.path().to_path_buf(),
         additional_directories: Vec::new(),
-        project_memory: Some(ProjectMemoryLaunchConfig {
+        project_memory: (!reviewer).then(|| ProjectMemoryLaunchConfig {
             history_socket: None,
             project_key: "abc".into(),
             root: root.path().join("memory"),
@@ -194,7 +202,18 @@ for line in sys.stdin:
             repository_roots: BTreeMap::new(),
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
-        extra_mcp_servers: Vec::new(),
+        extra_mcp_servers: if reviewer {
+            vec![ReviewerMcpServer::new(
+                mj_core::worker_launch::ReviewMcpServer {
+                    name: "bifrost".into(),
+                    command: "bifrost".into(),
+                    args: Vec::new(),
+                },
+                Path::new("/worker"),
+            )]
+        } else {
+            Vec::new()
+        },
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
@@ -214,13 +233,18 @@ for line in sys.stdin:
     let (sender, mut events) = mpsc::channel(128);
     let runtime = tokio::spawn(run(spec, receiver, sender));
     let mut configured = false;
+    let mut warnings = Vec::new();
     while let Some(event) = tokio::time::timeout(Duration::from_secs(15), events.recv())
         .await
         .expect("the fake adapter must make progress")
     {
-        if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
-            configured = true;
-            break;
+        match event {
+            RuntimeEvent::SessionConfigured { .. } => {
+                configured = true;
+                break;
+            }
+            RuntimeEvent::Warning { message } => warnings.push(message),
+            _ => {}
         }
     }
     drop(commands);
@@ -233,37 +257,60 @@ for line in sys.stdin:
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    (outcome, configured, received)
+    Opened {
+        outcome,
+        configured,
+        warnings,
+        received,
+    }
 }
 
 #[tokio::test]
-async fn muse_sessions_receive_mcp_servers_only_when_the_host_accepts_them() {
-    let (outcome, configured, received) = open_with_memory("granted").await;
-    outcome.unwrap();
-    assert!(configured);
-    assert_eq!(received, [["mj-memory"]]);
+async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them() {
+    let opened = open_muse("granted", false).await;
+    opened.outcome.unwrap();
+    assert!(opened.configured);
+    assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+    assert_eq!(opened.received, [["mj-memory"]]);
 
-    // Without the grant muse-acp would drop the servers and the session would
-    // run without Mjolnir's tools, so it must not become ready.
-    let (outcome, configured, received) = open_with_memory("withheld").await;
-    let error = format!("{:#}", outcome.unwrap_err());
+    // A container keeps the adapter it was created with. Its session keeps
+    // working without the tools, and the person is told why.
+    let opened = open_muse("withheld", false).await;
+    opened.outcome.unwrap();
+    assert!(opened.configured);
+    assert_eq!(opened.received, [["mj-memory"]]);
     assert!(
-        error.contains("did not forward Mjolnir's MCP servers"),
-        "{error}"
+        opened
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("does not accept MCP servers")),
+        "{:?}",
+        opened.warnings
     );
-    assert!(!configured);
-    assert_eq!(received, [["mj-memory"]]);
+}
+
+#[tokio::test]
+async fn a_muse_reviewer_without_its_analyzer_tools_does_not_start() {
+    let opened = open_muse("granted", true).await;
+    opened.outcome.unwrap();
+    assert!(opened.configured);
+    assert_eq!(opened.received, [["bifrost"]]);
+
+    let opened = open_muse("withheld", true).await;
+    let error = format!("{:#}", opened.outcome.unwrap_err());
+    assert!(error.contains("without its analyzer tools"), "{error}");
+    assert!(!opened.configured);
 }
 
 #[tokio::test]
 async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
-    let (outcome, configured, _) = open_with_memory("failed").await;
-    let error = format!("{:#}", outcome.unwrap_err());
+    let opened = open_muse("failed", true).await;
+    let error = format!("{:#}", opened.outcome.unwrap_err());
     assert!(error.contains("Muse Code is not logged in"), "{error}");
     assert!(!error.contains("MCP"), "{error}");
-    assert!(!configured);
+    assert!(!opened.configured);
 }
 
 #[tokio::test]

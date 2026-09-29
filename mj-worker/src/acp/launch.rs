@@ -290,7 +290,7 @@ fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdi
     }
 }
 
-pub(super) fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
+fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
     let mut servers = extra_mcp(spec);
     if include_project_memory {
         servers.extend(project_memory_mcp(spec));

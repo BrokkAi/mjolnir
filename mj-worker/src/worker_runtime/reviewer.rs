@@ -1261,14 +1261,17 @@ impl ReviewerRole {
     /// never share a config home. The role marker keeps a compatible resume
     /// from re-copying a large profile while still refreshing it when the
     /// reviewer's lifetime changes. The role's profile directory is what the
-    /// harness's home variable names, so a Muse home is its `muse` child.
+    /// harness's home variable names, so a Muse home is its `muse` child; the
+    /// whole directory is replaced, so nothing an earlier reviewer's harness
+    /// left there survives into the next one's home variable.
     async fn role_profile_home(
         &mut self,
         harness: HarnessKind,
         generation: u64,
         generation_changed: bool,
     ) -> Result<PathBuf> {
-        let home = harness.home_from_environment(self.placement.role_profile_home(&self.role));
+        let root = self.placement.role_profile_home(&self.role);
+        let home = harness.home_from_environment(&root);
         let source = self.placement.staged_profile_home(generation);
         let result_home = home.clone();
         #[cfg(test)]
@@ -1284,19 +1287,19 @@ impl ReviewerRole {
             if !generation_changed && home.is_dir() {
                 return Ok(());
             }
-            let parent = home.parent().context("reviewer home has no parent")?;
+            let parent = root.parent().context("reviewer home has no parent")?;
             std::fs::create_dir_all(parent)?;
             let staging = tempfile::Builder::new()
                 .prefix(".reviewer-profile-")
                 .tempdir_in(parent)?;
-            copy_tree(&source, staging.path())
+            copy_tree(&source, &harness.home_from_environment(staging.path()))
                 .with_context(|| format!("stage the reviewer profile for {}", home.display()))?;
-            if home.exists() {
-                std::fs::remove_dir_all(&home)
-                    .with_context(|| format!("clear the reviewer role home {}", home.display()))?;
+            if root.exists() {
+                std::fs::remove_dir_all(&root)
+                    .with_context(|| format!("clear the reviewer role home {}", root.display()))?;
             }
-            std::fs::rename(staging.path(), &home)
-                .with_context(|| format!("publish the reviewer profile {}", home.display()))?;
+            std::fs::rename(staging.path(), &root)
+                .with_context(|| format!("publish the reviewer profile {}", root.display()))?;
             Ok(())
         })
         .await
