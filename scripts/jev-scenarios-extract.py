@@ -368,6 +368,7 @@ def main():
             "active_user_shells": 0,
             "active_agent_terminals": 0,
             "task_settled_s_ago": None,
+            "background_needed": None,
         },
         "evidence": body["evidence"],
         "recorded_verdict": body["recorded_verdict"],
