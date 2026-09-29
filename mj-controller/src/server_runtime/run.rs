@@ -1160,7 +1160,8 @@ pub(crate) async fn run_server(
                         continue;
                     }
                     let ControllerRequest { action, reply } = request;
-                    let upgrade_work = match if matches!(&action, ControllerAction::Move { .. }) { Ok(None) } else { crate::upgrade::activity("web action").map(Some) } {
+                    // A destroy holds admission as a destroy from the moment it is accepted, so a stop right after "accepted" waits for it (#1191).
+                    let upgrade_work = match match &action { ControllerAction::Move { .. } => Ok(None), ControllerAction::Destroy { session_id, .. } => crate::upgrade::destroy_activity(session_id).map(Some), _ => crate::upgrade::activity("web action").map(Some) } {
                         Ok(work) => work,
                         Err(error) => {
                             let _ = reply.send(ActionOutcome::Refused(Refusal::unusable(error.to_string())));
