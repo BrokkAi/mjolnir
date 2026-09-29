@@ -392,6 +392,9 @@ struct FakeEnvironment {
     /// own database.
     state: Mutex<TurnReviewState>,
     writes: Mutex<Vec<(TurnReviewState, std::thread::ThreadId)>>,
+    /// The session the state belongs to, learned from the first save, so the
+    /// restart sweep can name it the way the database's sweep does.
+    owner: Mutex<Option<String>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
     /// Refusals the next reviewer resolutions answer with, in order.
@@ -450,6 +453,7 @@ impl FakeEnvironment {
             staged: Mutex::new(Vec::new()),
             state: Mutex::new(TurnReviewState::default()),
             writes: Mutex::new(Vec::new()),
+            owner: Mutex::new(None),
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
@@ -578,7 +582,11 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(self.state())
     }
 
-    fn save_state(&self, _session_id: &str, state: &TurnReviewState) -> Result<(), String> {
+    fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String> {
+        *self
+            .owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.to_owned());
         let gate = self
             .save_gate
             .lock()
@@ -599,11 +607,18 @@ impl ReviewEnvironment for FakeEnvironment {
     }
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
-        self.state
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let interrupted = state.active.is_some() || state.pending_forward.is_some();
+        state.active = None;
+        let owner = self
+            .owner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active = None;
-        Ok(Vec::new())
+            .clone();
+        Ok(owner.filter(|_| interrupted).into_iter().collect())
     }
 
     fn background_work_settled<'a>(
@@ -1338,7 +1353,10 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
         .expect("shared drain");
     host.shutdown().await.expect("shutdown stays idempotent");
 
-    assert_eq!(environment.state().active, None);
+    assert!(
+        environment.state().active.is_some(),
+        "the in-flight marker survives shutdown, so the next daemon can tell the person"
+    );
     assert!(host.view(session).is_none());
     let writes = environment.writes();
     assert!(
@@ -1349,13 +1367,152 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     assert!(
         writes
             .last()
-            .is_some_and(|(state, _)| state.active.is_none())
+            .is_some_and(|(state, _)| state.active.is_some())
     );
     let test_thread = std::thread::current().id();
     assert!(
         writes.iter().all(|(_, writer)| *writer != test_thread),
         "synchronous database writes run off the Tokio host thread"
     );
+}
+
+/// I1-8: `mj daemon restart` during a review left no notice, because the old
+/// daemon cleared its own in-flight marker while shutting down and the new
+/// daemon's startup sweep then found nothing to report.
+#[tokio::test]
+async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its_baseline() {
+    let session = session_id("restartnotice");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    {
+        let mut state = environment.state.lock().unwrap();
+        state
+            .baselines
+            .insert("/workspace/app".into(), "before-turn".into());
+    }
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &old).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("before-turn".to_owned()),
+            current_tree: "after-turn".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+    let _first_request = manager.next().await;
+    assert!(environment.state().active.is_some());
+
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the new daemon tells the person the review was cancelled");
+    assert_eq!(
+        notice,
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
+    );
+    let state = environment.state();
+    assert_eq!(state.active, None);
+    assert_eq!(
+        state.baselines[&PathBuf::from("/workspace/app")],
+        "before-turn",
+        "the baseline did not advance, so the next review covers both turns"
+    );
+    new.shutdown().await.unwrap();
+}
+
+/// I1-8 as observed: the restart came while the review was still choosing its
+/// reviewer, before any review state was written, and the row read
+/// `Reviewing`.
+#[tokio::test]
+async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() {
+    let session = session_id("restartprep");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    {
+        let mut state = environment.state.lock().unwrap();
+        state
+            .baselines
+            .insert("/workspace/app".into(), "before-turn".into());
+    }
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &old).await;
+    // Preparation asks the reviewer for its status; leave it unanswered.
+    let (_, _, _status_reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    assert!(old.view(session).is_some(), "the review is preparing");
+
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the new daemon tells the person the review was cancelled");
+    assert_eq!(
+        notice,
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
+    );
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "before-turn"
+    );
+    new.shutdown().await.unwrap();
 }
 
 /// Queued prompts hold the review back: reviewing now would hold work the

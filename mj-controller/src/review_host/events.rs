@@ -75,8 +75,11 @@ pub(super) enum PersistenceRequest {
         state: Box<TurnReviewState>,
         completion: Option<PersistenceCompletion>,
     },
-    ClearActive {
-        reply: oneshot::Sender<Result<(), String>>,
+    /// Records that a review still preparing at shutdown was cut off, so the
+    /// next daemon's startup sweep reports it like any other interrupted
+    /// review. A preparing review has no state row of its own yet.
+    MarkInterrupted {
+        session_id: String,
     },
 }
 
@@ -274,6 +277,27 @@ pub(super) async fn persistence_loop(
                     }
                 }
             }
+            PersistenceRequest::MarkInterrupted { session_id } => {
+                let environment = environment.clone();
+                let owner = session_id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut state = environment.load_state(&owner)?;
+                    state
+                        .active
+                        .get_or_insert_with(|| "review-preparing".to_owned());
+                    environment.save_state(&owner, &state)
+                })
+                .await
+                .map_err(|error| format!("review shutdown persistence task stopped: {error}"))
+                .and_then(|result| result);
+                if let Err(error) = result {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        %error,
+                        "could not record that a review was cut off by shutdown"
+                    );
+                }
+            }
             PersistenceRequest::Save {
                 session_id,
                 state,
@@ -299,16 +323,6 @@ pub(super) async fn persistence_loop(
                         "could not record how far this session has been reviewed"
                     );
                 }
-            }
-            PersistenceRequest::ClearActive { reply } => {
-                let environment = environment.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    environment.clear_interrupted().map(|_| ())
-                })
-                .await
-                .map_err(|error| format!("review shutdown persistence task stopped: {error}"))
-                .and_then(|result| result);
-                let _ = reply.send(result);
             }
         }
     }
