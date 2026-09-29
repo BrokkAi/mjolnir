@@ -5297,9 +5297,70 @@ async fn cancelled_api_startup_is_not_submitted_after_daemon_reconstruction() {
             .is_err(),
         "cancelled initial input must not become a new prompt on restart"
     );
-    assert_eq!(
-        crate::database::load_latest_startup_group("session-1").unwrap()[0].phase,
-        "dismissed"
+    // The first daemon may already have dismissed the group, and startup
+    // prunes dismissed groups, so an empty group also passes.
+    assert!(
+        crate::database::load_latest_startup_group("session-1")
+            .unwrap()
+            .iter()
+            .all(|step| step.phase == "dismissed")
+    );
+}
+
+#[tokio::test]
+async fn cancelled_api_startup_settles_without_a_managed_session() {
+    let Some(_writer) =
+        startup_prompt_test_store("cancelled_api_startup_settles_without_a_managed_session")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    state
+        .queue_api_followup(
+            "session-1",
+            "cancelled-api".into(),
+            crate::server::api::StartFollowup {
+                prompt: Some("must never start".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state.cancel_api_followup("session-1").await.unwrap();
+    state.cancel_and_join_startup_prompts().await.unwrap();
+    // Removing the session also removes it from the manager.
+    manager._targets.send_replace(Vec::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.control.session("session-1").await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the manager should drop the removed session");
+    let recovered = test_runtime_state_with_manager(&manager);
+    recovered
+        .restore_startup_deliveries(&CancellationToken::new())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while crate::database::next_startup_delivery("session-1")
+            .unwrap()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled work should settle without waiting for its session");
+    // The first daemon may already have dismissed the group, and startup
+    // prunes dismissed groups, so an empty group also passes.
+    assert!(
+        crate::database::load_latest_startup_group("session-1")
+            .unwrap()
+            .iter()
+            .all(|step| step.phase == "dismissed")
     );
 }
 

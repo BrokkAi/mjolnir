@@ -854,21 +854,21 @@ impl RuntimeState {
                     }
                 };
             drop(admission);
-            let handle = tokio::select! {
+            // A step that is accepted, cancelling or rejecting only needs its
+            // final phase written, so it settles even after its session is gone.
+            let delivers = !matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting");
+            let handle = if !delivers {
+                None
+            } else {
+                tokio::select! {
                 () = cancel.cancelled() => {
                     self.fail_startup_queue(session_id, "the daemon stopped before the session was ready",
                     )
                     .await;
                     return;
                 }
-                ready = async {
-                    if matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting") {
-                        self.session_manager.session(session_id).await
-                    } else {
-                        self.wait_for_ready_session(session_id).await
-                    }
-                } => match ready {
-                    Ok(handle) => handle,
+                ready = self.wait_for_ready_session(session_id) => match ready {
+                    Ok(handle) => Some(handle),
                     Err(error) => {
                         let id = session_id.to_owned();
                         let reason = format!("{error:#}");
@@ -880,6 +880,7 @@ impl RuntimeState {
                         return;
                     }
                 },
+                }
             };
             let command_id = step.command_id.clone();
             let mut decoded: StartupStep = match serde_json::from_str(&step.step_json) {
@@ -928,7 +929,7 @@ impl RuntimeState {
                     return;
                 }
             }
-            if !matches!(step.phase.as_str(), "accepted" | "cancelling" | "rejecting") {
+            if let Some(handle) = &handle {
                 let persisted_id = command_id.clone();
                 if let Err(error) = blocking(move || {
                     crate::database::set_startup_delivery_phase(&persisted_id, "delivering", None)
@@ -941,7 +942,7 @@ impl RuntimeState {
                 }
                 let outcome = tokio::select! {
                     () = cancel.cancelled() => Err(anyhow!("the daemon stopped before startup delivery settled")),
-                    result = self.run_startup_step(session_id, &handle, &decoded, &command_id) => result,
+                    result = self.run_startup_step(session_id, handle, &decoded, &command_id) => result,
                 };
                 let ordinal = match outcome {
                     Ok(ordinal) => ordinal,
