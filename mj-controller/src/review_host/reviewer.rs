@@ -124,13 +124,22 @@ pub(super) async fn prepare(
         .await
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
     match handle.reviewer(ReviewerAction::Status).await {
-        Ok(ReviewerOutcome::Status(state)) => {
-            if let Some(prompt) = &state.active_prompt {
-                return Err(StartRefusal(
-                    busy_reviewer(&handle, session_id, &prompt.command_id).await,
-                ));
+        Ok(ReviewerOutcome::Status(state)) => match &state.active_prompt {
+            // Preparation runs only while this host holds no review for the
+            // session, so a turn review's prompt here belongs to a review an
+            // earlier daemon started and no daemon can finish. Stop it, as
+            // the startup sweep does, and review in its place.
+            Some(prompt) if is_turn_review_command(&prompt.command_id) => {
+                stop_leftover_review(&handle).await.map_err(|error| {
+                    StartRefusal(format!(
+                        "the review left running when Mjolnir restarted could not be \
+                         stopped: {error}"
+                    ))
+                })?;
             }
-        }
+            Some(prompt) => return Err(StartRefusal(busy_reviewer(&prompt.command_id))),
+            None => {}
+        },
         Ok(_) => {}
         Err(error) => return Err(StartRefusal(format!("{error:#}"))),
     }
@@ -255,13 +264,20 @@ pub(super) async fn prepare_recovery(
     let state = tokio::task::spawn_blocking(move || environment.load_state(&session))
         .await
         .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
-    let Some(pending) = state.pending_forward.clone() else {
-        return Ok(None);
-    };
     let handle = control
         .session(session_id.to_owned())
         .await
         .map_err(|error| format!("{error:#}"))?;
+    // The interrupted review's reviewers may still be running in the worker.
+    // Nothing will read them now, so they stop before anyone is told the
+    // review was cancelled. A failure is left to the next review's
+    // preparation, which meets the same leftover and stops it.
+    if let Err(error) = stop_leftover_review(&handle).await {
+        tracing::warn!(%session_id, %error, "could not stop the interrupted review's reviewers");
+    }
+    let Some(pending) = state.pending_forward.clone() else {
+        return Ok(None);
+    };
     let view = handle.view();
     if !view.connected {
         return Err("the primary session is not connected".to_owned());
@@ -290,83 +306,61 @@ pub(super) async fn prepare_recovery(
 }
 
 /// Why the default reviewing role cannot take a new review, from the id of
-/// the prompt the worker says it is running.
-async fn busy_reviewer(
-    handle: &ManagedSessionHandle,
-    session_id: &str,
-    command_id: &str,
-) -> String {
+/// a prompt it is running that is not a turn review's.
+fn busy_reviewer(command_id: &str) -> String {
     if command_id.starts_with(mj_core::second_opinion::COMMAND_ID_PREFIX) {
-        return "the reviewer is busy with a second opinion".to_owned();
-    }
-    if !command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX) {
-        return "the reviewer is busy".to_owned();
-    }
-    // Preparation runs only while this host holds no review for the session,
-    // so a turn review's prompt here belongs to a review an earlier daemon
-    // started. The worker kept that reviewer running across the restart; the
-    // review that would read its answer did not survive.
-    const LEFTOVER: &str = "the review left running when Mjolnir restarted";
-    match reviewer_questions(handle, session_id).await {
-        Ok(questions) => match questions.first() {
-            Some(question) => format!(
-                "{LEFTOVER} is waiting for an answer to a question ({}) that Mjolnir \
-                 can no longer show",
-                quoted_question(&question.message)
-            ),
-            None => format!("{LEFTOVER} is still running"),
-        },
-        Err(error) => {
-            tracing::debug!(%session_id, %error, "could not read the leftover reviewer's journal");
-            format!("{LEFTOVER} is still running")
-        }
+        "the reviewer is busy with a second opinion".to_owned()
+    } else {
+        "the reviewer is busy".to_owned()
     }
 }
 
-/// The forms the default reviewing role's harness is waiting on, read from
-/// that role's journal in the worker.
-async fn reviewer_questions(
-    handle: &ManagedSessionHandle,
-    session_id: &str,
-) -> Result<Vec<mj_core::elicitation::ElicitationRequest>, String> {
-    // Bounds the pages read; a reviewer's journal is one review long.
-    const MAX_PAGES: usize = 64;
-    let mut transcript = RoleTranscript::default();
-    let relay_session = role_session_id(session_id, mj_core::review::driver::REVIEWER_ROLE);
-    for _ in 0..MAX_PAGES {
-        let after_digest = if transcript.cursor_digest.is_empty() {
-            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()
-        } else {
-            transcript.cursor_digest.clone()
-        };
-        let attachment = match handle
-            .reviewer(ReviewerAction::Attach {
-                after_ordinal: transcript.cursor_ordinal,
-                after_digest,
-            })
+fn is_turn_review_command(command_id: &str) -> bool {
+    command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
+}
+
+/// Stops, in the worker, every reviewing role a turn review left running
+/// when the daemon that drove it went away.
+///
+/// The worker keeps a reviewer's harness, journal and pending form across a
+/// daemon restart, but the review that would read its answer lived in that
+/// daemon's memory. Left alone, the prompt holds the default role, so every
+/// later review is refused, and its form waits on a question no surface can
+/// show. Stopping it makes the daemon's "cancelled" true in the worker too.
+///
+/// The default role is shared with a plan-review second opinion, so it is
+/// stopped only while it runs a turn review's prompt. The other roles belong
+/// to turn reviews alone; pausing one that is not running does nothing.
+pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
+    use mj_core::review::driver::{INTENT_ROLE, REVIEWER_ROLE, SUPERVISOR_ROLE, VALIDATOR_ROLE};
+    let mut roles = vec![VALIDATOR_ROLE, INTENT_ROLE, SUPERVISOR_ROLE];
+    roles.extend(mj_review::lanes::REVIEW_LANES.iter().map(|lane| lane.id));
+    let status = handle
+        .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    if let ReviewerOutcome::Status(state) = status
+        && state
+            .active_prompt
+            .as_ref()
+            .is_some_and(|prompt| is_turn_review_command(&prompt.command_id))
+    {
+        roles.insert(0, REVIEWER_ROLE);
+    }
+    let mut failures = Vec::new();
+    for role in roles {
+        if let Err(error) = handle
+            .reviewer_as(Some(role.to_owned()), ReviewerAction::Pause)
             .await
-            .map_err(|error| format!("{error:#}"))?
         {
-            ReviewerOutcome::Attached(attachment) => attachment,
-            other => return Err(unexpected(Ok(other))),
-        };
-        let done = attachment.events.is_empty()
-            || attachment.through_ordinal >= attachment.state.latest_ordinal;
-        transcript.apply(&relay_session, &attachment.events);
-        if done {
-            break;
+            failures.push(format!("{role}: {error:#}"));
         }
     }
-    Ok(transcript
-        .session
-        .map(|session| {
-            session
-                .pending_elicitations
-                .into_iter()
-                .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
-                .collect()
-        })
-        .unwrap_or_default())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 /// A question's first line, quoted and kept short enough for a notice.

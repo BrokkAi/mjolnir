@@ -246,6 +246,21 @@ impl FakeManager {
         manager
     }
 
+    /// The next request that is not a reviewer status check or pause, which
+    /// is how the host stops a review's leftover reviewers.
+    async fn next_past_reviewer_stops(&mut self) -> RemoteSessionRequest {
+        loop {
+            match self.next().await {
+                RemoteSessionRequest::Reviewer { action, reply, .. }
+                    if matches!(action, ReviewerAction::Status | ReviewerAction::Pause) =>
+                {
+                    let _ = reply.send(answer_for(&action));
+                }
+                other => return other,
+            }
+        }
+    }
+
     fn refuse_next_capture(&mut self, reason: &str) {
         self.capture_refusals.push_back(reason.to_owned());
     }
@@ -1554,7 +1569,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         admission,
         reply,
         ..
-    } = manager.next().await
+    } = manager.next_past_reviewer_stops().await
     else {
         panic!("recovery submits the pending handoff directly, without starting a reviewer");
     };
@@ -2259,12 +2274,79 @@ async fn next_notice(manager: &mut FakeManager) -> String {
     .expect("the host records a notice")
 }
 
-/// Finishes a turn while the worker's reviewer is still running a turn
-/// review's prompt that no review in this daemon owns, which is what a
-/// daemon restart leaves behind, and returns the notice the refused review
-/// posts. `journal` is what that reviewer's journal holds.
-async fn refusal_behind_a_leftover_review(test: &str, journal: Vec<RelayEvent>) -> String {
-    let session = session_id(test);
+/// What the host reached while [`serve_leftover_worker`] answered it.
+#[derive(Debug)]
+enum Reached {
+    Notice(String),
+    /// A new review asked for the capture, so it started.
+    Capture,
+}
+
+/// Plays a worker whose default reviewing role still runs a turn review's
+/// prompt, blocked on a form, until the host pauses that role; paused roles
+/// are recorded in `paused`. Answers the host until it records a notice or a
+/// new review asks for its capture.
+async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<String>) -> Reached {
+    let leftover = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return Reached::Notice(text);
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer {
+                    role,
+                    action,
+                    reply,
+                    ..
+                } => {
+                    let role =
+                        role.unwrap_or_else(|| mj_core::review::driver::REVIEWER_ROLE.to_owned());
+                    match action {
+                        ReviewerAction::CaptureDelta { .. } => return Reached::Capture,
+                        ReviewerAction::Status => {
+                            let state = if role == mj_core::review::driver::REVIEWER_ROLE
+                                && !paused.contains(&role)
+                            {
+                                busy_with(&leftover)
+                            } else {
+                                operational()
+                            };
+                            let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(state))));
+                        }
+                        ReviewerAction::Pause => {
+                            paused.push(role);
+                            let _ = reply.send(Ok(ReviewerOutcome::Paused));
+                        }
+                        other => {
+                            let _ = reply.send(answer_for(&other));
+                        }
+                    }
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the host reaches a notice or a new review")
+}
+
+/// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
+/// on the Fable decline form from the review the restart cut off, which no
+/// surface could show. Every later turn's review was refused with "the
+/// reviewer is busy with a second opinion". A review that meets such a
+/// leftover prompt stops it, since no daemon can use its answer, and starts.
+#[tokio::test]
+async fn a_review_that_meets_a_leftover_reviewer_stops_it_and_starts() {
+    let session = session_id("leftoverstop");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
@@ -2274,81 +2356,72 @@ async fn refusal_behind_a_leftover_review(test: &str, journal: Vec<RelayEvent>) 
         environment.clone(),
     );
     finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(
-        "turn-review-reviewer-1",
-    )))));
-    let (role, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Attach { .. }))
-        .await;
+    let mut paused = Vec::new();
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
     assert!(
-        role.as_deref()
-            .is_none_or(|role| role == mj_core::review::driver::REVIEWER_ROLE),
-        "the busy role is the one read: {role:?}"
+        matches!(reached, Reached::Capture),
+        "the review starts instead of being refused: {reached:?}"
     );
-    let (through_ordinal, through_digest) = journal.last().map_or_else(
-        || (0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()),
-        |event| (event.ordinal, event.digest.clone()),
+    assert!(
+        paused
+            .iter()
+            .any(|role| role == mj_core::review::driver::REVIEWER_ROLE),
+        "the leftover reviewer is stopped: {paused:?}"
     );
-    let mut state = busy_with("turn-review-reviewer-1");
-    state.latest_ordinal = through_ordinal;
-    state.latest_digest.clone_from(&through_digest);
-    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
-        crate::worker_client::RelayAttachment {
-            state,
-            events: journal,
-            through_ordinal,
-            through_digest,
-        },
-    ))));
-    let notice = next_notice(&mut manager).await;
     host.shutdown().await.expect("shutdown the host");
-    notice
 }
 
-/// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
-/// on the Fable decline form from the review the restart cut off. Every
-/// later turn's review was refused with "the reviewer is busy with a second
-/// opinion", although no second opinion existed. The refusal now says which
-/// review holds the reviewer and what it is waiting for.
+/// RVC-3(c): the next daemon said the review was cancelled while the
+/// worker's reviewer kept running it and holding its form. The daemon now
+/// stops that reviewer before it says so, and the next review starts.
 #[tokio::test]
-async fn a_review_refused_by_a_leftover_review_waiting_on_a_question_says_so() {
-    let message = "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?";
-    let notice = refusal_behind_a_leftover_review(
-        "leftoverform",
-        vec![elicitation_event(
-            1,
-            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
-            "decline-1",
-            message,
-        )],
-    )
-    .await;
-    assert!(!notice.contains("second opinion"), "{notice}");
-    assert!(
-        notice.starts_with(
-            "Turn review did not start: the review left running when Mjolnir restarted \
-             is waiting for an answer to a question"
-        ),
-        "{notice}"
+async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
+    let session = session_id("sweepstops");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
     );
-    assert!(notice.contains(message), "the question is named: {notice}");
-    assert!(
-        notice.ends_with("The next review covers these changes."),
-        "{notice}"
-    );
-}
+    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    old.shutdown().await.unwrap();
 
-#[tokio::test]
-async fn a_review_refused_by_a_leftover_review_that_is_still_working_says_so() {
-    let notice = refusal_behind_a_leftover_review("leftoverbusy", Vec::new()).await;
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let mut paused = Vec::new();
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
+    let Reached::Notice(notice) = reached else {
+        panic!("the next daemon reports the cut-off review: {reached:?}");
+    };
     assert_eq!(
         notice,
-        "Turn review did not start: the review left running when Mjolnir restarted \
-         is still running. The next review covers these changes."
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
     );
+    for role in [
+        mj_core::review::driver::REVIEWER_ROLE,
+        mj_core::review::driver::VALIDATOR_ROLE,
+        mj_core::review::driver::SUPERVISOR_ROLE,
+        mj_core::review::driver::INTENT_ROLE,
+    ] {
+        assert!(
+            paused.iter().any(|paused| paused == role),
+            "{role} is stopped before the notice: {paused:?}"
+        );
+    }
+
+    finish_a_turn(&manager, &new).await;
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
+    assert!(
+        matches!(reached, Reached::Capture),
+        "the next review starts: {reached:?}"
+    );
+    new.shutdown().await.unwrap();
 }
 
 /// The second-opinion wording stays for a real second opinion, which the
