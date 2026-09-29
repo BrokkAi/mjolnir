@@ -121,6 +121,8 @@ Creates and verifies a recovery copy for an active session. It waits for a safe 
 ```text
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--queue discard|start] [--clear-resources] [--yes] [--json]
+        [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
+mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
 Move keeps the logical session, workspace, transcript, and recoverable
@@ -141,6 +143,24 @@ refused with `this session's working tree lives on <host>; resume it there`.
 Such a session can change profile in place, or move to another bare target on
 the same host. To continue elsewhere, push its branch and start a new session
 from that branch. The same rule applies to `mj resume --target`.
+
+When the move copies a workspace, it transfers the repository history and
+tracked edits, plus the untracked files you keep selected. Three flags control
+that selection:
+
+- `--prepare` inspects the transfer and prints the preparation as JSON without
+  moving anything. Use it to see the eligible files, their sizes, and any
+  blockers.
+- `--exclude <repository>:<path>` leaves an untracked file or directory at
+  the source. Repeat it for each path.
+- `--allow-large-transfer` accepts a workspace transfer of at least 1 GB.
+  Without it, a large selection is refused, and the error says which of these
+  flags can resolve it.
+
+Paths left behind stay in a retained source. `mj move-sources --session <id>`
+lists the retained sources for a session as JSON. To delete one together with
+its excluded files, pass its operation ID as `--cleanup <operation-id>` and
+confirm with `--yes`; `--cleanup` without `--yes` is refused.
 
 An interactive invocation prepares the destination and asks for confirmation.
 `--yes` confirms the interruption for unattended use, but it does not choose

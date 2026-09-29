@@ -420,6 +420,21 @@ checkout. Existing branches, dirty workspaces, invalid selections, and conflicti
 legacy selectors fail visibly. Exact checkout requires a bundle-backed session;
 it cannot be combined with `project_directory` or `create_managed_worktree: false`.
 
+`subagents` sets the session's delegation policy:
+
+```json
+{"subagents": {"mode": "single_model", "model": "<model-id>", "effort": "low"}}
+```
+
+`mode` is `native` (the harness's own sub-agents), `all_models`, `single_model`,
+or `none`. `single_model` requires `model`, which must be one the parent's
+profiles offer, and takes an optional `effort`. The other modes take no other
+fields. The API spells the modes with underscores; `mj new --subagents` spells
+them with hyphens (`all-models`, `single-model`). Only Claude and Codex
+sessions accept a mode other than `native`. When `subagents` is omitted, the
+session reuses the last accepted choice. An unsupported mode or an unavailable
+model answers `422` with the reason in the body.
+
 Session creation still returns its ID before preparation finishes. Wait for
 readiness or inspect the session's failure before prompting. Readiness guarantees
 that preparation verified the selected commit, branch, and clean working tree.
