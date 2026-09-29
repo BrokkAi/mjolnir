@@ -100,9 +100,7 @@ pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     let Some(memory) = &spec.project_memory else {
         return Vec::new();
     };
-    if spec.harness == HarnessKind::Muse
-        || (spec.harness == HarnessKind::Claude && memory.history_socket.is_none())
-    {
+    if spec.harness == HarnessKind::Claude && memory.history_socket.is_none() {
         return Vec::new();
     }
     let mut args = vec![

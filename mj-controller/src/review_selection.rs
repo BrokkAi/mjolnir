@@ -62,10 +62,7 @@ pub(crate) async fn resolve(
                 .unwrap_or(ReviewProvider::Other);
             let mut providers = std::collections::BTreeMap::new();
             let mut reasons = Vec::new();
-            for (id, profile) in config
-                .enabled_profiles()
-                .filter(|(_, p)| p.kind.supports_injected_mcp())
-            {
+            for (id, profile) in config.enabled_profiles() {
                 match ReviewProvider::for_profile(profile) {
                     Ok(provider) => {
                         providers.insert(id.to_owned(), provider);

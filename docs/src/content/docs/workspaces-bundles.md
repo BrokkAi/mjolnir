@@ -278,9 +278,8 @@ hidden startup context. New sessions receive at most its first 200 lines or
 
 Delivery is harness-specific. Claude Code uses its native project-memory
 integration; Kimi managed targets receive the service through their staged MCP
-configuration; Codex, Grok, and local Kimi receive it through ACP. Muse cannot
-receive these injected MCP tools, so its sessions do not have this project-memory
-tool interface. See [Harness limitations](/profiles/#harness-limitations).
+configuration; Codex, Grok, Muse, and local Kimi receive it through ACP. See
+[Harness limitations](/profiles/#harness-limitations).
 
 For a multi-root bundle, bundle-wide material lives at the virtual root and
 repository-specific material may live below `/roots/<repository-id>/`.

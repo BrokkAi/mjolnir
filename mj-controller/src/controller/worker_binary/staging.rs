@@ -216,7 +216,7 @@ pub(super) fn stage_managed_skills(
 /// Write the enforcement table's staged setting, if the harness has one. Muse
 /// composes a session's permission profile from its settings file and nothing
 /// on the ACP wire overrides that choice, so the profile has to be staged.
-pub(super) fn apply_staged_execution_setting(
+pub(in crate::controller) fn apply_staged_execution_setting(
     kind: mj_core::config::HarnessKind,
     policy: mj_core::config::ExecutionPolicy,
     profile_stage: &Path,

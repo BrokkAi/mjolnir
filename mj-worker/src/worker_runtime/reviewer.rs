@@ -39,6 +39,7 @@ use crate::relay::{
     RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
     RelayResponsePayload, ReviewerAdmission,
 };
+use mj_core::config::HarnessKind;
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
 /// How long a reviewer may take to open its native session and advertise its
@@ -847,7 +848,7 @@ impl ReviewerRole {
         let generation_changed = self.prepare_generation(&root, config).await?;
         self.check_cancelled()?;
         let profile_home = self
-            .role_profile_home(config.generation, generation_changed)
+            .role_profile_home(config.harness, config.generation, generation_changed)
             .await?;
         self.check_cancelled()?;
         if generation_changed {
@@ -870,10 +871,9 @@ impl ReviewerRole {
         environment.extend(config.environment.clone());
         // The worker fixes the harness home itself: a controller must never be
         // able to aim a reviewer at the primary's credentials.
-        environment.insert(
-            config.harness.home_env().into(),
-            profile_home.to_string_lossy().into_owned(),
-        );
+        config
+            .harness
+            .configure_home_environment(&profile_home, &mut environment);
         config
             .harness
             .configure_execution_environment(config.execution_policy, &mut environment)?;
@@ -1260,13 +1260,18 @@ impl ReviewerRole {
     /// every role runs from a copy of that snapshot, so concurrent harnesses
     /// never share a config home. The role marker keeps a compatible resume
     /// from re-copying a large profile while still refreshing it when the
-    /// reviewer's lifetime changes.
+    /// reviewer's lifetime changes. The role's profile directory is what the
+    /// harness's home variable names, so a Muse home is its `muse` child; the
+    /// whole directory is replaced, so nothing an earlier reviewer's harness
+    /// left there survives into the next one's home variable.
     async fn role_profile_home(
         &mut self,
+        harness: HarnessKind,
         generation: u64,
         generation_changed: bool,
     ) -> Result<PathBuf> {
-        let home = self.placement.role_profile_home(&self.role);
+        let root = self.placement.role_profile_home(&self.role);
+        let home = harness.home_from_environment(&root);
         let source = self.placement.staged_profile_home(generation);
         let result_home = home.clone();
         #[cfg(test)]
@@ -1282,19 +1287,19 @@ impl ReviewerRole {
             if !generation_changed && home.is_dir() {
                 return Ok(());
             }
-            let parent = home.parent().context("reviewer home has no parent")?;
+            let parent = root.parent().context("reviewer home has no parent")?;
             std::fs::create_dir_all(parent)?;
             let staging = tempfile::Builder::new()
                 .prefix(".reviewer-profile-")
                 .tempdir_in(parent)?;
-            copy_tree(&source, staging.path())
+            copy_tree(&source, &harness.home_from_environment(staging.path()))
                 .with_context(|| format!("stage the reviewer profile for {}", home.display()))?;
-            if home.exists() {
-                std::fs::remove_dir_all(&home)
-                    .with_context(|| format!("clear the reviewer role home {}", home.display()))?;
+            if root.exists() {
+                std::fs::remove_dir_all(&root)
+                    .with_context(|| format!("clear the reviewer role home {}", root.display()))?;
             }
-            std::fs::rename(staging.path(), &home)
-                .with_context(|| format!("publish the reviewer profile {}", home.display()))?;
+            std::fs::rename(staging.path(), &root)
+                .with_context(|| format!("publish the reviewer profile {}", root.display()))?;
             Ok(())
         })
         .await

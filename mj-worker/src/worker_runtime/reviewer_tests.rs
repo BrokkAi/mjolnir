@@ -4,6 +4,7 @@
 //! actual child, so the pipes, the process teardown and the reviewer's own
 //! durable relay are the real ones rather than in-memory stand-ins.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +85,9 @@ for line in sys.stdin:
     method = request.get("method")
     ident = request.get("id")
     if method == "initialize":
+        with open(os.path.join(here, "harness-env-" + role), "w") as handle:
+            json.dump({name: os.environ.get(name) for name in
+                       ("XDG_CONFIG_HOME", "XDG_DATA_HOME")}, handle)
         write({"jsonrpc": "2.0", "id": ident, "result": {
             "protocolVersion": 1,
             "agentCapabilities": {"loadSession": True},
@@ -1395,6 +1399,49 @@ fn collected_agent_text(events: &[RelayEvent]) -> String {
 #[test]
 fn the_sidecar_uses_the_worker_relay_coordinator() {
     let _ = unix::ACP_EVENT_CHANNEL_CAPACITY;
+}
+
+#[tokio::test]
+async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
+    let mut fixture = Fixture::new(true);
+    std::fs::write(fixture.profile_home.join("auth.json"), b"{}\n").unwrap();
+    // What an earlier reviewer on another harness left in this role's home.
+    let earlier = fixture.worker_root.join("reviewer/runtime-profile");
+    std::fs::create_dir_all(&earlier).unwrap();
+    std::fs::write(earlier.join("config.toml"), b"earlier\n").unwrap();
+    let mut muse = config(0);
+    muse.harness = HarnessKind::Muse;
+    let body = fixture.start(muse).await;
+    started_options(&body);
+
+    let recorded: BTreeMap<String, Option<String>> = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .worker_root
+                .parent()
+                .unwrap()
+                .join("harness-env-default"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Muse reads its login from `$XDG_CONFIG_HOME/muse`.
+    let config_home = PathBuf::from(recorded["XDG_CONFIG_HOME"].as_deref().unwrap());
+    assert!(config_home.starts_with(fixture.worker_root.join("reviewer")));
+    assert!(
+        config_home.join("muse").join("auth.json").is_file(),
+        "{recorded:?}"
+    );
+    assert!(
+        !config_home.join("config.toml").exists(),
+        "the whole home the variable names is replaced"
+    );
+    // Its sessions stay in the reviewer's home, out of the person's own data.
+    let data_home = PathBuf::from(recorded["XDG_DATA_HOME"].as_deref().unwrap());
+    assert!(
+        data_home.starts_with(config_home.join("muse")),
+        "{recorded:?}"
+    );
 }
 
 #[tokio::test]

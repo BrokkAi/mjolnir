@@ -13,7 +13,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::worker_binary::{bridge_launch, container_upload_ownership_args, stage_profile};
+use super::worker_binary::{
+    apply_staged_execution_setting, bridge_launch, container_upload_ownership_args, stage_profile,
+};
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use mj_core::worker_launch::{
@@ -120,11 +122,6 @@ impl Controller {
             profile.enabled,
             "reviewer profile {profile_id:?} is disabled"
         );
-        if !profile.kind.supports_injected_mcp() {
-            bail!(
-                "Muse Code cannot be a reviewer: muse-acp does not accept the required MCP tools. Select another reviewer profile."
-            );
-        }
         let session = self
             .state
             .sessions
@@ -134,11 +131,34 @@ impl Controller {
         let execution_policy = profile
             .kind
             .effective_execution_policy(target.execution_policy);
+        // A reviewer reads a change another agent wrote, so it must not run
+        // with more authority than the session it reviews. Muse has no
+        // guardian mode and always runs unconstrained.
+        if execution_policy.is_unconstrained() && !target.execution_policy.is_unconstrained() {
+            let session_unconstrained = self
+                .config
+                .profiles
+                .get(&session.last_profile)
+                .is_some_and(|session_profile| {
+                    session_profile
+                        .kind
+                        .effective_execution_policy(target.execution_policy)
+                        .is_unconstrained()
+                });
+            ensure!(
+                session_unconstrained,
+                "{} cannot review this session: it has no guardian approval mode, so it would run unconstrained while the session runs with approvals on target {:?}. Choose another reviewer, or run the session on a container target",
+                profile.kind.display_name(),
+                session.target_template_id
+            );
+        }
         let (backend, worker_root) = self.worker_placement(session_id)?;
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
         let local = staging.path().join("profile");
         stage_profile(profile, &local).with_context(|| format!("stage profile {profile_id:?}"))?;
+        apply_staged_execution_setting(profile.kind, execution_policy, &local)
+            .with_context(|| format!("stage profile {profile_id:?}"))?;
         // Harnesses that ignore MCP servers offered over ACP read their own
         // configuration instead, so the servers are written into the copy
         // being staged, before it is uploaded.
@@ -701,6 +721,91 @@ mod tests {
             assert!(!config.mcp_servers[0].is_review_dispatch(Path::new("/worker/hel")));
             assert!(config.mcp_servers[1].is_review_dispatch(Path::new("/worker/hel")));
         }
+    }
+
+    #[test]
+    fn an_unconstrained_reviewer_is_refused_for_a_session_that_runs_with_approvals() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut controller, session_id) = fixture(
+            directory.path(),
+            mj_core::state::TargetLocator::LocalBare {
+                worker_root: directory.path().join(SESSION_ID),
+            },
+        );
+        controller.config.profiles.insert(
+            "muse".into(),
+            HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Muse,
+                home: directory.path().join("muse"),
+                environment: BTreeMap::new().into(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        let executor = RecordingExecutor::new();
+
+        // The fixture's Codex session runs with guardian approvals on a bare
+        // target; Muse would review it with none.
+        let error = controller
+            .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &executor)
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("cannot review this session"),
+            "{error:#}"
+        );
+        assert!(executor.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_muse_reviewer_is_staged_with_the_permission_profile_its_policy_enforces() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_root = directory.path().join(SESSION_ID);
+        let (mut controller, session_id) = fixture(
+            directory.path(),
+            mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            },
+        );
+        // Muse reads its permission profile from this file, and nothing on the
+        // ACP wire overrides it.
+        let home = directory.path().join("muse");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            br#"{"schema_version":1,"permissions":{"schema_version":1,"default_profile":":auto-review"}}"#,
+        )
+        .unwrap();
+        controller.config.profiles.insert(
+            "muse".into(),
+            HarnessProfile {
+                enabled: true,
+                kind: HarnessKind::Muse,
+                home,
+                environment: BTreeMap::new().into(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+            },
+        );
+        // A Muse session already runs unconstrained, so a Muse reviewer gains
+        // nothing over it.
+        controller
+            .state
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .last_profile = "muse".into();
+
+        controller
+            .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &ProcessExecutor)
+            .unwrap();
+
+        let staged: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(worker_root.join("reviewer/profile/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(staged["permissions"]["default_profile"], ":unrestricted");
     }
 
     #[test]
