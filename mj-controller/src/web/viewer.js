@@ -7343,12 +7343,20 @@ document.body.dataset.connection = navigator.onLine ? 'online' : 'offline';
 /// What the viewer believes about its link to the daemon.
 let connection = 'online';
 
+/// What the connection banner says in each state it is shown. The banner is
+/// the one live region for the offline state: a screen reader hears this text
+/// once, not also a separate announcement of the same change.
+const CONNECTION_BANNER_TEXT = {
+  offline: 'Offline. Showing the last state received.',
+  reconnecting: 'Reconnecting… Showing the last state received.',
+};
+
 function setConnection(next) {
   if (connection === next) return;
   connection = next;
   document.body.dataset.connection = next;
-  if (next === 'offline') announce('Offline. Showing the last state received.');
-  if (next === 'reconnecting') announce('Reconnecting.');
+  const bannerText = CONNECTION_BANNER_TEXT[next];
+  if (bannerText) document.querySelector('#connection').textContent = bannerText;
   if (next === 'online') announce('Connected.');
 }
 

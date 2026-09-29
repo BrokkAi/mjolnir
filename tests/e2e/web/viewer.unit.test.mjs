@@ -1129,3 +1129,22 @@ test('a review published without roles renders and clears when it ends', () => {
   harness.renderTurnReview(ended);
   assert.equal(harness.reviewHost.children.length, 0, 'the card stayed after the review ended');
 });
+test('the offline state is announced by one live region with one message', () => {
+  const start = viewerSource.indexOf("const CONNECTION_BANNER_TEXT");
+  const end = viewerSource.indexOf("function reconnect()");
+  const banner = { textContent: 'Offline. Showing the last state received.' };
+  const announcer = { textContent: '' };
+  const context = vm.createContext({
+    document: { body: { dataset: {} }, querySelector: () => banner },
+    announce: message => { announcer.textContent = message; },
+  });
+  vm.runInContext(`let connection = 'online'; ${viewerSource.slice(start, end)}; this.setConnection = setConnection;`, context);
+  context.setConnection('reconnecting');
+  assert.equal(banner.textContent, 'Reconnecting… Showing the last state received.');
+  assert.equal(announcer.textContent, '', 'the hidden announcer must stay silent');
+  context.setConnection('offline');
+  assert.equal(banner.textContent, 'Offline. Showing the last state received.');
+  assert.equal(announcer.textContent, '');
+  context.setConnection('online');
+  assert.equal(announcer.textContent, 'Connected.');
+});
