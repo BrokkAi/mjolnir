@@ -90,6 +90,12 @@ pub fn process_birth_identity(pid: u32) -> Result<String> {
     Ok(identity)
 }
 
+/// How long a bounded command's output may keep arriving after its leader
+/// exits. A backgrounded descendant that inherited the pipes would otherwise
+/// hold a finished command until the whole-command timeout. The same bound as
+/// Codex's `IO_DRAIN_TIMEOUT_MS`. The owned process group is terminated after.
+const IO_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Capture a process with byte/time bounds, draining both pipes concurrently.
 /// Kill its process group before returning on overflow, timeout, or cancellation.
 pub async fn run_bounded(
@@ -107,29 +113,60 @@ pub async fn run_bounded(
     command.process_group(0);
     let mut child = command.spawn().context("start bounded subprocess")?;
     let group = ProcessGroupGuard::new(child.id());
-    async fn read(mut pipe: impl tokio::io::AsyncRead + Unpin, max: usize) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        (&mut pipe)
-            .take(max as u64 + 1)
-            .read_to_end(&mut bytes)
-            .await?;
-        anyhow::ensure!(bytes.len() <= max, "subprocess output exceeds {max} bytes");
-        Ok(bytes)
+    // Bytes go to buffers owned here, so output read while draining survives
+    // the reader being dropped at the drain deadline.
+    async fn read(
+        mut pipe: impl tokio::io::AsyncRead + Unpin,
+        bytes: &mut Vec<u8>,
+        max: usize,
+    ) -> Result<()> {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let count = pipe.read(&mut chunk).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            anyhow::ensure!(bytes.len() <= max, "subprocess output exceeds {max} bytes");
+        }
     }
     let stdout = child.stdout.take().context("missing subprocess stdout")?;
     let stderr = child.stderr.take().context("missing subprocess stderr")?;
+    let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
     let result = tokio::time::timeout(timeout, async {
-        let (stdout, stderr, status) =
-            tokio::try_join!(read(stdout, max_bytes), read(stderr, max_bytes), async {
-                Ok::<_, anyhow::Error>(child.wait().await?)
-            })?;
-        Ok::<_, anyhow::Error>(Output {
-            status,
-            stdout,
-            stderr,
-        })
+        // Owning the pipes here closes our ends when the readers are dropped.
+        let mut readers = std::pin::pin!(async {
+            tokio::try_join!(
+                read(stdout, &mut stdout_bytes, max_bytes),
+                read(stderr, &mut stderr_bytes, max_bytes)
+            )
+            .map(|_| ())
+        });
+        let status = tokio::select! {
+            done = &mut readers => {
+                done?;
+                child.wait().await?
+            }
+            status = child.wait() => {
+                // The command completes when its leader exits. A descendant
+                // that keeps the pipes open only gets the drain bound.
+                let status = status?;
+                if let Ok(done) = tokio::time::timeout(IO_DRAIN_TIMEOUT, &mut readers).await {
+                    done?;
+                }
+                status
+            }
+        };
+        Ok::<_, anyhow::Error>(status)
     })
     .await;
+    let result = result.map(|status| {
+        status.map(|status| Output {
+            status,
+            stdout: std::mem::take(&mut stdout_bytes),
+            stderr: std::mem::take(&mut stderr_bytes),
+        })
+    });
     match result {
         Ok(Ok(output)) => {
             // Completed pipes do not authorize a background descendant to
@@ -535,6 +572,48 @@ mod tests {
             Some(libc::ECHILD),
             "bounded subprocess must already be reaped"
         );
+    }
+
+    /// The leader's exit completes a bounded command; a descendant that keeps
+    /// the pipes open is stopped after the drain instead of failing the
+    /// command at its timeout.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bounded_capture_completes_at_leader_exit_when_a_descendant_holds_the_pipes() {
+        use std::time::{Duration, Instant};
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("descendant");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 300 & echo $! > \"$1\"; echo hi", "held-pipes"])
+            .arg(&pid_file);
+        let started = Instant::now();
+        let output = super::run_bounded(&mut command, 100_000, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(output.stdout, b"hi\n");
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .is_none_or(|state| {
+                state
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z'))
+            })
+        {
+            if Instant::now() >= deadline {
+                // SAFETY: cleans up this test's own fixture.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("descendant {pid} survived the completed command");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[cfg(unix)]

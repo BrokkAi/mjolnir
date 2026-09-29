@@ -753,24 +753,18 @@ fn stream_command_with_stdin(
         .stdin
         .take()
         .context("streamed command stdin missing")?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .context("streamed command stdout missing")?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        std::io::copy(&mut stdout, &mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        std::io::copy(&mut stderr, &mut bytes).map(|_| bytes)
-    });
+    let stdout_reader = PipeCollector::spawn(stdout);
+    let stderr_reader = PipeCollector::spawn(stderr);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -800,6 +794,8 @@ fn stream_command_with_stdin(
             stdin.flush().context("flush command input")
         });
         let mut status = None;
+        let mut exited_at = None;
+        let mut group_killed = false;
         let status = loop {
             if is_cancelled() {
                 terminate_cancellable_child(&mut child);
@@ -828,14 +824,23 @@ fn stream_command_with_stdin(
                     return Err(error).with_context(|| format!("wait for {}", command.purpose));
                 }
             }
-            // Pipe ownership can outlive the direct child. Keep cancellation
-            // active until all three I/O tasks finish, including inherited pipes.
-            if let Some(status) = status
-                && input_writer.is_finished()
-                && stdout_reader.is_finished()
-                && stderr_reader.is_finished()
-            {
-                break status;
+            // The command completes when its leader exits. Descendants can
+            // retain the pipes, so output is collected for a bounded time;
+            // then the owned group is terminated, which also releases a
+            // writer blocked on a pipe a descendant holds.
+            if let Some(status) = status {
+                let exited_at = *exited_at.get_or_insert_with(Instant::now);
+                let drained = (stdout_reader.is_finished() && stderr_reader.is_finished())
+                    || exited_at.elapsed() >= IO_DRAIN_TIMEOUT;
+                if drained && !input_writer.is_finished() && !group_killed {
+                    group_killed = true;
+                    if let Some(group) = &group {
+                        group.kill();
+                    }
+                }
+                if drained && input_writer.is_finished() {
+                    break status;
+                }
             }
             std::thread::sleep(Duration::from_millis(25));
         };
@@ -844,12 +849,9 @@ fn stream_command_with_stdin(
             .map_err(|_| anyhow::anyhow!("streamed command input writer panicked"))?;
         Ok((status, input_result))
     });
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("streamed command stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("streamed command stderr reader panicked"))??;
+    let deadline = Instant::now();
+    let stdout = stdout_reader.finish("stdout", deadline)?;
+    let stderr = stderr_reader.finish("stderr", deadline)?;
     let (status, input_result) = process_result?;
     drop(group);
     if status.success() {
@@ -948,6 +950,119 @@ fn cancellable_command(command: &CommandSpec) -> Command {
     process
 }
 
+/// How long a command's output may keep arriving after its leader exits.
+/// A backgrounded descendant inherits the output pipes and can hold them open
+/// for its whole life, although the command it was started by is finished.
+/// The same bound as Codex's `IO_DRAIN_TIMEOUT_MS`. The owned process group is
+/// terminated once this drain ends.
+const IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A child pipe that can be waited on with a timeout, so its reader can be
+/// stopped while a descendant still holds the write end.
+trait PollablePipe: Read + Send + 'static {
+    fn readable(&self, timeout: Duration) -> bool;
+}
+
+macro_rules! pollable_pipe {
+    ($pipe:ty) => {
+        impl PollablePipe for $pipe {
+            #[cfg(unix)]
+            fn readable(&self, timeout: Duration) -> bool {
+                use std::os::fd::AsRawFd as _;
+                let mut poll = libc::pollfd {
+                    fd: self.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+                // SAFETY: `poll` is one initialized pollfd for an open descriptor.
+                unsafe { libc::poll(&raw mut poll, 1, millis) > 0 }
+            }
+
+            // Without polling, a read blocks until the pipe closes.
+            #[cfg(not(unix))]
+            fn readable(&self, _timeout: Duration) -> bool {
+                true
+            }
+        }
+    };
+}
+
+pollable_pipe!(std::process::ChildStdout);
+pollable_pipe!(std::process::ChildStderr);
+
+/// Collects one child pipe on its own thread. Stopping it drops the thread's
+/// end of the pipe, so a descendant that keeps the pipe open cannot hold the
+/// reader past the drain.
+struct PipeCollector {
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+}
+
+impl PipeCollector {
+    fn spawn(mut pipe: impl PollablePipe) -> Self {
+        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (collected, stopped) = (bytes.clone(), stop.clone());
+        let thread = std::thread::spawn(move || {
+            let mut chunk = [0_u8; 8192];
+            while !stopped.load(Ordering::Acquire) {
+                if !pipe.readable(Duration::from_millis(25)) {
+                    continue;
+                }
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => collected
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend_from_slice(&chunk[..count]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        });
+        Self {
+            bytes,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    /// Waits for end of stream until `deadline`, then stops the reader and
+    /// returns everything it collected.
+    fn finish(mut self, stream: &str, deadline: Instant) -> Result<Vec<u8>> {
+        while !self.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.stop.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .context("command reader already joined")?
+            .join()
+            .map_err(|_| anyhow::anyhow!("command {stream} reader panicked"))?
+            .with_context(|| format!("read command {stream}"))?;
+        let mut bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(std::mem::take(&mut bytes))
+    }
+}
+
+impl Drop for PipeCollector {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
 fn terminate_cancellable_child(child: &mut std::process::Child) {
     #[cfg(unix)]
     // The child owns a fresh process group, so descendants such as an SSH or
@@ -989,27 +1104,19 @@ impl CancellableProcessExecutor {
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
         let group = (!command.detaches)
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
-        let mut stdout = child.stdout.take().context("command stdout missing")?;
-        let mut stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            std::io::copy(&mut stdout, &mut bytes).map(|_| bytes)
-        });
-        let stderr_reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            std::io::copy(&mut stderr, &mut bytes).map(|_| bytes)
-        });
+        let stdout = child.stdout.take().context("command stdout missing")?;
+        let stderr = child.stderr.take().context("command stderr missing")?;
+        let stdout_reader = PipeCollector::spawn(stdout);
+        let stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
+        let mut exited_at = None;
         let status = loop {
             if self.is_cancelled() {
                 terminate_cancellable_child(&mut child);
+                let deadline = Instant::now() + IO_DRAIN_TIMEOUT;
                 for (stream, reader) in [("stdout", stdout_reader), ("stderr", stderr_reader)] {
-                    match reader.join() {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => {
-                            tracing::warn!(stream, %error, "cancelled command reader failed")
-                        }
-                        Err(_) => tracing::warn!(stream, "cancelled command reader panicked"),
+                    if let Err(error) = reader.finish(stream, deadline) {
+                        tracing::warn!(stream, %error, "cancelled command reader failed");
                     }
                 }
                 bail!("operation cancelled while {}", command.purpose);
@@ -1019,22 +1126,21 @@ impl CancellableProcessExecutor {
                     .try_wait()
                     .with_context(|| format!("wait for {}", command.purpose))?;
             }
-            // Descendants can retain these pipes after the shell exits. Keep
-            // enforcing the deadline until both readers have actually finished.
-            if let Some(status) = status
-                && stdout_reader.is_finished()
-                && stderr_reader.is_finished()
-            {
-                break status;
+            // The command completes when its leader exits. Descendants can
+            // retain the pipes, so output is collected for a bounded time.
+            if let Some(status) = status {
+                let exited_at = *exited_at.get_or_insert_with(Instant::now);
+                if (stdout_reader.is_finished() && stderr_reader.is_finished())
+                    || exited_at.elapsed() >= IO_DRAIN_TIMEOUT
+                {
+                    break status;
+                }
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("command stdout reader panicked"))??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("command stderr reader panicked"))??;
+        let deadline = Instant::now();
+        let stdout = stdout_reader.finish("stdout", deadline)?;
+        let stderr = stderr_reader.finish("stderr", deadline)?;
         let status = status.code().unwrap_or(-1);
         drop(group);
         trace_command_duration(command, started, status);
@@ -2110,6 +2216,65 @@ mod executor_tests {
                     panic!(
                         "successful command left descendant {pid} running (streamed={streamed})"
                     );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// B-2 at the executor: a backgrounded descendant that holds the output
+    /// pipes must not hold the completed command past the drain.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn commands_complete_at_leader_exit_when_a_descendant_holds_the_pipes() {
+        for streamed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let pid_file = temp.path().join("descendant");
+            let command = CommandSpec::new(
+                "sh",
+                [
+                    "-c".to_owned(),
+                    "sleep 300 & echo $! > \"$1\"; echo hi; exit 3".to_owned(),
+                    "held-pipes".to_owned(),
+                    pid_file.display().to_string(),
+                ],
+            );
+            let executor = CancellableProcessExecutor::with_timeout(Duration::from_secs(30));
+            let started = Instant::now();
+            let output = if streamed {
+                executor.execute_with_stdin(&command, &mut std::io::Cursor::new(b"input".to_vec()))
+            } else {
+                executor.execute(&command)
+            }
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "streamed={streamed} took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(output.status, 3);
+            assert_eq!(output.stdout, b"hi\n");
+            let pid: i32 = fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                if state.as_ref().is_none_or(|state| {
+                    state
+                        .rsplit_once(") ")
+                        .is_some_and(|(_, fields)| fields.starts_with('Z'))
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // SAFETY: cleans up this test's own fixture.
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    panic!("completed command left descendant {pid} (streamed={streamed})");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
