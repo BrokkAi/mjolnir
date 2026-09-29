@@ -130,6 +130,12 @@ pub(crate) enum DashboardIoUpdate {
         child: String,
         result: std::result::Result<(), String>,
     },
+    /// Interrupt all finished sending. Each failure names the session or
+    /// native sub-agent view it was for.
+    InterruptAllFinished {
+        targets: mj_tui::InterruptAllTargets,
+        failures: Vec<(String, String)>,
+    },
     ReviewRefused {
         session_id: String,
         message: String,
@@ -657,6 +663,9 @@ impl DashboardContext {
             } => {
                 self.dashboard
                     .native_agent_stop_finished(&owner, &child, result);
+            }
+            DashboardIoUpdate::InterruptAllFinished { targets, failures } => {
+                self.dashboard.interrupt_all_finished(&targets, failures);
             }
             DashboardIoUpdate::ReviewRefused {
                 session_id,

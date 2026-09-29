@@ -33,6 +33,24 @@ impl AttentionLevel {
     }
 }
 
+/// The turns Interrupt all ends: Mjolnir sessions by id, and harness-native
+/// sub-agents by owner session and child id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterruptAllTargets {
+    pub sessions: Vec<String>,
+    pub native: Vec<(String, String)>,
+}
+
+impl InterruptAllTargets {
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.native.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.sessions.len() + self.native.len()
+    }
+}
+
 /// One session the attention queue would take a person to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionEntry {
@@ -639,12 +657,7 @@ impl DashboardState {
         let mut children = self
             .managed_active_child_ids(parent_id)
             .into_iter()
-            .filter(|id| {
-                matches!(
-                    self.own_attention_level(id),
-                    AttentionLevel::Working | AttentionLevel::Waiting
-                )
-            })
+            .filter(|id| self.has_unfinished_turn(id))
             .filter_map(|id| self.state.sessions.get(&id))
             .collect::<Vec<_>>();
         children.sort_by(|left, right| {
@@ -655,6 +668,82 @@ impl DashboardState {
             .into_iter()
             .map(|child| child.listed_title().to_owned())
             .collect()
+    }
+
+    /// Whether the session's own turn is still going: working, or holding a
+    /// question the agent asked in that turn.
+    fn has_unfinished_turn(&self, session_id: &str) -> bool {
+        matches!(
+            self.own_attention_level(session_id),
+            AttentionLevel::Working | AttentionLevel::Waiting
+        )
+    }
+
+    /// What Interrupt all stops for `root`: every session in its Mjolnir
+    /// sub-agent tree whose turn is unfinished, and every running
+    /// harness-native sub-agent under any of them that can be stopped.
+    pub(crate) fn interrupt_all_targets(&self, root: &str) -> InterruptAllTargets {
+        let mut targets = InterruptAllTargets::default();
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![root.to_owned()];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if let Some(pane) = self.native_agents.get(&id) {
+                if pane.agent.capabilities.cancel && !pane.stopping {
+                    targets.native.push((
+                        pane.agent.owner_session_id.clone(),
+                        pane.agent.session_id.clone(),
+                    ));
+                }
+            } else if self.has_unfinished_turn(&id) {
+                targets.sessions.push(id.clone());
+            }
+            pending.extend(self.managed_active_child_ids(&id));
+            pending.extend(
+                self.native_running_by_parent
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+        targets
+    }
+
+    /// Reports how Interrupt all went, and lets a native sub-agent whose stop
+    /// failed be stopped again.
+    pub fn interrupt_all_finished(
+        &mut self,
+        targets: &InterruptAllTargets,
+        failures: Vec<(String, String)>,
+    ) {
+        for (owner, child) in &targets.native {
+            let view_id = mj_core::native_agent::view_id(owner, child);
+            if failures.iter().any(|(id, _)| *id == view_id)
+                && let Some(pane) = self.native_agents.get_mut(&view_id)
+            {
+                pane.stopping = false;
+            }
+        }
+        let Some((id, error)) = failures.first() else {
+            self.set_notice(format!(
+                "Sent an interrupt to {}.",
+                crate::widgets::counted(targets.len(), "turn", "turns")
+            ));
+            return;
+        };
+        let name = self
+            .state
+            .sessions
+            .get(id)
+            .map_or(id.as_str(), |session| session.listed_title());
+        self.set_notice(format!(
+            "Could not interrupt {} of {}; {name}: {error}",
+            failures.len(),
+            crate::widgets::counted(targets.len(), "turn", "turns"),
+        ));
     }
 
     /// The first of this parent's Mjolnir sub-agents that is waiting on a
