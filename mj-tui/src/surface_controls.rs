@@ -5,7 +5,7 @@ use mj_chat::components::{ButtonRow, ControlKind, Interaction};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::actions::{Availability, CommandId, spec};
@@ -25,6 +25,10 @@ pub(crate) enum SurfaceControl {
     /// The `×` after the filter label on the Sessions title, which drops the
     /// filter as `Esc` on the pane does.
     ClearSessionsFilter,
+    /// The `Filter:` input on the Sessions action row; a click starts typing.
+    SessionsFilterInput,
+    /// The `x` at the right end of that input, which drops the filter.
+    ClearSessionsFilterInput,
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -165,8 +169,12 @@ impl DashboardState {
                     self.begin_support_pane_menu(pane);
                     DashboardAction::None
                 }
-                SurfaceControl::ClearSessionsFilter => {
+                SurfaceControl::ClearSessionsFilter | SurfaceControl::ClearSessionsFilterInput => {
                     self.clear_sessions_filter();
+                    DashboardAction::None
+                }
+                SurfaceControl::SessionsFilterInput => {
+                    self.begin_sessions_filter();
                     DashboardAction::None
                 }
                 SurfaceControl::PanePin(pane) => {
@@ -303,6 +311,105 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
         };
         frame.render_widget(Paragraph::new(format!(" {label} ")).style(style), rect);
         x = x.saturating_add(width + 1);
+    }
+    drop(form);
+    render_sessions_filter_input(frame, area, x, dashboard);
+}
+
+/// The label before the Sessions filter's text field.
+const FILTER_LABEL: &str = "Filter: ";
+/// The least room the text field is worth drawing in; narrower rows leave the
+/// input out rather than show a field nobody can type a word into.
+const FILTER_FIELD_MIN: u16 = 4;
+/// The widest the text field grows, so a wide pane keeps the buttons and the
+/// input together instead of spreading them across the row.
+const FILTER_FIELD_MAX: u16 = 24;
+
+/// Where the `Filter:` input sits in the Sessions action row: the label and
+/// field start at `start`, the first cell after the buttons. `None` when the
+/// pane is in its most compact view, or the row has no room left.
+fn filter_input_area(dashboard: &DashboardState, row: Rect, start: u16) -> Option<Rect> {
+    if dashboard.sessions_minimized() {
+        return None;
+    }
+    let left = start.saturating_add(1);
+    let width = row.right().saturating_sub(left);
+    let label = FILTER_LABEL.len() as u16;
+    (width >= label + FILTER_FIELD_MIN)
+        .then(|| Rect::new(left, row.y, width.min(label + FILTER_FIELD_MAX), 1))
+}
+
+/// Draws the `Filter: ____` input to the right of the buttons. It shows and
+/// edits the same text the `/` key does. While a filter is in force an `x` at
+/// its right end drops it, as the `×` on the pane title does.
+fn render_sessions_filter_input(
+    frame: &mut Frame,
+    row: Rect,
+    start: u16,
+    dashboard: &DashboardState,
+) {
+    let Some(area) = filter_input_area(dashboard, row, start) else {
+        return;
+    };
+    let mut form = dashboard.surface_form.borrow_mut();
+    let filter = dashboard.sessions_filter.as_ref();
+    let editing = filter.is_some_and(|filter| filter.editing);
+    let clear = Line::raw(theme::glyphs().close).width() as u16;
+    let clear_area = filter
+        .is_some()
+        .then(|| Rect::new(area.right() - clear, area.y, clear, 1));
+    let label = FILTER_LABEL.len() as u16;
+    let field_end = clear_area.map_or(area.right(), |clear| clear.x);
+    let field = Rect::new(
+        area.x + label,
+        area.y,
+        field_end.saturating_sub(area.x + label),
+        1,
+    );
+    let input = Rect::new(area.x, area.y, field_end - area.x, 1);
+    form.register(
+        SurfaceControl::SessionsFilterInput,
+        ControlKind::Button,
+        input,
+        true,
+    );
+    // The label stays put; the field shows the end of the text, where the
+    // typing is, and pads with underscores so the box shows its extent.
+    let text: Vec<char> = filter
+        .map(|filter| filter.query.chars().collect())
+        .unwrap_or_default();
+    let room = usize::from(field.width);
+    let caret = usize::from(editing);
+    let shown: String = text
+        .iter()
+        .skip(text.len().saturating_sub(room.saturating_sub(caret)))
+        .collect();
+    let used = shown.chars().count();
+    let mut spans = vec![
+        Span::styled(FILTER_LABEL, theme::muted()),
+        Span::styled(shown, theme::actionable()),
+    ];
+    if editing && used < room {
+        spans.push(Span::styled(" ", theme::focus_control()));
+    }
+    let padding = room.saturating_sub(used + usize::from(editing && used < room));
+    spans.push(Span::styled("_".repeat(padding), theme::muted()));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(area.x, area.y, field_end - area.x, 1),
+    );
+    if let Some(clear_area) = clear_area {
+        let control = SurfaceControl::ClearSessionsFilterInput;
+        form.register(control, ControlKind::Button, clear_area, true);
+        let style = if form.is_armed(control) {
+            theme::selection(true)
+        } else {
+            theme::actionable()
+        };
+        frame.render_widget(
+            Paragraph::new(theme::glyphs().close).style(style),
+            clear_area,
+        );
     }
 }
 
@@ -848,5 +955,150 @@ mod tests {
                 lines[usize::from(y)]
             );
         }
+    }
+
+    /// The Sessions action row as drawn inside the Sessions pane, without the
+    /// panes beside it.
+    fn actions_row(dashboard: &DashboardState, lines: &[String]) -> String {
+        let pane = dashboard.pane_areas.expect("pane areas")[0];
+        lines[usize::from(pane.y) + 1]
+            .chars()
+            .skip(usize::from(pane.x))
+            .take(usize::from(pane.width))
+            .collect()
+    }
+
+    /// User request 2026-09-29: a `Filter: ____` input sits on the buttons'
+    /// row, to their right, in the standard pane at the widths people use.
+    #[test]
+    fn the_filter_input_sits_right_of_the_buttons_at_140_and_80_columns() {
+        for width in [140, 80] {
+            let mut dashboard = dashboard_with_session(running_session());
+            let lines = draw(&mut dashboard, (width, 40));
+            let row = actions_row(&dashboard, &lines);
+            let open = row.find("Open").expect("Open button");
+            let filter = row.find("Filter: ____").expect("filter input");
+            assert!(open < filter, "{width}: {row:?}");
+            // Nothing is active, so there is no clear button.
+            assert!(!row.contains('×'), "{width}: {row:?}");
+            assert_eq!(dashboard.sessions_filter, None);
+        }
+    }
+
+    #[test]
+    fn the_filter_input_is_hidden_in_the_compact_list_but_the_filter_still_applies() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "zzz".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let lines = draw(&mut dashboard, (140, 40));
+        let row = actions_row(&dashboard, &lines);
+        assert!(!row.contains("Filter:"), "{row:?}");
+        assert!(lines.join("\n").contains("Outside filter"), "{lines:#?}");
+        assert!(dashboard.sessions_filter.is_some());
+    }
+
+    /// Typing in the input edits the `/` search text, and the `x` at its end
+    /// clears it. The `x` shows only while a filter is in force.
+    #[test]
+    fn typing_in_the_filter_input_filters_and_its_x_clears() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let lines = draw(&mut dashboard, (140, 40));
+        let (x, y) = point(&lines, "Filter:");
+        assert_eq!(click(&mut dashboard, (x + 2, y)), DashboardAction::None);
+        assert!(
+            dashboard
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|f| f.editing)
+        );
+        assert_eq!(dashboard.focus(), Focus::Sessions);
+        for character in "nomatch".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            dashboard.sessions_filter.as_ref().map(|f| f.query.as_str()),
+            Some("nomatch")
+        );
+        let lines = draw(&mut dashboard, (140, 40));
+        let row = actions_row(&dashboard, &lines);
+        assert!(row.contains("Filter: nomatch"), "{row:?}");
+        assert!(row.contains('×'), "{row:?}");
+        // The same text is the `/` search: the list is filtered by it.
+        assert!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .all(|session| Some(session.id.as_str()) == dashboard.selected_session_id())
+        );
+
+        let pane = dashboard.pane_areas.expect("pane areas")[0];
+        let chip = row.chars().position(|c| c == '×').unwrap() as u16 + pane.x;
+        assert_eq!(click(&mut dashboard, (chip, y)), DashboardAction::None);
+        assert_eq!(dashboard.sessions_filter, None);
+        let lines = draw(&mut dashboard, (140, 40));
+        assert!(!actions_row(&dashboard, &lines).contains('×'));
+    }
+
+    #[test]
+    fn slash_focuses_the_filter_input_and_enter_or_esc_leave_it() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        dashboard.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            dashboard
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|f| f.editing)
+        );
+        dashboard.handle_key(key(KeyCode::Enter));
+        assert!(
+            dashboard
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|f| !f.editing && f.query == "q")
+        );
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(dashboard.sessions_filter, None);
+    }
+
+    #[test]
+    fn the_filter_input_row_is_pure_ascii_with_ascii_symbols() {
+        use mj_core::config::SymbolSet;
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(SymbolSet::Ascii);
+        dashboard.set_config(config);
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        dashboard.handle_key(key(KeyCode::Char('q')));
+        let lines = draw(&mut dashboard, (140, 40));
+        let row = actions_row(&dashboard, &lines);
+        assert!(row.contains("Filter: q"), "{row:?}");
+        assert!(row.contains(" x "), "{row:?}");
+        assert!(row.is_ascii(), "{row:?}");
+    }
+
+    #[test]
+    fn the_filter_matches_a_sessions_branch_name() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut other = running_session();
+        other.id = "branchy-session".into();
+        other.launch_branch = Some("feature/octopus".into());
+        dashboard.state.sessions.insert(other.id.clone(), other);
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "OCTOPUS".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        // The branch matches, so nothing is held back.
+        assert_eq!(dashboard.sessions_hidden_count(), 0);
+        dashboard.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(dashboard.sessions_hidden_count(), 1);
     }
 }

@@ -286,8 +286,16 @@ impl DashboardState {
             return true;
         }
         let source = self.project_source(session);
+        let branch = session
+            .managed_worktree
+            .as_ref()
+            .map(|worktree| worktree.branch.as_str())
+            .or(session.launch_branch.as_deref())
+            .unwrap_or_default()
+            .to_lowercase();
         [
             session.display_title().to_lowercase(),
+            branch,
             session.id.to_lowercase(),
             source.short.to_lowercase(),
             source.full.to_lowercase(),
@@ -342,8 +350,7 @@ impl DashboardState {
     /// Answers a key for the Sessions filter, or `None` when the filter does
     /// not claim it. While editing, printable keys are text and the arrows
     /// still move the selection; `Enter` keeps the filter and returns the
-    /// letters to the pane; `Esc` clears the text, and a second `Esc` clears
-    /// the state filter too. When not editing, the state letters narrow the
+    /// letters to the pane; `Esc` clears the text and leaves the input. When not editing, the state letters narrow the
     /// list and `Esc` drops the whole filter.
     pub(crate) fn handle_sessions_filter_key(&mut self, key: KeyEvent, plain: bool) -> Option<()> {
         let editing = self
@@ -361,10 +368,12 @@ impl DashboardState {
                     }
                 }
                 KeyCode::Esc => {
-                    if filter.query.is_empty() {
+                    // Esc clears the text and leaves the input. A state
+                    // filter stays until Esc on the pane drops it.
+                    filter.query.clear();
+                    filter.editing = false;
+                    if filter.state.is_none() {
                         self.sessions_filter = None;
-                    } else {
-                        filter.query.clear();
                     }
                 }
                 KeyCode::Backspace => {
