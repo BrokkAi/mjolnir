@@ -666,6 +666,82 @@ fn grok_cwd_key_url_encodes_short_paths_and_hashes_long_ones() {
     assert!(key.starts_with("workspace-"), "unslugifiable leaf: {key}");
 }
 
+/// A bare session launches its harness in its project directory exactly as
+/// recorded, and a checkout at the repository root is recorded with a
+/// trailing separator (`<repo>/.mj/clones/<id>/`). Grok Build keys its session
+/// storage by the cwd text it receives, so the restored session has to land
+/// under that text or `session/resume` reports FS_NOT_FOUND. Kimi Code and
+/// Claude Code key by the directory, so the separator must not change theirs.
+#[test]
+fn restored_native_sessions_follow_each_harness_reading_of_the_launch_cwd() {
+    const NATIVE: &str = "01a0ee22-d1b8-72a0-9c50-e34eab622597";
+    let launch_cwd = Path::new("/srv/project/.mj/clones/s1/");
+    let home = Path::new("/workers/s1/profile");
+
+    // The layout Grok Build 1.0.40 wrote in a live bare session.
+    let summary = restored_native_relative_path(
+        HarnessKind::Grok,
+        Path::new(&format!(
+            "sessions/%2Fold%2Fproject%2F.mj%2Fclones%2Fs1%2F/{NATIVE}/summary.json"
+        )),
+        Some(launch_cwd),
+    )
+    .unwrap();
+    assert_eq!(
+        summary,
+        PathBuf::from(format!(
+            "sessions/%2Fsrv%2Fproject%2F.mj%2Fclones%2Fs1%2F/{NATIVE}/summary.json"
+        ))
+    );
+    let rewritten = restored_native_artifact_bytes(
+        HarnessKind::Grok,
+        &summary,
+        format!(
+            r#"{{"info":{{"id":"{NATIVE}","cwd":"/old/project/.mj/clones/s1/"}},"grok_home":"/old/profile"}}"#
+        )
+        .as_bytes(),
+        Some(launch_cwd),
+        home,
+    )
+    .unwrap();
+    let rewritten: Value = serde_json::from_slice(&rewritten).unwrap();
+    assert_eq!(rewritten["info"]["cwd"], "/srv/project/.mj/clones/s1/");
+
+    let directory = Path::new("/srv/project/.mj/clones/s1");
+    assert_eq!(
+        restored_native_relative_path(
+            HarnessKind::Kimi,
+            Path::new(&format!("sessions/old-key/session_{NATIVE}/state.json")),
+            Some(launch_cwd),
+        )
+        .unwrap(),
+        Path::new("sessions")
+            .join(kimi_workspace_key(directory))
+            .join(format!("session_{NATIVE}/state.json"))
+    );
+    let state = restored_native_artifact_bytes(
+        HarnessKind::Kimi,
+        Path::new(&format!("sessions/key/session_{NATIVE}/state.json")),
+        br#"{"workDir":"/old"}"#,
+        Some(launch_cwd),
+        home,
+    )
+    .unwrap();
+    let state: Value = serde_json::from_slice(&state).unwrap();
+    assert_eq!(state["workDir"], "/srv/project/.mj/clones/s1");
+    assert_eq!(
+        restored_native_relative_path(
+            HarnessKind::Claude,
+            Path::new(&format!("projects/-old/{NATIVE}.jsonl")),
+            Some(launch_cwd),
+        )
+        .unwrap(),
+        PathBuf::from(format!(
+            "projects/-srv-project--mj-clones-s1/{NATIVE}.jsonl"
+        ))
+    );
+}
+
 #[test]
 fn claude_allowlist_collects_transcript_and_session_subtree_only() {
     let temp = tempfile::tempdir().unwrap();

@@ -80,6 +80,21 @@ pub(super) fn rewrite_kimi_session_index(
     Ok(rewritten)
 }
 
+/// The working directory a harness keys its native session storage by, given
+/// the directory the worker launches it in. Grok Build encodes the cwd text it
+/// receives, so `<dir>/` and `<dir>` are different storage keys to it; Claude
+/// Code and Kimi Code key by the directory itself (Kimi hashes it without the
+/// trailing separator even though its registry records the text), and Muse
+/// only records it.
+pub(super) fn harness_storage_cwd(harness: HarnessKind, launch_cwd: &Path) -> PathBuf {
+    match harness {
+        HarnessKind::Grok => launch_cwd.to_path_buf(),
+        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Kimi | HarnessKind::Muse => {
+            launch_cwd.components().collect()
+        }
+    }
+}
+
 pub(super) fn is_kimi_session_state(relative_path: &Path) -> bool {
     let mut components = relative_path.components();
     matches!(components.next(), Some(Component::Normal(component)) if component == "sessions")

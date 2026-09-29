@@ -219,7 +219,6 @@ impl Controller {
                     // The repositories are already in the workspace, untouched
                     // by the swap; only the harness state is restored.
                     restore_repositories: false,
-                    primary_repository_root_from_conversion: false,
                     native_continuity,
                     discard_queued_prompts,
                     replay_queue: false,

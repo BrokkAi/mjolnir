@@ -1756,8 +1756,11 @@ fn fresh_native_resume(
     let directory = tempfile::tempdir().unwrap();
     // A local bare worker root has to end in the session id.
     let worker_root = directory.path().join(session_id);
-    let checkout = directory.path().join("checkout");
+    // A checkout at its repository's root is recorded with a trailing
+    // separator, as `<repo>/.mj/clones/<id>/`.
+    let checkout = directory.path().join("checkout").join("");
     let archives = directory.path().join("archives");
+    let restore_spec = directory.path().join("restore-spec.json");
     let home = directory.path().join("profile");
     for path in [&worker_root, &checkout, &archives, &home] {
         std::fs::create_dir_all(path).unwrap();
@@ -1794,6 +1797,7 @@ proxy)
     {binary} --exact controller::checkpoint::tests::latch_relay_child_serves_stdio --nocapture | grep --line-buffered '^{{'
     ;;
 restore-checkpoint)
+    cp "$4" {restore_spec}
     cat >{seed} <<'SEED'
 {{"event_frontier":2,"event_frontier_digest":"{digest}","queued_prompts":[],"native_session_unused":true}}
 SEED
@@ -1804,6 +1808,7 @@ exit 0
         root = quote(&worker_root),
         binary = quote(&std::env::current_exe().unwrap()),
         seed = quote(&mj_core::relay::restored_relay_seed_path(&worker_root)),
+        restore_spec = quote(&restore_spec),
         digest = verified.canonical_session.event_frontier_digest,
     );
     // Only the behaviour goes in: the resume installs `MJ_WORKER_BINARY`, the
@@ -1877,7 +1882,6 @@ exit 0
             resumed_project_directory: Some(checkout.clone()),
             resumed_container_workspace: None,
             restore_repositories: false,
-            primary_repository_root_from_conversion: false,
             native_continuity: true,
             discard_queued_prompts: false,
             replay_queue: true,
@@ -1890,6 +1894,21 @@ exit 0
         },
         &ProcessExecutor,
     ));
+    // The restore keys the harness's native session by the directory the
+    // worker launches the harness in, spelled the same way: Grok Build keys
+    // its session storage by that text, trailing separator included.
+    let restored_spec: mj_checkpoint::checkpoint::CheckpointRestoreSpec =
+        serde_json::from_slice(&std::fs::read(&restore_spec).unwrap()).unwrap();
+    let launch: mj_core::worker_launch::WorkerLaunchConfig =
+        serde_json::from_slice(&std::fs::read(worker_root.join("launch.json")).unwrap()).unwrap();
+    assert_eq!(launch.cwd.as_os_str(), checkout.as_os_str());
+    assert_eq!(
+        restored_spec
+            .primary_repository_root
+            .as_ref()
+            .map(|root| root.as_os_str()),
+        Some(launch.cwd.as_os_str())
+    );
     let mentions = |projection: &MaterializedSession, text: &str| {
         projection
             .transcript
