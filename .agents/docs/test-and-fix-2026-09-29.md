@@ -384,3 +384,7 @@ Binaries: `bin-fixed/` built from the validated master tip in one go (host `mj`,
 | RV-12 | the Mac (`tf-mac`) | the new target table with capacity for `macbook` at 80 columns; the daemon log names the Darwin worker and its source; with the Darwin worker renamed away and a fresh daemon, `mj new --target macbook` fails with the `doctor.rs` message | M-4 (F8), M-7, M-8 |
 | RV-13 | real Claude, yolo (`[machines.self] ssh localhost` + `[targets.self-yolo] permissions = "yolo"`, or a local Podman target) on bridge 0.84.0 | ask for `kill <pid of a background sleep>` and for `ls`; record whether either raises a `request_permission`; attach the result to claude-agent-acp#1196 | #1196 |
 | RV-14 | fake lab (upgrade) | 2.23.0 → `bin-fixed` handoff still completes in seconds with live sessions; migrations log one info line each; the startup-step prune logs its count | B-4 (F3) |
+
+### User report (12:10): warnings for a native child's `async_task_*` updates
+
+A Claude session whose native (Task) child started background Bash work showed one warning row per `async_task_spawned`/`async_task_state_update`/`async_task_progress` update from the child: `NativeAgentRouter::route` (`native_agents.rs:138`) decodes a child's notification as a standard ACP `SessionUpdate`, which lacks Claude's task updates, and warns on the decode failure; the parent-level handler (`claude_tasks.rs:89`) is not session-scoped, so the updates must not fall through. Cosmetic. Fix wave F12: recognize the kinds before the decode and ignore them for child sessions, with a test.
