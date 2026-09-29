@@ -154,63 +154,6 @@ impl ManagedSessionHandle {
         self.enqueue_submit(command_id, command).await?.wait().await
     }
 
-    /// Retain the worker's deduplication receipt until explicitly released.
-    pub async fn submit_durable(&self, command_id: String, command: RelayCommand) -> Result<u64> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::Submit {
-                durable: true,
-                queued_at: Instant::now(),
-                command_id,
-                command,
-                admission: None,
-                reply,
-            })
-            .await
-            .context("session manager stopped")?;
-        PendingRelaySubmit { response }.wait().await
-    }
-
-    pub async fn command_receipt(
-        &self,
-        command_id: String,
-    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
-        self.request_receipt(command_id, CommandReceiptAction::Lookup)
-            .await
-    }
-
-    pub async fn release_command_receipt(&self, command_id: String) -> Result<()> {
-        self.request_receipt(command_id, CommandReceiptAction::Release)
-            .await
-            .map(|_| ())
-    }
-
-    /// Atomically refuse future delivery if this command was not accepted.
-    pub async fn cancel_command_admission(
-        &self,
-        command_id: String,
-    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
-        self.request_receipt(command_id, CommandReceiptAction::CancelAdmission)
-            .await
-    }
-
-    async fn request_receipt(
-        &self,
-        command_id: String,
-        action: CommandReceiptAction,
-    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::CommandReceipt {
-                command_id,
-                action,
-                reply,
-            })
-            .await
-            .context("session manager stopped")?;
-        response.await.context("session manager stopped")?
-    }
-
     /// Submit the review's corrective prompt through the one admission that
     /// corresponds to its live prompt hold. Generic submissions continue to
     /// use [`Self::submit`] and remain subject to review refusal.
@@ -220,19 +163,10 @@ impl ManagedSessionHandle {
         command: RelayCommand,
     ) -> Result<u64> {
         let command_id = admission.command_id.clone();
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::Submit {
-                durable: true,
-                queued_at: Instant::now(),
-                command_id,
-                command,
-                admission: Some(admission),
-                reply,
-            })
+        self.enqueue_submit_with_admission(command_id, command, Some(admission))
+            .await?
+            .wait()
             .await
-            .context("session manager stopped")?;
-        PendingRelaySubmit { response }.wait().await
     }
 
     pub async fn enqueue_submit(
@@ -253,7 +187,6 @@ impl ManagedSessionHandle {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ActorCommand::Submit {
-                durable: false,
                 queued_at: Instant::now(),
                 command_id,
                 command,

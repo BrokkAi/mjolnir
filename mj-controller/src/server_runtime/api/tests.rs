@@ -530,23 +530,6 @@ struct FakeSession {
 }
 
 impl SessionHandleBackend for FakeSession {
-    fn submit_durable(
-        &self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> BoxFuture<'_, Result<u64>> {
-        Box::pin(async move { self.enqueue_submit(command_id, command).await?.wait().await })
-    }
-    fn command_receipt(
-        &self,
-        _: String,
-    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
-        Box::pin(async { Ok(None) })
-    }
-    fn release_command_receipt(&self, _: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-
     fn search_prompts(
         &self,
         _bundle_id: String,
@@ -712,7 +695,6 @@ fn ready_view(model: &str) -> ManagedSessionView {
         queued_prompts: Vec::new(),
         active_user_shells: Vec::new(),
         active_agent_terminals: Vec::new(),
-        command_ledger_seal: None,
         checkpoint_barrier: None,
         checkpoint_ready: None,
         last_acp_activity_at_ms: None,
@@ -1088,7 +1070,6 @@ async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
 #[derive(Clone)]
 struct ConfigSession {
     inner: FakeSession,
-    receipt: Arc<Mutex<Option<mj_core::relay::HandledRelayCommand>>>,
 }
 
 impl SessionHandleBackend for ConfigSession {
@@ -1131,29 +1112,6 @@ impl SessionHandleBackend for ConfigSession {
     ) -> BoxFuture<'_, Result<PendingRelaySubmit>> {
         self.inner.enqueue_submit(id, command)
     }
-    fn submit_durable(&self, id: String, command: RelayCommand) -> BoxFuture<'_, Result<u64>> {
-        Box::pin(async move {
-            let existing = self.receipt.lock().unwrap().clone();
-            if let Some(receipt) = existing {
-                return Ok(receipt.accepted_ordinal);
-            }
-            let ordinal = self.inner.submit_durable(id, command.clone()).await?;
-            *self.receipt.lock().unwrap() = Some(mj_core::relay::HandledRelayCommand {
-                command,
-                accepted_ordinal: ordinal,
-                terminal_ordinal: Some(ordinal + 1),
-                outcome: Some(mj_core::relay::RelayCommandOutcome::Configured),
-                failure: None,
-            });
-            Ok(ordinal)
-        })
-    }
-    fn command_receipt(
-        &self,
-        _: String,
-    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
-        Box::pin(async { Ok(self.receipt.lock().unwrap().clone()) })
-    }
     fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>> {
         self.inner.enqueue_sync()
     }
@@ -1191,14 +1149,16 @@ fn config_session(
                 submitted,
                 view: Some(view),
             },
-            receipt: Arc::default(),
         }),
         received,
     )
 }
 
 #[tokio::test]
-async fn startup_configuration_uses_stable_receipts_across_retries() {
+async fn startup_configuration_retries_under_the_same_command_id() {
+    // Deduplication lives in the worker: a submit whose id it has already
+    // accepted answers with the original ordinal. The daemon's part is to
+    // retry a step with the step's own id, never a fresh one.
     let (handle, mut submitted) = config_session(ready_view("gpt-5-codex"));
     for _ in 0..2 {
         assert_eq!(
@@ -1214,20 +1174,19 @@ async fn startup_configuration_uses_stable_receipts_across_retries() {
             Some(12)
         );
     }
-    assert_eq!(
-        submitted.recv().await.unwrap(),
-        (
-            "startup:model".into(),
-            RelayCommand::SetConfig {
-                key: "model".into(),
-                value: "gpt-5-codex".into(),
-            }
-        )
-    );
-    assert!(
-        submitted.try_recv().is_err(),
-        "recovery must not reapply an accepted setting"
-    );
+    for _ in 0..2 {
+        assert_eq!(
+            submitted.recv().await.unwrap(),
+            (
+                "startup:model".into(),
+                RelayCommand::SetConfig {
+                    key: "model".into(),
+                    value: "gpt-5-codex".into(),
+                }
+            )
+        );
+    }
+    assert!(submitted.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -2205,26 +2164,12 @@ struct ScriptedSession {
     inner: FakeSession,
     failures: Arc<std::sync::Mutex<std::collections::VecDeque<bool>>>,
     on_failure: Arc<dyn Fn() + Send + Sync>,
+    /// Syncs refused the way the session actor refuses while a lifecycle
+    /// operation such as a park holds it.
+    reserved_syncs: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SessionHandleBackend for ScriptedSession {
-    fn submit_durable(
-        &self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> BoxFuture<'_, Result<u64>> {
-        Box::pin(async move { self.enqueue_submit(command_id, command).await?.wait().await })
-    }
-    fn command_receipt(
-        &self,
-        _: String,
-    ) -> BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>> {
-        Box::pin(async { Ok(None) })
-    }
-    fn release_command_receipt(&self, _: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-
     fn search_prompts(
         &self,
         bundle_id: String,
@@ -2279,6 +2224,18 @@ impl SessionHandleBackend for ScriptedSession {
         })
     }
     fn enqueue_sync(&self) -> BoxFuture<'_, Result<PendingRelaySync>> {
+        use std::sync::atomic::Ordering;
+        if self
+            .reserved_syncs
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Box::pin(async {
+                Ok(PendingRelaySync::new(Box::pin(async {
+                    anyhow::bail!("session is reserved for a lifecycle operation")
+                })))
+            });
+        }
         self.inner.enqueue_sync()
     }
     fn respond_elicitation(
@@ -2356,6 +2313,36 @@ fn parking_backend(
         },
         failures: Arc::new(std::sync::Mutex::new(failures.iter().copied().collect())),
         on_failure,
+        reserved_syncs: Arc::default(),
+    };
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(ScriptedControl(session)),
+        running_states(),
+        exports,
+    ));
+    (backend, delivered)
+}
+
+/// Like `parking_backend`, with the child's actor refusing its first
+/// `reserved_syncs` syncs because a park still holds it.
+fn reserved_parking_backend(
+    exports: Arc<ParkingExports>,
+    reserved_syncs: usize,
+) -> (
+    Arc<ApiBackend>,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
+    let (submitted, delivered) = mpsc::unbounded_channel();
+    let session = ScriptedSession {
+        inner: FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 9,
+            submitted,
+            view: Some(ready_view("model")),
+        },
+        failures: Arc::default(),
+        on_failure: Arc::new(|| {}),
+        reserved_syncs: Arc::new(std::sync::atomic::AtomicUsize::new(reserved_syncs)),
     };
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(ScriptedControl(session)),
@@ -2788,7 +2775,6 @@ async fn recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_
             request: request.clone(),
             turn_target: Some("original-turn".into()),
             spawn: None,
-            close_incarnation: None,
         },
     )
     .unwrap();
@@ -2874,43 +2860,6 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
     assert!(!result.is_error, "{}", result.message);
     let report = crate::database::load_subagent_report("child-1").unwrap();
     assert_eq!(report.handback.unwrap().command_id, "original-turn");
-}
-
-#[test]
-fn prepared_close_keeps_original_incarnation_after_child_resume() {
-    if !isolated_parked_test("prepared_close_keeps_original_incarnation_after_child_resume") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let prepared = crate::database::PreparedDelegation {
-        request: mj_core::subagent::SubagentToolRequest {
-            originating_command_id: None,
-            request_id: "close-request".into(),
-            created_at_ms: 1,
-            action: mj_core::subagent::SubagentToolAction::CloseAgent {
-                child_session_id: "child-1".into(),
-            },
-        },
-        turn_target: None,
-        spawn: None,
-        close_incarnation: None,
-    };
-    let original =
-        crate::database::prepare_delegation("parent-1".into(), prepared.clone()).unwrap();
-    let mut child = crate::database::load_session_record("child-1")
-        .unwrap()
-        .unwrap();
-    child.state = SessionState::Parked;
-    crate::database::save_session(&child).unwrap();
-    child.state = SessionState::Running;
-    crate::database::save_session(&child).unwrap();
-    assert_ne!(
-        crate::database::session_incarnation("child-1").unwrap(),
-        original.close_incarnation
-    );
-    let recovered = crate::database::prepare_delegation("parent-1".into(), prepared).unwrap();
-    assert_eq!(recovered.close_incarnation, original.close_incarnation);
 }
 
 /// The prompts that reached the child's relay, by text.
@@ -3007,6 +2956,25 @@ async fn send_input_starts_a_parked_child_again_and_resends_only_a_prompt_a_park
     assert!(answer.is_error, "{}", answer.message);
     assert_eq!(exports.unparks(), 0);
     assert!(delivered_prompts(&mut delivered).is_empty());
+}
+
+/// #1186: right after a handback the daemon parks the child, and the park
+/// holds the child's actor. A `send_input` arriving then used to fail with
+/// "session is reserved for a lifecycle operation", because a delivery
+/// receipt lookup was refused while the park held the actor and was not
+/// retried. The input must instead wait out the park and arrive exactly once.
+#[tokio::test]
+async fn send_input_waits_out_a_park_that_holds_the_child() {
+    if !isolated_parked_test("send_input_waits_out_a_park_that_holds_the_child") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, mut delivered) = reserved_parking_backend(exports.clone(), 3);
+    let answer = send_input(&backend, "one more thing").await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(delivered_prompts(&mut delivered), ["one more thing"]);
 }
 
 /// A restart that fails leaves the child parked, so the parent can try

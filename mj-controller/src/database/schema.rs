@@ -853,6 +853,32 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;")?;
     }
 
+    // Breaking: removes the durable review orchestration and the execution
+    // incarnation fence that migrations 61 and 63 introduced. Reviews running
+    // when the daemon stops are cancelled and re-covered by the next review,
+    // and a sub-agent close is admitted once per request instead of being
+    // fenced against a resumed child. An older daemon would still write both.
+    if version < 65 {
+        let drop_column = if super::legacy_schema::table_has_column(
+            connection,
+            "turn_review_state",
+            "orchestration",
+        )? {
+            "ALTER TABLE turn_review_state DROP COLUMN orchestration;"
+        } else {
+            ""
+        };
+        connection.execute_batch(&format!("BEGIN IMMEDIATE;
+            DROP TRIGGER IF EXISTS session_incarnation_insert;
+            DROP TRIGGER IF EXISTS session_incarnation_resume;
+            DROP TABLE IF EXISTS session_incarnations;
+            {drop_column}
+            UPDATE schema_compatibility SET minimum_compatible_version = 65 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (65, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 65;
+            COMMIT;"))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1000,7 +1026,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
-        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; PRAGMA user_version=63;").unwrap();
+        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
@@ -1098,8 +1124,9 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 62 requires durable worker-swap recovery.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 64;
+    /// `SCHEMA_VERSION`. Migration 65 removes review orchestration and the
+    /// session incarnation fence.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 65;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

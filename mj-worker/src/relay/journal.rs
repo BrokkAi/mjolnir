@@ -3,6 +3,10 @@
 //! `DurableRelay` that make an event or a snapshot durable before it is
 //! acknowledged to a caller.
 
+/// Terminal command ids kept past journal acknowledgement so a retried
+/// submit with a known id is answered from the ledger instead of re-run.
+pub(crate) const RETAINED_TERMINAL_COMMANDS: usize = 512;
+
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, Write};
@@ -987,20 +991,30 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Ledger entries whose command is terminal at or below `through`. Their
-    /// events are no longer retained, so the IDs no longer have to be
-    /// remembered for idempotency.
+    /// Ledger entries whose command is terminal at or below `through`, except
+    /// for the newest `RETAINED_TERMINAL_COMMANDS` of them.
+    ///
+    /// Their events are no longer retained, but a controller that lost the
+    /// reply to a submit may still retry it with the same command id after
+    /// acknowledging past its completion. Keeping a bounded tail of terminal
+    /// ids lets that retry be answered with the original acceptance instead
+    /// of running the command twice.
     fn prunable_command_ids(snapshot: &RelaySnapshot, through: u64) -> Vec<String> {
-        snapshot
+        let mut terminal: Vec<(u64, &String)> = snapshot
             .handled_commands
             .iter()
-            .filter(|(command_id, handled)| {
-                !snapshot.retained_command_receipts.contains(*command_id)
-                    && handled
-                        .terminal_ordinal
-                        .is_some_and(|terminal| terminal <= through)
+            .filter_map(|(command_id, handled)| {
+                handled
+                    .terminal_ordinal
+                    .filter(|terminal| *terminal <= through)
+                    .map(|terminal| (terminal, command_id))
             })
-            .map(|(command_id, _)| command_id.clone())
+            .collect();
+        terminal.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(a.1)));
+        terminal
+            .into_iter()
+            .skip(RETAINED_TERMINAL_COMMANDS)
+            .map(|(_, command_id)| command_id.clone())
             .collect()
     }
 
@@ -1030,14 +1044,13 @@ impl DurableRelay {
             self.finish_relay_local_command(&command_id)?;
         }
 
-        // Ordinary checkpoint barriers lose their connection owner on restart.
-        // A sealed Move/close cut instead belongs to durable lifecycle recovery
-        // and must retain its admission fence until explicit release/completion.
+        // Checkpoint barriers are controller-owned coordination commands. A
+        // restarted relay has no owner that can complete them, regardless of
+        // whether they were merely accepted, started, or already ready.
         let mut ownerless_barriers: Vec<(u64, String)> = self
             .snapshot
             .dispatches
             .iter()
-            .filter(|(id, _)| self.snapshot.command_ledger_seal.as_ref() != Some(*id))
             .filter(|(_, dispatch)| {
                 matches!(dispatch.command, RelayCommand::BeginCheckpoint { .. })
                     && !matches!(
@@ -1072,7 +1085,6 @@ impl DurableRelay {
             .snapshot
             .dispatches
             .iter()
-            .filter(|(id, _)| self.snapshot.command_ledger_seal.as_ref() != Some(*id))
             .filter(|(_, dispatch)| dispatch.state == RelayDispatchState::InFlight)
             .filter_map(|(command_id, _)| {
                 self.snapshot

@@ -1591,7 +1591,7 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     let socket_for_call = socket.clone();
     let dispatch_for_call = dispatch.clone();
     let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, 7, &dispatch_for_call)
+        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch_for_call)
     })
     .await
     .unwrap()
@@ -1603,34 +1603,24 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
     // coming, and a second copy would double the container's load.
     let socket_for_call = socket.clone();
     let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, 7, &dispatch)
+        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch)
     })
     .await
     .unwrap()
     .expect("the worker answers a repeat dispatch");
     assert!(reply.started.is_empty());
 
-    // Reading is replayable until the controller acknowledges durable acceptance.
-    let collected = sidecar.read_dispatches().unwrap();
+    // The controller collects the queue once, and it is empty afterwards.
+    let collected = sidecar.take_dispatches();
     assert_eq!(collected.len(), 2);
-    assert_eq!(collected[0].request.agent_type, "tests");
-    assert_eq!(sidecar.read_dispatches().unwrap(), collected);
-    sidecar
-        .acknowledge_dispatches(
-            &collected
-                .iter()
-                .map(|dispatch| dispatch.id.clone())
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-    assert!(sidecar.read_dispatches().unwrap().is_empty());
+    assert_eq!(collected[0].agent_type, "tests");
+    assert!(sidecar.take_dispatches().is_empty());
 
     // An invalid dispatch is refused with a message the supervisor can act on.
     let socket_for_call = socket.clone();
     let reply = tokio::task::spawn_blocking(move || {
         crate::review::mcp::send_dispatch(
             &socket_for_call,
-            7,
             &LaneDispatch {
                 reviewers: vec![ReviewSubagentRequest {
                     agent_type: "not_a_lane".to_owned(),
@@ -1829,125 +1819,5 @@ async fn disconnected_preparation_keeps_the_role_until_its_blocking_copy_finishe
         .cancel_checkpoint_barrier_on_disconnect("upgrade-after-reviewer-stop")
         .unwrap();
     started_options(&fixture.start(config(1)).await);
-    fixture.sidecar.pause_all().await;
-}
-
-#[tokio::test]
-async fn generation_retired_before_start_cannot_launch_from_a_late_connection() {
-    let mut fixture = Fixture::new(true);
-    fixture.stage_generation(900);
-    fixture.stage_generation(3);
-    let retired = fixture
-        .request(ReviewerRequest::PauseGeneration { generation: 900 })
-        .await;
-    assert!(matches!(
-        retired,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::ReviewerPaused
-        }
-    ));
-    let refused = fixture.start(config(900)).await;
-    assert!(error_message(&refused).contains("retired"));
-    assert!(!fixture.marker("harness-pid").exists());
-    started_options(&fixture.start(config(3)).await);
-    let current = fixture.harness_pid();
-    assert!(error_message(&fixture.start(config(900)).await).contains("retired"));
-    assert!(
-        process_alive(current),
-        "stale generations cannot replace a newer selected identity"
-    );
-    fixture.sidecar.pause_all().await;
-}
-
-#[tokio::test]
-async fn reviewer_receipt_fences_delayed_submission_and_survives_retirement_until_acknowledged() {
-    let mut fixture = Fixture::new(true);
-    fixture.stage_generation(7);
-    fixture.stage_generation(8);
-    started_options(&fixture.start(config(7)).await);
-    let cancelled = fixture
-        .request(ReviewerRequest::CancelCommandAdmission {
-            generation: 7,
-            command_id: "cancel-before-submission".into(),
-        })
-        .await;
-    assert!(matches!(
-        cancelled,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::CommandReceipt { receipt: None }
-        }
-    ));
-    let delayed = fixture
-        .request(ReviewerRequest::SubmitDurable {
-            generation: 7,
-            command_id: "cancel-before-submission".into(),
-            command: RelayCommand::RecordNotice {
-                text: "must never be accepted".into(),
-            },
-        })
-        .await;
-    assert!(matches!(delayed, RelayResponseBody::Error { .. }));
-
-    let accepted = fixture
-        .request(ReviewerRequest::SubmitDurable {
-            generation: 7,
-            command_id: "retained-role-notice".into(),
-            command: RelayCommand::RecordNotice {
-                text: "accepted once".into(),
-            },
-        })
-        .await;
-    assert!(matches!(
-        accepted,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Accepted { .. }
-        }
-    ));
-    assert!(error_message(&fixture.start(config(8)).await).contains("unsettled command receipts"));
-    fixture
-        .request(ReviewerRequest::PauseGeneration { generation: 7 })
-        .await;
-    let receipt = fixture
-        .request(ReviewerRequest::CommandReceipt {
-            generation: 7,
-            command_id: "retained-role-notice".into(),
-        })
-        .await;
-    assert!(matches!(
-        receipt,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::CommandReceipt { receipt: Some(_) }
-        }
-    ));
-    let stale = fixture
-        .request(ReviewerRequest::SubmitDurable {
-            generation: 7,
-            command_id: "after-role-retirement".into(),
-            command: RelayCommand::RecordNotice {
-                text: "stale".into(),
-            },
-        })
-        .await;
-    assert!(error_message(&stale).contains("retired"));
-    let released = fixture
-        .request(ReviewerRequest::ReleaseCommandReceipt {
-            generation: 7,
-            command_id: "retained-role-notice".into(),
-        })
-        .await;
-    assert!(matches!(
-        released,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::CommandReceiptReleased
-        }
-    ));
-    started_options(&fixture.start(config(8)).await);
-    let stale_cancel = fixture
-        .request(ReviewerRequest::CancelCommandAdmission {
-            generation: 7,
-            command_id: "retained-role-notice".into(),
-        })
-        .await;
-    assert!(error_message(&stale_cancel).contains("generation changed"));
     fixture.sidecar.pause_all().await;
 }

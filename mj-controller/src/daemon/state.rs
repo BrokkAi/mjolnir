@@ -1,3 +1,6 @@
+/// Consecutive failed delivery rounds before a startup step is given up.
+const STARTUP_STEP_ATTEMPTS: u32 = 5;
+
 use super::*;
 
 impl RuntimeState {
@@ -720,6 +723,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        blocking(crate::database::prune_settled_startup_deliveries).await?;
         let deliveries = blocking(crate::database::load_startup_deliveries).await?;
         for delivery in deliveries {
             self.start_persisted_startup_delivery(delivery, cancellation);
@@ -758,6 +762,7 @@ impl RuntimeState {
         let task = tokio::spawn(async move {
             use futures::FutureExt;
             let mut backoff = Duration::from_secs(1);
+            let mut failed_rounds: u32 = 0;
             loop {
                 let result = std::panic::AssertUnwindSafe(
                     Arc::clone(&runtime).drain_startup_queue(&drain_session, &cancel),
@@ -766,11 +771,7 @@ impl RuntimeState {
                 .await;
                 if result.is_err() {
                     runtime
-                        .fail_startup_queue(
-                            &drain_session,
-                            None,
-                            "the startup delivery task panicked",
-                        )
+                        .fail_startup_queue(&drain_session, "the startup delivery task panicked")
                         .await;
                 }
                 if cancel.is_cancelled() {
@@ -785,6 +786,15 @@ impl RuntimeState {
                     .is_some_and(|queue| Arc::ptr_eq(&queue.identity, &identity))
                 {
                     return;
+                }
+                // The queue is still registered, so this round ended in a
+                // failure. A step that keeps failing is abandoned rather than
+                // retried forever: a parent waiting on a child gets an answer.
+                failed_rounds += 1;
+                if failed_rounds >= STARTUP_STEP_ATTEMPTS {
+                    runtime.abandon_startup_step(&drain_session).await;
+                    failed_rounds = 0;
+                    backoff = Duration::from_secs(1);
                 }
                 tokio::select! {
                     () = cancel.cancelled() => {
@@ -838,7 +848,7 @@ impl RuntimeState {
                     }
                     Err(error) => {
                         drop(admission);
-                        self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
                             .await;
                         return;
                     }
@@ -846,10 +856,7 @@ impl RuntimeState {
             drop(admission);
             let handle = tokio::select! {
                 () = cancel.cancelled() => {
-                    self.fail_startup_queue(
-                        session_id,
-                        None,
-                        "the daemon stopped before the session was ready",
+                    self.fail_startup_queue(session_id, "the daemon stopped before the session was ready",
                     )
                     .await;
                     return;
@@ -868,7 +875,7 @@ impl RuntimeState {
                         if let Err(persistence) = blocking(move || crate::database::fail_unavailable_startup_groups(&id, &reason)).await {
                             tracing::error!(session_id, %persistence, "could not record unavailable startup session");
                         }
-                        self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
                             .await;
                         return;
                     }
@@ -880,7 +887,6 @@ impl RuntimeState {
                 Err(error) => {
                     self.fail_startup_queue(
                         session_id,
-                        None,
                         &format!("invalid durable startup step: {error}"),
                     )
                     .await;
@@ -897,7 +903,7 @@ impl RuntimeState {
                 let text = match prepared {
                     Ok(text) => text,
                     Err(error) => {
-                        self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
                             .await;
                         return;
                     }
@@ -906,7 +912,7 @@ impl RuntimeState {
                 let prepared_json = match serde_json::to_string(&decoded) {
                     Ok(json) => json,
                     Err(error) => {
-                        self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
                             .await;
                         return;
                     }
@@ -917,7 +923,7 @@ impl RuntimeState {
                 })
                 .await
                 {
-                    self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                    self.fail_startup_queue(session_id, &format!("{error:#}"))
                         .await;
                     return;
                 }
@@ -929,7 +935,7 @@ impl RuntimeState {
                 })
                 .await
                 {
-                    self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                    self.fail_startup_queue(session_id, &format!("{error:#}"))
                         .await;
                     return;
                 }
@@ -953,7 +959,26 @@ impl RuntimeState {
                                 tracing::error!(session_id, %persistence, "could not persist startup rejection");
                             }
                         }
-                        self.fail_startup_queue(session_id, None, &format!("{error:#}"))
+                        let definite = error
+                            .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
+                            .is_none();
+                        if definite
+                            && step.group_id.is_none()
+                            && let StartupStep::Prompt { text, .. } = &decoded
+                        {
+                            // The worker refused this prompt outright, so it was
+                            // never accepted: give the text back rather than
+                            // retrying something that will be refused again.
+                            self.return_startup_prompt_to_draft(
+                                session_id,
+                                &command_id,
+                                text,
+                                &format!("{error:#}"),
+                            )
+                            .await;
+                            continue;
+                        }
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
                             .await;
                         return;
                     }
@@ -966,40 +991,11 @@ impl RuntimeState {
                 {
                     self.fail_startup_queue(
                         session_id,
-                        None,
                         &format!("delivery accepted but settlement failed: {error:#}"),
                     )
                     .await;
                     return;
                 }
-            }
-            // Persist acceptance before releasing deduplication. A restart at
-            // this phase performs only receipt cleanup, never the command.
-            let release = if step.phase == "cancelling" {
-                match handle.cancel_command_admission(command_id.clone()).await {
-                    Ok(receipt) => receipt.is_some(),
-                    Err(error) => {
-                        self.fail_startup_queue(
-                            session_id,
-                            None,
-                            &format!("startup cancellation reconciliation deferred: {error:#}"),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            } else {
-                true
-            };
-            if release && let Err(error) = handle.release_command_receipt(command_id.clone()).await
-            {
-                self.fail_startup_queue(
-                    session_id,
-                    None,
-                    &format!("startup receipt cleanup deferred: {error:#}"),
-                )
-                .await;
-                return;
             }
             let settled_id = command_id;
             let final_phase = match step.phase.as_str() {
@@ -1019,7 +1015,6 @@ impl RuntimeState {
             {
                 self.fail_startup_queue(
                     session_id,
-                    None,
                     &format!("startup settlement failed: {error:#}"),
                 )
                 .await;
@@ -1038,7 +1033,7 @@ impl RuntimeState {
         match step {
             StartupStep::InstallHandoff(_) => bail!("archive startup step was not prepared"),
             StartupStep::PreparedHandoff { text } => handle
-                .submit_durable(
+                .submit(
                     command_id.to_owned(),
                     RelayCommand::InstallPromptContext { text: text.clone() },
                 )
@@ -1100,7 +1095,7 @@ impl RuntimeState {
             .get(session_id)
             .map(|record| record.bundle_id.clone());
         let ordinal = handle
-            .submit_durable(
+            .submit(
                 command_id.to_owned(),
                 RelayCommand::Prompt {
                     prompt: vec![ContentBlock::Text(TextContent::new(text.to_owned()))],
@@ -1150,14 +1145,95 @@ impl RuntimeState {
         Ok(ordinal)
     }
 
-    /// Stop this drain without turning uncertain accepted input into a new draft.
-    async fn fail_startup_queue(
+    /// A step that failed `STARTUP_STEP_ATTEMPTS` rounds in a row is given
+    /// up: an API group fails so its client's wait answers, a user's prompt
+    /// goes back to the draft, and anything else is marked failed. The drain
+    /// then continues with the next step.
+    async fn abandon_startup_step(&self, session_id: &str) {
+        let lookup_id = session_id.to_owned();
+        let step = match blocking(move || crate::database::next_startup_delivery(&lookup_id)).await
+        {
+            Ok(Some(step)) => step,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(session_id, %error, "could not read the startup step to abandon");
+                return;
+            }
+        };
+        let reason = format!(
+            "startup delivery gave up after {STARTUP_STEP_ATTEMPTS} attempts: {}",
+            self.startup_prompts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(session_id)
+                .and_then(|queue| queue.last_error.clone())
+                .unwrap_or_else(|| "delivery kept failing".to_owned())
+        );
+        if let Some(group_id) = step.group_id.clone() {
+            let id = session_id.to_owned();
+            let persisted = reason.clone();
+            if let Err(error) =
+                blocking(move || crate::database::fail_startup_group(&id, &group_id, &persisted))
+                    .await
+            {
+                tracing::error!(session_id, %error, "could not fail an abandoned startup group");
+            }
+            self.push_notice(session_id, reason);
+            return;
+        }
+        let decoded: Option<StartupStep> = serde_json::from_str(&step.step_json).ok();
+        if let Some(StartupStep::Prompt { text, .. }) = &decoded {
+            self.return_startup_prompt_to_draft(session_id, &step.command_id, text, &reason)
+                .await;
+            return;
+        }
+        let command_id = step.command_id.clone();
+        let persisted = reason.clone();
+        if let Err(error) = blocking(move || {
+            crate::database::set_startup_delivery_phase(&command_id, "failed", Some(&persisted))
+        })
+        .await
+        {
+            tracing::error!(session_id, %error, "could not mark an abandoned startup step failed");
+        }
+        self.push_notice(session_id, reason);
+    }
+
+    /// A prompt the worker will not take is the user's text again, not a
+    /// row that retries forever.
+    async fn return_startup_prompt_to_draft(
         &self,
         session_id: &str,
-        failed: Option<StartupStep>,
+        command_id: &str,
+        text: &str,
         reason: &str,
     ) {
-        let _ = failed;
+        let settled_id = command_id.to_owned();
+        let persisted = reason.to_owned();
+        if let Err(error) = blocking(move || {
+            crate::database::set_startup_delivery_phase(&settled_id, "failed", Some(&persisted))
+        })
+        .await
+        {
+            tracing::error!(session_id, %error, "could not mark a refused startup prompt failed");
+            return;
+        }
+        if let Err(error) = self.append_draft_input(session_id, text).await {
+            tracing::error!(session_id, %error, "could not return a refused startup prompt to the draft");
+            self.push_notice(
+                session_id,
+                format!("A queued prompt was refused and could not be saved as a draft: {reason}"),
+            );
+            return;
+        }
+        self.push_notice(
+            session_id,
+            format!("A queued prompt was refused and returned to your draft: {reason}"),
+        );
+    }
+
+    /// Stop this drain without turning uncertain accepted input into a new draft.
+    async fn fail_startup_queue(&self, session_id: &str, reason: &str) {
         let changed = {
             let mut queues = self
                 .startup_prompts
@@ -1181,7 +1257,6 @@ impl RuntimeState {
     }
 
     /// Restore input through the writer; the owner observes only committed data.
-    #[cfg(test)]
     pub(super) async fn append_draft_input(&self, session_id: &str, text: &str) -> Result<()> {
         let session_id = session_id.to_owned();
         let text = text.to_owned();

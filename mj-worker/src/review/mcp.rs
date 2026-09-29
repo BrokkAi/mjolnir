@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use mj_review::lanes::{LaneDispatch, LaneDispatchReply, REVIEW_LANES, validate_dispatch};
 
 /// Serve the review dispatch tool over MCP's JSON-lines stdio transport.
-pub fn run_mcp_stdio(socket: &Path, generation: u64) -> Result<()> {
+pub fn run_mcp_stdio(socket: &Path) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
         std::io::stdin().lock(),
@@ -38,13 +38,13 @@ pub fn run_mcp_stdio(socket: &Path, generation: u64) -> Result<()> {
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             // This tool returns at once, so it has no progress to report.
             call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
-                call_tool(&socket, generation, params)
+                call_tool(&socket, params)
             },
         },
     )
 }
 
-fn call_tool(socket: &Path, generation: u64, params: Option<&Value>) -> Result<(Value, bool)> {
+fn call_tool(socket: &Path, params: Option<&Value>) -> Result<(Value, bool)> {
     let params = params.context("tools/call is missing params")?;
     let name = params
         .get("name")
@@ -64,7 +64,7 @@ fn call_tool(socket: &Path, generation: u64, params: Option<&Value>) -> Result<(
     if let Err(message) = validate_dispatch(&dispatch.reviewers) {
         return Ok((json!({ "error": message }), true));
     }
-    let reply = send_dispatch(socket, generation, &dispatch)?;
+    let reply = send_dispatch(socket, &dispatch)?;
     if let Some(error) = reply.error {
         return Ok((json!({ "error": error }), true));
     }
@@ -79,16 +79,8 @@ fn call_tool(socket: &Path, generation: u64, params: Option<&Value>) -> Result<(
 
 /// One request, one line, one reply. The socket lives in the worker root and
 /// is only reachable from inside this container.
-pub fn send_dispatch(
-    socket: &Path,
-    generation: u64,
-    dispatch: &LaneDispatch,
-) -> Result<LaneDispatchReply> {
-    let envelope = mj_core::review::mcp::LaneDispatchEnvelope {
-        generation,
-        dispatch: dispatch.clone(),
-    };
-    crate::mcp_stdio::socket_request(socket, &envelope, "review dispatch", DISPATCH_REPLY_TIMEOUT)?
+pub fn send_dispatch(socket: &Path, dispatch: &LaneDispatch) -> Result<LaneDispatchReply> {
+    crate::mcp_stdio::socket_request(socket, dispatch, "review dispatch", DISPATCH_REPLY_TIMEOUT)?
         .with_context(|| {
             format!(
                 "the review dispatch socket did not answer within {}s",
@@ -197,7 +189,7 @@ mod tests {
             "name": "spawn_specialist",
             "arguments": {"reviewers": [{"agent_type": "tests", "hypothesis": "  "}]}
         });
-        let (result, is_error) = call_tool(&socket, 7, Some(&params)).expect("validation answers");
+        let (result, is_error) = call_tool(&socket, Some(&params)).expect("validation answers");
         assert!(is_error);
         assert!(
             result["error"]
@@ -210,7 +202,7 @@ mod tests {
             "name": "spawn_specialist",
             "arguments": {"reviewers": []}
         });
-        let (result, is_error) = call_tool(&socket, 7, Some(&params)).expect("validation answers");
+        let (result, is_error) = call_tool(&socket, Some(&params)).expect("validation answers");
         assert!(is_error);
         assert!(result["error"].as_str().unwrap().contains("at least one"));
     }
@@ -219,7 +211,7 @@ mod tests {
     fn an_unknown_tool_is_refused() {
         let socket = std::path::PathBuf::from("/nonexistent/review-dispatch.sock");
         let params = json!({"name": "write", "arguments": {}});
-        let error = call_tool(&socket, 7, Some(&params)).expect_err("only one tool is served");
+        let error = call_tool(&socket, Some(&params)).expect_err("only one tool is served");
         assert!(format!("{error:#}").contains("unknown review tool"));
     }
 }

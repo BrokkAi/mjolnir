@@ -745,7 +745,6 @@ pub(crate) fn record_runtime_event(
             }
         }
     }
-    relay.refresh_sealed_checkpoint()?;
     Ok(stopped)
 }
 

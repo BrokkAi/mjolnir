@@ -640,8 +640,6 @@ pub struct RelayOperationalState {
     pub active_user_shells: Vec<ActiveUserShell>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_agent_terminals: Vec<ActiveAgentTerminal>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_ledger_seal: Option<String>,
     pub checkpoint_barrier: Option<String>,
     pub checkpoint_ready: Option<RelayCursor>,
     /// When anything at all last arrived over ACP. This is the liveness
@@ -1180,86 +1178,6 @@ pub struct HandledRelayCommand {
     pub failure: Option<String>,
 }
 
-/// Command identity survives moving the conversation to another worker store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CheckpointCommandLedger {
-    pub version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_prompt_accepted_ordinal: Option<u64>,
-    pub retained_command_receipts: BTreeSet<String>,
-    pub cancelled_command_admissions: BTreeSet<String>,
-    pub handled_commands: BTreeMap<String, HandledRelayCommand>,
-}
-
-impl CheckpointCommandLedger {
-    pub fn is_empty(&self) -> bool {
-        self.retained_command_receipts.is_empty()
-            && self.cancelled_command_admissions.is_empty()
-            && self.handled_commands.is_empty()
-            && self.latest_prompt_accepted_ordinal.is_none()
-    }
-
-    pub fn from_snapshot(snapshot: &RelaySnapshot) -> Self {
-        Self {
-            version: 1,
-            latest_prompt_accepted_ordinal: snapshot.latest_prompt_accepted_ordinal,
-            retained_command_receipts: snapshot.retained_command_receipts.clone(),
-            cancelled_command_admissions: snapshot.cancelled_command_admissions.clone(),
-            handled_commands: snapshot
-                .handled_commands
-                .iter()
-                .filter(|(id, _)| snapshot.retained_command_receipts.contains(*id))
-                .map(|(id, receipt)| (id.clone(), receipt.clone()))
-                .collect(),
-        }
-    }
-
-    pub fn decode(value: &serde_json::Value, frontier: u64) -> anyhow::Result<Self> {
-        let ledger: Self = serde_json::from_value(value.clone())?;
-        anyhow::ensure!(ledger.version == 1, "unsupported command ledger version");
-        anyhow::ensure!(
-            ledger
-                .latest_prompt_accepted_ordinal
-                .is_none_or(|ordinal| ordinal <= frontier),
-            "latest accepted prompt exceeds checkpoint frontier"
-        );
-        anyhow::ensure!(
-            ledger.retained_command_receipts.len() <= 4096
-                && ledger.cancelled_command_admissions.len() <= 4096,
-            "command ledger exceeds admission capacity"
-        );
-        for id in ledger
-            .retained_command_receipts
-            .iter()
-            .chain(&ledger.cancelled_command_admissions)
-        {
-            anyhow::ensure!(
-                !id.trim().is_empty() && id.len() <= 256,
-                "invalid command ledger identity"
-            );
-        }
-        for (id, receipt) in &ledger.handled_commands {
-            anyhow::ensure!(
-                ledger.retained_command_receipts.contains(id),
-                "unretained checkpoint command receipt"
-            );
-            anyhow::ensure!(
-                !ledger.cancelled_command_admissions.contains(id),
-                "accepted command has cancelled admission"
-            );
-            anyhow::ensure!(
-                receipt.accepted_ordinal <= frontier
-                    && receipt
-                        .terminal_ordinal
-                        .is_none_or(|ordinal| ordinal <= frontier),
-                "command receipt exceeds checkpoint frontier"
-            );
-        }
-        Ok(ledger)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
@@ -1364,6 +1282,8 @@ pub struct RelaySnapshot {
     pub pending_user_shell_contexts: Vec<PendingUserShellContext>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub active_user_shells: BTreeMap<String, ActiveUserShell>,
+    /// Ignored. Protocol 26 workers persisted a Move seal here; the field
+    /// stays so their stores still open after an upgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_ledger_seal: Option<String>,
     pub checkpoint_barrier: Option<String>,
@@ -1373,10 +1293,11 @@ pub struct RelaySnapshot {
     pub harness_turn: Option<StoredHarnessTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
-    /// Caller-owned receipts survive event acknowledgement and journal GC.
+    /// Ignored. Protocol 26 workers persisted durable command receipts here;
+    /// the field stays so their stores still open after an upgrade.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retained_command_receipts: BTreeSet<String>,
-    /// Admission tombstones cannot be removed while old connections may submit.
+    /// Ignored, kept for the same reason as `retained_command_receipts`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub cancelled_command_admissions: BTreeSet<String>,
     pub handled_commands: BTreeMap<String, HandledRelayCommand>,
@@ -1517,10 +1438,6 @@ impl RelaySnapshot {
                 .collect(),
             active_user_shells: self.active_user_shells.values().cloned().collect(),
             active_agent_terminals: Vec::new(),
-            command_ledger_seal: self
-                .command_ledger_seal
-                .clone()
-                .filter(|id| self.checkpoint_barrier.as_ref() == Some(id)),
             checkpoint_barrier: self.checkpoint_barrier.clone(),
             checkpoint_ready: self
                 .checkpoint_ready_through

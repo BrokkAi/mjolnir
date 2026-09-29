@@ -438,17 +438,75 @@ fn command_idempotency_survives_ack_until_checkpoint_covers_terminal_event() {
         "ACK must not prune the stable command ID"
     );
 
-    let ready = ready_checkpoint(&mut relay, "idempotency-barrier");
-    acknowledge_relay(&mut relay, "ack-idempotency-barrier", ready.ordinal);
+    cover_with_checkpoint(&mut relay, "idempotency-barrier");
+    assert_eq!(
+        submit_relay(&mut relay, "checkpointed-command", prompt("once")),
+        accepted,
+        "a checkpoint alone must not forget a recent command ID"
+    );
+}
+
+/// Submit, dispatch and finish one prompt, returning its acceptance ordinal.
+fn complete_prompt(relay: &mut DurableRelay, command_id: &str) -> u64 {
+    let accepted = submit_relay(relay, command_id, prompt(command_id));
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed[0].command_id, command_id);
+    relay
+        .record_command_completed(
+            command_id,
+            RelayCommandOutcome::Prompt {
+                diagnostic: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    accepted
+}
+
+/// Acknowledge everything and complete a checkpoint that covers it, which is
+/// what lets journal collection prune below the new frontier.
+fn cover_with_checkpoint(relay: &mut DurableRelay, barrier: &str) {
+    let latest = relay.latest_ordinal();
+    attach_relay(relay, &format!("attach-{barrier}"), 0);
+    acknowledge_relay(relay, &format!("ack-{barrier}"), latest);
+    let ready = ready_checkpoint(relay, barrier);
+    acknowledge_relay(relay, &format!("ack-ready-{barrier}"), ready.ordinal);
     submit_relay(
-        &mut relay,
-        "complete-idempotency-barrier",
+        relay,
+        &format!("complete-{barrier}"),
         RelayCommand::CompleteCheckpoint {
-            barrier_command_id: "idempotency-barrier".into(),
+            barrier_command_id: barrier.into(),
         },
     );
-    let accepted_again = submit_relay(&mut relay, "checkpointed-command", prompt("once"));
-    assert!(accepted_again > accepted);
+}
+
+#[test]
+fn only_the_newest_terminal_command_ids_survive_collection() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let oldest = complete_prompt(&mut relay, "oldest-command");
+    let second = complete_prompt(&mut relay, "second-command");
+    for n in 0..crate::relay::journal::RETAINED_TERMINAL_COMMANDS - 1 {
+        complete_prompt(&mut relay, &format!("filler-command-{n}"));
+    }
+    cover_with_checkpoint(&mut relay, "ring-barrier");
+    assert!(
+        !relay
+            .snapshot
+            .handled_commands
+            .contains_key("oldest-command"),
+        "the oldest terminal ID beyond the retained count is pruned"
+    );
+    assert_eq!(
+        submit_relay(&mut relay, "second-command", prompt("second-command")),
+        second,
+        "the newest retained IDs still answer a retry with the original acceptance"
+    );
+    assert!(
+        submit_relay(&mut relay, "oldest-command", prompt("oldest-command")) > oldest,
+        "a pruned ID is a new command again"
+    );
 }
 
 #[test]
@@ -908,21 +966,11 @@ fn first_active_journal_file_is_reopenable_after_its_first_append() {
 fn failed_gc_persistence_keeps_command_idempotency_in_memory() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let accepted = submit_relay(&mut relay, "keep-idempotent", prompt("once"));
-    assert_eq!(
-        relay.claim_pending_commands(true).unwrap()[0].command_id,
-        "keep-idempotent"
-    );
-    relay
-        .record_command_completed(
-            "keep-idempotent",
-            RelayCommandOutcome::Prompt {
-                diagnostic: None,
-                stop_reason: "end_turn".into(),
-                usage: None,
-            },
-        )
-        .unwrap();
+    let accepted = complete_prompt(&mut relay, "keep-idempotent");
+    // Enough newer terminal commands that this one is due for pruning.
+    for n in 0..crate::relay::journal::RETAINED_TERMINAL_COMMANDS {
+        complete_prompt(&mut relay, &format!("newer-command-{n}"));
+    }
     let terminal = relay.latest_ordinal();
     let digest = relay.latest_digest().to_owned();
     relay.snapshot.acknowledged_through = terminal;
@@ -943,7 +991,7 @@ fn failed_gc_persistence_keeps_command_idempotency_in_memory() {
             .contains_key("keep-idempotent")
     );
     assert_eq!(
-        submit_relay(&mut relay, "keep-idempotent", prompt("once")),
+        submit_relay(&mut relay, "keep-idempotent", prompt("keep-idempotent")),
         accepted
     );
 }

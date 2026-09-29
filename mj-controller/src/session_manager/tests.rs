@@ -916,7 +916,6 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 queued_prompts: Vec::new(),
                 active_user_shells: Vec::new(),
                 active_agent_terminals: Vec::new(),
-                command_ledger_seal: None,
                 checkpoint_barrier: None,
                 checkpoint_ready: None,
                 last_acp_activity_at_ms: None,
@@ -2129,7 +2128,6 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
         actor
             .commands
             .send(ActorCommand::Submit {
-                durable: false,
                 queued_at: Instant::now(),
                 command_id: new_command_id("bounded-queue").unwrap(),
                 command: RelayCommand::Cancel,
@@ -2167,122 +2165,6 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn actor_durable_submission_retains_and_releases_its_receipt() {
-    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
-        run_in_isolated_child(
-            DEFERRED_SUBMIT_TEST_CHILD,
-            "actor_durable_submission_retains_and_releases_its_receipt",
-        );
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (actor, lease_id, connection) = lease_a_live_actor().await;
-    let handle = ManagedSessionHandle {
-        session_id: LEASED_RELAY_SESSION.to_owned(),
-        commands: actor.commands.clone(),
-        releases: actor.releases.clone(),
-        view: actor._views.clone(),
-    };
-    actor
-        .releases
-        .send(ReturnedConnection {
-            lease_id,
-            connection: Some(connection),
-        })
-        .unwrap();
-    let command_id = new_command_id("durable").unwrap();
-    let first = handle
-        .submit_durable(command_id.clone(), RelayCommand::ClearQueuedPrompts)
-        .await
-        .unwrap();
-    let repeated = handle
-        .submit_durable(command_id.clone(), RelayCommand::ClearQueuedPrompts)
-        .await
-        .unwrap();
-    assert_eq!(first, repeated);
-    assert!(
-        handle
-            .command_receipt(command_id.clone())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    handle
-        .release_command_receipt(command_id.clone())
-        .await
-        .unwrap();
-    // Release is idempotent, allowing a persisted cleanup step to retry.
-    handle.release_command_receipt(command_id).await.unwrap();
-    actor.retirement.send_replace(true);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn receipt_lookup_never_reports_absence_ahead_of_a_deferred_durable_submit() {
-    if std::env::var_os(DEFERRED_SUBMIT_TEST_CHILD).is_none() {
-        run_in_isolated_child(
-            DEFERRED_SUBMIT_TEST_CHILD,
-            "receipt_lookup_never_reports_absence_ahead_of_a_deferred_durable_submit",
-        );
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (actor, lease_id, connection) = lease_a_live_actor().await;
-    let handle = ManagedSessionHandle {
-        session_id: LEASED_RELAY_SESSION.to_owned(),
-        commands: actor.commands.clone(),
-        releases: actor.releases.clone(),
-        view: actor._views.clone(),
-    };
-    let command_id = new_command_id("cancelled-durable-wait").unwrap();
-    let (reply, disconnected) = oneshot::channel();
-    actor
-        .commands
-        .send(ActorCommand::Submit {
-            durable: true,
-            queued_at: Instant::now(),
-            command_id: command_id.clone(),
-            command: RelayCommand::ClearQueuedPrompts,
-            admission: None,
-            reply,
-        })
-        .await
-        .unwrap();
-    drop(disconnected);
-    // The command is queued, not accepted. A negative lookup here would let
-    // cancellation forget a command the actor could still deliver later.
-    let error = handle
-        .command_receipt(command_id.clone())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("lifecycle operation"));
-    assert!(
-        handle
-            .release_command_receipt(command_id.clone())
-            .await
-            .is_err()
-    );
-    actor
-        .releases
-        .send(ReturnedConnection {
-            lease_id,
-            connection: Some(connection),
-        })
-        .unwrap();
-    // Returns have priority; all deferred commands settle before this lookup.
-    assert!(
-        handle
-            .command_receipt(command_id.clone())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    handle.release_command_receipt(command_id).await.unwrap();
-    actor.retirement.send_replace(true);
-}
-
-#[cfg(unix)]
 async fn submit_a_deferred_prompt(
     actor: &LeasedActor,
 ) -> oneshot::Receiver<std::result::Result<u64, mj_client::session::SubmitFailure>> {
@@ -2290,7 +2172,6 @@ async fn submit_a_deferred_prompt(
     actor
         .commands
         .send(ActorCommand::Submit {
-            durable: false,
             queued_at: Instant::now(),
             command_id: new_command_id("prompt").unwrap(),
             command: RelayCommand::Prompt {

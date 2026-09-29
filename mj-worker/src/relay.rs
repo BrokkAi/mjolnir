@@ -122,7 +122,6 @@ pub struct DurableRelay {
     /// The connected bridge returns steers it cannot inject, so the relay may
     /// steer queued prompts on its own. Belongs to the bridge, like readiness.
     automatic_steering: bool,
-    checkpoint_command_ledger: Option<(String, Vec<u8>)>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -216,10 +215,6 @@ impl DurableRelay {
     /// The Unix worker is the only production caller; the helper stays
     /// compiled on Windows so the relay tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn has_retained_command_receipts(&self) -> bool {
-        !self.snapshot.retained_command_receipts.is_empty()
-    }
-
     pub fn open(
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,
@@ -377,30 +372,6 @@ impl DurableRelay {
                         created_at_ms: queued.queued_at_ms,
                     });
                 }
-                if let Some(value) = &restored.command_ledger {
-                    let ledger = mj_core::relay::CheckpointCommandLedger::decode(
-                        value,
-                        restored.event_frontier,
-                    )?;
-                    snapshot.latest_prompt_accepted_ordinal = ledger.latest_prompt_accepted_ordinal;
-                    for (id, receipt) in ledger.handled_commands {
-                        anyhow::ensure!(
-                            receipt.terminal_ordinal.is_some()
-                                || snapshot.handled_commands.contains_key(&id),
-                            "restored nonterminal receipt has no queued command {id}"
-                        );
-                        if let Some(queued) = snapshot.handled_commands.get(&id) {
-                            anyhow::ensure!(
-                                queued.command == receipt.command
-                                    && receipt.terminal_ordinal.is_none(),
-                                "restored receipt conflicts with queued command {id}"
-                            );
-                        }
-                        snapshot.handled_commands.insert(id, receipt);
-                    }
-                    snapshot.retained_command_receipts = ledger.retained_command_receipts;
-                    snapshot.cancelled_command_admissions = ledger.cancelled_command_admissions;
-                }
             }
             snapshot
         };
@@ -465,7 +436,6 @@ impl DurableRelay {
             next_reviewer_admission: 0,
             steering_supported: None,
             automatic_steering: false,
-            checkpoint_command_ledger: None,
             snapshot,
             journal_spans,
             hot_events,

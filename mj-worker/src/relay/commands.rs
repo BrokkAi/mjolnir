@@ -13,10 +13,6 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
-    pub(super) fn command_ledger_is_sealed(&self) -> bool {
-        self.snapshot.command_ledger_seal.is_some()
-            && self.snapshot.command_ledger_seal == self.snapshot.checkpoint_barrier
-    }
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
@@ -107,21 +103,6 @@ impl DurableRelay {
         command_id: &str,
         command: RelayCommand,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
-        if self.command_ledger_is_sealed()
-            && !matches!(
-                &command,
-                RelayCommand::CompleteCheckpoint { .. }
-                    | RelayCommand::ReleaseCheckpoint { .. }
-                    | RelayCommand::Close { .. }
-            )
-        {
-            return Ok(Err(relay_protocol_error(
-                RelayErrorCode::InvalidState,
-                "command ledger is sealed for checkpoint transfer",
-                true,
-                None,
-            )));
-        }
         if let Err(error) =
             ensure_serialized_budget(&command, RELAY_COMMAND_BYTE_BUDGET, "relay command")
         {
@@ -136,18 +117,6 @@ impl DurableRelay {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
                 "invalid command ID",
-                false,
-                None,
-            )));
-        }
-        if self
-            .snapshot
-            .cancelled_command_admissions
-            .contains(command_id)
-        {
-            return Ok(Err(relay_protocol_error(
-                RelayErrorCode::InvalidState,
-                "command admission was cancelled",
                 false,
                 None,
             )));
@@ -1542,46 +1511,6 @@ impl DurableRelay {
         Ok(ordinal)
     }
 
-    /// A restarted harness changes journal metadata while the durable Move
-    /// seal still excludes new work. Reestablish its cut after setup settles.
-    ///
-    /// The Unix worker is the only production caller; it stays compiled on
-    /// Windows so the relay tests still build there.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn refresh_sealed_checkpoint(&mut self) -> Result<()> {
-        if !self.command_ledger_is_sealed()
-            || !self.acp_ready
-            || self.snapshot.execution != RelayExecutionState::Idle
-            || self.snapshot.active_prompt.is_some()
-            || self.snapshot.harness_turn.is_some()
-            || self.snapshot.checkpoint_ready_through == Some(self.snapshot.latest_ordinal)
-        {
-            return Ok(());
-        }
-        let command_id = self
-            .snapshot
-            .command_ledger_seal
-            .clone()
-            .expect("sealed barrier");
-        self.require_in_flight(&command_id)?;
-        let through = self
-            .snapshot
-            .latest_ordinal
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("relay event ordinal exhausted"))?;
-        // Drop the old paged export before changing its cut. Both are owned
-        // by this relay lock; stale page requests fail the frontier check.
-        self.checkpoint_command_ledger = None;
-        self.append_relay_event(
-            Some(&command_id),
-            RelayObservation::CheckpointReady {
-                command_id: command_id.clone(),
-                through,
-            },
-        )?;
-        Ok(())
-    }
-
     pub fn record_checkpoint_ready(&mut self, command_id: &str) -> Result<u64> {
         self.require_in_flight(command_id)?;
         if self.snapshot.checkpoint_barrier.as_deref() != Some(command_id) {
@@ -1617,11 +1546,6 @@ impl DurableRelay {
         &mut self,
         command_id: &str,
     ) -> Result<Option<u64>> {
-        // A Move/close cut belongs to durable lifecycle recovery. Reopening
-        // admission here could accept work absent from its installed archive.
-        if self.snapshot.command_ledger_seal.as_deref() == Some(command_id) {
-            return Ok(None);
-        }
         let Some(dispatch) = self.snapshot.dispatches.get(command_id) else {
             return Ok(None);
         };

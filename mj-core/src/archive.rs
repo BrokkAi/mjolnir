@@ -134,7 +134,8 @@ pub struct RepositoryManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalSessionSnapshot {
-    /// Versioned retained command receipts and cancelled admission tombstones.
+    /// Ignored. Archives written by protocol 26 workers carried a command
+    /// receipt ledger here; it is accepted so those archives still restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_ledger: Option<serde_json::Value>,
     /// Versioned worker assessment state, validated by assessment::Checkpoint.
@@ -381,9 +382,6 @@ pub struct NativeArtifact {
 }
 
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {
-    if let Some(value) = &snapshot.command_ledger {
-        crate::relay::CheckpointCommandLedger::decode(value, snapshot.event_frontier)?;
-    }
     if let Some(value) = &snapshot.assessment_state {
         crate::assessment::Checkpoint::decode(value)?;
     }

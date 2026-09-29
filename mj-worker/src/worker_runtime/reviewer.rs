@@ -29,9 +29,6 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-mod dispatches;
-mod generations;
-
 use super::unix::{ACP_EVENT_CHANNEL_CAPACITY, run_relay_coordinator};
 use super::{
     AcpSupervisorSpec, REVIEWER_DIR, REVIEWER_PROFILE_DIR, REVIEWER_ROLES_DIR, ReviewerLaunchConfig,
@@ -268,7 +265,11 @@ pub struct ReviewerSidecar {
     /// Admission for specialist lanes, so a supervisor that dispatches the
     /// whole roster cannot put six harnesses in one container at once.
     lane_slots: Arc<tokio::sync::Semaphore>,
-    dispatches: Arc<dispatches::LaneDispatches>,
+    /// Lanes the supervisor has asked for and the controller has not collected
+    /// yet. The worker records them and answers the tool at once; starting a
+    /// lane is the controller's job, because only it holds the diff, the job
+    /// and the rendered prompts.
+    pending_dispatches: std::sync::Mutex<Vec<mj_core::review::lanes::ReviewSubagentRequest>>,
     /// Admitted role operations outlive their requesting socket. A role lock
     /// moves into its task, so cancellation cannot release it over a live
     /// blocking mutation. Only one operation per role is spawned at a time.
@@ -280,8 +281,8 @@ impl ReviewerSidecar {
     #[must_use]
     pub fn new(placement: ReviewerPlacement, primary_relay: Arc<Mutex<DurableRelay>>) -> Self {
         Self {
-            dispatches: Arc::new(dispatches::LaneDispatches::new(placement.root())),
             placement,
+            pending_dispatches: std::sync::Mutex::new(Vec::new()),
             primary_relay,
             roles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             lane_slots: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_LANES)),
@@ -301,21 +302,47 @@ impl ReviewerSidecar {
     #[must_use]
     pub fn record_dispatch(
         &self,
-        generation: u64,
         dispatch: mj_core::review::lanes::LaneDispatch,
     ) -> mj_core::review::lanes::LaneDispatchReply {
-        self.dispatches.record(generation, dispatch)
+        if let Err(message) = mj_review::lanes::validate_dispatch(&dispatch.reviewers) {
+            return mj_core::review::lanes::LaneDispatchReply {
+                started: Vec::new(),
+                error: Some(message),
+            };
+        }
+        let mut pending = self
+            .pending_dispatches
+            .lock()
+            .expect("review dispatch queue lock poisoned");
+        let mut started = Vec::new();
+        for request in dispatch.reviewers {
+            // A lane the supervisor already launched is not launched twice:
+            // its report is still coming, and a second copy would double the
+            // container's load for no new evidence.
+            if pending
+                .iter()
+                .any(|queued| queued.agent_type == request.agent_type)
+            {
+                continue;
+            }
+            started.push(request.agent_type.clone());
+            pending.push(request);
+        }
+        mj_core::review::lanes::LaneDispatchReply {
+            started,
+            error: None,
+        }
     }
 
-    /// Pending lanes are replayed until their controller acceptance is durable.
-    #[cfg(test)]
-    pub fn read_dispatches(&self) -> Result<Vec<mj_core::relay::ReviewerLaneDispatch>> {
-        self.dispatches.read()
-    }
-
-    #[cfg(test)]
-    pub fn acknowledge_dispatches(&self, ids: &[String]) -> Result<()> {
-        self.dispatches.acknowledge(ids)
+    /// Hands the controller every dispatch recorded since it last asked.
+    #[must_use]
+    pub fn take_dispatches(&self) -> Vec<mj_core::review::lanes::ReviewSubagentRequest> {
+        std::mem::take(
+            &mut *self
+                .pending_dispatches
+                .lock()
+                .expect("review dispatch queue lock poisoned"),
+        )
     }
 
     #[cfg(test)]
@@ -460,32 +487,12 @@ impl ReviewerSidecar {
         disconnected: impl std::future::Future<Output = ReviewerCancellation>,
     ) -> Result<RelayResponseBody> {
         use mj_core::relay::ReviewerRequest;
-        match request {
-            ReviewerRequest::TakeLaneDispatches => bail!(
-                "destructive lane reads are unsupported; use ReadLaneDispatches and AckLaneDispatches"
-            ),
-            ReviewerRequest::ReadLaneDispatches => {
-                return Ok(RelayResponseBody::Ok {
-                    payload: RelayResponsePayload::PendingLaneDispatches {
-                        dispatches: {
-                            let dispatches = self.dispatches.clone();
-                            tokio::task::spawn_blocking(move || dispatches.read())
-                                .await
-                                .context("read reviewer dispatch task stopped")??
-                        },
-                    },
-                });
-            }
-            ReviewerRequest::AckLaneDispatches { ids } => {
-                let dispatches = self.dispatches.clone();
-                tokio::task::spawn_blocking(move || dispatches.acknowledge(&ids))
-                    .await
-                    .context("acknowledge reviewer dispatch task stopped")??;
-                return Ok(RelayResponseBody::Ok {
-                    payload: RelayResponsePayload::LaneDispatchesAcknowledged,
-                });
-            }
-            _ => {}
+        if let ReviewerRequest::TakeLaneDispatches = request {
+            return Ok(RelayResponseBody::Ok {
+                payload: RelayResponsePayload::LaneDispatches {
+                    requests: self.take_dispatches(),
+                },
+            });
         }
         let handle = self.role(role);
         tokio::pin!(disconnected);
@@ -501,10 +508,7 @@ impl ReviewerSidecar {
             | ReviewerRequest::Attach { .. }
             | ReviewerRequest::Acknowledge { .. }
             | ReviewerRequest::Status
-            | ReviewerRequest::RespondElicitation { .. }
-            | ReviewerRequest::CommandReceipt { .. }
-            | ReviewerRequest::ReleaseCommandReceipt { .. }
-            | ReviewerRequest::CancelCommandAdmission { .. } => None,
+            | ReviewerRequest::RespondElicitation { .. } => None,
             _ => Some(ReviewerAdmission::acquire(
                 self.primary_relay.clone(),
                 format!("reviewer operation {}", role.role),
@@ -574,12 +578,6 @@ impl ReviewerRole {
         match request {
             ReviewerRequest::Start { config } => self.start(lane_slots, *config).await,
             ReviewerRequest::PauseGeneration { generation } => {
-                let root = self.placement.role_root(&self.role);
-                tokio::task::spawn_blocking(move || {
-                    generations::Generations::load(&root)?.retire(&root, generation)
-                })
-                .await
-                .context("retire reviewer generation task stopped")??;
                 if self.lifecycle.generation() == Some(generation) {
                     self.pause().await?;
                 }
@@ -611,50 +609,12 @@ impl ReviewerRole {
                 command_id,
                 command,
             } => {
-                let generation = self.generation_fences().await?;
-                if let Some(selected) = generation.selected {
-                    generation.ensure_active(selected)?;
-                }
                 let response = self.forward(RelayRequest::Submit {
                     command_id,
                     command,
                 })?;
                 self.wake_dispatch();
                 Ok(response)
-            }
-            ReviewerRequest::SubmitDurable {
-                generation,
-                command_id,
-                command,
-            } => {
-                self.require_generation(generation, true).await?;
-                let response = self.forward(RelayRequest::SubmitDurable {
-                    command_id,
-                    command,
-                })?;
-                self.wake_dispatch();
-                Ok(response)
-            }
-            ReviewerRequest::CommandReceipt {
-                generation,
-                command_id,
-            } => {
-                self.require_generation(generation, false).await?;
-                self.forward(RelayRequest::CommandReceipt { command_id })
-            }
-            ReviewerRequest::ReleaseCommandReceipt {
-                generation,
-                command_id,
-            } => {
-                self.require_generation(generation, false).await?;
-                self.forward(RelayRequest::ReleaseCommandReceipt { command_id })
-            }
-            ReviewerRequest::CancelCommandAdmission {
-                generation,
-                command_id,
-            } => {
-                self.require_generation(generation, false).await?;
-                self.forward(RelayRequest::CancelCommandAdmission { command_id })
             }
             ReviewerRequest::Status => self.forward(RelayRequest::Status),
             ReviewerRequest::RespondElicitation {
@@ -666,41 +626,9 @@ impl ReviewerRole {
             ReviewerRequest::AnalyzeDelta { repositories } => {
                 self.analyze_delta(repositories).await
             }
-            ReviewerRequest::TakeLaneDispatches
-            | ReviewerRequest::ReadLaneDispatches
-            | ReviewerRequest::AckLaneDispatches { .. } => {
+            ReviewerRequest::TakeLaneDispatches => {
                 unreachable!("lane dispatches are answered by the sidecar, not by one role")
             }
-        }
-    }
-
-    fn generation_fences(
-        &self,
-    ) -> impl std::future::Future<Output = Result<generations::Generations>> + Send + 'static {
-        let root = self.placement.role_root(&self.role);
-        async move {
-            tokio::task::spawn_blocking(move || generations::Generations::load(&root))
-                .await
-                .context("read reviewer generation fences task stopped")?
-        }
-    }
-
-    fn require_generation(
-        &self,
-        expected: u64,
-        active: bool,
-    ) -> impl std::future::Future<Output = Result<()>> + Send + 'static {
-        let generations = self.generation_fences();
-        async move {
-            let generations = generations.await?;
-            anyhow::ensure!(
-                generations.selected == Some(expected),
-                "reviewer generation changed; generation {expected} cannot mutate or inspect its replacement"
-            );
-            if active {
-                generations.ensure_active(expected)?;
-            }
-            Ok(())
         }
     }
 
@@ -866,24 +794,6 @@ impl ReviewerRole {
                 profile_home.display()
             );
         }
-        let generations = self.generation_fences().await?;
-        generations.ensure_active(config.generation)?;
-        if generations.selected.is_some() && generations.selected != Some(config.generation) {
-            let relay = self.open_relay()?;
-            anyhow::ensure!(
-                !relay
-                    .lock()
-                    .expect("reviewer relay lock poisoned")
-                    .has_retained_command_receipts(),
-                "reviewer generation still has unsettled command receipts; settle delivery before replacing it"
-            );
-        }
-        let root = self.placement.role_root(&self.role);
-        let generation = config.generation;
-        tokio::task::spawn_blocking(move || generations.select(&root, generation))
-            .await
-            .context("select reviewer generation task stopped")??;
-        self.check_cancelled()?;
         if matches!(self.lifecycle, ReviewerLifecycle::Stopping(_)) {
             self.pause().await?;
         }

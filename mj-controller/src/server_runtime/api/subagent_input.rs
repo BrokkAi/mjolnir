@@ -36,13 +36,6 @@ impl ApiBackend {
         if let Some(ordinal) = prompt_acceptance(child, &command_id).await? {
             return Ok(ordinal);
         }
-        // Receipt reconciliation precedes readiness/deadline decisions: a
-        // recovered request may already have run even after its wait expired.
-        if let Some(handle) = self.session_handle(child.to_owned()).await?
-            && let Some(receipt) = handle.command_receipt(command_id.clone()).await?
-        {
-            return Ok(receipt.accepted_ordinal);
-        }
         let elapsed_ms = mj_core::clock::epoch_millis()
             .saturating_sub(request.created_at_ms)
             .max(0) as u64;
@@ -148,11 +141,8 @@ impl ApiBackend {
                 !self.exports.close_is_requested(child),
                 "child session is closing; queued input was not delivered"
             );
-            if let Some(receipt) = handle.command_receipt(command_id.clone()).await? {
-                return Ok(receipt.accepted_ordinal);
-            }
             let result = handle
-                .submit_durable(
+                .submit(
                     command_id.clone(),
                     RelayCommand::Prompt {
                         prompt: vec![ContentBlock::Text(TextContent::new(message))],

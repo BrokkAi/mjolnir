@@ -197,43 +197,6 @@ impl RelayClient {
         }
     }
 
-    pub async fn checkpoint_command_ledger(
-        &mut self,
-        cursor: &RelayCursor,
-        seal: bool,
-    ) -> Result<Option<serde_json::Value>> {
-        let mut bytes = Vec::new();
-        loop {
-            let response = self
-                .call(RelayRequest::CheckpointCommandLedger {
-                    through_ordinal: cursor.ordinal,
-                    through_digest: cursor.digest.clone(),
-                    seal,
-                    offset: bytes.len(),
-                })
-                .await?;
-            let RelayResponsePayload::CheckpointCommandLedger { data, total_bytes } = response
-            else {
-                bail!("relay returned an unexpected command ledger response");
-            };
-            anyhow::ensure!(
-                total_bytes <= mj_core::relay::RELAY_SNAPSHOT_BYTE_BUDGET,
-                "checkpoint command ledger exceeds its byte budget"
-            );
-            anyhow::ensure!(
-                !data.is_empty() && bytes.len().saturating_add(data.len()) <= total_bytes,
-                "checkpoint command ledger page is invalid"
-            );
-            bytes.extend(data);
-            if bytes.len() == total_bytes {
-                let value = serde_json::from_slice(&bytes)?;
-                let ledger =
-                    mj_core::relay::CheckpointCommandLedger::decode(&value, cursor.ordinal)?;
-                return Ok((!ledger.is_empty()).then_some(value));
-            }
-        }
-    }
-
     /// Return the fingerprint and freshness of this session's harness
     /// credentials without exposing the credential bytes.
     pub async fn credential_state(&mut self) -> Result<CredentialSnapshot> {
@@ -414,41 +377,19 @@ impl RelayClient {
         command_id: impl Into<String>,
         command: RelayCommand,
     ) -> Result<u64> {
-        self.submit_with_receipt(command_id.into(), command, false)
-            .await
-    }
-
-    pub async fn submit_durable(
-        &mut self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> Result<u64> {
-        self.submit_with_receipt(command_id, command, true).await
-    }
-
-    async fn submit_with_receipt(
-        &mut self,
-        command_id: String,
-        command: RelayCommand,
-        durable: bool,
-    ) -> Result<u64> {
+        let command_id = command_id.into();
         if let RelayCommand::Prompt { prompt } = &command {
             for reference in mj_core::attachment::references(prompt)? {
                 self.ensure_attachment(&reference).await?;
             }
         }
-        let request = if durable {
-            RelayRequest::SubmitDurable {
+        match self
+            .call(RelayRequest::Submit {
                 command_id: command_id.clone(),
                 command,
-            }
-        } else {
-            RelayRequest::Submit {
-                command_id: command_id.clone(),
-                command,
-            }
-        };
-        match self.call(request).await? {
+            })
+            .await?
+        {
             RelayResponsePayload::Accepted {
                 command_id: accepted_id,
                 ordinal,
@@ -458,42 +399,6 @@ impl RelayClient {
                 ..
             } => bail!("relay accepted command under ID {accepted_id}, expected {command_id}"),
             _ => bail!("relay returned an unexpected command response"),
-        }
-    }
-
-    pub async fn command_receipt(
-        &mut self,
-        command_id: String,
-    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
-        match self
-            .call(RelayRequest::CommandReceipt { command_id })
-            .await?
-        {
-            RelayResponsePayload::CommandReceipt { receipt } => Ok(receipt),
-            _ => bail!("relay returned an unexpected command receipt response"),
-        }
-    }
-
-    pub async fn cancel_command_admission(
-        &mut self,
-        command_id: String,
-    ) -> Result<Option<mj_core::relay::HandledRelayCommand>> {
-        match self
-            .call(RelayRequest::CancelCommandAdmission { command_id })
-            .await?
-        {
-            RelayResponsePayload::CommandReceipt { receipt } => Ok(receipt),
-            _ => bail!("relay returned an unexpected command cancellation response"),
-        }
-    }
-
-    pub async fn release_command_receipt(&mut self, command_id: String) -> Result<()> {
-        match self
-            .call(RelayRequest::ReleaseCommandReceipt { command_id })
-            .await?
-        {
-            RelayResponsePayload::CommandReceiptReleased => Ok(()),
-            _ => bail!("relay returned an unexpected receipt release response"),
         }
     }
 

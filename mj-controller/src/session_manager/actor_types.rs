@@ -7,25 +7,13 @@ pub(super) enum ManagerCommand {
     },
 }
 
-pub(super) enum CommandReceiptAction {
-    Lookup,
-    Release,
-    CancelAdmission,
-}
-
 pub(super) enum ActorCommand {
     Submit {
-        durable: bool,
         queued_at: Instant,
         command_id: String,
         command: RelayCommand,
         admission: Option<ReviewDeliveryAdmission>,
         reply: oneshot::Sender<std::result::Result<u64, SubmitFailure>>,
-    },
-    CommandReceipt {
-        command_id: String,
-        action: CommandReceiptAction,
-        reply: oneshot::Sender<Result<Option<mj_core::relay::HandledRelayCommand>>>,
     },
     Sync {
         reply: oneshot::Sender<std::result::Result<(), String>>,
@@ -63,7 +51,6 @@ impl ActorCommand {
     pub(super) fn operation_name(&self) -> &'static str {
         match self {
             Self::Submit { .. } => "submit",
-            Self::CommandReceipt { .. } => "command_receipt",
             Self::Sync { .. } => "sync",
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
@@ -75,9 +62,6 @@ impl ActorCommand {
 
     pub(super) fn reject(self, session_id: &str, message: &str) {
         match self {
-            Self::CommandReceipt { reply, .. } => {
-                let _ = reply.send(Err(anyhow::anyhow!(message.to_owned())));
-            }
             Self::Submit { reply, .. } => {
                 if reply.send(Err(message.to_owned().into())).is_err() {
                     tracing::debug!(
@@ -156,7 +140,6 @@ pub(super) struct ReturnedConnection {
 /// A submission that arrived while a lifecycle operation held the connection.
 /// The actor replays these in arrival order once the lease comes back.
 pub(super) struct DeferredSubmit {
-    pub(super) durable: bool,
     pub(super) queued_at: Instant,
     pub(super) command_id: String,
     pub(super) command: RelayCommand,

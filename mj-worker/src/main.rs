@@ -106,8 +106,6 @@ enum WorkerCommand {
     ReviewMcp {
         #[arg(long)]
         socket: PathBuf,
-        #[arg(long)]
-        generation: u64,
     },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
@@ -456,9 +454,7 @@ async fn run_command(command: Command) -> Result<()> {
         } => {
             mj_worker::memory_mcp::run_mcp_stdio_with_history(&root, history_socket, !native_notes)
         }
-        WorkerCommand::ReviewMcp { socket, generation } => {
-            mj_worker::review::mcp::run_mcp_stdio(&socket, generation)
-        }
+        WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
         WorkerCommand::SubagentMcp {
             socket,
             harness,

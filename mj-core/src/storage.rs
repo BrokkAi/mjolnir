@@ -225,16 +225,14 @@ pub struct TurnReviewState {
     /// The last forwarded verdict, which turns the next review into a
     /// verification pass. Cleared once that pass consumes it.
     pub prior_review: Option<crate::review::lanes::PriorReviewContext>,
-    /// Identity of the review whose durable orchestration is still open.
+    /// A review that was running when the daemon stopped. On recovery it is
+    /// cleared without advancing the baseline.
     pub active: Option<String>,
     /// A corrective prompt that was submitted while its relay acceptance was
     /// still ambiguous. It survives a daemon restart so the exact command can
     /// be retried and reconciled without losing the findings.
     #[serde(default)]
     pub pending_forward: Option<crate::review::driver::PendingForward>,
-    /// Versioned controller-owned state machine and outstanding effects.
-    #[serde(default)]
-    pub orchestration: Option<serde_json::Value>,
 }
 
 /// What a bounded prompt search found, and whether it stopped early.

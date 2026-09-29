@@ -133,18 +133,13 @@ pub(crate) async fn serve_one_review_dispatch(
     if line.trim().is_empty() {
         return Ok(());
     }
-    let reply =
-        match serde_json::from_str::<mj_core::review::mcp::LaneDispatchEnvelope>(line.trim()) {
-            Ok(envelope) => tokio::task::spawn_blocking(move || {
-                reviewer.record_dispatch(envelope.generation, envelope.dispatch)
-            })
-            .await
-            .context("persist review dispatch task stopped")?,
-            Err(error) => mj_core::review::lanes::LaneDispatchReply {
-                started: Vec::new(),
-                error: Some(format!("could not read the dispatch: {error}")),
-            },
-        };
+    let reply = match serde_json::from_str::<mj_core::review::lanes::LaneDispatch>(line.trim()) {
+        Ok(dispatch) => reviewer.record_dispatch(dispatch),
+        Err(error) => mj_core::review::lanes::LaneDispatchReply {
+            started: Vec::new(),
+            error: Some(format!("could not read the dispatch: {error}")),
+        },
+    };
     let mut body = serde_json::to_vec(&reply)?;
     body.push(b'\n');
     write

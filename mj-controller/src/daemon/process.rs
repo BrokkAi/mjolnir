@@ -149,12 +149,6 @@ pub(super) async fn run_daemon_runtime(
     // Bootstrap already owns live managers. Capture its error so those owners
     // are shut down before the process-level writer can be closed.
     let bootstrap = async {
-        // Restore review admission before prompts or external services start.
-        state
-            .review_host()
-            .ready()
-            .await
-            .map_err(anyhow::Error::msg)?;
         let move_operations = blocking(crate::database::load_move_operations).await?;
         let move_sessions = move_operations
             .iter()

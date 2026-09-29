@@ -5561,7 +5561,7 @@ fn jev_completion_survives_restart_and_later_work_without_restoring_idle_inferen
 fn durable_archive_context_retry_after_consumption_does_not_reinstall_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let install = || RelayRequest::SubmitDurable {
+    let install = || RelayRequest::Submit {
         command_id: "archive-context".into(),
         command: RelayCommand::InstallPromptContext {
             text: "archived context".into(),

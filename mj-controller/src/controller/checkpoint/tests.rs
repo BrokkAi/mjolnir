@@ -313,7 +313,6 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             queued_prompts: Vec::new(),
             active_user_shells: Vec::new(),
             active_agent_terminals: Vec::new(),
-            command_ledger_seal: None,
             checkpoint_barrier: Some("checkpoint-1".into()),
             checkpoint_ready: None,
             last_acp_activity_at_ms: None,
@@ -2170,7 +2169,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
             }],
         },
     );
-    let mut controller = Controller {
+    let controller = Controller {
         config,
         state: State {
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
@@ -2220,41 +2219,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     // checkpoint's own bookkeeping.
     assert!(latched.cursor.ordinal > checkpoint.event_frontier);
     let cursor = latched.cursor.clone();
-    let sealed_barrier = latched.barrier_command_id.clone();
-    let previous_state = controller.state.sessions[LATCH_RELAY_SESSION].state;
-    controller
-        .state
-        .sessions
-        .get_mut(LATCH_RELAY_SESSION)
-        .unwrap()
-        .state = SessionState::Closing;
-    crate::database::save_lifecycle_session(&controller.state.sessions[LATCH_RELAY_SESSION])
-        .unwrap();
-    drop(latched);
-    // A replacement lifecycle owner must adopt this worker's original sealed
-    // cut instead of submitting a second BeginCheckpoint or unsealing it.
-    let latched = controller
-        .checkpoint_session_latched(
-            LATCH_RELAY_SESSION,
-            &executor,
-            Some(&channels.control),
-            LatchExclusivity::HoldThroughClose,
-            CheckpointExportPolicy::ReuseUnchangedArchive,
-        )
-        .await
-        .unwrap();
-    assert_eq!(latched.barrier_command_id, sealed_barrier);
-    assert_eq!(latched.cursor, cursor);
-    assert!(executor.purposes().is_empty());
     latched.complete().await.unwrap();
-    controller
-        .state
-        .sessions
-        .get_mut(LATCH_RELAY_SESSION)
-        .unwrap()
-        .state = previous_state;
-    crate::database::save_lifecycle_session(&controller.state.sessions[LATCH_RELAY_SESSION])
-        .unwrap();
     wait_until_the_actor_serves_again(&handle).await;
 
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {

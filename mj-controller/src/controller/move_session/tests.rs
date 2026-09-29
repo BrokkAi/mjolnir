@@ -127,10 +127,6 @@ fn move_queue_relay_child() {
         if let RelayRequest::Submit {
             command_id,
             command,
-        }
-        | RelayRequest::SubmitDurable {
-            command_id,
-            command,
         } = &request.request
         {
             let observed = marker.with_extension("observed");
@@ -146,9 +142,6 @@ fn move_queue_relay_child() {
             && matches!(
                 &request.request,
                 RelayRequest::Submit {
-                    command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
-                    ..
-                } | RelayRequest::SubmitDurable {
                     command: RelayCommand::Prompt { .. } | RelayCommand::SetConfig { .. },
                     ..
                 }

@@ -1,7 +1,6 @@
 use super::*;
 use crate::session_manager::{
-    RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests,
-    spawn_reply_fixture_session_manager,
+    RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests, spawn_remote_session_manager,
 };
 use mj_core::review::driver::{RoleState, RoleStatus};
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
@@ -166,7 +165,6 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
 fn operational() -> RelayOperationalState {
     serde_json::from_value(serde_json::json!({
         "session_id": "reviewer",
-        "relay_protocol_version": mj_core::relay::RELAY_PROTOCOL_VERSION,
         "execution": "idle",
         "latest_ordinal": 0,
         "latest_digest": mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
@@ -210,7 +208,7 @@ impl FakeManager {
     /// Builds the manager and waits until it is managing the session, so
     /// the host's first request cannot race the actor's creation.
     async fn new(session: &str) -> Self {
-        let channels = spawn_reply_fixture_session_manager().expect("remote manager");
+        let channels = spawn_remote_session_manager().expect("remote manager");
         // The target is never dialled: this manager forwards every
         // request to the test instead of to a worker.
         channels.targets.send_replace(vec![RelaySessionTarget {
@@ -253,38 +251,10 @@ impl FakeManager {
 
     /// The next request the host makes, or a failure if it makes none.
     async fn next(&mut self) -> RemoteSessionRequest {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let request = self
-                    .requests
-                    .recv()
-                    .await
-                    .expect("the manager is still running");
-                if let RemoteSessionRequest::Sync { reply, .. } = request {
-                    let _ = reply.send(Ok(()));
-                } else {
-                    return request;
-                }
-            }
-        })
-        .await
-        .expect("the host makes a request")
-    }
-
-    async fn drive_until(&mut self, done: impl Fn() -> bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !done() {
-                tokio::select! {
-                    request = self.requests.recv() => match request.expect("manager is alive") {
-                        RemoteSessionRequest::Reviewer { action, reply, .. } => { let _ = reply.send(answer_for(&action)); }
-                        RemoteSessionRequest::Sync { reply, .. } => { let _ = reply.send(Ok(())); }
-                        RemoteSessionRequest::Submit { command: RelayCommand::RecordNotice { .. }, reply, .. } => { let _ = reply.send(Ok(1)); }
-                        other => panic!("unexpected request {}", other.session_id()),
-                    },
-                    _ = tokio::time::sleep(Duration::from_millis(1)) => {}
-                }
-            }
-        }).await.expect("worker control effects settle");
+        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+            .await
+            .expect("the host makes a request")
+            .expect("the manager is still running")
     }
 
     /// Answers reviewer actions until one matches `wanted`, which is then
@@ -340,17 +310,6 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
             packet: "- edited retry()".to_owned(),
         }),
         ReviewerAction::AdvanceBaseline { .. } => Ok(ReviewerOutcome::BaselineAdvanced),
-        ReviewerAction::ReviewerCommandReceipt { .. }
-        | ReviewerAction::CancelReviewerCommandAdmission { .. } => {
-            Ok(ReviewerOutcome::CommandReceipt { receipt: None })
-        }
-        ReviewerAction::ReleaseReviewerCommandReceipt { .. } => {
-            Ok(ReviewerOutcome::CommandReceiptReleased)
-        }
-        ReviewerAction::ReadLaneDispatches => Ok(ReviewerOutcome::PendingLaneDispatches {
-            dispatches: Vec::new(),
-        }),
-        ReviewerAction::AckLaneDispatches { .. } => Ok(ReviewerOutcome::LaneDispatchesAcknowledged),
         ReviewerAction::TakeLaneDispatches => Ok(ReviewerOutcome::LaneDispatches {
             requests: Vec::new(),
         }),
@@ -365,9 +324,7 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
         ReviewerAction::Pause | ReviewerAction::PauseGeneration { .. } => {
             Ok(ReviewerOutcome::Paused)
         }
-        ReviewerAction::Submit { .. } | ReviewerAction::SubmitDurable { .. } => {
-            Ok(ReviewerOutcome::Accepted { ordinal: 1 })
-        }
+        ReviewerAction::Submit { .. } => Ok(ReviewerOutcome::Accepted { ordinal: 1 }),
         ReviewerAction::Start { .. } => Err("no harness in this test".to_owned()),
         ReviewerAction::RespondElicitation { .. } => Ok(ReviewerOutcome::ElicitationResolved),
         ReviewerAction::Acknowledge { .. } => {
@@ -641,7 +598,11 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(())
     }
 
-    fn recoverable_reviews(&self) -> Result<Vec<String>, String> {
+    fn clear_interrupted(&self) -> Result<Vec<String>, String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active = None;
         Ok(Vec::new())
     }
 
@@ -883,14 +844,8 @@ async fn auto_preparation_is_visible_and_can_be_cancelled() {
         .await;
     assert!(host.view(&session).unwrap().status.contains("Preparing"));
     host.resolve(&session, Resolution::Cancelled).await.unwrap();
-    assert!(
-        host.refuses_prompt(&session),
-        "preparation owns admission until its outstanding result settles"
-    );
+    assert!(!host.refuses_prompt(&session));
     let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
-    manager
-        .drive_until(|| !host.refuses_prompt(&session) && host.view(&session).is_none())
-        .await;
     host.shutdown().await.unwrap();
 }
 
@@ -1362,7 +1317,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     let second = tokio::spawn(async move { second_host.shutdown().await });
     tokio::time::timeout(Duration::from_secs(5), close_gate.entered())
         .await
-        .expect("shutdown records resumable orchestration");
+        .expect("shutdown queues the final inactive state");
     assert!(!first.is_finished(), "shutdown drains the blocked write");
     assert!(
         !second.is_finished(),
@@ -1383,8 +1338,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
         .expect("shared drain");
     host.shutdown().await.expect("shutdown stays idempotent");
 
-    assert!(environment.state().active.is_some());
-    assert!(environment.state().orchestration.is_some());
+    assert_eq!(environment.state().active, None);
     assert!(host.view(session).is_none());
     let writes = environment.writes();
     assert!(
@@ -1395,7 +1349,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     assert!(
         writes
             .last()
-            .is_some_and(|(state, _)| state.active.is_some() && state.orchestration.is_some())
+            .is_some_and(|(state, _)| state.active.is_none())
     );
     let test_thread = std::thread::current().id();
     assert!(
@@ -1433,10 +1387,9 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
     );
     host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
     host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
+        .send(HostEvent::Interrupted {
+            interrupted: vec![session.clone()],
         })
-        .await
         .unwrap();
     let RemoteSessionRequest::Submit {
         command_id,
@@ -1459,11 +1412,27 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         host.resolve(&session, Resolution::Forwarded).await.is_err(),
         "duplicate Forward is not another submission"
     );
+    assert!(
+        host.resolve(&session, Resolution::Cancelled).await.is_err(),
+        "an unknown delivery cannot be undone"
+    );
     reply
         .send(Err("primary temporarily unavailable".into()))
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !host.view(&session).is_some_and(|view| {
+            matches!(
+                view.phase,
+                TurnReviewPhase::Forwarding { error: Some(_), .. }
+            )
+        }) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rejection remains actionable");
     assert_eq!(environment.state().pending_forward, Some(pending.clone()));
-    // Transport ambiguity retains the delivery owner and retries the original identity.
+    host.resolve(&session, Resolution::Forwarded).await.unwrap();
     let RemoteSessionRequest::Submit {
         command_id,
         admission,
@@ -1484,7 +1453,6 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
                 result: Err("late reviewer disconnect".to_owned()),
             },
         })
-        .await
         .unwrap();
     let gate = environment.block_saves();
     reply.send(Ok(42)).unwrap();
@@ -1497,7 +1465,13 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         "the durable pending record remains until the complete accepted outcome is written"
     );
     gate.release();
-    manager.drive_until(|| host.view(&session).is_none()).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("accepted handoff closes");
     let state = environment.state();
     assert!(state.pending_forward.is_none());
     assert!(state.prior_review.is_some());
@@ -1615,8 +1589,13 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
     host.resolve(session, Resolution::Cancelled)
         .await
         .expect("cancel needs no verdict");
-    manager.drive_until(|| !host.refuses_prompt(session)).await;
-    host.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelling releases the prompts");
 }
 
 /// A reviewer launch failure is a durable failed verdict, but it no longer
@@ -1680,7 +1659,13 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
     host.resolve(session, Resolution::Dismissed)
         .await
         .expect("the visible failure can be dismissed");
-    manager.drive_until(|| host.view(session).is_none()).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dismissal closes the failed review");
     host.shutdown().await.expect("shutdown the host");
 }
 
@@ -1795,13 +1780,12 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     let (_, action, reply) = manager
         .next_reviewer(|role, action| {
             role.as_deref() == Some(mj_core::review::driver::REVIEWER_ROLE)
-                && matches!(action, ReviewerAction::SubmitDurable { .. })
+                && matches!(action, ReviewerAction::Submit { .. })
         })
         .await;
-    let ReviewerAction::SubmitDurable {
+    let ReviewerAction::Submit {
         command_id,
         command,
-        ..
     } = action
     else {
         unreachable!("matched above");
@@ -1822,21 +1806,12 @@ async fn a_clean_reviewer_report_resolves_the_review() {
                 && matches!(action, ReviewerAction::Attach { .. })
         })
         .await;
-    let _ = tokio::time::timeout(Duration::from_millis(100), async {
-        loop {
-            match manager.requests.recv().await.unwrap() {
-                RemoteSessionRequest::Reviewer {
-                    action: ReviewerAction::ReleaseReviewerCommandReceipt { .. },
-                    reply,
-                    ..
-                } => {
-                    let _ = reply.send(Ok(ReviewerOutcome::CommandReceiptReleased));
-                }
-                _ => panic!("one role prompt has only one attachment poll in flight"),
-            }
-        }
-    })
-    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), manager.requests.recv())
+            .await
+            .is_err(),
+        "one role prompt has only one attachment poll in flight"
+    );
     let before_identical = publications.load(std::sync::atomic::Ordering::SeqCst);
     let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
         crate::worker_client::RelayAttachment {
@@ -1876,13 +1851,16 @@ async fn a_clean_reviewer_report_resolves_the_review() {
         },
     ))));
 
-    manager
-        .drive_until(|| {
-            !host.refuses_prompt(session)
-                && host.view(session).is_none()
-                && environment.state().active.is_none()
-        })
-        .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session)
+            || host.view(session).is_some()
+            || environment.state().active.is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a clean review releases and durably closes the turn by itself");
     assert!(host.view(session).is_none());
     assert!(
         publications.load(std::sync::atomic::Ordering::SeqCst) > before_identical,
@@ -1909,648 +1887,4 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert_eq!(recorded.reviewed_through_ordinal, 12);
     assert_eq!(recorded.active, None);
     host.shutdown().await.expect("shutdown the host");
-}
-
-fn restartable_review_slot() -> ReviewSlot {
-    restartable_review_slot_at(ReviewTier::Quick)
-}
-
-fn restartable_review_slot_at(tier: ReviewTier) -> ReviewSlot {
-    let role = if tier == ReviewTier::Quick {
-        mj_review::driver::REVIEWER_ROLE
-    } else {
-        SUPERVISOR_ROLE
-    };
-    let (mut driver, _) = TurnReviewDriver::start(TurnReviewSeed {
-        tier,
-        task: "finish the parser".into(),
-        user_messages: vec![UserMessage::prompt("finish the parser")],
-        initial_result: "parser implemented".into(),
-        trajectory: "edited parser.rs".into(),
-        baselines: BTreeMap::from([(PathBuf::from("/workspace/app"), "base".into())]),
-        through_ordinal: 12,
-        prior_review: None,
-    });
-    driver.delta_captured(vec![mj_core::relay::RepoDelta {
-        root: "/workspace/app".into(),
-        baseline_tree: Some("base".into()),
-        current_tree: "new".into(),
-        patch: "diff --git a/parser.rs b/parser.rs\n@@\n+parse\n".into(),
-        diffstat: "1 insertion".into(),
-        changed_lines: 1,
-    }]);
-    driver.analysis_completed(Ok("parser changed".into()));
-    let outbox = driver.role_started(role);
-    let receipts = outbox
-        .iter()
-        .filter_map(|request| match request {
-            ReviewRequest::PromptRole { command_id, .. } => Some((
-                command_id.clone(),
-                super::durable::ReviewReceipt {
-                    role: Some(role.into()),
-                    generation: 812,
-                    phase: super::durable::ReceiptPhase::Waiting,
-                },
-            )),
-            _ => None,
-        })
-        .collect();
-    ReviewSlot {
-        epoch: 71,
-        driver,
-        roles: BTreeMap::new(),
-        reviewer: ReviewerIdentity::default(),
-        state: TurnReviewState {
-            active: Some("review-71".into()),
-            ..Default::default()
-        },
-        generation: 812,
-        role_generations: BTreeMap::from([(role.into(), 812)]),
-        outbox,
-        receipts,
-        running_effects: BTreeSet::new(),
-        delivery_errors: BTreeMap::new(),
-        polling_roles: BTreeSet::new(),
-        reading_dispatches: false,
-        pending_supervisor: None,
-        dispatch_after_completion: false,
-        accepted_dispatches: BTreeSet::new(),
-        pending_dispatch_acks: BTreeSet::new(),
-    }
-}
-
-#[tokio::test]
-async fn restart_replays_the_durable_role_prompt_with_its_original_identity() {
-    let session = session_id("durablereviewprompt");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let mut slot = restartable_review_slot();
-    let expected = slot
-        .outbox
-        .iter()
-        .find_map(|request| match request {
-            ReviewRequest::PromptRole {
-                command_id, prompt, ..
-            } => Some((command_id.clone(), prompt.clone())),
-            _ => None,
-        })
-        .unwrap();
-    slot.state.orchestration = Some(slot.checkpoint().unwrap());
-    *environment.state.lock().unwrap() = slot.state;
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    host.ready().await.unwrap();
-    host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    let (role, action, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::SubmitDurable { .. }))
-        .await;
-    assert_eq!(role.as_deref(), Some(mj_review::driver::REVIEWER_ROLE));
-    let ReviewerAction::SubmitDurable {
-        command_id,
-        command,
-        ..
-    } = action
-    else {
-        unreachable!()
-    };
-    assert_eq!(command_id, expected.0);
-    assert_eq!(command, prompt_command(expected.1));
-    reply
-        .send(Ok(ReviewerOutcome::Accepted { ordinal: 13 }))
-        .unwrap();
-    assert!(host.refuses_prompt(&session));
-    host.shutdown().await.unwrap();
-    assert!(environment.state().orchestration.is_some());
-}
-
-#[tokio::test]
-async fn restart_reattaches_the_saved_role_cursor_without_starting_another_harness() {
-    let session = session_id("durablereviewcursor");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let mut slot = restartable_review_slot();
-    slot.outbox.clear();
-    slot.receipts.clear();
-    slot.roles.insert(
-        mj_review::driver::REVIEWER_ROLE.into(),
-        RoleTranscript {
-            cursor_ordinal: 42,
-            cursor_digest: "saved-digest".into(),
-            session: None,
-        },
-    );
-    slot.state.orchestration = Some(slot.checkpoint().unwrap());
-    *environment.state.lock().unwrap() = slot.state;
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment,
-    );
-    host.ready().await.unwrap();
-    host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    let RemoteSessionRequest::Reviewer { action, reply, .. } = manager.next().await else {
-        panic!("expected reviewer reattachment");
-    };
-    assert!(
-        matches!(action, ReviewerAction::Attach { after_ordinal: 42, after_digest: ref digest } if digest == "saved-digest")
-    );
-    reply.send(answer_for(&action)).unwrap();
-    host.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn restart_preserves_findings_waiting_for_a_user_resolution() {
-    let session = session_id("durablereviewverdict");
-    let manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let mut slot = restartable_review_slot();
-    let reviewer_command = slot.driver.awaited_commands()[0].1.clone();
-    slot.driver.role_turn_completed(
-        &reviewer_command,
-        "[P2] parser.rs:1 -- empty input is rejected",
-    );
-    slot.driver.role_started(mj_review::driver::VALIDATOR_ROLE);
-    let validator_command = slot.driver.awaited_commands()[0].1.clone();
-    slot.driver.role_turn_completed(
-        &validator_command,
-        "[P2] parser.rs:1 -- empty input is rejected",
-    );
-    let expected = slot.driver.phase().clone();
-    assert!(matches!(
-        expected,
-        TurnReviewPhase::Verdict(ReviewVerdict::Findings { .. })
-    ));
-    slot.outbox.clear();
-    slot.receipts.clear();
-    slot.state.orchestration = Some(slot.checkpoint().unwrap());
-    *environment.state.lock().unwrap() = slot.state;
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    host.ready().await.unwrap();
-    host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host.view(&session).is_none() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(host.view(&session).unwrap().phase, expected);
-    assert!(host.refuses_prompt(&session));
-    host.shutdown().await.unwrap();
-    let restored = ReviewSlot::restore(environment.state()).unwrap();
-    assert_eq!(restored.driver.phase(), &expected);
-}
-
-#[test]
-fn review_observations_bound_transcripts_and_retain_a_coalesced_completion() {
-    let mut mailbox = super::observations::Observations::default();
-    let running = MaterializedExecutionState::Running { started_at_ms: 0 };
-    mailbox.observe("review", &view("review", running));
-    mailbox.observe("review", &view("review", MaterializedExecutionState::Idle));
-    for _ in 0..10_000 {
-        mailbox.observe("review", &view("review", MaterializedExecutionState::Idle));
-    }
-    assert!(matches!(
-        mailbox.pop(),
-        Some(HostEvent::View {
-            finished_turn: true,
-            ..
-        })
-    ));
-    assert!(mailbox.pop().is_none());
-}
-
-#[tokio::test]
-async fn specialist_dispatch_is_checkpointed_before_ack_and_ack_replays_after_restart() {
-    let session = session_id("durablereviewdispatch");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let mut slot = restartable_review_slot_at(ReviewTier::Extended);
-    slot.outbox.clear();
-    slot.receipts.clear();
-    slot.state.orchestration = Some(slot.checkpoint().unwrap());
-    *environment.state.lock().unwrap() = slot.state;
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    host.ready().await.unwrap();
-    host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    // Keep the journal read outstanding so no periodic observation interferes
-    // with the persistence barrier this test controls.
-    let outstanding_poll = manager.next().await;
-    let gate = environment.block_saves();
-    let dispatch = mj_core::relay::ReviewerLaneDispatch {
-        id: "lane-stable-1".into(),
-        generation: 812,
-        request: mj_core::review::lanes::ReviewSubagentRequest {
-            agent_type: "control_flow".into(),
-            hypothesis: "Check the empty parser input branch".into(),
-        },
-    };
-    host.events
-        .send(HostEvent::Step {
-            session_id: session.clone(),
-            epoch: 71,
-            step: ReviewStep::Dispatches(Ok(vec![dispatch.clone()])),
-        })
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), gate.entered())
-        .await
-        .unwrap();
-    assert!(
-        !environment.state().orchestration.unwrap()["accepted_dispatches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|id| id == "lane-stable-1")
-    );
-    gate.release();
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::AckLaneDispatches { .. }))
-        .await;
-    assert!(
-        matches!(action, ReviewerAction::AckLaneDispatches { ref ids } if ids == &["lane-stable-1"])
-    );
-    let restored = ReviewSlot::restore(environment.state()).unwrap();
-    assert!(restored.accepted_dispatches.contains("lane-stable-1"));
-    assert!(restored.pending_dispatch_acks.contains("lane-stable-1"));
-    // Lose the ACK and replace the controller while worker ownership remains.
-    drop(reply);
-    host.shutdown().await.unwrap();
-    drop(outstanding_poll);
-    let restored = ReviewSlot::restore(environment.state()).unwrap();
-    assert!(restored.accepted_dispatches.contains("lane-stable-1"));
-    let replacement = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    replacement.ready().await.unwrap();
-    replacement.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    replacement
-        .events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::AckLaneDispatches { .. }))
-        .await;
-    assert!(
-        matches!(action, ReviewerAction::AckLaneDispatches { ref ids } if ids == &["lane-stable-1"])
-    );
-    reply
-        .send(Ok(ReviewerOutcome::LaneDispatchesAcknowledged))
-        .unwrap();
-    replacement.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn cancelled_ambiguous_review_prompt_reconciles_before_releasing_its_receipt() {
-    let session = session_id("cancelreceipt");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let mut slot = restartable_review_slot();
-    let command_id = slot.receipts.keys().next().unwrap().clone();
-    slot.receipts.get_mut(&command_id).unwrap().phase = super::durable::ReceiptPhase::Cancel;
-    slot.outbox.extend(slot.driver.cancel());
-    slot.state.orchestration = Some(slot.checkpoint().unwrap());
-    *environment.state.lock().unwrap() = slot.state;
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-    host.ready().await.unwrap();
-    host.observe(&session, &view(&session, MaterializedExecutionState::Idle));
-    host.events
-        .send(HostEvent::Initialized {
-            result: Ok(vec![session.clone()]),
-        })
-        .await
-        .unwrap();
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| {
-            matches!(
-                action,
-                ReviewerAction::CancelReviewerCommandAdmission { .. }
-                    | ReviewerAction::SubmitDurable { .. }
-            )
-        })
-        .await;
-    assert!(
-        matches!(action, ReviewerAction::CancelReviewerCommandAdmission { generation: 812, command_id: ref id } if id == &command_id)
-    );
-    assert!(environment.state().orchestration.is_some());
-    reply
-        .send(Ok(ReviewerOutcome::CommandReceipt { receipt: None }))
-        .unwrap();
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| {
-            matches!(
-                action,
-                ReviewerAction::PauseGeneration { .. } | ReviewerAction::SubmitDurable { .. }
-            )
-        })
-        .await;
-    assert!(matches!(
-        action,
-        ReviewerAction::PauseGeneration { generation: 812 }
-    ));
-    let restored = ReviewSlot::restore(environment.state()).unwrap();
-    assert!(!restored.receipts.contains_key(&command_id));
-    assert!(
-        !restored
-            .outbox
-            .iter()
-            .any(|request| matches!(request, ReviewRequest::PromptRole { .. }))
-    );
-    reply.send(Ok(ReviewerOutcome::Paused)).unwrap();
-    host.shutdown().await.unwrap();
-}
-
-fn checkpoint_owner(
-    manager: &FakeManager,
-) -> (HostState, mpsc::UnboundedReceiver<PersistenceRequest>) {
-    let (persistence, requests) = mpsc::unbounded_channel();
-    let (events, _receiver) = mpsc::channel(256);
-    let shared = Arc::new(HostShared {
-        views: Mutex::default(),
-        changed: Arc::new(|| {}),
-        shutdown: tokio::sync::OnceCell::new(),
-        observations: Mutex::default(),
-        observation_ready: tokio::sync::Notify::new(),
-        stop_delivery: tokio_util::sync::CancellationToken::new(),
-        initialized: tokio::sync::watch::channel(None).0,
-    });
-    (
-        HostState {
-            control: manager.control.clone(),
-            config: armed(Some("reviewer")),
-            environment: FakeEnvironment::new(),
-            shared,
-            events,
-            persistence: Some(persistence),
-            persistence_task: None,
-            reviews: BTreeMap::from([(manager.session.clone(), restartable_review_slot())]),
-            preparing: BTreeSet::new(),
-            pending_open: BTreeMap::new(),
-            closing: BTreeSet::new(),
-            next_epoch: 71,
-            sessions: BTreeMap::new(),
-            preparation_cancellation: BTreeMap::new(),
-            recovery_candidates: BTreeSet::new(),
-            recovery_in_flight: BTreeSet::new(),
-            dirty: BTreeSet::from([manager.session.clone()]),
-            checkpointing: BTreeMap::new(),
-            next_checkpoint_revision: 0,
-            persistence_errors: BTreeMap::new(),
-            start_replies: BTreeMap::new(),
-            resolve_replies: BTreeMap::new(),
-        },
-        requests,
-    )
-}
-
-#[tokio::test]
-async fn an_older_checkpoint_ack_cannot_authorize_a_newer_review_effect() {
-    let session = session_id("checkpointack");
-    let manager = FakeManager::new(&session).await;
-    let (mut owner, mut writes) = checkpoint_owner(&manager);
-    owner.checkpoint_dirty();
-    let PersistenceRequest::Save {
-        completion: Some(first),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("first checkpoint");
-    };
-    owner
-        .reviews
-        .get_mut(&session)
-        .unwrap()
-        .pending_dispatch_acks
-        .insert("new-dispatch".into());
-    owner.dirty.insert(session.clone());
-    owner.checkpoint_dirty();
-    assert!(
-        writes.try_recv().is_err(),
-        "one checkpoint at a time per review"
-    );
-    owner.state_saved(session.clone(), first, Ok(()));
-    let PersistenceRequest::Save {
-        state,
-        completion: Some(second),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("coalesced newer checkpoint");
-    };
-    assert_ne!(first, second);
-    assert!(
-        state.orchestration.unwrap()["pending_dispatch_acks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|id| id == "new-dispatch")
-    );
-    assert!(owner.reviews[&session].running_effects.is_empty());
-    owner.state_saved(session.clone(), first, Ok(()));
-    assert!(
-        owner.reviews[&session].running_effects.is_empty(),
-        "duplicate old ACK cannot release the barrier"
-    );
-    owner.state_saved(session.clone(), second, Ok(()));
-    assert!(
-        owner.reviews[&session]
-            .running_effects
-            .contains("dispatch-ack")
-    );
-}
-
-#[tokio::test]
-async fn failed_checkpoint_retries_current_state_and_ignores_its_late_ack() {
-    let session = session_id("checkpointretry");
-    let manager = FakeManager::new(&session).await;
-    let (mut owner, mut writes) = checkpoint_owner(&manager);
-    owner.checkpoint_dirty();
-    let PersistenceRequest::Save {
-        completion: Some(first @ PersistenceCompletion::Checkpoint { epoch, revision }),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("first checkpoint");
-    };
-    owner.state_saved(
-        session.clone(),
-        first,
-        Err("disk temporarily unavailable".into()),
-    );
-    owner
-        .reviews
-        .get_mut(&session)
-        .unwrap()
-        .state
-        .reviewed_through_ordinal = 99;
-    owner.dirty.insert(session.clone());
-    owner.checkpoint_dirty();
-    assert!(
-        writes.try_recv().is_err(),
-        "backoff retains the sole write owner"
-    );
-    owner.retry_checkpoint(session.clone(), epoch, revision);
-    let PersistenceRequest::Save {
-        state,
-        completion: Some(second),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("retry uses latest desired state");
-    };
-    assert_eq!(state.reviewed_through_ordinal, 99);
-    owner.state_saved(session.clone(), first, Ok(()));
-    owner.retry_checkpoint(session.clone(), epoch, revision);
-    assert!(owner.reviews[&session].running_effects.is_empty());
-    assert!(
-        writes.try_recv().is_err(),
-        "late retry cannot enqueue an obsolete snapshot"
-    );
-    owner.state_saved(session.clone(), second, Ok(()));
-    assert!(!owner.reviews[&session].running_effects.is_empty());
-}
-
-#[tokio::test]
-async fn cancelling_a_committing_open_retains_ownership_through_failed_close() {
-    let session = session_id("cancelopencommit");
-    let manager = FakeManager::new(&session).await;
-    let (mut owner, mut writes) = checkpoint_owner(&manager);
-    owner.reviews.clear();
-    owner.dirty.clear();
-    owner.preparing.insert(session.clone());
-    owner.preparation_cancellation.insert(
-        session.clone(),
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-    );
-    owner.pending_open.insert(
-        session.clone(),
-        PendingOpen {
-            epoch: 72,
-            manual: false,
-            reply: None,
-            prepared: Prepared {
-                state: TurnReviewState {
-                    active: Some("review-72".into()),
-                    pending_forward: None,
-                    ..Default::default()
-                },
-                reviewer: ReviewerIdentity::default(),
-                tier: ReviewTier::Quick,
-                materialized: Box::new(MaterializedSession::empty(&session)),
-                resume_forward: None,
-                captured: None,
-            },
-        },
-    );
-    hold_prompts(&session);
-    owner.state_saved(
-        session.clone(),
-        PersistenceCompletion::Open { epoch: 72 },
-        Ok(()),
-    );
-    assert!(prompt_refusal(&session).is_some());
-    assert!(
-        owner.reviews[&session]
-            .outbox
-            .iter()
-            .all(|request| matches!(request, ReviewRequest::Close))
-    );
-    owner.checkpoint_dirty();
-    let PersistenceRequest::Save {
-        state,
-        completion: Some(checkpoint),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("cancel checkpoint");
-    };
-    assert!(state.pending_forward.is_none());
-    let restored = ReviewSlot::restore(*state).unwrap();
-    assert!(matches!(
-        restored.driver.phase(),
-        TurnReviewPhase::Resolved(Resolution::Cancelled)
-    ));
-    owner.state_saved(session.clone(), checkpoint, Ok(()));
-    let PersistenceRequest::Save {
-        completion: Some(close),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("acknowledged close");
-    };
-    owner.state_saved(session.clone(), close, Err("disk unavailable".into()));
-    assert!(owner.reviews.contains_key(&session));
-    assert!(
-        prompt_refusal(&session).is_some(),
-        "failure cannot release the durable owner"
-    );
-    owner
-        .handle(HostEvent::RetryClose {
-            session_id: session.clone(),
-            epoch: 72,
-        })
-        .await;
-    owner.checkpoint_dirty();
-    let PersistenceRequest::Save {
-        completion: Some(checkpoint),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("retry current cancelled state");
-    };
-    owner.state_saved(session.clone(), checkpoint, Ok(()));
-    let PersistenceRequest::Save {
-        completion: Some(close),
-        ..
-    } = writes.try_recv().unwrap()
-    else {
-        panic!("retry close");
-    };
-    owner.state_saved(session.clone(), close, Ok(()));
-    assert!(!owner.reviews.contains_key(&session));
-    assert!(prompt_refusal(&session).is_none());
 }

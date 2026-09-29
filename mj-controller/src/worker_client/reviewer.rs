@@ -272,58 +272,6 @@ impl RelayClient {
         }
     }
 
-    pub async fn submit_reviewer_durable(
-        &mut self,
-        role: Option<&str>,
-        generation: u64,
-        command_id: String,
-        command: RelayCommand,
-    ) -> Result<u64> {
-        let request = self.reviewer_request(
-            role,
-            ReviewerRequest::SubmitDurable {
-                generation,
-                command_id,
-                command,
-            },
-        )?;
-        match self.call(request).await? {
-            RelayResponsePayload::Accepted { ordinal, .. } => Ok(ordinal),
-            _ => bail!("relay returned an unexpected durable reviewer submission response"),
-        }
-    }
-
-    pub async fn reviewer_receipt(
-        &mut self,
-        role: Option<&str>,
-        request: ReviewerRequest,
-    ) -> Result<RelayResponsePayload> {
-        let request = self.reviewer_request(role, request)?;
-        self.call(request).await
-    }
-
-    pub async fn read_lane_dispatches(
-        &mut self,
-    ) -> Result<Vec<mj_core::relay::ReviewerLaneDispatch>> {
-        anyhow::ensure!(
-            self.protocol_version >= mj_core::relay::MIN_DURABLE_REVIEW_DISPATCH_PROTOCOL,
-            "worker must be upgraded before durable specialist dispatch is available"
-        );
-        let request = self.reviewer_request(None, ReviewerRequest::ReadLaneDispatches)?;
-        match self.call(request).await? {
-            RelayResponsePayload::PendingLaneDispatches { dispatches } => Ok(dispatches),
-            _ => bail!("relay returned an unexpected durable lane dispatch response"),
-        }
-    }
-
-    pub async fn ack_lane_dispatches(&mut self, ids: Vec<String>) -> Result<()> {
-        let request = self.reviewer_request(None, ReviewerRequest::AckLaneDispatches { ids })?;
-        match self.call(request).await? {
-            RelayResponsePayload::LaneDispatchesAcknowledged => Ok(()),
-            _ => bail!("relay returned an unexpected lane dispatch acknowledgement"),
-        }
-    }
-
     /// Wraps a reviewer action, refusing it on a worker too old to know what a
     /// reviewer is rather than sending a method it would reject as unknown.
     pub(super) fn reviewer_request(

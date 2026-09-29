@@ -3,7 +3,7 @@ use super::*;
 /// A handle on the review host. Cheap to clone; every method is a message.
 #[derive(Clone)]
 pub struct TurnReviewHost {
-    pub(super) events: mpsc::Sender<HostEvent>,
+    pub(super) events: mpsc::UnboundedSender<HostEvent>,
     pub(super) shared: Arc<HostShared>,
 }
 
@@ -12,10 +12,6 @@ pub(super) struct HostShared {
     pub(super) views: Mutex<BTreeMap<String, RuntimeReviewView>>,
     pub(super) changed: Arc<dyn Fn() + Send + Sync>,
     pub(super) shutdown: tokio::sync::OnceCell<Result<(), String>>,
-    pub(super) observations: Mutex<super::observations::Observations>,
-    pub(super) observation_ready: tokio::sync::Notify,
-    pub(super) stop_delivery: tokio_util::sync::CancellationToken,
-    pub(super) initialized: tokio::sync::watch::Sender<Option<Result<(), String>>>,
 }
 
 impl std::fmt::Debug for TurnReviewHost {
@@ -68,16 +64,12 @@ impl TurnReviewHost {
         environment: Arc<dyn ReviewEnvironment>,
         changed: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
-        let (events, receiver) = mpsc::channel(256);
+        let (events, receiver) = mpsc::unbounded_channel();
         let (persistence, persistence_receiver) = mpsc::unbounded_channel();
         let shared = Arc::new(HostShared {
             views: Mutex::default(),
             changed,
             shutdown: tokio::sync::OnceCell::new(),
-            observations: Mutex::default(),
-            observation_ready: tokio::sync::Notify::new(),
-            stop_delivery: tokio_util::sync::CancellationToken::new(),
-            initialized: tokio::sync::watch::channel(None).0,
         });
         let host = Self {
             events: events.clone(),
@@ -87,12 +79,12 @@ impl TurnReviewHost {
             environment.clone(),
             events.clone(),
             persistence_receiver,
-            shared.stop_delivery.clone(),
         ));
-        // Discover durable owners before any new review writes. Daemon startup
-        // waits for this discovery to install holds before accepting prompts.
+        // The restart sweep is the first operation in the same FIFO lane that
+        // records new active reviews, so it cannot clear a review that opened
+        // while the sweep was still running.
         persistence
-            .send(PersistenceRequest::DiscoverOwned)
+            .send(PersistenceRequest::SweepInterrupted)
             .expect("new review persistence lane accepts its initial sweep");
         tokio::spawn(host_loop(
             HostState {
@@ -107,37 +99,16 @@ impl TurnReviewHost {
                 preparing: BTreeSet::new(),
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
-
+                awaiting_forward_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
                 preparation_cancellation: BTreeMap::new(),
                 recovery_candidates: BTreeSet::new(),
                 recovery_in_flight: BTreeSet::new(),
-                dirty: BTreeSet::new(),
-                checkpointing: BTreeMap::new(),
-                next_checkpoint_revision: 0,
-                persistence_errors: BTreeMap::new(),
-                start_replies: BTreeMap::new(),
-                resolve_replies: BTreeMap::new(),
             },
             receiver,
         ));
         host
-    }
-
-    /// Wait only for durable ownership discovery and prompt holds, never for
-    /// a worker role or its running turn.
-    pub async fn ready(&self) -> Result<(), String> {
-        let mut initialized = self.shared.initialized.subscribe();
-        loop {
-            if let Some(result) = initialized.borrow_and_update().clone() {
-                return result;
-            }
-            initialized
-                .changed()
-                .await
-                .map_err(|_| "review initialization stopped".to_owned())?;
-        }
     }
 
     /// Reports one session's latest view. This is the trigger's only input.
@@ -145,21 +116,44 @@ impl TurnReviewHost {
     /// this from its reconcile so a stopped or destroyed session's transcript is
     /// released rather than retained in `sessions` forever.
     pub fn retain_sessions(&self, live: std::collections::BTreeSet<String>) {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(live);
-        self.shared.observation_ready.notify_one();
+        let _ = self.events.send(HostEvent::Retain { live });
     }
 
     pub fn observe(&self, session_id: &str, view: &ManagedSessionView) {
-        self.shared
-            .observations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .observe(session_id, view);
-        self.shared.observation_ready.notify_one();
+        // Running -> Idle is an edge, not a level: the session manager
+        // suppresses unchanged views, so dropping one here can lose an
+        // automatic review permanently. An unbounded hand-off keeps the
+        // daemon's update loop nonblocking without dropping that edge.
+        let _ = self.events.send(HostEvent::View {
+            session_id: session_id.to_owned(),
+            snapshot: view
+                .snapshot
+                .as_ref()
+                .map(|snapshot| Box::new(snapshot.materialized.clone())),
+            prompt_driven: view.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .operational
+                    .active_prompt
+                    .as_ref()
+                    .is_some_and(|prompt| {
+                        let user_id = format!("user:{}", prompt.command_id);
+                        !snapshot
+                            .materialized
+                            .transcript
+                            .iter()
+                            .find(|item| item.stable_id == user_id)
+                            .is_some_and(|item| match &item.body {
+                                mj_core::state::TranscriptBody::User { content } => matches!(
+                                    mj_core::acp::context_command_text(
+                                        &mj_core::transcript::materialized_content_text(content)
+                                    ),
+                                    Some((mj_core::acp::ContextCommand::Compact, _))
+                                ),
+                                _ => false,
+                            })
+                    })
+            }),
+        });
     }
 
     /// Reviews the turn that just finished, on request.
@@ -171,7 +165,6 @@ impl TurnReviewHost {
                 manual,
                 reply: Some(reply),
             })
-            .await
             .map_err(|_| StartRefusal("the review host stopped".to_owned()))?;
         answer
             .await
@@ -187,7 +180,6 @@ impl TurnReviewHost {
                 resolution,
                 reply,
             })
-            .await
             .map_err(|_| "the review host stopped".to_owned())?;
         answer
             .await
@@ -204,7 +196,6 @@ impl TurnReviewHost {
                 let (reply, answer) = oneshot::channel();
                 self.events
                     .send(HostEvent::Shutdown { reply })
-                    .await
                     .map_err(|_| "the review host stopped".to_owned())?;
                 answer
                     .await

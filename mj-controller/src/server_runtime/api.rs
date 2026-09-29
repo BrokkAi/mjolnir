@@ -117,7 +117,6 @@ pub trait ExportRuntime: Send + Sync {
         _session_id: String,
         _parent: String,
         _request: String,
-        _expected_incarnation: String,
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async { anyhow::bail!("durable sub-agent close admission is unavailable") })
     }
@@ -272,17 +271,9 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
         parent: String,
         request: String,
-        expected_incarnation: String,
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
-            RuntimeState::close_subagent_request(
-                &self,
-                session_id,
-                parent,
-                request,
-                expected_incarnation,
-            )
-            .await
+            RuntimeState::close_subagent_request(&self, session_id, parent, request).await
         })
     }
 
@@ -500,7 +491,6 @@ impl ApiBackend {
                             request,
                             turn_target,
                             spawn: None,
-                            close_incarnation: None,
                         },
                     )
                 }
@@ -526,39 +516,6 @@ impl ApiBackend {
         })
         .await?;
         Ok(result)
-    }
-
-    pub(crate) async fn release_delegation_receipt(
-        &self,
-        request: &mj_core::subagent::SubagentToolRequest,
-    ) -> Result<()> {
-        use mj_core::subagent::SubagentToolAction;
-        let (child, prefix) = match &request.action {
-            SubagentToolAction::SendInput {
-                child_session_id, ..
-            } => (child_session_id, "subagent-input"),
-            SubagentToolAction::InterruptAgent { child_session_id } => {
-                (child_session_id, "subagent-interrupt")
-            }
-            _ => return Ok(()),
-        };
-        if self.exports.session_record(child).is_none() {
-            return Ok(());
-        }
-        let result = async {
-            let handle = self
-                .session_handle(child.clone())
-                .await?
-                .context("waiting for delegation receipt owner")?;
-            handle
-                .release_command_receipt(format!("{prefix}-{}", request.request_id))
-                .await?;
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        result.context(
-            "delegation result is durable; retrying receipt release without repeating the effect",
-        )
     }
 
     #[cfg(test)]
@@ -1026,7 +983,7 @@ impl ApiBackend {
                 };
                 let handle = handle.context("interrupt target worker is unavailable")?;
                 let result = handle
-                    .submit_durable(
+                    .submit(
                         format!("subagent-interrupt-{}", request.request_id),
                         RelayCommand::CancelTurnFor {
                             active_prompt_id: target.clone(),
@@ -1060,15 +1017,12 @@ impl ApiBackend {
             SubagentToolAction::CloseAgent { child_session_id } => {
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
-                if let Some(prepared) = prepared {
+                if prepared.is_some() {
                     Arc::clone(&self.exports)
                         .close_subagent_request(
                             child_session_id.clone(),
                             parent_session_id.to_owned(),
                             request.request_id.clone(),
-                            prepared.close_incarnation.clone().context(
-                                "child incarnation was unavailable at request preparation",
-                            )?,
                         )
                         .await?;
                 } else {
@@ -1288,15 +1242,6 @@ impl ApiBackend {
             move || crate::database::load_subagent_report(&child_id)
         })
         .await?;
-        if let Some(reminder) = &report.reminder {
-            // The durable report is the receipt-release outbox. A crash after
-            // recording it retries cleanup before marking this turn noticed.
-            self.sessions
-                .session(child_session_id.to_owned())
-                .await?
-                .release_command_receipt(reminder.command_id.clone())
-                .await?;
-        }
         let state = mj_core::subagent::report_state(
             handback_tool,
             &report,
@@ -1319,7 +1264,7 @@ impl ApiBackend {
                 .await
                 .with_context(|| format!("session {child_session_id} is not running"))?;
             handle
-                .submit_durable(
+                .submit(
                     command_id.clone(),
                     RelayCommand::HandbackReminder {
                         completed_command_id: last_turn.command_id.clone(),
@@ -1342,11 +1287,6 @@ impl ApiBackend {
                     crate::database::record_handback_reminder(&child_id, &reminder)
                 })
                 .await?;
-                self.sessions
-                    .session(child_session_id.to_owned())
-                    .await?
-                    .release_command_receipt(command_id)
-                    .await?;
                 Ok(true)
             }
             Err(error) => {

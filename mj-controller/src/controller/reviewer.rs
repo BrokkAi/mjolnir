@@ -92,7 +92,7 @@ impl Controller {
         let mut servers = mcp_servers.to_vec();
         if dispatch_tool {
             let (_, worker_root) = self.worker_placement(session_id)?;
-            servers.push(review_dispatch_server(&worker_root, generation));
+            servers.push(review_dispatch_server(&worker_root));
         }
         self.stage_reviewer_profile_controlled(
             session_id,
@@ -250,7 +250,7 @@ fn configure_staged_review_mcp(
 /// The review supervisor's dispatch tool, as it runs inside the container:
 /// this worker's own binary in `review-mcp` mode, talking to the socket the
 /// worker serves in its reviewer directory.
-fn review_dispatch_server(worker_root: &str, generation: u64) -> ReviewMcpServer {
+fn review_dispatch_server(worker_root: &str) -> ReviewMcpServer {
     let socket = format!(
         "{worker_root}/{}/{}",
         REVIEWER_DIR,
@@ -264,8 +264,6 @@ fn review_dispatch_server(worker_root: &str, generation: u64) -> ReviewMcpServer
             "review-mcp".to_owned(),
             "--socket".to_owned(),
             socket,
-            "--generation".to_owned(),
-            generation.to_string(),
         ],
     }
 }
@@ -693,7 +691,7 @@ mod tests {
         );
         let mut servers =
             mj_review::bifrost::review_mcp_servers(&[directory.path().to_owned()], "review");
-        servers.push(review_dispatch_server("/worker", 1));
+        servers.push(review_dispatch_server("/worker"));
         for profile in ["codex", "claude"] {
             let executor = RecordingExecutor::new();
             let config = controller

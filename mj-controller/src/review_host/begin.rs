@@ -7,7 +7,6 @@ impl HostState {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
         prompt_driven: bool,
-        completed_while_coalescing: bool,
     ) {
         let execution = snapshot
             .as_ref()
@@ -31,11 +30,10 @@ impl HostState {
         // A turn the harness starts on its own also runs and then goes idle.
         // Reviewing that is a separate decision, so the edge that arms a
         // review is the end of a turn that answered a prompt.
-        let finished_turn = completed_while_coalescing
-            || previous.as_ref().is_some_and(|watch| {
-                watch.prompt_driven
-                    && matches!(watch.execution, MaterializedExecutionState::Running { .. })
-            }) && matches!(execution, MaterializedExecutionState::Idle);
+        let finished_turn = previous.as_ref().is_some_and(|watch| {
+            watch.prompt_driven
+                && matches!(watch.execution, MaterializedExecutionState::Running { .. })
+        }) && matches!(execution, MaterializedExecutionState::Idle);
         if !finished_turn || !(self.config)().enabled {
             return;
         }
@@ -93,14 +91,12 @@ impl HostState {
                 cancelled,
             )
             .await;
-            let _ = events
-                .send(HostEvent::Prepared {
-                    session_id: prepare_session,
-                    manual,
-                    reply,
-                    prepared,
-                })
-                .await;
+            let _ = events.send(HostEvent::Prepared {
+                session_id: prepare_session,
+                manual,
+                reply,
+                prepared,
+            });
         });
     }
 
@@ -134,12 +130,10 @@ impl HostState {
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
             let prepared = prepare_recovery(&control, &environment, &session_id).await;
-            let _ = events
-                .send(HostEvent::RecoveryPrepared {
-                    session_id,
-                    prepared,
-                })
-                .await;
+            let _ = events.send(HostEvent::RecoveryPrepared {
+                session_id,
+                prepared,
+            });
         });
     }
 
@@ -150,29 +144,6 @@ impl HostState {
     ) {
         self.recovery_in_flight.remove(&session_id);
         match prepared {
-            Ok(Some(prepared)) if prepared.state.orchestration.is_some() => {
-                match ReviewSlot::restore(prepared.state) {
-                    Ok(slot) => {
-                        self.recovery_candidates.remove(&session_id);
-                        self.next_epoch = self.next_epoch.max(slot.epoch);
-                        let roles = slot.driver.active_roles();
-                        if matches!(slot.driver.verdict(), Some(ReviewVerdict::Failed { .. })) {
-                            release_prompts(&session_id);
-                        }
-                        self.reviews.insert(session_id.clone(), slot);
-                        self.dispatch_outbox(&session_id);
-                        for role in roles {
-                            self.poll_role(&session_id, &role, Duration::ZERO);
-                        }
-                        self.publish(&session_id);
-                    }
-                    Err(error) => {
-                        tracing::error!(%session_id, %error, "cannot restore review orchestration");
-                        // Keep the durable owner and prompt hold; do not turn a
-                        // corrupt checkpoint into permission to start new work.
-                    }
-                }
-            }
             Ok(Some(prepared)) => {
                 self.recovery_candidates.remove(&session_id);
                 self.preparing.insert(session_id.clone());
@@ -187,15 +158,10 @@ impl HostState {
                 );
             }
             Err(error) => {
-                // The durable review still owns prompt admission. A failed
-                // attachment does not release that ownership or drop its work.
-                tracing::warn!(session_id = %session_id, %error, "could not reattach durable review");
-                self.recovery_in_flight.insert(session_id.clone());
-                let events = self.events.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let _ = events.send(HostEvent::RetryRecovery { session_id }).await;
-                });
+                // Keep the candidate so a later connected/idle observation can
+                // retry. No success notice is emitted for an unknown outcome.
+                tracing::warn!(session_id = %session_id, %error, "could not reconcile an interrupted review handoff");
+                release_prompts(&session_id);
             }
         }
     }

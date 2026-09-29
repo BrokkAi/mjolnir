@@ -52,11 +52,9 @@ impl HostState {
                 prepared,
             },
         );
-        if let Err(error) = self.persist(
-            session_id.clone(),
-            state,
-            Some(PersistenceCompletion::Open { epoch }),
-        ) {
+        if let Err(error) =
+            self.persist(session_id.clone(), state, Some(PersistenceCompletion::Open))
+        {
             let pending = self
                 .pending_open
                 .remove(&session_id)
@@ -85,19 +83,8 @@ impl HostState {
         result: Result<(), String>,
     ) {
         match completion {
-            PersistenceCompletion::Checkpoint { epoch, revision } => {
-                self.checkpoint_saved(session_id, epoch, revision, result)
-            }
-            PersistenceCompletion::Open { epoch } => {
-                if self
-                    .pending_open
-                    .get(&session_id)
-                    .map(|pending| pending.epoch)
-                    != Some(epoch)
-                {
-                    return;
-                }
-                let Some(mut pending) = self.pending_open.remove(&session_id) else {
+            PersistenceCompletion::Open => {
+                let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
                 };
                 self.preparing.remove(&session_id);
@@ -105,6 +92,20 @@ impl HostState {
                     .preparation_cancellation
                     .remove(&session_id)
                     .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+                if cancelled && result.is_ok() {
+                    let mut state = pending.prepared.state;
+                    state.active = None;
+                    if let Err(error) = self.persist(session_id.clone(), state, None) {
+                        tracing::warn!(%session_id, %error, "could not clear cancelled review preparation");
+                    }
+                    release_prompts(&session_id);
+                    self.publish(&session_id);
+                    answer(
+                        pending.reply,
+                        Err(StartRefusal("review preparation cancelled".into())),
+                    );
+                    return;
+                }
                 if let Err(error) = result {
                     if pending.prepared.resume_forward.is_some() {
                         self.recovery_candidates.insert(session_id.clone());
@@ -129,7 +130,7 @@ impl HostState {
                         "automatic"
                     },
                 );
-                let (mut driver, mut requests) =
+                let (driver, requests) =
                     if let Some(pending) = pending.prepared.resume_forward.clone() {
                         let command_id = pending.command_id.clone();
                         let (mut driver, _) = TurnReviewDriver::resume_forward(seed, pending);
@@ -148,22 +149,6 @@ impl HostState {
                             None => (driver, requests),
                         }
                     };
-                if cancelled {
-                    // Fresh preparation has emitted no effect. Legacy recovered
-                    // handoffs may already be accepted and must reconcile their
-                    // original command identity with the worker below.
-                    if pending.prepared.resume_forward.is_none() {
-                        requests = driver.cancel();
-                        if !requests.contains(&ReviewRequest::Close) {
-                            requests.push(ReviewRequest::Close);
-                        }
-                        pending.prepared.state.pending_forward = None;
-                    }
-                    answer(
-                        pending.reply.take(),
-                        Err(StartRefusal("review preparation cancelled".into())),
-                    );
-                }
                 self.reviews.insert(
                     session_id.clone(),
                     ReviewSlot {
@@ -176,51 +161,35 @@ impl HostState {
                         // every fresh role. Zero remains the explicit
                         // generation for a role that resumes in place.
                         generation: 0,
-                        role_generations: BTreeMap::new(),
-                        outbox: Vec::new(),
-                        receipts: BTreeMap::new(),
-                        running_effects: BTreeSet::new(),
-                        delivery_errors: BTreeMap::new(),
-                        polling_roles: BTreeSet::new(),
-                        reading_dispatches: false,
-                        pending_supervisor: None,
-                        dispatch_after_completion: false,
-                        accepted_dispatches: BTreeSet::new(),
-                        pending_dispatch_acks: BTreeSet::new(),
                     },
                 );
-                if let Some(reply) = pending.reply {
-                    self.start_replies.insert(session_id.clone(), reply);
+                answer(pending.reply, Ok(()));
+                self.run(&session_id, requests);
+            }
+            PersistenceCompletion::Forward => {
+                let Some(requests) = self.awaiting_forward_persistence.remove(&session_id) else {
+                    return;
+                };
+                if let Err(error) = result {
+                    if let Some(slot) = self.reviews.get_mut(&session_id) {
+                        slot.driver.forward_failed(format!(
+                            "the handoff could not be recorded durably: {error}"
+                        ));
+                    }
+                    self.publish(&session_id);
+                    return;
                 }
                 self.run(&session_id, requests);
-                if cancelled && let Some(slot) = self.reviews.get_mut(&session_id) {
-                    for receipt in slot.receipts.values_mut() {
-                        if receipt.phase == super::durable::ReceiptPhase::Waiting {
-                            receipt.phase = super::durable::ReceiptPhase::Cancel;
-                        }
-                    }
-                }
             }
-            PersistenceCompletion::Close { epoch } => {
-                if self.reviews.get(&session_id).map(|slot| slot.epoch) != Some(epoch)
-                    || !self.closing.contains(&session_id)
-                {
-                    return;
-                }
-                if let Err(error) = result {
-                    self.persistence_errors.insert(session_id.clone(), error);
-                    self.publish(&session_id);
-                    let events = self.events.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        let _ = events
-                            .send(HostEvent::RetryClose { session_id, epoch })
-                            .await;
-                    });
-                    return;
-                }
+            PersistenceCompletion::Close => {
                 self.closing.remove(&session_id);
-                self.persistence_errors.remove(&session_id);
+                if let Err(error) = result {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        %error,
+                        "could not clear the active review marker"
+                    );
+                }
                 let notice = self.reviews.get(&session_id).and_then(|slot| {
                     resolution_notice(slot.driver.phase(), slot.driver.last_verdict())
                 });

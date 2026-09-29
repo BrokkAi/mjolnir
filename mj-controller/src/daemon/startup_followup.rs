@@ -123,58 +123,32 @@ pub(crate) async fn configure_startup(
             .await
             .context("session did not become ready for startup configuration")??;
     }
-    // A retained acceptance owns the old decision, even when the current
-    // model advertises different choices after reconnecting.
-    let receipt = handle.command_receipt(command_id.to_owned()).await?;
-    if receipt.is_none() {
-        let snapshot = handle
-            .view()
-            .snapshot
-            .context("session configuration is unavailable")?;
-        let offered =
-            mj_core::acp::session_config_choices(&snapshot.operational.config_options, key)
-                .iter()
-                .any(|choice| choice.value == value);
-        if !offered {
-            if optional {
-                return Ok(None);
-            }
-            return Err(
-                StartupRejected(format!("this agent does not offer {value} as a {key}")).into(),
-            );
+    let snapshot = handle
+        .view()
+        .snapshot
+        .context("session configuration is unavailable")?;
+    let offered = mj_core::acp::session_config_choices(&snapshot.operational.config_options, key)
+        .iter()
+        .any(|choice| choice.value == value);
+    if !offered {
+        if optional {
+            return Ok(None);
         }
-    }
-    let ordinal = handle
-        .submit_durable(
-            command_id.to_owned(),
-            RelayCommand::SetConfig {
-                key: key.to_owned(),
-                value: value.to_owned(),
-            },
-        )
-        .await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Some(receipt) = handle.command_receipt(command_id.to_owned()).await? {
-            if let Some(error) = receipt.failure {
-                if optional {
-                    tracing::warn!(key, value, %error, "optional startup configuration was rejected");
-                    return Ok(Some(ordinal));
-                }
-                return Err(StartupRejected(error).into());
-            }
-            if matches!(
-                receipt.outcome,
-                Some(mj_core::relay::RelayCommandOutcome::Configured)
-            ) {
-                handle.sync_now().await?;
-                return Ok(Some(ordinal));
-            }
-        }
-        ensure!(
-            tokio::time::Instant::now() < deadline,
-            "startup configuration did not finish within 60 seconds"
+        return Err(
+            StartupRejected(format!("this agent does not offer {value} as a {key}")).into(),
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The step's stable command id makes a retry after a daemon restart a
+    // duplicate the worker answers with the original acceptance.
+    match handle
+        .set_config_with_id(command_id.to_owned(), key.to_owned(), value.to_owned())
+        .await
+    {
+        Ok(ordinal) => Ok(Some(ordinal)),
+        Err(error) if optional => {
+            tracing::warn!(key, value, %error, "optional startup configuration was rejected");
+            Ok(None)
+        }
+        Err(error) => Err(StartupRejected(format!("{error:#}")).into()),
     }
 }

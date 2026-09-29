@@ -9,8 +9,6 @@ pub(crate) struct PreparedDelegation {
     pub turn_target: Option<String>,
     #[serde(default)]
     pub spawn: Option<PreparedSpawn>,
-    #[serde(default)]
-    pub close_incarnation: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -56,21 +54,10 @@ pub(crate) fn load_delegation(
 
 pub(crate) fn prepare_delegation(
     parent: String,
-    mut prepared: PreparedDelegation,
+    prepared: PreparedDelegation,
 ) -> Result<PreparedDelegation> {
     submit_database_write("prepare delegation", move |connection| {
         let transaction = connection.transaction()?;
-        if let mj_core::subagent::SubagentToolAction::CloseAgent { child_session_id } =
-            &prepared.request.action
-        {
-            prepared.close_incarnation = transaction
-                .query_row(
-                    "SELECT identity FROM session_incarnations WHERE session_id=?1",
-                    [child_session_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-        }
         transaction.execute("INSERT INTO delegation_effects(parent_session_id,request_id,phase,prepared_json,result_json) VALUES (?1,?2,'prepared',?3,NULL) ON CONFLICT(parent_session_id,request_id) DO NOTHING", params![parent, prepared.request.request_id, serde_json::to_string(&prepared)?])?;
         let stored: String = transaction.query_row("SELECT prepared_json FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2", params![parent, prepared.request.request_id], |row| row.get(0))?;
         transaction.commit()?;
@@ -87,14 +74,7 @@ pub(crate) fn delegation_delivering(parent: String, request: String) -> Result<(
 
 pub(crate) fn record_delegation_result(parent: String, result: SubagentToolResult) -> Result<()> {
     submit_database_write("record delegation result", move |connection| {
-        let prepared: String = connection.query_row("SELECT prepared_json FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2", params![parent, result.request_id], |row| row.get(0))?;
-        let prepared: PreparedDelegation = serde_json::from_str(&prepared)?;
-        let receipt_pending = matches!(
-            prepared.request.action,
-            mj_core::subagent::SubagentToolAction::SendInput { .. }
-                | mj_core::subagent::SubagentToolAction::InterruptAgent { .. }
-        );
-        let changed = connection.execute("UPDATE delegation_effects SET phase='result', result_json=?3, receipt_pending=?4 WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NULL", params![parent, result.request_id, serde_json::to_string(&result)?, receipt_pending])?;
+        let changed = connection.execute("UPDATE delegation_effects SET phase='result', result_json=?3 WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NULL", params![parent, result.request_id, serde_json::to_string(&result)?])?;
         ensure!(
             changed == 1,
             "delegation result has no pending durable effect"
@@ -103,34 +83,23 @@ pub(crate) fn record_delegation_result(parent: String, result: SubagentToolResul
     })
 }
 
+/// The parent has its result, so the record has done its one job: making a
+/// replayed request return the same outcome instead of running again.
 pub(crate) fn acknowledge_delegation(parent: String, request: String) -> Result<()> {
     submit_database_write("acknowledge delegation", move |connection| {
-        connection.execute("UPDATE delegation_effects SET phase='acknowledged' WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NOT NULL", params![parent, request])?;
-        // Retain the receipt: a stale worker observation must not resurrect effects.
+        connection.execute("DELETE FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NOT NULL", params![parent, request])?;
         Ok(())
     })
 }
 
-/// A bounded, indexed cursor over release work; failed owners do not starve later rows.
-pub(crate) fn delegation_receipts_after(
-    after: Option<(String, String)>,
-) -> Result<Vec<(String, PreparedDelegation)>> {
-    let connection = open_reader(&database_path())?;
-    let (parent, request) = after.unwrap_or_default();
-    let mut query = connection.prepare("SELECT parent_session_id, prepared_json FROM delegation_effects WHERE receipt_pending=1 AND (parent_session_id,request_id) > (?1,?2) ORDER BY parent_session_id,request_id LIMIT 32")?;
-    let rows = query.query_map(params![parent, request], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    rows.map(|row| {
-        let (parent, prepared) = row?;
-        Ok((parent, serde_json::from_str(&prepared)?))
-    })
-    .collect()
-}
-
-pub(crate) fn delegation_receipt_released(parent: String, request: String) -> Result<()> {
-    submit_database_write("release delegation receipt", move |connection| {
-        connection.execute("UPDATE delegation_effects SET receipt_pending=0 WHERE parent_session_id=?1 AND request_id=?2", params![parent, request])?;
+/// Acknowledged records from builds that kept them after the parent had
+/// its result. Nothing reads them; run once at daemon start.
+pub(crate) fn prune_acknowledged_delegations() -> Result<()> {
+    submit_database_write("prune acknowledged delegations", move |connection| {
+        connection.execute(
+            "DELETE FROM delegation_effects WHERE phase='acknowledged'",
+            [],
+        )?;
         Ok(())
     })
 }
@@ -167,7 +136,6 @@ mod tests {
             },
             turn_target: Some("original-turn".into()),
             spawn: None,
-            close_incarnation: None,
         };
         prepare_delegation("parent".into(), prepared.clone()).unwrap();
         delegation_delivering("parent".into(), "request".into()).unwrap();
@@ -184,44 +152,22 @@ mod tests {
             message: "original result".into(),
         };
         record_delegation_result("parent".into(), result).unwrap();
-        acknowledge_delegation("parent".into(), "request".into()).unwrap();
         let (restored, result) = load_delegation("parent", "request").unwrap().unwrap();
         assert_eq!(restored.turn_target.as_deref(), Some("original-turn"));
         assert_eq!(result.unwrap().message, "original result");
-        let pending = delegation_receipts_after(None).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].1.turn_target.as_deref(), Some("original-turn"));
-        delegation_receipt_released("parent".into(), "request".into()).unwrap();
-        assert!(delegation_receipts_after(None).unwrap().is_empty());
-        // Cleanup removes only the worker receipt lease, never our durable result.
-        assert!(
-            load_delegation("parent", "request")
-                .unwrap()
-                .unwrap()
-                .1
-                .is_some()
-        );
-        for n in 0..40 {
-            let parent = format!("parent-{n:02}");
-            prepare_delegation(parent.clone(), restored.clone()).unwrap();
-            record_delegation_result(
-                parent,
-                SubagentToolResult {
-                    request_id: "request".into(),
-                    completed_at_ms: 2,
-                    is_error: false,
-                    message: "done".into(),
-                },
-            )
-            .unwrap();
-        }
-        let first = delegation_receipts_after(None).unwrap();
-        assert_eq!(first.len(), 32);
-        let last = first.last().unwrap();
-        let remaining =
-            delegation_receipts_after(Some((last.0.clone(), last.1.request.request_id.clone())))
-                .unwrap();
-        assert_eq!(remaining.len(), 8);
-        assert!(remaining.iter().all(|(parent, _)| parent > &last.0));
+        // Acknowledgement is the end of the record's life: a later replay of
+        // the same request id is a new request, and the table does not grow.
+        acknowledge_delegation("parent".into(), "request".into()).unwrap();
+        assert!(load_delegation("parent", "request").unwrap().is_none());
+
+        // A row an older build left acknowledged is pruned at start.
+        prepare_delegation("parent".into(), restored.clone()).unwrap();
+        submit_database_write("mark legacy acknowledged", |connection| {
+            connection.execute("UPDATE delegation_effects SET phase='acknowledged'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        prune_acknowledged_delegations().unwrap();
+        assert!(load_delegation("parent", "request").unwrap().is_none());
     }
 }

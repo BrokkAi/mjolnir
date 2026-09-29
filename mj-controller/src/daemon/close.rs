@@ -351,15 +351,14 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// A replay targets the child incarnation selected when the durable effect
-    /// was prepared. Admission is held across the comparison and all close
-    /// effects, so Resume cannot replace that incarnation between them.
+    /// A parent's close request, admitted once per (parent, request) so a
+    /// replay after a daemon restart joins the close already in flight
+    /// instead of starting another.
     pub async fn close_subagent_request(
         self: &Arc<Self>,
         session_id: String,
         parent_session_id: String,
         request_id: String,
-        expected_incarnation: String,
     ) -> Result<()> {
         let key = serde_json::to_string(&(parent_session_id, request_id))?;
         let result = self.start_or_join_lifecycle_with_key(
@@ -368,26 +367,14 @@ impl RuntimeState {
             None,
             Some(key),
             move |state, session_id, cancelled| async move {
-                let current = blocking({
-                    let session_id = session_id.clone();
-                    move || crate::database::session_incarnation(&session_id)
-                })
-                .await?;
-                if current.as_deref() != Some(expected_incarnation.as_str()) {
-                    return Ok(DaemonLifecycleResult::Superseded);
-                }
                 state.suspend_admitted(session_id, cancelled, true).await
             },
         )?;
         let completed = result.clone();
         let outcome = Self::wait_lifecycle_result(result).await;
         self.remove_completed_lifecycle(&completed);
-        match outcome? {
-            DaemonLifecycleResult::Superseded => bail!(
-                "close request belongs to an earlier child incarnation; the current session was left running"
-            ),
-            _ => Ok(()),
-        }
+        outcome?;
+        Ok(())
     }
 
     async fn close_requested_session_with_ack(
@@ -585,9 +572,7 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match outcome? {
             DaemonLifecycleResult::Done => Ok(()),
-            DaemonLifecycleResult::Move(_)
-            | DaemonLifecycleResult::Park(_)
-            | DaemonLifecycleResult::Superseded => {
+            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
                 unreachable!("cleanup cannot return a move outcome")
             }
             DaemonLifecycleResult::DeferredCleanup => {

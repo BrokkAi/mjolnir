@@ -65,16 +65,9 @@ impl HostState {
         let control = self.control.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
-            let retry_backoff = matches!(
-                action,
-                ReviewerAction::AckLaneDispatches { .. } | ReviewerAction::ReadLaneDispatches
-            );
             let outcome = reviewer_action(&control, &session_id, role, action).await;
-            if retry_backoff && outcome.is_err() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
             if let Some(event) = into_event(outcome) {
-                let _ = events.send(event).await;
+                let _ = events.send(event);
             }
         });
     }
@@ -89,13 +82,7 @@ impl HostState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let changed = match self.reviews.get(session_id) {
             Some(slot) => {
-                let mut next = slot.view(session_id);
-                if let Some(error) = slot.delivery_errors.values().next() {
-                    next.status = format!("Review delivery is being reconciled: {error}");
-                }
-                if let Some(error) = self.persistence_errors.get(session_id) {
-                    next.status = format!("Review is waiting for durable storage: {error}");
-                }
+                let next = slot.view(session_id);
                 if views.get(session_id) == Some(&next) {
                     false
                 } else {
@@ -125,17 +112,6 @@ impl HostState {
     }
 
     pub(super) async fn shutdown(&mut self) -> Result<(), String> {
-        self.shared.stop_delivery.cancel();
-        for reply in std::mem::take(&mut self.start_replies).into_values() {
-            let _ = reply.send(Err(StartRefusal(
-                "daemon shutdown interrupted review acknowledgement".into(),
-            )));
-        }
-        for reply in std::mem::take(&mut self.resolve_replies).into_values() {
-            let _ = reply.send(Err(
-                "daemon shutdown interrupted review acknowledgement".into()
-            ));
-        }
         let session_ids = self
             .preparing
             .iter()
@@ -156,9 +132,7 @@ impl HostState {
         // observe EOF.
         let lane = self.persistence.take();
         for (session_id, slot) in &mut self.reviews {
-            if !self.closing.contains(session_id) {
-                slot.state.orchestration = Some(slot.checkpoint()?);
-            }
+            slot.state.active = None;
             let queued = lane
                 .as_ref()
                 .ok_or_else(|| "the review persistence lane stopped".to_owned())
@@ -187,10 +161,22 @@ impl HostState {
             self.publish(session_id);
         }
 
-        // Dropping the sender drains existing committed intent without clearing
-        // active reviews; replacement reconstructs it and reattaches the workers.
-        drop(lane);
-        let clear_result: Result<(), String> = Ok(());
+        let clear_result = match lane {
+            Some(lane) => {
+                let (reply, cleared) = oneshot::channel();
+                let sent = lane
+                    .send(PersistenceRequest::ClearActive { reply })
+                    .map_err(|_| "the review persistence lane stopped during shutdown".to_owned());
+                drop(lane);
+                match sent {
+                    Ok(()) => cleared.await.map_err(|_| {
+                        "the review persistence lane stopped before cleanup".to_owned()
+                    })?,
+                    Err(error) => Err(error),
+                }
+            }
+            None => Err("the review persistence lane already stopped".to_owned()),
+        };
         let task_result = match self.persistence_task.take() {
             Some(task) => task
                 .await

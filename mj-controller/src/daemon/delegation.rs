@@ -43,9 +43,12 @@ async fn run(
     cancellation: CancellationToken,
 ) -> Result<()> {
     let backend = policy.services.backend.clone();
-    let mut receipt_cleanup = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-        cleanup_receipts(backend.clone(), cancellation.clone()),
-    )));
+    // Housekeeping for stores written by builds that kept acknowledged rows.
+    if let Err(error) =
+        tokio::task::spawn_blocking(crate::database::prune_acknowledged_delegations).await?
+    {
+        tracing::warn!(%error, "could not prune acknowledged delegation records");
+    }
     let mut revisions = state.revisions();
     let mut dispatch = SubagentDispatch::default();
     let mut jobs = tokio::task::JoinSet::new();
@@ -132,12 +135,6 @@ async fn run(
         }
         tokio::select! {
             _ = cancellation.cancelled() => break,
-            ended = receipt_cleanup.as_mut().expect("cleanup is supervised until shutdown") => {
-                receipt_cleanup.take();
-                ended.context("delegation receipt cleanup panicked")??;
-                if cancellation.is_cancelled() { break; }
-                anyhow::bail!("delegation receipt cleanup stopped unexpectedly");
-            }
             update = updates.recv() => {
                 let Some((id, observation)) = update else { anyhow::bail!("delegation observation feed stopped") };
                 if let Some(observation) = observation {
@@ -205,14 +202,6 @@ async fn run(
         // Coalesced receives can be immediately ready without Tokio's channel budget.
         tokio::task::yield_now().await;
     }
-    if let Some(receipt_cleanup) = receipt_cleanup {
-        receipt_cleanup.abort();
-        if let Err(error) = receipt_cleanup.await
-            && !error.is_cancelled()
-        {
-            tracing::error!(%error, "delegation receipt cleanup failed during shutdown");
-        }
-    }
     jobs.abort_all();
     completions.abort_all();
     while let Some(result) = jobs.join_next().await {
@@ -230,44 +219,6 @@ async fn run(
         }
     }
     Ok(())
-}
-
-/// Receipt release is durable housekeeping, independent of parent result delivery.
-async fn cleanup_receipts(backend: Arc<ApiBackend>, cancellation: CancellationToken) -> Result<()> {
-    let mut cursor = None;
-    loop {
-        let after = cursor.take();
-        let rows =
-            tokio::task::spawn_blocking(move || crate::database::delegation_receipts_after(after))
-                .await??;
-        let mut releases = tokio::task::JoinSet::new();
-        for (parent, prepared) in rows {
-            cursor = Some((parent.clone(), prepared.request.request_id.clone()));
-            let backend = backend.clone();
-            releases.spawn(async move {
-                let id = prepared.request.request_id.clone();
-                let released = tokio::time::timeout(Duration::from_secs(10), backend.release_delegation_receipt(&prepared.request)).await;
-                match released {
-                    Ok(Ok(())) => {
-                        tokio::task::spawn_blocking(move || crate::database::delegation_receipt_released(parent, id)).await??;
-                    }
-                    Ok(Err(error)) => tracing::debug!(%parent, request_id=%id, %error, "retaining delegation receipt cleanup for retry"),
-                    Err(_) => tracing::debug!(%parent, request_id=%id, "delegation receipt cleanup timed out; retaining retry"),
-                }
-                Ok::<_, anyhow::Error>(())
-            });
-        }
-        while !releases.is_empty() {
-            tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
-                result = releases.join_next() => { result.context("receipt release task disappeared")???; }
-            }
-        }
-        tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-        }
-    }
 }
 
 async fn complete_child(

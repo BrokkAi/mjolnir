@@ -452,8 +452,6 @@ impl ActiveLifecycle {
 #[derive(Debug, Clone)]
 enum DaemonLifecycleResult {
     Done,
-    /// A durable effect addressed a previous resource incarnation.
-    Superseded,
     DeferredCleanup,
     Move(MoveOutcome),
     Park(crate::controller::ParkOutcome),

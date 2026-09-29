@@ -4018,7 +4018,6 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
             evidence: Default::default(),
         }),
         active: Some("{\"phase\":\"running\"}".to_string()),
-        orchestration: Some(serde_json::json!({"version":1})),
         pending_forward: Some(PendingForward {
             synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
             evidence: Default::default(),
@@ -4047,9 +4046,10 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
     assert_eq!(restored.pending_forward, state.pending_forward);
 }
 
-/// Discovery retains the active owner, its checkpoint, and its baseline.
+/// A review interrupted by a daemon restart is cancelled, not resumed, and the
+/// baseline it never advanced stays where it was.
 #[test]
-fn discovering_interrupted_reviews_preserves_the_owner_and_baseline() {
+fn clearing_interrupted_reviews_keeps_every_baseline() {
     use mj_core::review::driver::PendingForward;
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -4068,7 +4068,6 @@ fn discovering_interrupted_reviews_preserves_the_owner_and_baseline() {
             reviewed_through_ordinal: 42,
             prior_review: None,
             active: Some("{\"opened_at_ordinal\":42}".to_string()),
-            orchestration: Some(serde_json::json!({"version":1})),
             pending_forward: Some(PendingForward {
                 synthesis: "[P1] broken".to_string(),
                 evidence: Default::default(),
@@ -4087,21 +4086,16 @@ fn discovering_interrupted_reviews_preserves_the_owner_and_baseline() {
             reviewed_through_ordinal: 7,
             prior_review: None,
             active: None,
-            orchestration: None,
             pending_forward: None,
         },
     )
     .unwrap();
 
-    let interrupted = recoverable_turn_reviews_in(&database).unwrap();
+    let interrupted = clear_interrupted_turn_reviews_in(&database).unwrap();
     assert_eq!(interrupted, vec!["session-1".to_string()]);
 
     let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert!(restored.active.is_some());
-    assert_eq!(
-        restored.orchestration,
-        Some(serde_json::json!({"version":1}))
-    );
+    assert_eq!(restored.active, None);
     assert_eq!(
         restored.baselines, baselines,
         "the baseline is left alone, so the next review covers the same change"
@@ -4109,7 +4103,7 @@ fn discovering_interrupted_reviews_preserves_the_owner_and_baseline() {
     assert_eq!(restored.reviewed_through_ordinal, 42);
     assert!(restored.pending_forward.is_some());
     assert_eq!(
-        recoverable_turn_reviews_in(&database).unwrap(),
+        clear_interrupted_turn_reviews_in(&database).unwrap(),
         vec!["session-1".to_string()],
         "a pending handoff remains recoverable until its command is accepted"
     );
@@ -5539,6 +5533,17 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
         )
         .unwrap();
     assert!(floor >= 53, "builds predating parked sessions are refused");
+    let triggers: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        triggers, 0,
+        "generic error triggers are retired by migration 57"
+    );
     assert!(
         !connection
             .prepare("PRAGMA foreign_key_check")

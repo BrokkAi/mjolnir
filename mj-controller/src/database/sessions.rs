@@ -1,19 +1,5 @@
 use super::*;
 
-/// Identity of the execution lifetime selected by a durable lifecycle effect.
-/// The database rotates it when a stopped session starts a new lifetime.
-pub fn session_incarnation(session_id: &str) -> Result<Option<String>> {
-    let connection = open_reader(&database_path())?;
-    connection
-        .query_row(
-            "SELECT identity FROM session_incarnations WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
-}
-
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
@@ -1453,58 +1439,6 @@ pub(super) fn rebind_session_bundle_to(
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
-
-    #[test]
-    fn lifecycle_identity_survives_close_but_rotates_before_resume() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("incarnation.sqlite3");
-        let mut session = super::super::tests::session("incarnation", "project");
-        session.state = SessionState::Running;
-        save_session_to(&path, &session).unwrap();
-        let connection = open(&path).unwrap();
-        let identity = || {
-            connection
-                .query_row(
-                    "SELECT identity FROM session_incarnations WHERE session_id = ?1",
-                    [&session.id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap()
-        };
-        let original = identity();
-        for state in ["disconnected", "running", "closing", "stopped"] {
-            connection
-                .execute(
-                    "UPDATE sessions SET state = ?2 WHERE session_id = ?1",
-                    params![session.id, state],
-                )
-                .unwrap();
-            assert_eq!(
-                identity(),
-                original,
-                "close must keep its execution identity"
-            );
-        }
-        connection
-            .execute(
-                "UPDATE sessions SET state = 'provisioning' WHERE session_id = ?1",
-                [&session.id],
-            )
-            .unwrap();
-        let resumed = identity();
-        assert_ne!(resumed, original);
-        connection
-            .execute(
-                "UPDATE sessions SET state = 'running' WHERE session_id = ?1",
-                [&session.id],
-            )
-            .unwrap();
-        assert_eq!(
-            identity(),
-            resumed,
-            "publishing a resume keeps its admitted identity"
-        );
-    }
 
     #[test]
     fn resume_and_rollback_preserve_edits_committed_after_their_snapshot() {

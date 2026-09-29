@@ -113,37 +113,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         })
     }
 
-    fn submit_durable(
-        &self,
-        command_id: String,
-        command: RelayCommand,
-    ) -> mj_client::session::BoxFuture<'_, Result<u64>> {
-        Box::pin(self.0.submit_durable(command_id, command))
-    }
-
-    fn command_receipt(
-        &self,
-        command_id: String,
-    ) -> mj_client::session::BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>>
-    {
-        Box::pin(self.0.command_receipt(command_id))
-    }
-
-    fn cancel_command_admission(
-        &self,
-        command_id: String,
-    ) -> mj_client::session::BoxFuture<'_, Result<Option<mj_core::relay::HandledRelayCommand>>>
-    {
-        Box::pin(self.0.cancel_command_admission(command_id))
-    }
-
-    fn release_command_receipt(
-        &self,
-        command_id: String,
-    ) -> mj_client::session::BoxFuture<'_, Result<()>> {
-        Box::pin(self.0.release_command_receipt(command_id))
-    }
-
     fn enqueue_sync(
         &self,
     ) -> mj_client::session::BoxFuture<'_, Result<mj_client::session::PendingRelaySync>> {

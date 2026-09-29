@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::elicitation::ElicitationResponse;
 use crate::project_memory::ProjectMemorySnapshot;
 
-use super::snapshot::{HandledRelayCommand, RelayCommand, RelayEvent, RelayOperationalState};
+use super::snapshot::{RelayCommand, RelayEvent, RelayOperationalState};
 use super::{MAX_FRAME_BYTES, RELAY_MIN_PROTOCOL_VERSION, RELAY_PROTOCOL_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,28 +63,6 @@ pub enum RelayRequest {
     Submit {
         command_id: String,
         command: RelayCommand,
-    },
-    /// Retain the accepted command identity until the durable caller settles it.
-    SubmitDurable {
-        command_id: String,
-        command: RelayCommand,
-    },
-    CommandReceipt {
-        command_id: String,
-    },
-    /// Export an immutable checkpoint cut in bounded pieces.
-    CheckpointCommandLedger {
-        through_ordinal: u64,
-        through_digest: String,
-        seal: bool,
-        offset: usize,
-    },
-    ReleaseCommandReceipt {
-        command_id: String,
-    },
-    /// Atomically prevent future admission, or return the already accepted receipt.
-    CancelCommandAdmission {
-        command_id: String,
     },
     Status,
     /// Atomically admit a checkpoint barrier only when no work would be lost.
@@ -216,24 +194,6 @@ pub enum ReviewerRequest {
         command_id: String,
         command: RelayCommand,
     },
-    /// Receipt-pinned admission against one immutable reviewing generation.
-    SubmitDurable {
-        generation: u64,
-        command_id: String,
-        command: RelayCommand,
-    },
-    CommandReceipt {
-        generation: u64,
-        command_id: String,
-    },
-    ReleaseCommandReceipt {
-        generation: u64,
-        command_id: String,
-    },
-    CancelCommandAdmission {
-        generation: u64,
-        command_id: String,
-    },
     Status,
     /// Answer a form the reviewer's harness is waiting on.
     ///
@@ -276,21 +236,6 @@ pub enum ReviewerRequest {
     /// its MCP tool since the last time the controller asked. This request is
     /// answered by the sidecar itself rather than by any one role.
     TakeLaneDispatches,
-    /// Replay pending dispatches until the controller durably accepts them.
-    ReadLaneDispatches,
-    /// Acknowledge dispatch IDs only after durable controller acceptance.
-    AckLaneDispatches {
-        ids: Vec<String>,
-    },
-}
-
-/// A stable worker-owned dispatch, replayed until explicitly acknowledged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewerLaneDispatch {
-    pub id: String,
-    pub generation: u64,
-    pub request: crate::review::lanes::ReviewSubagentRequest,
 }
 
 /// One repository's captured endpoints for the Bifrost analysis pre-pass.
@@ -328,10 +273,6 @@ impl ReviewerRequest {
             Self::Attach { .. } => "reviewer_attach",
             Self::Acknowledge { .. } => "reviewer_acknowledge",
             Self::Submit { .. } => "reviewer_submit",
-            Self::SubmitDurable { .. } => "reviewer_submit_durable",
-            Self::CommandReceipt { .. } => "reviewer_command_receipt",
-            Self::ReleaseCommandReceipt { .. } => "reviewer_release_command_receipt",
-            Self::CancelCommandAdmission { .. } => "reviewer_cancel_command_admission",
             Self::Status => "reviewer_status",
             Self::RespondElicitation { .. } => "reviewer_respond_elicitation",
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
@@ -339,8 +280,6 @@ impl ReviewerRequest {
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
             Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
             Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
-            Self::ReadLaneDispatches => "reviewer_read_lane_dispatches",
-            Self::AckLaneDispatches { .. } => "reviewer_ack_lane_dispatches",
         }
     }
 }
@@ -352,11 +291,6 @@ impl RelayRequest {
             Self::Attach { .. } => "attach",
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
-            Self::SubmitDurable { .. } => "submit_durable",
-            Self::CommandReceipt { .. } => "command_receipt",
-            Self::CheckpointCommandLedger { .. } => "checkpoint_command_ledger",
-            Self::CancelCommandAdmission { .. } => "cancel_command_admission",
-            Self::ReleaseCommandReceipt { .. } => "release_command_receipt",
             Self::Status => "status",
             Self::ReserveIdle { .. } => "reserve_idle",
             Self::InstallPromptContext { .. } => "install_prompt_context",
@@ -390,11 +324,6 @@ impl RelayRequest {
     /// non-steering turn cancellation in 7.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
-            Self::SubmitDurable { command, .. } => 26.max(command.minimum_protocol()),
-            Self::CheckpointCommandLedger { .. } => 26,
-            Self::CommandReceipt { .. }
-            | Self::ReleaseCommandReceipt { .. }
-            | Self::CancelCommandAdmission { .. } => 26,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
@@ -408,19 +337,6 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::Submit { command, .. } => command.minimum_protocol(),
-            Self::Reviewer {
-                request:
-                    ReviewerRequest::ReadLaneDispatches
-                    | ReviewerRequest::AckLaneDispatches { .. }
-                    | ReviewerRequest::CommandReceipt { .. }
-                    | ReviewerRequest::ReleaseCommandReceipt { .. }
-                    | ReviewerRequest::CancelCommandAdmission { .. },
-                ..
-            } => 26,
-            Self::Reviewer {
-                request: ReviewerRequest::SubmitDurable { command, .. },
-                ..
-            } => 26.max(command.minimum_protocol()),
             Self::Reviewer {
                 request: ReviewerRequest::PauseGeneration { .. },
                 ..
@@ -518,14 +434,6 @@ pub enum RelayResponsePayload {
         command_id: String,
         ordinal: u64,
     },
-    CommandReceipt {
-        receipt: Option<HandledRelayCommand>,
-    },
-    CommandReceiptReleased,
-    CheckpointCommandLedger {
-        data: Vec<u8>,
-        total_bytes: usize,
-    },
     Status(RelayOperationalState),
     AttachmentPresent {
         present: bool,
@@ -607,10 +515,6 @@ pub enum RelayResponsePayload {
     LaneDispatches {
         requests: Vec<crate::review::lanes::ReviewSubagentRequest>,
     },
-    PendingLaneDispatches {
-        dispatches: Vec<ReviewerLaneDispatch>,
-    },
-    LaneDispatchesAcknowledged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

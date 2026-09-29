@@ -373,7 +373,9 @@ mod tests {
             .unwrap();
         assert!(state.active());
         state
-            .apply(&update(serde_json::json!({"jetbrains":{"air":{"goal":null}}})))
+            .apply(&update(
+                serde_json::json!({"jetbrains":{"air":{"goal":null}}}),
+            ))
             .unwrap();
         assert!(state.snapshot.is_none());
     }

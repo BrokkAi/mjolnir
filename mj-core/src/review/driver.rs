@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// What the driver needs the caller to do next.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewRequest {
     /// Ask the worker what changed since these baselines.
     CaptureDelta {
@@ -137,7 +137,7 @@ pub const SUPERVISOR_ROLE: &str = "supervisor";
 pub const INTENT_ROLE: &str = "intent";
 
 /// Everything about the reviewed turn that is known before the capture lands.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TurnReviewSeed {
     pub tier: ReviewTier,
     /// The latest real user prompt; earlier requirements remain in the history.

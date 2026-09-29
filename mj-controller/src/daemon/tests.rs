@@ -586,7 +586,7 @@ struct TestRemoteManager {
 impl TestRemoteManager {
     async fn new() -> Self {
         let channels =
-            crate::session_manager::spawn_reply_fixture_session_manager().expect("remote manager");
+            crate::session_manager::spawn_remote_session_manager().expect("remote manager");
         let session_id = "session-1";
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session_id.to_owned(),
@@ -2292,7 +2292,6 @@ fn ready_startup_view() -> ManagedSessionView {
         queued_prompts: Vec::new(),
         active_user_shells: Vec::new(),
         active_agent_terminals: Vec::new(),
-        command_ledger_seal: None,
         checkpoint_barrier: None,
         checkpoint_ready: None,
         last_acp_activity_at_ms: None,
@@ -2533,6 +2532,15 @@ fn session_draft_input(state: &RuntimeState) -> String {
         .draft_input
 }
 
+/// A failure whose delivery is unknown, as the session actor reports a lost
+/// reply or a broken connection. A bare string is a definite refusal instead.
+fn unconfirmed(message: &str) -> mj_client::session::SubmitFailure {
+    mj_client::session::SubmitFailure {
+        message: message.to_owned(),
+        unconfirmed: true,
+    }
+}
+
 fn notice_texts(state: &RuntimeState) -> Vec<String> {
     state
         .notices
@@ -2743,7 +2751,7 @@ async fn a_refused_submit_preserves_order_without_creating_duplicate_drafts() {
     let (text, reply) = next_submit(&mut manager).await;
     assert_eq!(text, "refused prompt");
     reply
-        .send(Err("the harness refused the prompt".into()))
+        .send(Err(unconfirmed("the reply to the prompt was lost")))
         .expect("the drain awaits the submit reply");
 
     wait_for_startup_pause(&state).await;
@@ -2834,7 +2842,7 @@ async fn startup_restart_reuses_the_durable_command_identity_after_a_lost_reply(
     };
     assert_eq!(command_id, saved_id);
     reply
-        .send(Err("connection lost after acceptance".into()))
+        .send(Err(unconfirmed("connection lost after acceptance")))
         .unwrap();
     wait_for_startup_pause(&state).await;
     state.cancel_and_join_startup_prompts().await.unwrap();
@@ -2869,6 +2877,65 @@ async fn startup_restart_reuses_the_durable_command_identity_after_a_lost_reply(
     })
     .await
     .unwrap();
+}
+
+/// A prompt the worker refuses outright was never accepted, so it goes back
+/// to the composer with a notice and the queue moves on, instead of retrying
+/// something that will be refused again.
+#[tokio::test]
+async fn a_definitely_refused_startup_prompt_returns_to_the_draft() {
+    let Some(_writer) =
+        startup_prompt_test_store("a_definitely_refused_startup_prompt_returns_to_the_draft")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    for text in ["refused prompt", "prompt behind it"] {
+        handle_action(queued_prompt_action(text), &metadata, &state, &cancellation)
+            .await
+            .expect("queue a startup prompt");
+    }
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "refused prompt");
+    reply
+        .send(Err("the harness refused the prompt".into()))
+        .expect("the drain awaits the submit reply");
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(
+        text, "prompt behind it",
+        "the queue continues past a refusal"
+    );
+    reply.send(Ok(9)).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::database::load_startup_deliveries()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("settled steps outside an API group leave the table");
+    assert_eq!(session_draft_input(&state), "refused prompt");
+    assert!(
+        notice_texts(&state)
+            .iter()
+            .any(|notice| notice.contains("returned to your draft")),
+        "the refusal is explained: {:?}",
+        notice_texts(&state)
+    );
+    state.cancel_and_join_startup_prompts().await.unwrap();
 }
 
 #[tokio::test]
@@ -5214,7 +5281,9 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
         .unwrap();
     let (text, reply) = next_submit(&mut manager).await;
     assert_eq!(text, "first");
-    reply.send(Err("transient disconnect".into())).unwrap();
+    reply
+        .send(Err(unconfirmed("transient disconnect")))
+        .unwrap();
     wait_for_startup_pause(&state).await;
     state
         .queue_startup_step(
@@ -5240,55 +5309,6 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn replayed_child_close_cannot_stop_or_mark_a_resumed_incarnation() {
-    if !in_isolated_parked_test("replayed_child_close_cannot_stop_or_mark_a_resumed_incarnation") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let workspace = crate::database::create_workspace("Close replay").unwrap();
-    let child_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    let mut child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
-    crate::database::save_session(&child).unwrap();
-    let previous = crate::database::session_incarnation(child_id)
-        .unwrap()
-        .unwrap();
-    child.state = SessionState::Stopped;
-    crate::database::save_lifecycle_session(&child).unwrap();
-    child.state = SessionState::Provisioning;
-    crate::database::save_lifecycle_session(&child).unwrap();
-    child.state = SessionState::Running;
-    child.last_error = Some("new incarnation diagnostic".into());
-    crate::database::save_lifecycle_session(&child).unwrap();
-    let current = crate::database::session_incarnation(child_id)
-        .unwrap()
-        .unwrap();
-    assert_ne!(previous, current);
-    let state = test_runtime_state_loading_the_store();
-    let error = state
-        .close_subagent_request(
-            child_id.into(),
-            "parent".into(),
-            "old-close".into(),
-            previous,
-        )
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("earlier child incarnation"));
-    let stored = crate::database::read_durable_session_record(child_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.state, SessionState::Running);
-    assert_eq!(stored.last_error, child.last_error);
-    assert_eq!(
-        crate::database::session_incarnation(child_id)
-            .unwrap()
-            .as_deref(),
-        Some(current.as_str())
-    );
-    assert!(!state.owner().lifecycle.contains_key(child_id));
-}
-
 #[tokio::test]
 async fn move_copy_releases_admission_and_control_transition_reacquires_it() {
     let state = test_runtime_state();

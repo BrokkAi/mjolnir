@@ -1274,7 +1274,6 @@ impl Controller {
             );
             relay
         };
-        let mut admitted_receipts = Vec::new();
         if operation.queue == ResumeQueueDisposition::Start {
             let _starting_queue = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
             executor.notify_notice("Starting queued work");
@@ -1286,25 +1285,7 @@ impl Controller {
                 verified.archive_sha256 == checkpoint.sha256 && verified.manifest.session.id == *id,
                 "move queue checkpoint verification failed"
             );
-            let source_receipts = verified
-                .canonical_session
-                .command_ledger
-                .as_ref()
-                .map(|value| {
-                    mj_core::relay::CheckpointCommandLedger::decode(
-                        value,
-                        verified.canonical_session.event_frontier,
-                    )
-                })
-                .transpose()?
-                .map(|ledger| ledger.retained_command_receipts)
-                .unwrap_or_default();
             for queued in verified.canonical_session.queued_prompts {
-                // Existing receipt owners survive the move. Release only the
-                // additional pins this admission acquires for legacy commands.
-                if !source_receipts.contains(&queued.command_id) {
-                    admitted_receipts.push(queued.command_id.clone());
-                }
                 if operation.queue_admission_finished {
                     continue;
                 }
@@ -1324,19 +1305,12 @@ impl Controller {
                         RelayCommand::SetConfig { key, value }
                     }
                 };
-                relay
-                    .submit_durable_accepted(queued.command_id, command)
-                    .await?;
+                relay.submit_accepted(queued.command_id, command).await?;
             }
         }
         operation.queue_admission_finished = true;
         crate::database::save_move_operation(operation)?;
         restore_move_queue_hold(operation);
-        // The durable completion boundary makes releasing receipts safe: a
-        // retry from here only releases them, never resubmits the queue.
-        for command_id in admitted_receipts {
-            relay.release_command_receipt(command_id).await?;
-        }
         let queue_sentence = if operation.queue == ResumeQueueDisposition::Discard {
             "Queued work was discarded; ready and idle."
         } else {
