@@ -301,6 +301,9 @@ impl WizardDraft for NewWizard {
             self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
+        if self.step == WizardStep::Bundle && id == WizardControl::RemoveBundle {
+            return Ok(dashboard.begin_bundle_removal(self));
+        }
         if self.subagents.activate(id) {
             return Ok(dashboard.keep(self));
         }
@@ -532,6 +535,11 @@ impl WizardDraft for NewWizard {
                     !dashboard.config.bundles.is_empty(),
                 );
                 form.declare_with_enabled(WizardControl::Add, ControlKind::Button, true);
+                form.declare_with_enabled(
+                    WizardControl::RemoveBundle,
+                    ControlKind::Button,
+                    !dashboard.config.bundles.is_empty(),
+                );
                 declare_wizard_buttons(form, true, !dashboard.config.bundles.is_empty());
             }
             WizardStep::ProjectDirectory => {
@@ -557,7 +565,7 @@ impl WizardDraft for NewWizard {
     /// Creating a bundle rewrites the config, so the form is frozen until the
     /// daemon answers.
     fn input_locked(&self) -> bool {
-        self.bundle_creation_in_flight
+        self.bundle_creation_in_flight || self.bundle_removal_in_flight
     }
 
     /// The bundle creator and the project directory are all text field, so

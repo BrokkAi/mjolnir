@@ -14,7 +14,9 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec};
 
 pub use crate::local_git::resolve_local_repository;
 
-/// An immutable starting selection for one repository in a bundle.
+/// An immutable starting selection for one repository in a bundle. The API
+/// names it `at` and `branch`; the daemon picks the bundle's primary
+/// repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExactCheckout {
@@ -32,11 +34,11 @@ impl ExactCheckout {
         );
         anyhow::ensure!(
             is_object_id(&self.commit),
-            "checkout commit must be a full nonzero commit object ID"
+            "`at` must be a full nonzero commit object ID"
         );
         if let Some(branch) = &self.branch {
-            validate_branch_name(branch).context("invalid checkout branch")?;
-            anyhow::ensure!(branch != "HEAD", "checkout branch cannot be HEAD");
+            validate_branch_name(branch).context("invalid `branch`")?;
+            anyhow::ensure!(branch != "HEAD", "`branch` cannot be HEAD");
         }
         Ok(())
     }

@@ -254,10 +254,6 @@ impl HarnessKind {
         }
     }
 
-    pub const fn supports_injected_mcp(self) -> bool {
-        !matches!(self, Self::Muse)
-    }
-
     pub const ALL: [Self; 5] = [
         Self::Codex,
         Self::Claude,
@@ -572,6 +568,14 @@ impl HarnessKind {
             Self::Kimi | Self::Grok => &["sessions"],
             Self::Muse => &[".data/muse/sessions"],
         }
+    }
+
+    /// Whether this harness's adapter passes on the MCP servers a session
+    /// offers only when its `initialize` advertises HTTP MCP. muse-acp forwards
+    /// them to Muse only under the host's session MCP grant, advertises HTTP
+    /// MCP exactly then, and otherwise drops every server with a log line.
+    pub const fn mcp_servers_need_advertised_http(self) -> bool {
+        matches!(self, Self::Muse)
     }
 
     /// An executable a managed install must create beside its pinned

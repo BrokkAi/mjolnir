@@ -693,10 +693,7 @@ pub(super) fn worker_launch_config(
             cwd: PathBuf::from(&workspace.0),
             additional_directories,
             native_session_id: session.native_session_id.clone(),
-            project_memory: profile
-                .kind
-                .supports_injected_mcp()
-                .then(|| project_memory.clone()),
+            project_memory: Some(project_memory.clone()),
             execution_policy,
         },
         project_memory,

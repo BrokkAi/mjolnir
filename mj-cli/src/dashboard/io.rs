@@ -130,6 +130,12 @@ pub(crate) enum DashboardIoUpdate {
         child: String,
         result: std::result::Result<(), String>,
     },
+    /// Interrupt all finished sending. Each failure names the session or
+    /// native sub-agent view it was for.
+    InterruptAllFinished {
+        targets: mj_tui::InterruptAllTargets,
+        failures: Vec<(String, String)>,
+    },
     ReviewRefused {
         session_id: String,
         message: String,
@@ -267,6 +273,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     CreatedBundle {
         result: Box<std::result::Result<CreatedBundleUpdate, String>>,
+    },
+    RemovedBundle {
+        bundle_id: String,
+        result: std::result::Result<(), String>,
     },
     ImportedSessionApplied {
         result: Box<std::result::Result<ImportedDashboardSessionApply, String>>,
@@ -468,6 +478,9 @@ impl DashboardIoUpdate {
             Self::CreatedBundle { result } => result.as_ref().as_ref().is_ok_and(|created| {
                 controller.config.bundles.get(&created.bundle_id) != Some(&created.bundle)
             }),
+            Self::RemovedBundle { bundle_id, result } => {
+                result.is_ok() && controller.config.bundles.contains_key(bundle_id)
+            }
             Self::ImportedSessionApplied { result } => {
                 result.as_ref().as_ref().is_ok_and(|applied| {
                     !controller.state.sessions.contains_key(&applied.session.id)
@@ -487,6 +500,10 @@ impl DashboardIoUpdate {
         match self {
             Self::CreatedBundle { .. } => Self::CreatedBundle {
                 result: Box::new(Err(error)),
+            },
+            Self::RemovedBundle { bundle_id, .. } => Self::RemovedBundle {
+                bundle_id,
+                result: Err(error),
             },
             Self::ImportedSessionApplied { .. } => Self::ImportedSessionApplied {
                 result: Box::new(Err(error)),
@@ -657,6 +674,9 @@ impl DashboardContext {
             } => {
                 self.dashboard
                     .native_agent_stop_finished(&owner, &child, result);
+            }
+            DashboardIoUpdate::InterruptAllFinished { targets, failures } => {
+                self.dashboard.interrupt_all_finished(&targets, failures);
             }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
@@ -1216,6 +1236,12 @@ impl DashboardContext {
                 Err(error) => {
                     self.dashboard.fail_bundle_creation(&error);
                 }
+            },
+            DashboardIoUpdate::RemovedBundle { bundle_id, result } => match result {
+                Ok(()) => self
+                    .dashboard
+                    .apply_removed_bundle(self.controller.config.clone(), &bundle_id),
+                Err(error) => self.dashboard.fail_bundle_removal(&error),
             },
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
                 Ok(applied) => {

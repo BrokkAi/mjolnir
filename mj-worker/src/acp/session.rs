@@ -176,6 +176,8 @@ pub(super) async fn serve_session(
     // Set when the recorded native session is replaced because it was never
     // used; `session_opened` carries it so a resume can accept the new one.
     let mut replaced_unused_native_session_id = None;
+    // The MCP servers the request that opened the session carried.
+    let mut offered_mcp_servers = 0;
     let loaded_session = if let Some(existing) = &spec.resume_session {
         let session_id = SessionId::from(existing.clone());
         // Native children require replay to recover identity and transcripts.
@@ -200,19 +202,17 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let resumed = connection
-                .send_request(resume_session_request(spec, session_id.clone()))
-                .block_task()
-                .await;
+            let request = resume_session_request(spec, session_id.clone());
+            offered_mcp_servers = request.mcp_servers.len();
+            let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
             resumed
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let loaded = connection
-                .send_request(load_session_request(spec, session_id.clone()))
-                .block_task()
-                .await;
+            let request = load_session_request(spec, session_id.clone());
+            offered_mcp_servers = request.mcp_servers.len();
+            let loaded = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
             loaded
                 .with_context(|| format!("load ACP session {existing}"))
@@ -308,10 +308,9 @@ pub(super) async fn serve_session(
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
             accept_live_history(live_history_enabled);
-            let created = connection
-                .send_request(new_session_request(spec, true))
-                .block_task()
-                .await;
+            let request = new_session_request(spec, true);
+            offered_mcp_servers = request.mcp_servers.len();
+            let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
             let created = created.context("create ACP session")?;
             if spec.harness == HarnessKind::Codex
@@ -333,6 +332,38 @@ pub(super) async fn serve_session(
                 false,
             )
         };
+
+    // An adapter that withholds the servers it was offered says so only in
+    // its log. Checked after the open, because a Muse host that could not
+    // start also withholds the grant, and the open's error carries that host's
+    // own diagnostic. A container keeps the adapter it was created with, so a
+    // session from an older image continues without the tools and says so. A
+    // reviewer does not: it is told to inspect the change with its analyzer
+    // tools, and reviewing without them is the degraded review the review
+    // design refuses.
+    if offered_mcp_servers > 0
+        && spec.harness.mcp_servers_need_advertised_http()
+        && !initialized.agent_capabilities.mcp_capabilities.http
+    {
+        let remedy = format!(
+            "Managed targets install muse-acp {}; on a container target, suspend and resume the session once its agent-dev image has updated",
+            mj_core::harness_runtime::MUSE_ACP_VERSION
+        );
+        if !spec.extra_mcp_servers.is_empty() {
+            bail!(
+                "this Muse runtime does not accept MCP servers, so a Muse reviewer here would run without its analyzer tools. {remedy}."
+            );
+        }
+        emit_runtime_event(
+            events,
+            RuntimeEvent::Warning {
+                message: format!(
+                    "This session's Muse runtime does not accept MCP servers, so Mjolnir's tools, such as project memory, are unavailable in it. {remedy}."
+                ),
+            },
+        )
+        .await?;
+    }
 
     if availability_supported {
         native_agents::refresh_availability(connection, &session_id, events).await?;

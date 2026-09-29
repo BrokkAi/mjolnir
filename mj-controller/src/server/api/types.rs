@@ -36,9 +36,17 @@ pub struct ApiSession {
     pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<mj_core::harness_runtime::RuntimeReceipt>,
-    /// Immutable starting selection; session readiness verifies preparation.
+    /// Immutable starting selection, named as `StartSessionRequest` names
+    /// it; session readiness verifies preparation.
+    /// Commit the workspace started checked out at, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// Branch created at `at`, or the existing branch checked out without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base the session was started with; `at` unless another was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +96,9 @@ impl From<&ViewerSession> for ApiSession {
             assessment: None,
             subagents: session.subagents.clone(),
             background_work: None,
-            checkout: session.checkout.clone(),
+            at: session.at.clone(),
+            branch: session.branch.clone(),
+            base: session.base.clone(),
             expected_runtime_identity: session.expected_runtime_identity.clone(),
             runtime: None,
             id: session.id.clone(),
@@ -155,15 +165,18 @@ pub struct CreateWorkspaceResponse {
 pub struct StartSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
-    /// Diff baseline; also the starting revision for a raw managed worktree.
-    #[serde(default)]
-    pub launch_base: Option<String>,
-    /// Branch to check out in a new isolated workspace.
-    #[serde(default)]
-    pub launch_branch: Option<String>,
-    /// Exact starting selection for one bundle repository, verified before readiness.
+    /// Full commit object ID to start the workspace at: an exact checkout of
+    /// the bundle's primary repository, detached unless `branch` is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// With `at`, the new branch created there; otherwise the existing branch
+    /// to check out in a new isolated workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base, when it is not `at`. Without `at`, also the starting
+    /// revision for a raw managed worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
     /// Omitted reuses the last accepted top-level session choice.

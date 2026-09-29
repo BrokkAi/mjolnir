@@ -1339,17 +1339,22 @@ pub struct SessionRecord {
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
-    /// Diff baseline as supplied by the caller. A raw managed worktree also
-    /// starts here; a bundle checkout keeps its selected remote branch tip.
-    /// The resolved baseline lands in `managed_worktree.base_commit` or the
-    /// clone's `mj.baseCommit`.
+    /// Diff baseline as supplied by the caller (the API's `base`). A raw
+    /// managed worktree also starts here; a bundle checkout keeps its selected
+    /// remote branch tip. With `checkout`, it applies to the checked-out
+    /// repository only, and when absent that repository's base is the
+    /// checkout commit. The resolved baseline lands in
+    /// `managed_worktree.base_commit` or the clone's `mj.baseCommit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_base: Option<String>,
-    /// Branch selected for a new isolated checkout, independently of its base commit.
+    /// Existing branch to check out in a new isolated workspace (the API's
+    /// `branch` without `at`). Never set together with `checkout`, which
+    /// carries its own branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_branch: Option<String>,
-    /// Immutable exact starting selection for one bundle repository. Resume
-    /// preserves checkpointed work rather than applying this selection again.
+    /// Immutable exact starting selection for one bundle repository, built
+    /// from the API's `at` and `branch`. Resume preserves checkpointed work
+    /// rather than applying this selection again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<crate::remote_git::ExactCheckout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1484,7 +1489,37 @@ pub fn target_label(config: &Config, target_id: &str, project: Option<&Path>) ->
     )
 }
 
+/// A session's starting selection in the terms the API and CLI use.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartSelection {
+    /// Commit the workspace started checked out at.
+    pub at: Option<String>,
+    /// Branch created at `at`, or the existing branch checked out without it.
+    pub branch: Option<String>,
+    /// Diff base; `at` unless the caller named another.
+    pub base: Option<String>,
+}
+
 impl SessionRecord {
+    /// The starting selection this record stores, as `at`, `branch` and
+    /// `base`. The record keeps the older field layout, so this is the one
+    /// place that maps it to the public names.
+    pub fn start_selection(&self) -> StartSelection {
+        let at = self
+            .checkout
+            .as_ref()
+            .map(|checkout| checkout.commit.clone());
+        StartSelection {
+            branch: self
+                .checkout
+                .as_ref()
+                .and_then(|checkout| checkout.branch.clone())
+                .or_else(|| self.launch_branch.clone()),
+            base: self.launch_base.clone().or_else(|| at.clone()),
+            at,
+        }
+    }
+
     /// Cached verdict for an independent clone. Active checkouts are unknown
     /// until a new checkpoint binds an assessment to their exact contents.
     pub fn publication_state(&self) -> Option<PublicationState> {
@@ -2093,6 +2128,47 @@ impl State {
             .sessions
             .remove(session_id)
             .expect("session checked above"))
+    }
+
+    /// Sessions that still read `bundle_id` from the config. A suspended
+    /// session counts: resume looks its project up again. Only a session
+    /// opened on a plain directory, or one whose data is already gone, does
+    /// not need it.
+    pub fn bundle_users(&self, bundle_id: &str) -> Vec<&SessionRecord> {
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.bundle_id == bundle_id
+                    && session.project_directory.is_none()
+                    && session.state != SessionState::DestroyedWithDataLoss
+            })
+            .collect()
+    }
+
+    /// Why `bundle_id` cannot be removed from the config, or `None` when no
+    /// session uses it.
+    pub fn bundle_removal_refusal(&self, bundle_id: &str) -> Option<String> {
+        let users = self.bundle_users(bundle_id);
+        if users.is_empty() {
+            return None;
+        }
+        let mut names = users
+            .iter()
+            .take(3)
+            .map(|session| format!("{:?}", session.listed_title()))
+            .collect::<Vec<_>>();
+        if users.len() > 3 {
+            names.push(format!("{} more", users.len() - 3));
+        }
+        Some(format!(
+            "Project {bundle_id:?} is used by {}: {}. Destroy those sessions before removing it.",
+            if users.len() == 1 {
+                "a session"
+            } else {
+                "sessions"
+            },
+            names.join(", ")
+        ))
     }
 
     /// Setup may add replacements under new names, but must not rewrite

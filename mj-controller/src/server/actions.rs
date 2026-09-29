@@ -15,13 +15,16 @@ pub enum ControllerAction {
     New {
         #[serde(default)]
         create_managed_worktree: Option<bool>,
-        /// Diff baseline; also the starting revision for a raw managed worktree.
-        #[serde(default)]
-        launch_base: Option<String>,
-        #[serde(default)]
-        launch_branch: Option<String>,
+        /// Full commit object ID to start the bundle's primary repository at.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        checkout: Option<mj_core::remote_git::ExactCheckout>,
+        at: Option<String>,
+        /// With `at`, the new branch created there; otherwise an existing branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Diff base; defaults to `at`. Without `at`, also the starting
+        /// revision for a raw managed worktree.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_runtime_identity: Option<String>,
         /// Omitted reuses the last accepted top-level session choice.

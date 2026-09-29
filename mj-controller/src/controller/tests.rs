@@ -534,9 +534,9 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,
@@ -573,23 +573,23 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
 }
 
 #[test]
-fn registration_rejects_a_launch_base_it_cannot_honour() {
+fn registration_rejects_a_base_it_cannot_honour() {
     let mut controller = Controller {
         config: registration_config(),
         state: State::default(),
     };
 
     let mut options = launch_options(Vec::new());
-    options.launch_base = Some("   ".into());
+    options.base = Some("   ".into());
     let error = controller
         .register_session_with_resources("codex", "project", "podman", "blank", options)
         .unwrap_err();
-    assert!(error.to_string().contains("launch base must not be empty"));
+    assert!(error.to_string().contains("`base` must not be empty"));
 
     // Without a worktree there is nowhere to apply the base: the session runs
     // in the selected directory as it stands.
     let mut options = launch_options(Vec::new());
-    options.launch_base = Some("HEAD~1".into());
+    options.base = Some("HEAD~1".into());
     options.create_managed_worktree = Some(false);
     let error = controller
         .register_session_with_resources("codex", "project", "podman", "no worktree", options)
@@ -638,8 +638,8 @@ fn muse_registration_rejects_more_than_one_workspace_root_before_persisting() {
 }
 
 #[test]
-fn registration_rejects_exact_checkout_without_a_valid_repository_and_unambiguous_options() {
-    for case in ["missing_repository", "short_sha", "base", "branch", "raw"] {
+fn registration_rejects_a_start_commit_it_cannot_honour() {
+    for case in ["short_sha", "bad_branch", "raw", "no_isolated_workspace"] {
         let mut controller = Controller {
             config: registration_config(),
             state: State::default(),
@@ -649,30 +649,117 @@ fn registration_rejects_exact_checkout_without_a_valid_repository_and_unambiguou
             .targets
             .insert("local".into(), TargetTemplate::LocalBare);
         let mut options = launch_options(Vec::new());
-        options.checkout = Some(mj_core::remote_git::ExactCheckout {
-            repository_id: "project".into(),
-            commit: "a".repeat(40),
-            branch: Some("town/run-123".into()),
-        });
+        options.at = Some("a".repeat(40));
+        options.branch = Some("town/run-123".into());
         let target = if case == "raw" { "local" } else { "podman" };
-        match case {
-            "missing_repository" => {
-                options.checkout.as_mut().unwrap().repository_id = "absent".into()
+        let expected = match case {
+            "short_sha" => {
+                options.at = Some("abcdef0".into());
+                "`at` must be a full nonzero commit object ID"
             }
-            "short_sha" => options.checkout.as_mut().unwrap().commit = "abcdef0".into(),
-            "base" => options.launch_base = Some("HEAD".into()),
-            "branch" => options.launch_branch = Some("main".into()),
-            "raw" => options.project_directory = Some(PathBuf::from("/project")),
+            "bad_branch" => {
+                options.branch = Some("HEAD".into());
+                "`branch`"
+            }
+            "raw" => {
+                options.project_directory = Some(PathBuf::from("/project"));
+                "requires a bundle-backed session"
+            }
+            "no_isolated_workspace" => {
+                options.create_managed_worktree = Some(false);
+                "`at` requires an isolated workspace"
+            }
             _ => unreachable!(),
-        }
-        assert!(
-            controller
-                .register_session_with_resources("codex", "project", target, "exact", options)
-                .is_err(),
-            "{case}"
-        );
+        };
+        let error = controller
+            .register_session_with_resources("codex", "project", target, "exact", options)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
         assert!(controller.state.sessions.is_empty());
     }
+}
+
+#[test]
+fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repository() {
+    const MARKER: &str = "MJ_TEST_START_COMMIT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repository",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = registration_config();
+    // A second repository that is not the primary one: `at` must not pick it.
+    let bundle = config.bundles.get_mut("project").unwrap();
+    let mut second = bundle.repositories[0].clone();
+    second.id = "second".into();
+    second.github = Some("owner/second".into());
+    second.destination = PathBuf::from("second");
+    bundle.repositories.insert(0, second);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "start commit",
+            SessionLaunchOptions {
+                at: Some(at.to_uppercase()),
+                branch: Some("town/run-1".into()),
+                ..launch_options(Vec::new())
+            },
+        )
+        .unwrap();
+    let stored = crate::database::load_state().unwrap().sessions[&id].clone();
+    assert_eq!(
+        stored.checkout,
+        Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: at.into(),
+            branch: Some("town/run-1".into()),
+        })
+    );
+    // The checkout owns the branch, and the base is left to default to `at`.
+    assert_eq!((stored.launch_base, stored.launch_branch), (None, None));
+    assert_eq!(
+        controller.state.sessions[&id].start_selection(),
+        mj_core::state::StartSelection {
+            at: Some(at.into()),
+            branch: Some("town/run-1".into()),
+            base: Some(at.into()),
+        }
+    );
+
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "start commit with base",
+            SessionLaunchOptions {
+                at: Some(at.into()),
+                base: Some("v1.0".into()),
+                ..launch_options(Vec::new())
+            },
+        )
+        .unwrap();
+    let stored = &crate::database::load_state().unwrap().sessions[&id];
+    assert_eq!(
+        stored.start_selection(),
+        mj_core::state::StartSelection {
+            at: Some(at.into()),
+            branch: None,
+            base: Some("v1.0".into()),
+        }
+    );
 }
 
 /// MJ_DATA_DIR is process-global, so every test that reaches the

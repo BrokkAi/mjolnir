@@ -1170,6 +1170,24 @@ pub(crate) fn spawn_create_bundle(
     );
 }
 
+pub(crate) fn spawn_remove_bundle(
+    bundle_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    let removed = bundle_id.clone();
+    spawn_critical_io(
+        tracker,
+        "removing project",
+        updates,
+        move || mj_controller::controller::remove_bundle(&bundle_id).map(|_| ()),
+        move |result| DashboardIoUpdate::RemovedBundle {
+            bundle_id: removed,
+            result,
+        },
+    );
+}
+
 pub(crate) fn spawn_imported_session_apply(
     mut imported: DashboardImportSuccess,
     pending: PendingDashboardImport,
@@ -1327,9 +1345,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        launch_base: None,
-                        launch_branch: None,
-                        checkout: None,
+                        at: None,
+                        branch: None,
+                        base: None,
                         expected_runtime_identity: None,
                         subagents,
                         create_managed_worktree,

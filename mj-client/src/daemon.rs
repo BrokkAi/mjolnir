@@ -354,13 +354,18 @@ pub struct ResumeSessionRequest {
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
-    /// Git revision the session starts at, as the caller typed it.
-    #[serde(default)]
-    pub launch_base: Option<String>,
-    #[serde(default)]
-    pub launch_branch: Option<String>,
+    /// Full commit object ID to start the workspace at: an exact checkout of
+    /// the bundle's primary repository, detached unless `branch` is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// With `at`, the new branch created there; otherwise the existing branch
+    /// to check out in a new isolated workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base, when it is not `at`. Without `at`, also the starting
+    /// revision for a raw managed worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
     /// Omitted reuses the last accepted top-level session choice.
@@ -2059,8 +2064,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Delegation policies replace boolean creation fields and extend runtime snapshots.
-pub const PROTOCOL_VERSION: u32 = 41;
+// Session creation names its starting selection `at`, `branch` and `base`.
+pub const PROTOCOL_VERSION: u32 = 42;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

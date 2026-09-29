@@ -1,15 +1,16 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct PickerNavigation {
+pub(crate) struct PickerNavigation<'a> {
     pub(crate) has_back: bool,
     /// Row the keyboard is on, highlighted while the content has focus.
     pub(crate) selected: usize,
     pub(crate) control: WizardControl,
     pub(crate) next_enabled: bool,
-    /// A secondary action pinned to the right edge of the action row, e.g. the
-    /// bundle step's "New bundle…" opener.
-    pub(crate) pinned_action: Option<(WizardControl, &'static str, bool)>,
+    /// Actions on the listed items, e.g. the project step's Add and Remove,
+    /// stacked in a column to the right of the list as the Workspaces
+    /// manager stacks its actions.
+    pub(crate) side_actions: &'a [(WizardControl, &'static str, bool)],
     /// Muted line drawn in place of an empty list, so the step never renders a
     /// blank picker.
     pub(crate) empty_hint: Option<&'static str>,
@@ -68,11 +69,6 @@ pub(crate) struct PickerChoice {
 }
 
 impl PickerChoice {
-    /// A single cell of plain, unstyled text.
-    pub(crate) fn text(text: impl Into<String>) -> Self {
-        Self::table(vec![PickerCell::text(text)])
-    }
-
     /// A row of table cells padded into aligned columns.
     pub(crate) fn table(cells: Vec<PickerCell>) -> Self {
         Self {
@@ -239,7 +235,7 @@ pub(crate) fn render_picker(
     title: &str,
     choices: Vec<PickerChoice>,
     help: Vec<Line<'static>>,
-    navigation: PickerNavigation,
+    navigation: PickerNavigation<'_>,
     form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
@@ -252,8 +248,16 @@ pub(crate) fn render_picker(
             .flat_map(|line| mj_chat::chat::wrap_styled_line(line.clone(), width.max(1), 2))
             .collect::<Vec<_>>()
     };
+    let side_width = if navigation.side_actions.is_empty() {
+        0
+    } else {
+        usize::from(
+            mj_chat::components::ButtonColumn::width(navigation.side_actions)
+                + mj_chat::components::ButtonColumn::BODY_GAP,
+        )
+    };
     let estimated_width = usize::from(area.width) * usize::from(width_percent) / 100;
-    let help_rows = wrap_help(estimated_width.saturating_sub(4)).len();
+    let help_rows = wrap_help(estimated_width.saturating_sub(4 + side_width)).len();
     let popup = centered_modal(
         frame,
         surfaces,
@@ -265,14 +269,31 @@ pub(crate) fn render_picker(
         horizontal: 1,
         vertical: 1,
     });
-    let help = wrap_help(usize::from(content.width));
+    let button_area = mj_chat::components::DialogShell::layout(content, 0).actions;
+    // The side column shares the rows above the navigation buttons with the
+    // list and help, which keep the width to its left.
+    let columns = form.split_actions(
+        Rect::new(
+            content.x,
+            content.y,
+            content.width,
+            button_area.y.saturating_sub(content.y),
+        ),
+        navigation.side_actions,
+    );
+    let body = if navigation.side_actions.is_empty() {
+        content
+    } else {
+        Rect::new(content.x, content.y, columns.body.width, content.height)
+    };
+    let help = wrap_help(usize::from(body.width));
     let list_height = u16::try_from(choices.len())
         .unwrap_or(u16::MAX)
         .max(u16::from(
             choices.is_empty() && navigation.empty_hint.is_some(),
         ))
         .min(content.height.saturating_sub(help.len() as u16 + 2));
-    let list_area = Rect::new(content.x, content.y, content.width, list_height);
+    let list_area = Rect::new(body.x, body.y, body.width, list_height);
     let widths = picker_columns(&choices);
     let rows = choices
         .iter()
@@ -294,8 +315,7 @@ pub(crate) fn render_picker(
         .collect::<Vec<_>>();
     let help_y = list_area.y.saturating_add(list_area.height);
     let help_height = (help.len() as u16).min(content.bottom().saturating_sub(help_y + 1));
-    let help_area = Rect::new(content.x, help_y, content.width, help_height);
-    let button_area = mj_chat::components::DialogShell::layout(content, 0).actions;
+    let help_area = Rect::new(body.x, help_y, body.width, help_height);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
     ChoiceList::render_with_rows(
@@ -325,34 +345,14 @@ pub(crate) fn render_picker(
         buttons.push((WizardControl::Back, "Back", true));
     }
     buttons.push((WizardControl::Next, "Next", navigation.next_enabled));
-    let row_width = |buttons: &[(WizardControl, &str, bool)]| {
-        buttons
-            .iter()
-            .map(|(_, label, _)| Line::raw(*label).width() + 4)
-            .sum::<usize>()
-            .saturating_add(buttons.len().saturating_sub(1))
-    };
-    match navigation.pinned_action {
-        // The pinned action keeps its own right-aligned row when it fits next
-        // to the navigation buttons, matching the Workspaces action row.
-        Some(pinned)
-            if row_width(&buttons) + 1 + Line::raw(pinned.1).width() + 4
-                <= usize::from(button_area.width) =>
-        {
-            Dialog::render_actions(frame, button_area, &buttons, form);
-            mj_chat::components::ButtonRow::render_aligned(
-                frame,
-                button_area,
-                &[pinned],
-                form,
-                mj_chat::components::RowAlign::Right,
-            );
-        }
-        pinned => {
-            if let Some(pinned) = pinned {
-                buttons.insert(buttons.len() - 1, pinned);
-            }
-            Dialog::render_actions(frame, button_area, &buttons, form);
-        }
+    Dialog::render_actions(frame, button_area, &buttons, form);
+    if !navigation.side_actions.is_empty() {
+        Dialog::render_actions_stacked(
+            frame,
+            columns.actions,
+            navigation.side_actions,
+            form,
+            mj_chat::components::ColumnAlign::Right,
+        );
     }
 }

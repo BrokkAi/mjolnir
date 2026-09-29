@@ -317,6 +317,59 @@ impl DashboardState {
         DashboardAction::None
     }
 
+    /// Starts removing the selected saved project, or explains why a session
+    /// still needs it. The config write re-checks against fresh state.
+    pub(in crate::wizards) fn begin_bundle_removal(
+        &mut self,
+        mut wizard: NewWizard,
+    ) -> DashboardAction {
+        let Some(bundle_id) = bundle_ids_by_recent_creation(&self.config, &self.state)
+            .get(wizard.bundle)
+            .map(|id| (*id).to_owned())
+        else {
+            return self.keep(wizard);
+        };
+        if let Some(refusal) = self.state.bundle_removal_refusal(&bundle_id) {
+            self.notices.set(refusal);
+            return self.keep(wizard);
+        }
+        wizard.bundle_removal_in_flight = true;
+        self.notices.set(format!("Removing project {bundle_id}…"));
+        self.mode = Mode::New(wizard);
+        DashboardAction::RemoveBundle { bundle_id }
+    }
+
+    /// Installs the config without the removed project and keeps the
+    /// selection on a row that still exists.
+    pub fn apply_removed_bundle(&mut self, config: Config, bundle_id: &str) {
+        self.config = config;
+        if let Mode::New(mut wizard) = self.mode.clone()
+            && wizard.bundle_removal_in_flight
+        {
+            wizard.bundle_removal_in_flight = false;
+            wizard.bundle = wizard
+                .bundle
+                .min(self.config.bundles.len().saturating_sub(1));
+            self.invalidate_new_remote_preflight(&mut wizard);
+            if self.config.bundles.is_empty() {
+                wizard.form.get_mut().focus(WizardControl::Add);
+            }
+            self.mode = Mode::New(wizard);
+        }
+        self.notices.set(format!("Removed project {bundle_id}."));
+    }
+
+    pub fn fail_bundle_removal(&mut self, error: &str) {
+        if let Mode::New(mut wizard) = self.mode.clone()
+            && wizard.bundle_removal_in_flight
+        {
+            wizard.bundle_removal_in_flight = false;
+            self.mode = Mode::New(wizard);
+        }
+        self.notices
+            .set(format!("Could not remove project: {error}"));
+    }
+
     /// Reopens the new-bundle editor after its asynchronous create failed.
     /// The draft remains untouched so the user can correct and retry it.
     pub fn fail_bundle_creation(&mut self, error: &str) {

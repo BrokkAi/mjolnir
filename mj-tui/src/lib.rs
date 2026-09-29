@@ -373,6 +373,9 @@ pub enum DashboardAction {
     CreateBundle {
         sources: Vec<String>,
     },
+    RemoveBundle {
+        bundle_id: String,
+    },
     Suspend {
         session_id: String,
         acknowledge_unpublished_work: bool,
@@ -517,6 +520,12 @@ pub enum DashboardAction {
     /// Esc in its composer does.
     InterruptTurn {
         session_id: String,
+    },
+    /// End every turn Interrupt all found under one session: each Mjolnir
+    /// session's turn through the daemon, and each harness-native
+    /// sub-agent through its owner.
+    InterruptAll {
+        targets: InterruptAllTargets,
     },
     /// Show a session's sub-agents in their own workspace. The controller
     /// saves the composer draft first, as the prompt border's click does.
@@ -1032,7 +1041,7 @@ mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
 mod pane_controls;
-pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
+pub use dashboard_sessions::{AttentionEntry, AttentionLevel, InterruptAllTargets};
 mod dashboard_standby;
 mod dashboard_workspaces;
 pub use dashboard_workspaces::StoppedBySuspend;

@@ -515,9 +515,9 @@ Session recall and file provenance are provided by the `mj-memory` MCP server:
 `trace_file`, `session_files`, and `blame_file`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
 copying the index to the target. Claude receives these history tools and keeps
-native project notes; other MCP-capable harnesses also receive the document
-tools `list`, `read`, and `write`. Muse currently cannot receive injected MCP
-tools. Applicable tools are registered again when a session resumes.
+native project notes; the other harnesses also receive the document tools
+`list`, `read`, and `write`. Applicable tools are registered again when a
+session resumes.
 
 History reads are bounded and include continuation information. The index can
 lag active sessions, and older transcripts may lack timestamps or file evidence.
@@ -606,10 +606,17 @@ and checkpoint restore can relocate that workspace while retaining the session
 identity. Archives include the selected session and its child streams, not
 other sessions or credentials. External Muse sessions normally come from
 `~/.local/share/muse/sessions` (`XDG_DATA_HOME/muse/sessions` when set); mj
-restores them into the destination profile’s isolated data directory. The adapter does not accept
-injected MCP servers, so Muse cannot act as a reviewer or use Mjolnir's
-project-memory tools. Another supported reviewer can still review a Muse
-primary session. Muse Spark can also supply utility inference for cross-harness handoffs; see
+restores them into the destination profile’s isolated data directory.
+
+Muse receives Mjolnir's project-memory and review tools through muse-acp 0.8.0
+or newer with Muse Code 1.3.0 or newer, which managed targets and the agent-dev
+image install. A session whose Muse runtime does not accept them, such as one
+in a container created from an older image, continues without them and says
+so; suspend and resume it once the image has updated. A Muse reviewer needs its
+tools, so it does not start without them. Because Muse always runs
+unconstrained, it reviews only sessions that already run unconstrained, such as
+sessions on container targets and Muse sessions. Muse Spark can also supply utility
+inference for cross-harness handoffs; see
 [Durability and recovery](/durability/).
 
 - Kimi Code has no guardian approval mode. Prefer an isolated

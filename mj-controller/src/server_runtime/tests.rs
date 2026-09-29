@@ -1114,9 +1114,9 @@ fn prompt_action() -> ControllerAction {
 
 fn new_action() -> ControllerAction {
     ControllerAction::New {
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,

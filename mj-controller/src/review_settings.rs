@@ -73,9 +73,6 @@ pub async fn discover_review_settings(
             request.profile
         ));
     }
-    if !profile.kind.supports_injected_mcp() {
-        return Err("Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools".into());
-    }
 
     let Some((session_id, handle)) = select_worker(
         &control,

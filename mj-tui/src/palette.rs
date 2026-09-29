@@ -29,6 +29,8 @@ use crate::actions::{Availability, COMMANDS, CommandId, Scope, hidden_from_palet
 use crate::render::render_session_scrollbar;
 use crate::widgets::{Truncate, centered_modal, dismissible_modal_title, truncate_to_cells};
 use crate::{DashboardAction, DashboardState, Focus, Mode};
+use mj_core::state::{ManagedCheckoutKind, SessionRecord};
+use mj_core::subagent::SubagentPolicy;
 
 /// One row of the palette: a command and whether it can be run.
 ///
@@ -116,6 +118,7 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::MoveSession,
     CommandId::SuspendSession,
     CommandId::RestartSession,
+    CommandId::InterruptAll,
     CommandId::CopySessionId,
     CommandId::DestroySession,
 ];
@@ -145,6 +148,100 @@ fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
             })
         })
         .collect()
+}
+
+/// Facts about the session that its row does not show and that change what
+/// the menu's actions do: how it delegates, what it has checked out, and the
+/// container settings it carries into its next container.
+fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Line<'static>> {
+    let mut facts = Vec::new();
+    let fact = |label: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("{label:<11}"), theme::muted()),
+            Span::raw(value),
+        ])
+    };
+
+    let policy = session.subagents.clone().unwrap_or_default();
+    let mut delegation = match &policy {
+        SubagentPolicy::Native => "Native".to_owned(),
+        SubagentPolicy::AllModels => "Mjolnir, all models".to_owned(),
+        SubagentPolicy::SingleModel { model, effort } => match effort {
+            Some(effort) => format!("Mjolnir, {model} ({effort})"),
+            None => format!("Mjolnir, {model}"),
+        },
+        SubagentPolicy::None => "None".to_owned(),
+    };
+    let total = dashboard.subagent_count_for(&session.id);
+    if total > 0 {
+        delegation.push_str(&format!(
+            " · {} of {total} working",
+            dashboard.working_subagent_count_for(&session.id)
+        ));
+    }
+    facts.push(fact("Sub-agents", delegation));
+
+    if let Some(worktree) = &session.managed_worktree {
+        let kind = match worktree.kind {
+            ManagedCheckoutKind::Worktree => "Worktree",
+            ManagedCheckoutKind::Clone => "Clone",
+        };
+        facts.push(fact(
+            "Checkout",
+            format!("{kind} of {}", worktree.source_project_directory.display()),
+        ));
+        facts.push(fact(
+            "Branch",
+            match &worktree.base_commit {
+                Some(base) => format!("{} from {}", worktree.branch, short_commit(base)),
+                None => worktree.branch.clone(),
+            },
+        ));
+    } else if let Some(directory) = &session.project_directory {
+        facts.push(fact(
+            "Checkout",
+            format!("{} (in place)", directory.display()),
+        ));
+    } else if let Some(checkout) = &session.checkout {
+        facts.push(fact(
+            "Checkout",
+            format!(
+                "{} at {}",
+                checkout.repository_id,
+                short_commit(&checkout.commit)
+            ),
+        ));
+        if let Some(branch) = &checkout.branch {
+            facts.push(fact("Branch", branch.clone()));
+        }
+    }
+
+    let mut container = Vec::new();
+    if let Some(cpus) = &session.container_cpus {
+        container.push(format!("{cpus} CPUs"));
+    }
+    if let Some(memory) = &session.container_memory {
+        container.push(format!("{memory} memory"));
+    }
+    if !session.additional_mounts.is_empty() {
+        container.push(crate::widgets::counted(
+            session.additional_mounts.len(),
+            "mount",
+            "mounts",
+        ));
+    }
+    if session.build_cache.is_some() {
+        container.push("build cache".to_owned());
+    }
+    if !container.is_empty() {
+        facts.push(fact("Container", container.join(" · ")));
+    }
+    facts
+}
+
+/// The first 10 characters of a commit ID, as `git log --oneline` shows it.
+fn short_commit(commit: &str) -> &str {
+    commit.get(..10).unwrap_or(commit)
 }
 
 /// What the palette says a command does, for the session it would act on.
@@ -178,6 +275,7 @@ fn session_menu_label(id: CommandId) -> &'static str {
         CommandId::MoveSession => "Move…",
         CommandId::SuspendSession => "Suspend…",
         CommandId::RestartSession => "Restart",
+        CommandId::InterruptAll => "Interrupt all (parent + sub-agents)…",
         CommandId::DestroySession => "Destroy…",
         _ => spec(id).label,
     }
@@ -592,7 +690,8 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
-                | CommandId::RestartSession => 2,
+                | CommandId::RestartSession
+                | CommandId::InterruptAll => 2,
                 CommandId::CopySessionId | CommandId::DestroySession => 3,
                 _ => continue,
             };
@@ -634,9 +733,25 @@ pub(crate) fn render_palette(
     surfaces: &mut FrameSurfaces,
 ) {
     let lines = palette_lines(dashboard, palette);
+    let facts = if palette.session_only {
+        palette
+            .session_id
+            .as_deref()
+            // A harness-native child's row is presentation only; it has no
+            // record of its own to describe.
+            .filter(|id| !dashboard.is_native_agent(id))
+            .and_then(|id| dashboard.state.sessions.get(id))
+            .map(|session| session_facts(dashboard, session))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    // The facts are followed by one blank row that sets them apart from the
+    // commands.
+    let facts_height = if facts.is_empty() { 0 } else { facts.len() + 1 };
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let extra_height = if palette.session_only { 3 } else { 5 };
+    let extra_height = facts_height + if palette.session_only { 3 } else { 5 };
     let popup_height =
         u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
@@ -644,7 +759,11 @@ pub(crate) fn render_palette(
     let rows = if palette.session_only {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(u16::try_from(facts_height).unwrap_or(u16::MAX)),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
             .split(inner)
     } else {
         Layout::default()
@@ -657,16 +776,17 @@ pub(crate) fn render_palette(
             ])
             .split(inner)
     };
-    let list_row = if palette.session_only {
-        rows[0]
-    } else {
-        rows[1]
-    };
-    let description_row = if palette.session_only {
-        rows[1]
-    } else {
-        rows[2]
-    };
+    let list_row = rows[1];
+    let description_row = rows[2];
+    if !facts.is_empty() {
+        let facts_row = Rect::new(
+            rows[0].x.saturating_add(2),
+            rows[0].y,
+            rows[0].width.saturating_sub(2),
+            rows[0].height.saturating_sub(1),
+        );
+        frame.render_widget(Paragraph::new(facts), facts_row);
+    }
 
     let mut form = palette.form.borrow_mut();
     form.begin_frame();
@@ -1043,10 +1163,47 @@ mod tests {
                 "Move…",
                 "Suspend…",
                 "Restart",
+                "Interrupt all (parent + sub-agents)…",
                 "---",
                 "Copy session ID",
                 "Destroy…",
             ]
+        );
+    }
+
+    /// The menu opens with what the row does not show, set apart from the
+    /// commands by a blank row.
+    #[test]
+    fn session_menu_lists_the_session_facts_above_its_commands() {
+        let mut session = running_session();
+        session.subagents = Some(SubagentPolicy::SingleModel {
+            model: "gpt-5".into(),
+            effort: Some("high".into()),
+        });
+        session.container_cpus = Some("4".into());
+        session.container_memory = Some("8g".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+
+        let delegation = row_of(&lines, "Sub-agents").expect("sub-agent policy");
+        assert!(
+            lines[delegation].contains("Mjolnir, gpt-5 (high)"),
+            "{lines:#?}"
+        );
+        let container = row_of(&lines, "Container").expect("container overrides");
+        assert!(
+            lines[container].contains("4 CPUs · 8g memory"),
+            "{lines:#?}"
+        );
+        let content = row_of(&lines, "Content").expect("Content");
+        assert!(delegation < container && container < content, "{lines:#?}");
+        assert!(
+            lines[container + 1]
+                .trim_matches(|c: char| c == '│' || c.is_whitespace())
+                .is_empty(),
+            "a blank row separates the facts from the commands: {lines:#?}"
         );
     }
 

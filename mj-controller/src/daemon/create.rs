@@ -156,9 +156,9 @@ impl RuntimeState {
                 request.title,
                 SessionLaunchOptions {
                     create_managed_worktree: request.create_managed_worktree,
-                    launch_base: request.launch_base,
-                    launch_branch: request.launch_branch,
-                    checkout: request.checkout,
+                    at: request.at,
+                    branch: request.branch,
+                    base: request.base,
                     expected_runtime_identity: request.expected_runtime_identity,
                     subagents: request.subagents,
                     initial_prompt: request.initial_prompt,

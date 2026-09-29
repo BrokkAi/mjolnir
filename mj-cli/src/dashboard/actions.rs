@@ -22,10 +22,10 @@ use crate::dashboard::io::{
     ResumeRepositoryPreflightApply, config_only_controller, report, spawn_cancellable_io,
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
-    spawn_dashboard_rename, spawn_lifecycle_operation, spawn_review_settings_discovery,
-    spawn_startup_prompt, spawn_workspace_close, spawn_workspace_close_cancel,
-    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
-    spawn_workspace_rename,
+    spawn_dashboard_rename, spawn_lifecycle_operation, spawn_remove_bundle,
+    spawn_review_settings_discovery, spawn_startup_prompt, spawn_workspace_close,
+    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
+    spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -184,6 +184,17 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
+        DashboardAction::InterruptAll { targets } => {
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let failures = interrupt_all(&targets).await;
+                if let Err(error) =
+                    updates.send(DashboardIoUpdate::InterruptAllFinished { targets, failures })
+                {
+                    tracing::warn!(%error, "interrupt all result receiver closed");
+                }
+            });
+        }
         DashboardAction::InterruptTurn { session_id } => {
             // The chat is what knows the turn and sends the interrupt, so the
             // command reaches only a conversation this terminal has open.
@@ -1243,6 +1254,13 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
             );
         }
+        DashboardAction::RemoveBundle { bundle_id } => {
+            spawn_remove_bundle(
+                bundle_id,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
         DashboardAction::DiscardSinceCheckpoint {
             session_id,
             checkpoint,
@@ -1814,6 +1832,61 @@ fn spawn_web_request(context: &mut DashboardContext, action: DashboardAction) {
             report("web viewer request", &updates, update);
         }
     });
+}
+
+/// Ends each turn Interrupt all found, through the daemon, so a sub-agent's
+/// turn stops whether or not this terminal has its conversation open. One
+/// failure does not keep the rest from being interrupted; each is returned
+/// with the session or native sub-agent it belongs to.
+async fn interrupt_all(targets: &mj_tui::InterruptAllTargets) -> Vec<(String, String)> {
+    let mut client = match daemon::connect_existing().await {
+        Ok(client) => client,
+        Err(error) => {
+            let error = format!("{error:#}");
+            return targets
+                .sessions
+                .iter()
+                .cloned()
+                .chain(
+                    targets
+                        .native
+                        .iter()
+                        .map(|(owner, child)| mj_core::native_agent::view_id(owner, child)),
+                )
+                .map(|id| (id, error.clone()))
+                .collect();
+        }
+    };
+    let mut failures = Vec::new();
+    for session_id in &targets.sessions {
+        let result = async {
+            let command_id = mj_client::session::new_command_id("tui-interrupt-all")?;
+            client
+                .submit_session_command(
+                    session_id.clone(),
+                    command_id,
+                    mj_core::relay::RelayCommand::CancelTurn,
+                    None,
+                )
+                .await
+        }
+        .await;
+        if let Err(error) = result {
+            failures.push((session_id.clone(), format!("{error:#}")));
+        }
+    }
+    for (owner, child) in &targets.native {
+        if let Err(error) = client
+            .stop_background_task(owner.clone(), format!("native-agent:{child}"))
+            .await
+        {
+            failures.push((
+                mj_core::native_agent::view_id(owner, child),
+                format!("{error:#}"),
+            ));
+        }
+    }
+    failures
 }
 
 #[cfg(test)]

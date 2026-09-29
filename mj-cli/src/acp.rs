@@ -54,15 +54,15 @@ pub(crate) struct AcpArgs {
     /// the project, which is what a local target needs.
     #[arg(long)]
     pub(crate) bundle: Option<String>,
-    /// Bundle repository ID whose checkout starts at --checkout-commit.
-    #[arg(long, requires_all = ["bundle", "checkout_commit"])]
-    pub(crate) checkout_repository: Option<String>,
-    /// Full commit object ID to check out before the first prompt.
-    #[arg(long, requires_all = ["bundle", "checkout_repository"])]
-    pub(crate) checkout_commit: Option<String>,
-    /// New private branch for the exact checkout; omitted leaves HEAD detached.
-    #[arg(long, requires = "checkout_commit")]
-    pub(crate) checkout_branch: Option<String>,
+    /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
+    #[arg(long, value_name = "SHA", requires = "bundle")]
+    pub(crate) at: Option<String>,
+    /// With --at, the new branch to create there; otherwise the existing branch to check out.
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+    /// Record this Git revision as the diff base, when it should not be --at.
+    #[arg(long, value_name = "REV")]
+    pub(crate) base: Option<String>,
     /// Require the saved target runtime identity before any task prompt.
     #[arg(long)]
     pub(crate) expected_runtime_identity: Option<String>,
@@ -1033,14 +1033,9 @@ fn start_request(
         target_id: args.target.clone(),
         bundle_id: args.bundle.clone(),
         expected_runtime_identity: args.expected_runtime_identity.clone(),
-        checkout: args
-            .checkout_commit
-            .as_ref()
-            .map(|commit| mj_core::remote_git::ExactCheckout {
-                repository_id: args.checkout_repository.clone().unwrap_or_default(),
-                commit: commit.clone(),
-                branch: args.checkout_branch.clone(),
-            }),
+        at: args.at.clone(),
+        branch: args.branch.clone(),
+        base: args.base.clone(),
         // A managed target provisions its own workspace from the bundle. A
         // local one works in the directory the consumer is already in, which is
         // what its working directory means.
@@ -1644,7 +1639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_checkout_is_forwarded_and_failure_prevents_prompting_without_losing_ownership() {
+    async fn start_commit_is_forwarded_and_failure_prevents_prompting_without_losing_ownership() {
         let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
         daemon.script(
             "session-1",
@@ -1657,9 +1652,8 @@ mod tests {
         );
         let args = AcpArgs {
             bundle: Some("product".into()),
-            checkout_repository: Some("project".into()),
-            checkout_commit: Some("a".repeat(40)),
-            checkout_branch: Some("town/run-123".into()),
+            at: Some("a".repeat(40)),
+            branch: Some("town/run-123".into()),
             ..Default::default()
         };
         let adapter = Arc::new(Adapter::new(args, None, Some(client)));
@@ -1670,12 +1664,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unavailable"), "{error:#}");
-        assert_eq!(
-            daemon.start.lock().unwrap()[0]["checkout"],
-            json!({
-                "repository_id": "project", "commit": "a".repeat(40), "branch": "town/run-123"
-            })
-        );
+        let start = daemon.start.lock().unwrap()[0].clone();
+        assert_eq!(start["at"], json!("a".repeat(40)));
+        assert_eq!(start["branch"], json!("town/run-123"));
+        assert!(start.get("base").is_none(), "{start}");
         assert_eq!(adapter.owned_sessions(), ["session-1"]);
         assert!(daemon.prompt.lock().unwrap().is_empty());
         adapter.apply_exit_policy().await.unwrap();
@@ -2033,36 +2025,36 @@ mod tests {
     }
 
     #[test]
-    fn exact_checkout_flags_require_a_bundle_and_complete_repository_selection() {
+    fn at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
         use clap::Parser;
         let commit = "a".repeat(40);
-        let args = [
-            "mj",
-            "--instance",
-            "exact-checkout-1162",
-            "acp",
-            "--workspace",
-            "town",
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "--instance", "exact-checkout-1162", "acp"];
+            argv.extend_from_slice(&["--workspace", "town"]);
+            argv.extend_from_slice(extra);
+            crate::Cli::try_parse_from(argv)
+        };
+        let error = parse(&["--at", &commit]).expect_err("--at without --bundle is refused");
+        assert!(error.to_string().contains("--bundle"), "{error}");
+        assert!(parse(&["--bundle", "product", "--at", &commit]).is_ok());
+        let cli = parse(&[
             "--bundle",
             "product",
-            "--checkout-repository",
-            "project",
-            "--checkout-commit",
+            "--at",
             &commit,
-            "--checkout-branch",
+            "--branch",
             "town/run-123",
-        ];
-        assert!(crate::Cli::try_parse_from(args).is_ok());
-        for (option, value) in [
-            ("--checkout-commit", commit.as_str()),
-            ("--checkout-repository", "project"),
-            ("--checkout-branch", "town/run-123"),
-        ] {
-            assert!(
-                crate::Cli::try_parse_from(["mj", "acp", "--workspace", "town", option, value])
-                    .is_err()
-            );
-        }
+            "--base",
+            "v1.0",
+        ])
+        .unwrap();
+        let Some(crate::Command::Acp(args)) = cli.command else {
+            panic!("expected the acp command");
+        };
+        let request = start_request(&args, None, StdPath::new("/work/project"));
+        assert_eq!(request.at.as_deref(), Some(commit.as_str()));
+        assert_eq!(request.branch.as_deref(), Some("town/run-123"));
+        assert_eq!(request.base.as_deref(), Some("v1.0"));
     }
 
     #[test]

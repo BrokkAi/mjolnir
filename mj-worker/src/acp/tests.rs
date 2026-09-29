@@ -852,7 +852,11 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     };
     assert!(!server.args.contains(&"--native-notes".into()));
     claude.harness = HarnessKind::Muse;
-    assert!(project_memory_mcp(&claude).is_empty());
+    let servers = project_memory_mcp(&claude);
+    let [McpServer::Stdio(server)] = servers.as_slice() else {
+        panic!("Muse receives history and notes");
+    };
+    assert!(!server.args.contains(&"--native-notes".into()));
 }
 
 #[test]

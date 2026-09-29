@@ -39,17 +39,25 @@ impl Controller {
         let root = workspace_root(backend, session.container_workspace.as_deref());
         for repository in &bundle.repositories {
             let directory = std::path::Path::new(&root).join(&repository.destination);
+            // With an exact checkout, the base belongs to the checked-out
+            // repository alone; the others start at their default branch.
+            let checkout = session
+                .checkout
+                .as_ref()
+                .filter(|checkout| checkout.repository_id == repository.id);
+            let launch_base = if session.checkout.is_some() && checkout.is_none() {
+                None
+            } else {
+                session.launch_base.as_deref()
+            };
             initialize_workspace(
                 executor,
                 backend,
                 session_id,
                 &directory,
-                session.launch_base.as_deref(),
+                launch_base,
                 session.launch_branch.as_deref(),
-                session
-                    .checkout
-                    .as_ref()
-                    .filter(|checkout| checkout.repository_id == repository.id),
+                checkout,
             )?;
         }
         Ok(())
@@ -111,9 +119,29 @@ fn initialize_workspace(
         );
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     };
+    // A named base must resolve in the clone; the clone holds only what the
+    // remote sent, so a host-only branch name is not there to resolve. Say so
+    // rather than repeat Git's "unknown revision".
+    let resolve_base = |revision: &str| {
+        checked(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ])
+        .with_context(|| {
+            format!(
+                "base {revision:?} is not in the clone; name a commit SHA, a tag, or origin/<branch>"
+            )
+        })
+    };
     if let Some(checkout) = checkout {
         prepare_exact_checkout(&git, &checked, session_id, checkout)?;
-        return configure_workspace(&git, &checked, &checkout.commit);
+        let base = match launch_base {
+            Some(revision) => resolve_base(revision)?,
+            None => checkout.commit.clone(),
+        };
+        return configure_workspace(&git, &checked, &base);
     }
     let marker = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
     ensure!(
@@ -145,20 +173,7 @@ fn initialize_workspace(
         &format!("refs/remotes/origin/{branch}^{{commit}}"),
     ])?;
     let base = match launch_base {
-        // The clone holds only what the remote sent, so a host-only branch
-        // name is not there to resolve. Say so rather than repeat Git's
-        // "unknown revision".
-        Some(revision) => checked(&[
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{revision}^{{commit}}"),
-        ])
-        .with_context(|| {
-            format!(
-                "launch base {revision:?} is not in the clone; name a commit SHA, a tag, or origin/<branch>"
-            )
-        })?,
+        Some(revision) => resolve_base(revision)?,
         // Clone obtains origin/HEAD from the server, independent of host HEAD
         // and init.defaultBranch. An empty or misconfigured remote cannot seed
         // work.
@@ -709,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_checkout_applies_only_to_the_named_bundle_repository() {
+    fn exact_checkout_and_its_base_apply_only_to_the_checked_out_repository() {
         let fixture = ExactFixture::new();
         let other = committed_repository();
         let other_commit = test_git(other.path(), &["rev-parse", "HEAD"]);
@@ -729,6 +744,8 @@ mod tests {
         config.bundles.insert("project".into(), bundle);
         let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
         session.checkout = Some(fixture.selection.clone());
+        // A base the other repository does not hold: applying it there would fail.
+        session.launch_base = Some(fixture.later.clone());
         let mut state = mj_core::state::State::default();
         state.sessions.insert(EXACT_SESSION.into(), session);
         let controller = Controller { config, state };
@@ -752,6 +769,14 @@ mod tests {
         assert_eq!(
             test_git(&workspace.join("other"), &["branch", "--show-current"]),
             "master"
+        );
+        assert_eq!(
+            test_git(&workspace.join("project"), &["config", "mj.baseCommit"]),
+            fixture.later
+        );
+        assert_eq!(
+            test_git(&workspace.join("other"), &["config", "mj.baseCommit"]),
+            other_commit
         );
     }
 

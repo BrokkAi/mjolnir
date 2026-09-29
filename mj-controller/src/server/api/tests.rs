@@ -1457,9 +1457,9 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
@@ -1493,17 +1493,16 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
 }
 
 #[tokio::test]
-async fn start_forwards_the_launch_base_to_the_controller() {
+async fn start_forwards_the_base_to_the_controller() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
-    let response =
-        tokio::spawn(app.oneshot(start_request(start_body(r#","launch_base":"origin/main""#))));
+    let response = tokio::spawn(app.oneshot(start_request(start_body(r#","base":"origin/main""#))));
     let request = actions.recv().await.unwrap();
-    let ControllerAction::New { launch_base, .. } = &request.action else {
+    let ControllerAction::New { base, .. } = &request.action else {
         panic!("expected a New action, got {:?}", request.action);
     };
-    assert_eq!(launch_base.as_deref(), Some("origin/main"));
+    assert_eq!(base.as_deref(), Some("origin/main"));
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1581,42 +1580,38 @@ async fn runtime_identity_constraint_is_forwarded_and_receipt_is_public_without_
 }
 
 #[test]
-fn session_receipt_retains_exact_checkout_identity() {
+fn session_receipt_names_the_start_selection_as_the_request_does() {
     let (config, mut state) = sample_config_state();
-    let checkout = mj_core::remote_git::ExactCheckout {
-        repository_id: "project".into(),
-        commit: "a".repeat(40),
-        branch: Some("town/run-123".into()),
-    };
-    state.sessions.get_mut("session-1").unwrap().checkout = Some(checkout.clone());
+    state.sessions.get_mut("session-1").unwrap().checkout =
+        Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: "a".repeat(40),
+            branch: Some("town/run-123".into()),
+        });
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let receipt = ApiSession::from(&snapshot.sessions[0]);
-    assert_eq!(receipt.checkout, Some(checkout));
+    assert_eq!(receipt.at, Some("a".repeat(40)));
+    assert_eq!(receipt.branch.as_deref(), Some("town/run-123"));
+    assert_eq!(receipt.base, Some("a".repeat(40)), "base defaults to at");
     assert_eq!(receipt.id, "session-1");
 }
 
 #[tokio::test]
-async fn start_forwards_exact_checkout() {
+async fn start_forwards_at_and_branch() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-    let checkout = mj_core::remote_git::ExactCheckout {
-        repository_id: "project".into(),
-        commit: "a".repeat(40),
-        branch: Some("town/run-123".into()),
-    };
-    let extra = format!(
-        ",\"checkout\":{}",
-        serde_json::to_string(&checkout).unwrap()
-    );
+    let extra = format!(r#","at":"{}","branch":"town/run-123""#, "a".repeat(40));
     let response = tokio::spawn(app.oneshot(start_request(start_body(&extra))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
-        checkout: received, ..
+        at, branch, base, ..
     } = &request.action
     else {
         panic!("expected New")
     };
-    assert_eq!(received.as_ref(), Some(&checkout));
+    assert_eq!(at.as_deref(), Some("a".repeat(40).as_str()));
+    assert_eq!(branch.as_deref(), Some("town/run-123"));
+    assert_eq!(base, &None);
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1626,6 +1621,23 @@ async fn start_forwards_exact_checkout() {
     assert_eq!(
         response.await.unwrap().unwrap().status(),
         StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_refuses_at_without_a_bundle() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let body = format!(
+        r#"{{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","at":"{}"}}"#,
+        "a".repeat(40)
+    );
+    let response = app.oneshot(start_request(body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("`at` requires bundle_id"),
+        "{body}"
     );
 }
 
@@ -1838,9 +1850,9 @@ async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_b
     assert_eq!(
         request.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
