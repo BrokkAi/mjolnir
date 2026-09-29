@@ -1012,9 +1012,12 @@ pub struct DaemonNotRunning {
     pub metadata_path: std::path::PathBuf,
 }
 
+/// What a caller shows for [`DaemonNotRunning`].
+pub const DAEMON_NOT_RUNNING_MESSAGE: &str = "the Mjolnir daemon is not running";
+
 impl std::fmt::Display for DaemonNotRunning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the Mjolnir daemon is not running")
+        formatter.write_str(DAEMON_NOT_RUNNING_MESSAGE)
     }
 }
 

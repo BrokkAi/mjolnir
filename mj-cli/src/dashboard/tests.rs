@@ -2112,6 +2112,77 @@ fn a_quick_reconnect_replaces_the_daemon_unavailable_notice() {
 }
 
 #[test]
+fn a_reconnect_replaces_the_daemon_not_running_error_notice() {
+    // A failed request against a stopped daemon reports the client's own
+    // "not running" error as a failure notice. Nothing but the reconnect
+    // clears it while the dashboard idles, so the reconnect must.
+    let mut dashboard =
+        DashboardState::new(Default::default(), State::default(), Default::default());
+    let stopped = mj_client::daemon::DaemonNotRunning {
+        metadata_path: "daemon.json".into(),
+    }
+    .to_string();
+    dashboard.set_failure_notice(stopped);
+    show_daemon_reattached(&mut dashboard);
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+}
+
+#[test]
+fn an_attached_keep_alive_clears_a_daemon_failure_without_a_transition() {
+    // The keep-alive recovered without the dashboard handling the
+    // Missing-to-Attached change (or the failure landed after it). The
+    // connection state alone must still take the failure down, and arm the
+    // reconnect notice's expiry.
+    use crate::daemon::DaemonPresence;
+    let mut dashboard =
+        DashboardState::new(Default::default(), State::default(), Default::default());
+    let now = std::time::Instant::now();
+    let mut since = None;
+
+    dashboard.set_failure_notice(DAEMON_UNAVAILABLE_NOTICE);
+    let missing = DaemonPresence::Missing("gone".into());
+    assert!(!reconcile_daemon_failure(
+        &mut dashboard,
+        &missing,
+        &mut since,
+        now
+    ));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_UNAVAILABLE_NOTICE)
+    );
+
+    assert!(reconcile_daemon_failure(
+        &mut dashboard,
+        &DaemonPresence::Attached,
+        &mut since,
+        now
+    ));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some(DAEMON_RUNNING_AGAIN_NOTICE)
+    );
+    assert_eq!(since, Some(now));
+
+    // An unrelated failure is not the connection state's to clear.
+    dashboard.set_failure_notice("Could not save the layout.");
+    let mut since = None;
+    assert!(!reconcile_daemon_failure(
+        &mut dashboard,
+        &DaemonPresence::Attached,
+        &mut since,
+        now
+    ));
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Could not save the layout.")
+    );
+}
+
+#[test]
 fn the_daemon_running_again_notice_expires_by_itself() {
     let notices = mj_chat::chat::Notices::default();
     notices.set(DAEMON_RUNNING_AGAIN_NOTICE);

@@ -836,6 +836,13 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // same clock that redraws the dialog rebuilds its rows.
                 context.dashboard.rebuild_resume_rows();
                 redraw = context.clock_tick_redraws();
+                let presence = context.daemon_presence.borrow().clone();
+                redraw |= reconcile_daemon_failure(
+                    &mut context.dashboard,
+                    &presence,
+                    &mut context.daemon_running_again_since,
+                    std::time::Instant::now(),
+                );
                 redraw |= expire_daemon_running_again(
                     &context.notices,
                     &mut context.daemon_running_again_since,
@@ -2096,16 +2103,47 @@ const DAEMON_RUNNING_AGAIN_NOTICE: &str = "Mjolnir daemon is running again.";
 /// the event that makes that failure false, so it replaces it directly, also
 /// when it is shown inside a count of stacked failures.
 fn show_daemon_reattached(dashboard: &mut DashboardState) {
-    if let Some(current) = dashboard.notice()
-        && current.ends_with(DAEMON_UNAVAILABLE_NOTICE)
-        && dashboard.replace_notice_if(&current, DAEMON_RUNNING_AGAIN_NOTICE)
-    {
-        return;
+    if !replace_stale_daemon_failure(dashboard) {
+        dashboard.set_notice(DAEMON_RUNNING_AGAIN_NOTICE);
     }
-    dashboard.set_notice(DAEMON_RUNNING_AGAIN_NOTICE);
 }
 
-/// How long "the daemon is running again" stays in the notice bar.
+/// Replace a "daemon unavailable" or "daemon not running" failure with the
+/// reconnect notice. Answers whether one was showing.
+fn replace_stale_daemon_failure(dashboard: &mut DashboardState) -> bool {
+    let Some(current) = dashboard.notice() else {
+        return false;
+    };
+    [
+        DAEMON_UNAVAILABLE_NOTICE,
+        // A request that hit the stopped daemon reports this error text.
+        crate::daemon::DAEMON_NOT_RUNNING_MESSAGE,
+    ]
+    .iter()
+    .any(|stale| current.ends_with(stale))
+        && dashboard.replace_notice_if(&current, DAEMON_RUNNING_AGAIN_NOTICE)
+}
+
+/// Keep the bar true to the keep-alive's current state, not only to its
+/// transitions. A restart can leave the keep-alive attached with the failure
+/// still showing, when the transition was missed or the failure was posted
+/// after it, so the connection state also clears it here on the clock tick.
+/// Answers whether the bar changed.
+fn reconcile_daemon_failure(
+    dashboard: &mut DashboardState,
+    presence: &crate::daemon::DaemonPresence,
+    running_again_since: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if matches!(presence, crate::daemon::DaemonPresence::Attached)
+        && replace_stale_daemon_failure(dashboard)
+    {
+        *running_again_since = Some(now);
+        return true;
+    }
+    false
+}
+
 const DAEMON_RUNNING_AGAIN_DISPLAY: Duration = Duration::from_secs(8);
 
 /// Take the reconnect notice down once it has been readable for
