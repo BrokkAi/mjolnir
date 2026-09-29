@@ -345,3 +345,15 @@ Validation on master at `d7af8c6b` (before F9): clippy clean; `mj-cli/tests/term
 ### User question (11:40): a yolo session on `morannon-podman` raised a permission request
 
 Session `7a52ae6d` (Claude, `morannon-podman`, bridge 0.84.0): the target is `SshPodman`, whose `execution_policy()` is `Unconstrained` unconditionally; the transcript carries the worker's "made a permission request while configured to run unconstrained" warning, so the worker had enforced `bypassPermissions` and surfaced a request the harness should never have sent (`tool-permission-1`, a Bash command beginning `kill 61659; …`, mid-turn, no plan mode). Verdict: harness side, likely tied to the 0.84.0 bridge pin (`1af3b8d5`, `dc436f0c`); the warning's wording blames the policy wrongly. Proposed re-verification: a yolo Claude session on 0.84.0 running `kill <pid>` and `ls`; if it reproduces, auto-approve under yolo and reword the warning.
+
+### Opus O2, option B (I1-2 remainder) — landed
+
+`aa3ab9c3`: when a sub-agent's startup group fails for good (a refused step, or one given up after its retries), the delivery loop runs the child's park operation but records `Error` with the cause (`Controller::fail_subagent_start_worker`); record, parent link and target are kept; a child that took work meanwhile is left running. `has_nothing_to_checkpoint(session, subagent)` treats an `Error` sub-agent as having nothing to archive, so its close tears the target down without a checkpoint; force destroy removes it; `wait`/`list_agents` still report `error` with the cause and `send_input` still refuses with "child startup failed: <cause>"; the notice reads "Session startup failed: <cause>". Tests: `a_child_whose_start_failed_is_stopped_and_recorded_as_failed`, `closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint`, `force_destroy_removes_a_failed_subagent`, `a_child_recorded_failed_after_a_refused_startup_reports_its_cause`. Limits: not durable across a daemon stop between the refusal and the stop (the child stays idle; the parent still reads the failure); the close rule covers any `Error` sub-agent. controller 2005 green; clippy and fmt clean.
+
+### Fix wave F11 (Sonnet) — landed
+
+`f0850e75`: `tests/e2e/delegation.py` passes again — the fake ACP appends each prompt to `fixture-prompt.txt` in its own home and `wait_prompt` finds it by session id; new checks: the first wait returns the report text, a wait on the parked child returns in under 5 s, a wait submitted right after `send_input` stays pending until the second prompt reaches the worker and returns the second report after the daemon replacement. The wait overrun did not reproduce (10.2 s, 0.1 s, 9.8 s against 30/30/60 s). Observation: a wait made after a delivered handback still held for the fake's 10 s prompt delay.
+
+### Upstream issue filed (11:50)
+
+agentclientprotocol/claude-agent-acp#1196: 0.84.0 sends `session/request_permission` for a Bash tool call while the session mode is `bypassPermissions` (the `7a52ae6d` case).
