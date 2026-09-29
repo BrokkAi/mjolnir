@@ -1959,3 +1959,72 @@ async fn a_missing_historical_checkout_is_not_probed_on_every_retry_tick() {
     let result = sources.jobs.join_next().await.unwrap().unwrap();
     sources.complete(result);
 }
+
+/// RVC-3: a reviewing harness's form was on screen in the terminal while
+/// `mj elicitations --session <parent>` answered `[]`. The session's question
+/// list now includes it, under an id that routes the answer back to the role
+/// that asked; the API accepts an answer only for an id on this list.
+#[test]
+fn a_reviewers_question_is_one_of_the_sessions_questions() {
+    use crate::review_host::RuntimeReviewView;
+    use mj_core::review::driver::TurnReviewPhase;
+
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut record = phone_session("parent", 0);
+    record.state = SessionState::Running;
+    controller.state.sessions.insert("parent".into(), record);
+    let question = mj_core::elicitation::ElicitationRequest {
+        id: "fable-decline-1".into(),
+        message: "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?"
+            .into(),
+        title: None,
+        description: None,
+        fields: Vec::new(),
+    };
+    let reviews = BTreeMap::from([(
+        "parent".to_owned(),
+        RuntimeReviewView {
+            session_id: "parent".into(),
+            questions: vec![mj_client::review::ReviewerQuestion {
+                role: "reviewer".into(),
+                request: question.clone(),
+            }],
+            tier: mj_core::review::lanes::ReviewTier::Quick,
+            phase: TurnReviewPhase::Running { roles: Vec::new() },
+            roles: Vec::new(),
+            status: "the reviewer is reading the change…".into(),
+            verdict: None,
+        },
+    )]);
+    let sources = PhoneProjectSources::default();
+    let snapshot = viewer_snapshot(
+        &controller,
+        &[],
+        &Default::default(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &sources,
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &reviews,
+        },
+        1,
+    );
+    let listed = &snapshot.sessions.0["parent"].pending_elicitations;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].message, question.message);
+    assert_eq!(
+        mj_client::review::parse_reviewer_question_id(&listed[0].id),
+        Some(("reviewer", "fable-decline-1")),
+        "the listed id says which reviewing role to answer"
+    );
+}

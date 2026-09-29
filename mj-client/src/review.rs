@@ -16,6 +16,46 @@ pub struct RuntimeReviewView {
     pub status: String,
     /// Present once the review has reached a verdict the user must answer.
     pub verdict: Option<VerdictView>,
+    /// Forms a reviewing harness is waiting for a person to answer. The
+    /// worker owns them; the host projects them from each role's journal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<ReviewerQuestion>,
+}
+
+/// One form a reviewing role asked, and the role that asked it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewerQuestion {
+    pub role: String,
+    pub request: mj_core::elicitation::ElicitationRequest,
+}
+
+/// Marks an elicitation id as a reviewing role's form rather than the
+/// primary agent's. Public ids allow only letters, digits, `-`, `_` and `.`,
+/// so the separator is a dot.
+const REVIEWER_QUESTION_PREFIX: &str = "review.";
+
+impl ReviewerQuestion {
+    /// The request as the session's own question list carries it. Its id
+    /// names the role, so an answer goes back to the harness that asked.
+    #[must_use]
+    pub fn session_request(&self) -> mj_core::elicitation::ElicitationRequest {
+        let mut request = self.request.clone();
+        request.id = format!(
+            "{REVIEWER_QUESTION_PREFIX}{}.{}",
+            self.role, self.request.id
+        );
+        request
+    }
+}
+
+/// The role and that role's own elicitation id behind an id made by
+/// [`ReviewerQuestion::session_request`], or `None` for any other id.
+#[must_use]
+pub fn parse_reviewer_question_id(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix(REVIEWER_QUESTION_PREFIX)?
+        .split_once('.')
+        .filter(|(role, inner)| !role.is_empty() && !inner.is_empty())
 }
 
 impl RuntimeReviewView {
@@ -23,13 +63,15 @@ impl RuntimeReviewView {
     /// handoff wait for the user even though they retain an activity label.
     #[must_use]
     pub fn is_working(&self) -> bool {
-        matches!(
-            self.phase,
-            TurnReviewPhase::CapturingDelta
-                | TurnReviewPhase::LaunchingReviewer
-                | TurnReviewPhase::Running { .. }
-                | TurnReviewPhase::Forwarding { error: None, .. }
-        )
+        // A reviewer waiting on a person's answer makes no progress on its own.
+        self.questions.is_empty()
+            && matches!(
+                self.phase,
+                TurnReviewPhase::CapturingDelta
+                    | TurnReviewPhase::LaunchingReviewer
+                    | TurnReviewPhase::Running { .. }
+                    | TurnReviewPhase::Forwarding { error: None, .. }
+            )
     }
 
     /// A compact activity label for session lists and headers. Read typed
@@ -38,6 +80,7 @@ impl RuntimeReviewView {
     pub fn activity_label(&self) -> Option<&'static str> {
         match &self.phase {
             TurnReviewPhase::Resolved(_) => None,
+            _ if !self.questions.is_empty() => Some("Question"),
             TurnReviewPhase::Forwarding { error: None, .. } => Some("Sending findings"),
             TurnReviewPhase::Forwarding { error: Some(_), .. } => Some("Forward failed"),
             TurnReviewPhase::Verdict(verdict) => Some(match verdict {

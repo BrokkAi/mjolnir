@@ -3614,6 +3614,7 @@ fn a_failure_outranks_a_question_and_an_unreachable_worker_sits_between_them() {
     // session must win, so the row, the queue, and the badge all say failure.
     dashboard.set_session_reviews([mj_client::review::RuntimeReviewView {
         session_id: "asks".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Verdict(
             mj_core::review::verdict::ReviewVerdict::Failed {

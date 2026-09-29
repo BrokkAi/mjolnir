@@ -2348,6 +2348,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
     );
     dashboard.set_session_reviews([RuntimeReviewView {
         session_id: "session-second".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
         roles: Vec::new(),
@@ -2381,6 +2382,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
     // must not pair a live review with the primary's idle marker.
     dashboard.set_session_reviews([RuntimeReviewView {
         session_id: "session-second".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
         roles: Vec::new(),

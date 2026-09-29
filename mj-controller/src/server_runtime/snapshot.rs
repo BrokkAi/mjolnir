@@ -561,6 +561,16 @@ pub(super) fn viewer_snapshot_selected(
             .get(&session.id)
             .cloned()
             .unwrap_or_default();
+        // A reviewing harness's form is this session's question too: the
+        // person answers it here, and its id routes the answer to that role.
+        if let Some(review) = reviews.get(&session.id) {
+            session.pending_elicitations.extend(
+                review
+                    .questions
+                    .iter()
+                    .map(crate::review_host::ReviewerQuestion::session_request),
+            );
+        }
         session.prompt_images_supported = prompt_images.contains(&session.id);
         session.operation = operations.get(&session.id).cloned();
         // Runtime ownership takes precedence over the durable record. Move

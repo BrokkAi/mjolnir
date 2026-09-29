@@ -1049,6 +1049,7 @@ mod tests {
         ]);
         busy.reviews.push(mj_client::review::RuntimeReviewView {
             session_id: "running".into(),
+            questions: Vec::new(),
             tier: mj_core::review::lanes::ReviewTier::Quick,
             phase: mj_core::review::driver::TurnReviewPhase::CapturingDelta,
             roles: Vec::new(),

@@ -93,6 +93,7 @@ impl HostState {
             None if self.preparing.contains(session_id) => {
                 let next = RuntimeReviewView {
                     session_id: session_id.into(),
+                    questions: Vec::new(),
                     tier: (self.config)().tier,
                     phase: TurnReviewPhase::LaunchingReviewer,
                     roles: Vec::new(),

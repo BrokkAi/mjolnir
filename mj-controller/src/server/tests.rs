@@ -3527,6 +3527,7 @@ fn a_running_review_projects_to_the_phone() {
 
     let review = RuntimeReviewView {
         session_id: "session-1".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Extended,
         phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
             synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),

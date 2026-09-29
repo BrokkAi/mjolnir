@@ -20,6 +20,7 @@ fn session_id(test: &str) -> String {
 fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
     let mut view = RuntimeReviewView {
         session_id: "activity".to_owned(),
+        questions: Vec::new(),
         tier: ReviewTier::Quick,
         phase: TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
@@ -2044,4 +2045,176 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert_eq!(recorded.reviewed_through_ordinal, 12);
     assert_eq!(recorded.active, None);
     host.shutdown().await.expect("shutdown the host");
+}
+
+fn elicitation_event(ordinal: u64, previous_digest: &str, id: &str, message: &str) -> RelayEvent {
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal,
+        previous_digest: previous_digest.to_owned(),
+        digest: String::new(),
+        recorded_at_ms: i64::try_from(ordinal).unwrap_or_default() * 100,
+        command_id: None,
+        observation: RelayObservation::ElicitationRequested {
+            request: mj_core::elicitation::ElicitationRequest {
+                id: id.to_owned(),
+                message: message.to_owned(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+            },
+        },
+    };
+    event.digest = relay_event_digest(&event).expect("digest");
+    event
+}
+
+/// Opens a quick review of a one-line change and answers every step up to
+/// the reviewer's first journal poll, which is returned for the test.
+async fn open_a_quick_review_to_its_first_poll(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+) -> oneshot::Sender<Result<ReviewerOutcome, String>> {
+    finish_a_turn(manager, host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: std::path::PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Started(Box::new(
+        crate::worker_client::StartedReviewer {
+            native_session_id: None,
+            config_options: Vec::new(),
+            reused: false,
+            state: operational(),
+        },
+    ))));
+    let (_, _, reply) = manager
+        .next_reviewer(|role, action| {
+            role.as_deref() == Some(mj_core::review::driver::REVIEWER_ROLE)
+                && matches!(action, ReviewerAction::Attach { .. })
+        })
+        .await;
+    reply
+}
+
+/// RVC-3: the Auto reviewer's harness declined and asked "Retry with
+/// claude-opus-4-8?". Only the terminal's review pane showed that form; the
+/// session list, `mj elicitations` and the phone did not. The host projects
+/// the form from the role's journal into the review it publishes, and the
+/// review reads as a question rather than as work in progress.
+#[tokio::test]
+async fn a_reviewers_question_is_published_with_its_review() {
+    let session = session_id("reviewerform");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let message = "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?";
+    let asked = elicitation_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "decline-1",
+        message,
+    );
+    let through_digest = asked.digest.clone();
+    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
+        crate::worker_client::RelayAttachment {
+            state: operational(),
+            events: vec![asked],
+            through_ordinal: 1,
+            through_digest,
+        },
+    ))));
+    let view = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(view) = host.view(session).filter(|view| !view.questions.is_empty()) {
+                return view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reviewer's form is published with the review");
+    assert_eq!(view.questions.len(), 1);
+    assert_eq!(
+        view.questions[0].role,
+        mj_core::review::driver::REVIEWER_ROLE
+    );
+    assert_eq!(view.questions[0].request.message, message);
+    assert_eq!(view.activity_label(), Some("Question"));
+    assert!(
+        !view.is_working(),
+        "a review waiting on a person is not working"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// `mj respond`, the phone and the terminal's session answer all reach the
+/// session handle. An id from a reviewer's question goes back to the role
+/// that asked, the same reviewer action the terminal's review pane sends.
+#[tokio::test]
+async fn an_answer_to_a_reviewers_question_reaches_that_role() {
+    let session = session_id("reviewanswer");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let handle = manager.control.session(session.to_owned()).await.unwrap();
+    let id = mj_client::review::ReviewerQuestion {
+        role: mj_core::review::driver::REVIEWER_ROLE.to_owned(),
+        request: mj_core::elicitation::ElicitationRequest {
+            id: "decline-1".into(),
+            message: "Retry?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        },
+    }
+    .session_request()
+    .id;
+    let answer = tokio::spawn(async move {
+        handle
+            .respond_elicitation(id, mj_core::elicitation::ElicitationResponse::Decline)
+            .await
+    });
+    match manager.next().await {
+        RemoteSessionRequest::Reviewer {
+            role,
+            action:
+                ReviewerAction::RespondElicitation {
+                    elicitation_id,
+                    response,
+                },
+            reply,
+            ..
+        } => {
+            assert_eq!(
+                role.as_deref(),
+                Some(mj_core::review::driver::REVIEWER_ROLE)
+            );
+            assert_eq!(elicitation_id, "decline-1");
+            assert_eq!(response, mj_core::elicitation::ElicitationResponse::Decline);
+            let _ = reply.send(Ok(ReviewerOutcome::ElicitationResolved));
+        }
+        other => panic!(
+            "a reviewer's question is answered through the reviewer, not the primary: {}",
+            other.session_id()
+        ),
+    }
+    answer.await.unwrap().expect("the answer is delivered");
 }
