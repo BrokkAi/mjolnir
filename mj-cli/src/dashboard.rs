@@ -74,9 +74,7 @@ use crate::pollers::{
     spawn_dashboard_resource_poller, spawn_quota_refresher, spawn_remote_dashboard_worker_poller,
     spawn_worker_diagnosis,
 };
-use crate::session_presentation::{
-    apply_lifecycle_display, apply_session_activity, lifecycle_kind,
-};
+use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
 use crate::{TerminalGuard, short_id};
 
 /// Redraw cadence for displays that move with the wall clock: turn timers,
@@ -988,7 +986,7 @@ mod upgrade;
 pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
-pub(crate) use drains::refresh_open_chats;
+pub(crate) use drains::{refresh_open_chats, refresh_subagent_counts};
 mod session_state;
 mod surface;
 

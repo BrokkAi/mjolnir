@@ -1086,14 +1086,7 @@ impl DashboardState {
                                 | SessionState::Closing
                                 | SessionState::Destroying
                         ))
-                    || (session.state == SessionState::Running
-                        && !self.unreachable_sessions.contains(&session.id)
-                        && self.session_details.get(&session.id).is_some_and(|detail| {
-                            detail.activity.is_working(
-                                detail.current_turn_started_at,
-                                !detail.pending_elicitations.is_empty(),
-                            )
-                        }))
+                    || self.session_is_working(&session.id)
                     || self
                         .session_reviews
                         .get(&session.id)

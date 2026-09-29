@@ -226,14 +226,7 @@ pub(crate) fn drawn_session_rows_with_options(
                     now_epoch_seconds,
                     attention,
                 };
-                let primary_busy = !unreachable
-                    && session.state == SessionState::Running
-                    && detail.is_some_and(|detail| {
-                        detail.activity.is_working(
-                            detail.current_turn_started_at,
-                            !detail.pending_elicitations.is_empty(),
-                        )
-                    });
+                let primary_busy = dashboard.session_is_working(&session.id);
                 // Review work is independent of the session's primary
                 // lifecycle. A review can keep animating while the session
                 // is stopped or unreachable, so do not gate it on either.

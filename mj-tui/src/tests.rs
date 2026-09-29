@@ -5707,3 +5707,32 @@ fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
         );
     }
 }
+
+/// I2-7: the composer footer's working count stayed 0 for a child's whole
+/// turn. The count must come from the facts the worker reports for the child,
+/// which is all a dashboard holds for a child nobody has opened, and it must
+/// agree with the child's Sessions row.
+#[test]
+fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    assert_eq!(dashboard.working_subagent_count_for(&parent), 0);
+
+    dashboard.set_session_activity(
+        "child-session",
+        mj_client::usage_format::SessionActivity {
+            execution: Some(mj_core::relay::RelayExecutionState::Running),
+            state: Some(mj_core::activity::ActivityState::Turn {
+                started_at_ms: Some(1_000),
+                last_activity_at_ms: None,
+            }),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        dashboard.attention_level("child-session"),
+        AttentionLevel::Working,
+        "the child's own row reads it as working"
+    );
+    assert_eq!(dashboard.working_subagent_count_for(&parent), 1);
+}

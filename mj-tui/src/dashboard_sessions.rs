@@ -463,10 +463,7 @@ impl DashboardState {
                     } else {
                         2
                     }
-                } else if self.session_details.get(&session.id).is_some_and(|d| {
-                    d.activity
-                        .is_working(d.current_turn_started_at, d.awaiting_input)
-                }) {
+                } else if self.session_is_working(&session.id) {
                     0
                 } else if session.state == SessionState::Running {
                     1
@@ -691,6 +688,23 @@ impl DashboardState {
                 || self.transition_kind(session_id).is_some(),
             self.transition_failure_kind(session_id).is_some(),
         )
+    }
+
+    /// Whether a live, reachable session is computing right now: the fact the
+    /// Sessions row's spinner, a parent's sub-agent count and the Sub-agents
+    /// view's ordering all read, so they cannot disagree.
+    pub(crate) fn session_is_working(&self, session_id: &str) -> bool {
+        self.state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.state == SessionState::Running)
+            && !self.unreachable_sessions.contains(session_id)
+            && self.session_details.get(session_id).is_some_and(|detail| {
+                detail.activity.is_working(
+                    detail.current_turn_started_at,
+                    !detail.pending_elicitations.is_empty(),
+                )
+            })
     }
 
     /// The most recent activity the dashboard knows for a session, for

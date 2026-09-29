@@ -4,6 +4,8 @@
 //! snapshots.  Keeping these setters here prevents either surface from
 //! turning a display update into persistence or chat-side behavior.
 
+use std::collections::BTreeMap;
+
 use mj_controller::session_manager::ManagedSessionView;
 use mj_tui::{DashboardState, SessionOperationKind};
 
@@ -32,6 +34,22 @@ pub(crate) fn apply_session_activity(
         ),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
+}
+
+/// Apply one worker report and hand the open conversations the sub-agent
+/// counts it can change.
+///
+/// A child's worker reporting a turn changes no record, so the parent's
+/// composer footer (`Subagents · N/M`) would otherwise keep the count from the
+/// last record change and read `0/M` for the child's whole turn (I2-7).
+pub(crate) fn apply_worker_activity(
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    view: &ManagedSessionView,
+) {
+    apply_session_activity(dashboard, session_id, view);
+    crate::dashboard::refresh_subagent_counts(chats, dashboard);
 }
 
 /// Map a daemon lifecycle to the operation kind rendered by a surface.
@@ -110,10 +128,17 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use super::{apply_lifecycle_display, apply_session_activity, lifecycle_kind};
+    use super::{
+        apply_lifecycle_display, apply_session_activity, apply_worker_activity, lifecycle_kind,
+    };
     use crate::daemon::{RuntimeLifecycleKind, RuntimeLifecycleView};
 
     fn dashboard() -> DashboardState {
+        let (config, state) = dashboard_parts();
+        DashboardState::new(config, state, BTreeMap::new())
+    }
+
+    fn dashboard_parts() -> (Config, State) {
         let mut config = Config::default();
         config.profiles.insert(
             "profile-1".into(),
@@ -184,7 +209,7 @@ mod tests {
                 checkpoint: None,
             },
         );
-        DashboardState::new(config, state, BTreeMap::new())
+        (config, state)
     }
 
     fn operational(
@@ -404,5 +429,58 @@ mod tests {
             lifecycle_kind(RuntimeLifecycleKind::StopSubagent),
             SessionOperationKind::Stopping
         );
+    }
+
+    /// I2-7: the composer footer read `Subagents · 0/3` for a child's whole
+    /// turn, because the working count was refreshed only with records.
+    #[tokio::test]
+    async fn a_child_worker_report_updates_the_parent_footer_working_count() {
+        let (config, mut state) = dashboard_parts();
+        let mut dashboard = DashboardState::new(config, state.clone(), BTreeMap::new());
+        let mut child = state.sessions["session-1"].clone();
+        child.id = "child-1".into();
+        child.title = "child".into();
+        state.subagents.insert(
+            child.id.clone(),
+            mj_core::subagent::SubagentRecord {
+                child_session_id: child.id.clone(),
+                parent_session_id: "session-1".into(),
+                task_name: "Inspect parser".into(),
+                profile_id: child.last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: "Inspect the parser".into(),
+                request_key: "request-1".into(),
+                created_at: child.created_at.clone(),
+                noticed_turn: None,
+                handback_tool: false,
+            },
+        );
+        state.sessions.insert(child.id.clone(), child);
+        dashboard.set_state(state);
+        let fixture = mj_client::session::replacement_session_test_fixture("session-1", 1);
+        let mut chats = BTreeMap::from([(
+            "session-1".to_owned(),
+            mj_chat::chat::ActiveChat::open(
+                fixture.stopped,
+                "bundle-1",
+                None,
+                fixture.control,
+                mj_chat::chat::SessionHeaderIdentity::default(),
+                String::new(),
+                mj_chat::chat::Notices::default(),
+            ),
+        )]);
+        crate::dashboard::refresh_subagent_counts(&mut chats, &dashboard);
+        assert_eq!(chats["session-1"].subagent_working_count(), 0);
+
+        let running = managed_view(
+            operational(RelayExecutionState::Running, Some(1_700_000_000_000)),
+            true,
+        );
+        apply_worker_activity(&mut dashboard, &mut chats, "child-1", &running);
+
+        assert_eq!(chats["session-1"].subagent_working_count(), 1);
     }
 }

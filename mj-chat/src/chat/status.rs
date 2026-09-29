@@ -268,6 +268,12 @@ impl ChatState {
         self.subagent_working_count = count;
     }
 
+    /// How many sub-agents the composer footer shows as working.
+    #[must_use]
+    pub fn subagent_working_count(&self) -> usize {
+        self.subagent_working_count
+    }
+
     /// Records whether this session was created with Mjolnir sub-agents, so
     /// the composer can show where they will appear before the first one
     /// exists.
