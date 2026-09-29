@@ -145,6 +145,15 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    // Views are published only from the serving loop below, so the first
+    // targets are installed before any can arrive.
+    state.owner().install_relay_sessions(
+        manager_targets
+            .borrow()
+            .iter()
+            .map(|target| target.session_id.clone())
+            .collect(),
+    );
     let cancellation = crate::termination::Coordinator::install().token();
     // Bootstrap already owns live managers. Capture its error so those owners
     // are shut down before the process-level writer can be closed.
@@ -816,9 +825,9 @@ pub(super) fn spawn_manager_target_refresher(
                 let retained = refreshed
                     .iter()
                     .map(|target| target.session_id.clone())
-                    .collect();
-                {
-                    let owner = state.owner();
+                    .collect::<BTreeSet<_>>();
+                let views_dropped = {
+                    let mut owner = state.owner();
                     // A lifecycle may have claimed a target while its commands
                     // were being prepared. Only the owner can authorize install.
                     if owner.pollable_worker_inputs() != inputs {
@@ -832,6 +841,12 @@ pub(super) fn spawn_manager_target_refresher(
                             true
                         }
                     });
+                    // Same lock as the install, so a view is published only
+                    // while its actor is still wanted.
+                    owner.install_relay_sessions(retained.clone())
+                };
+                if views_dropped {
+                    state.publish_revision();
                 }
                 state.review_host().retain_sessions(retained);
                 installed = Some(inputs);
