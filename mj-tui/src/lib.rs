@@ -373,6 +373,9 @@ pub enum DashboardAction {
     CreateBundle {
         sources: Vec<String>,
     },
+    RemoveBundle {
+        bundle_id: String,
+    },
     Suspend {
         session_id: String,
         acknowledge_unpublished_work: bool,

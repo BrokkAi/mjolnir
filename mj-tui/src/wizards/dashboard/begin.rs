@@ -67,6 +67,7 @@ impl DashboardState {
             new_bundle_repositories: Vec::new(),
             new_bundle_source: mj_chat::path_input::PathInput::new(),
             bundle_creation_in_flight: false,
+            bundle_removal_in_flight: false,
             project_directory: mj_chat::path_input::PathInput::new(),
             project_directory_error: None,
             project_history: Vec::new(),

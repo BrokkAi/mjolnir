@@ -290,6 +290,25 @@ pub fn create_bundle_from_sources(
     Ok(QuickBundleCreation { config, bundle_id })
 }
 
+/// Remove a saved project from the config. Only the config entry goes: no
+/// checkout, clone or file is touched. Refused while any session still uses
+/// the project, checked against fresh state so a dashboard's stale view
+/// cannot remove a project a new session just started with.
+pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
+    let state = crate::database::load_state()?;
+    if let Some(refusal) = state.bundle_removal_refusal(bundle_id) {
+        bail!(refusal);
+    }
+    let (config, ()) = Config::update(|config| {
+        ensure!(
+            config.bundles.remove(bundle_id).is_some(),
+            "project {bundle_id:?} is no longer saved"
+        );
+        config.validate()
+    })?;
+    Ok(config)
+}
+
 /// Add a bundle for all `sources` to an already-loaded config. The source
 /// interpretation is shared with the persisted [`create_bundle_from_sources`]
 /// entry point and the legacy quick-bundle helper.

@@ -2130,6 +2130,47 @@ impl State {
             .expect("session checked above"))
     }
 
+    /// Sessions that still read `bundle_id` from the config. A suspended
+    /// session counts: resume looks its project up again. Only a session
+    /// opened on a plain directory, or one whose data is already gone, does
+    /// not need it.
+    pub fn bundle_users(&self, bundle_id: &str) -> Vec<&SessionRecord> {
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.bundle_id == bundle_id
+                    && session.project_directory.is_none()
+                    && session.state != SessionState::DestroyedWithDataLoss
+            })
+            .collect()
+    }
+
+    /// Why `bundle_id` cannot be removed from the config, or `None` when no
+    /// session uses it.
+    pub fn bundle_removal_refusal(&self, bundle_id: &str) -> Option<String> {
+        let users = self.bundle_users(bundle_id);
+        if users.is_empty() {
+            return None;
+        }
+        let mut names = users
+            .iter()
+            .take(3)
+            .map(|session| format!("{:?}", session.listed_title()))
+            .collect::<Vec<_>>();
+        if users.len() > 3 {
+            names.push(format!("{} more", users.len() - 3));
+        }
+        Some(format!(
+            "Project {bundle_id:?} is used by {}: {}. Destroy those sessions before removing it.",
+            if users.len() == 1 {
+                "a session"
+            } else {
+                "sessions"
+            },
+            names.join(", ")
+        ))
+    }
+
     /// Setup may add replacements under new names, but must not rewrite
     /// dependencies still owned by active sessions.
     pub fn validate_setup_update(&self, before: &Config, after: &Config) -> Result<()> {

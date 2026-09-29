@@ -536,33 +536,148 @@ fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Target);
 }
 
-#[test]
-fn project_picker_saved_projects_keep_add_project_beside_navigation() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+/// A saved-projects fixture: `hel` from the shared config, plus a second
+/// project with two repositories, one of them a path too long for a row.
+fn two_project_config() -> mj_core::config::Config {
+    let mut configuration = config();
+    let long_path =
+        "/tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d1a-0123456789ab/bifrost";
+    configuration.bundles.insert(
+        "bifrost2".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "bifrost-dev".into(),
+            repositories: vec![
+                mj_core::config::ProjectRepository {
+                    id: "bifrost-dev".into(),
+                    github: Some("BrokkAi/bifrost-dev".into()),
+                    local: None,
+                    destination: PathBuf::from("bifrost-dev"),
+                    git_ref: None,
+                },
+                mj_core::config::ProjectRepository {
+                    id: "bifrost".into(),
+                    github: None,
+                    local: Some(PathBuf::from(long_path)),
+                    destination: PathBuf::from("bifrost"),
+                    git_ref: None,
+                },
+            ],
+        },
+    );
+    configuration
+}
+
+fn dashboard_at_saved_projects(state: State) -> DashboardState {
+    let mut dashboard = DashboardState::new(two_project_config(), state, BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+    dashboard
+}
+
+fn select_saved_project(dashboard: &mut DashboardState, bundle_id: &str) {
+    let index = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
+        .iter()
+        .position(|id| *id == bundle_id)
+        .unwrap();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard.bundle = index;
+    wizard.form.get_mut().focus(WizardControl::BundleList);
+}
+
+#[test]
+fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() {
+    let mut dashboard = dashboard_at_saved_projects(State::default());
+    select_saved_project(&mut dashboard, "bifrost2");
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let lines = draw_project_picker(&mut dashboard, &mut terminal);
     let text = lines.join("\n");
-    assert!(text.contains("hel  1 repository"), "{text}");
     assert!(text.contains("choose a project"), "{text}");
-    let action_row = lines
-        .iter()
-        .find(|line| line.contains("Add project"))
-        .unwrap();
+    // Rows name the first source and count the rest.
     assert!(
-        action_row.contains("Cancel") && action_row.contains("Next"),
+        lines
+            .iter()
+            .any(|line| line.contains("bifrost2") && line.contains("BrokkAi/bifrost-dev  +1 more")),
         "{text}"
     );
+    // The details under the list spell out every source of the selection,
+    // wrapped rather than cut, and name the primary repository.
+    assert!(text.contains("bifrost2 · 2 repositories"), "{text}");
+    assert!(text.contains("BrokkAi/bifrost-dev  (primary)"), "{text}");
+    let joined = lines
+        .iter()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .collect::<String>();
+    assert!(joined.contains("0123456789ab/bifrost"), "{text}");
+    // Add and Remove stack at the upper right, apart from the navigation row.
+    let row_of = |label: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("missing {label:?}:\n{text}"))
+    };
+    let (add, remove, cancel) = (row_of("Add…"), row_of("Remove"), row_of("Cancel"));
+    assert_eq!(remove, add + 1, "{text}");
+    assert!(add < row_of("bifrost2 ·") && cancel > remove, "{text}");
+    assert!(!lines[cancel].contains("Add"), "{text}");
     assert_eq!(
-        click_project_text(&mut dashboard, &mut terminal, "Add project"),
+        click_project_text(&mut dashboard, &mut terminal, "Add…"),
         DashboardAction::None
     );
     assert_eq!(project_wizard(&dashboard).step, WizardStep::NewBundle);
     activate_project_control(&mut dashboard, WizardControl::Back);
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+}
+
+#[test]
+fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selection() {
+    let mut state = State::default();
+    let session = stopped_session();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = dashboard_at_saved_projects(state);
+
+    // A suspended session still resumes from `hel`, so Delete explains why
+    // it stays instead of removing it.
+    select_saved_project(&mut dashboard, "hel");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Delete)),
+        DashboardAction::None
+    );
+    let notice = dashboard.notice().unwrap();
+    assert!(notice.contains("\"hel\" is used by a session"), "{notice}");
+    assert!(notice.contains("ACP pretty name"), "{notice}");
+    assert!(!project_wizard(&dashboard).bundle_removal_in_flight);
+
+    select_saved_project(&mut dashboard, "bifrost2");
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::RemoveBundle),
+        DashboardAction::RemoveBundle {
+            bundle_id: "bifrost2".into()
+        }
+    );
+    assert!(project_wizard(&dashboard).bundle_removal_in_flight);
+    // The list is frozen until the config write is confirmed.
+    for code in [KeyCode::Delete, KeyCode::Enter, KeyCode::Up] {
+        assert_eq!(ready_key(&mut dashboard, key(code)), DashboardAction::None);
+    }
+
+    let mut removed = dashboard.config.clone();
+    removed.bundles.remove("bifrost2");
+    dashboard.apply_removed_bundle(removed, "bifrost2");
+    let wizard = project_wizard(&dashboard);
+    assert!(!wizard.bundle_removal_in_flight);
+    assert_eq!(wizard.step, WizardStep::Bundle);
+    assert_eq!(
+        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        "hel"
+    );
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Removed project bifrost2.")
+    );
 }
 
 #[test]
