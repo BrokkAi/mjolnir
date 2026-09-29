@@ -374,6 +374,47 @@ pub fn with_symbols<R>(symbols: SymbolSet, render: impl FnOnce() -> R) -> R {
     render()
 }
 
+/// The one-cell ASCII stand-in for a Unicode mark that dialog titles, hints,
+/// notices and Settings fields spell as literal text. The glyph table covers
+/// the marks the dashboard draws itself; prose such as "Enter opens · Esc
+/// closes" or "Saving…" cannot reach it without every string asking for its
+/// separator, so the frame is folded once after drawing instead. The
+/// replacements are one cell wide so no layout changes.
+pub fn ascii_fallback(mark: char) -> Option<&'static str> {
+    Some(match mark {
+        '·' | '—' | '–' | '−' | '─' | '▁' => "-",
+        '…' | '⋯' => ".",
+        '▾' | '↓' => ASCII_GLYPHS.stopping,
+        '↑' => ASCII_GLYPHS.starting,
+        '→' | '›' | '❯' | '▸' => ">",
+        '←' | '‹' => "<",
+        '✓' => ASCII_GLYPHS.unread,
+        '×' => ASCII_GLYPHS.failed,
+        '▪' => ASCII_GLYPHS.size_standard,
+        '□' | '◇' | '◈' => "+",
+        '◆' | '•' | '●' | '◐' => "*",
+        '○' => ASCII_GLYPHS.pending,
+        '⚠' => "!",
+        '│' | '▕' | '▏' => "|",
+        '█' | '▐' => "#",
+        '■' => "=",
+        _ => return None,
+    })
+}
+
+/// Replace every Unicode mark in `buffer` that has an ASCII stand-in. Called
+/// after a frame is drawn while the ASCII symbol set is in force.
+pub fn fold_buffer_to_ascii(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buffer.content {
+        let mut marks = cell.symbol().chars();
+        if let (Some(mark), None) = (marks.next(), marks.next())
+            && let Some(replacement) = ascii_fallback(mark)
+        {
+            cell.set_symbol(replacement);
+        }
+    }
+}
+
 /// The symbol set to draw with: the configured one, or a guess from the
 /// terminal when nothing is configured. The Linux console and a locale
 /// without UTF-8 cannot show the Unicode set.

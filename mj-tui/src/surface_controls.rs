@@ -798,7 +798,8 @@ mod tests {
     fn the_filter_clear_chip_drops_the_filter_and_the_label_does_not() {
         use mj_core::config::SymbolSet;
 
-        for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+        for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')]
+        {
             let mut dashboard = dashboard_with_session(running_session());
             let mut config = dashboard.config.clone();
             config.advanced.symbols = Some(symbols);
@@ -819,7 +820,7 @@ mod tests {
                 Some(("ses", Some(SessionStateFilter::Blocked)))
             );
 
-            let label = "/ses · blocked";
+            let label = format!("/ses {dot} blocked");
             let lines = draw(&mut dashboard, (120, 40));
             let (x, y) = point(&lines, &format!("{label} {close} "));
             let pane = dashboard.pane_areas.expect("pane areas")[0];

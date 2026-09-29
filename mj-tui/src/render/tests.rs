@@ -414,7 +414,7 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
 fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
     use mj_core::config::SymbolSet;
 
-    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+    for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')] {
         let mut dashboard = dashboard_with_session(running_session());
         let mut config = dashboard.config.clone();
         config.advanced.symbols = Some(symbols);
@@ -440,7 +440,7 @@ fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
         dashboard.handle_key(key(KeyCode::Char('w')));
         let working = title(&mut dashboard, 120);
         assert!(
-            working.contains(&format!(" Sessions · working{chip}")),
+            working.contains(&format!(" Sessions {dot} working{chip}")),
             "{symbols:?}: {working:?}"
         );
 
@@ -449,7 +449,7 @@ fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
         dashboard.handle_key(key(KeyCode::Char('b')));
         let blocked = title(&mut dashboard, 240);
         assert!(
-            blocked.contains(&format!(" Sessions · blocked{chip}")),
+            blocked.contains(&format!(" Sessions {dot} blocked{chip}")),
             "{symbols:?}: {blocked:?}"
         );
 

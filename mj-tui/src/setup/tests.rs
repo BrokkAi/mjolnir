@@ -970,7 +970,10 @@ fn symbols_can_return_to_the_unset_state_and_saving_removes_the_key() {
         .unwrap();
     let popup = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(popup.contains("Follows the terminal"), "{popup}");
-    assert!(popup.contains("unicode") && popup.contains("ascii"), "{popup}");
+    assert!(
+        popup.contains("unicode") && popup.contains("ascii"),
+        "{popup}"
+    );
 
     dashboard.handle_key(key(KeyCode::Up));
     dashboard.handle_key(key(KeyCode::Up));
@@ -3300,4 +3303,79 @@ fn unsupported_cache_host_does_not_show_a_pending_managed_policy() {
     assert!(text.contains("requires a Linux host"), "{text}");
     assert!(!text.contains("Pending application"), "{text}");
     assert!(!text.contains("Mj-managed mbx"), "{text}");
+}
+
+/// Launch campaign finding A-4: with `symbols = "ascii"`, dialog titles and
+/// hints kept `·`, popup headers kept `↑/↓`, notices kept `…`, and Settings
+/// fields kept `▾`. Every page and popup below is drawn with the ASCII set
+/// and must contain nothing else.
+#[test]
+fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
+    fn assert_ascii(context: &str, lines: &[String]) {
+        let offenders = lines
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|character| !character.is_ascii())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            offenders.is_empty(),
+            "{context}: non-ASCII {offenders:?}\n{lines:#?}"
+        );
+    }
+    fn ascii_dashboard() -> DashboardState {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+        dashboard.set_config(config);
+        dashboard
+    }
+
+    let mut dashboard = ascii_dashboard();
+    dashboard.begin_setup();
+    let roots = setup_dialog_mut(&mut dashboard.mode).unwrap().keys();
+    assert_ascii("settings root", &drawn(&mut dashboard, 120, 40));
+    for root in &roots {
+        let mut dashboard = ascii_dashboard();
+        dashboard.begin_settings_section(root, None);
+        assert_ascii(&format!("settings {root}"), &drawn(&mut dashboard, 120, 40));
+        assert_ascii(
+            &format!("settings {root} narrow"),
+            &drawn(&mut dashboard, 80, 30),
+        );
+    }
+    // A field's popup and its header.
+    for (section, field) in [
+        ("advanced", "symbols"),
+        ("advanced", "session_order"),
+        ("interface", "theme"),
+        ("interface", "spinner"),
+        ("interface", "sessions_side"),
+    ] {
+        let mut dashboard = ascii_dashboard();
+        dashboard.begin_settings_section(section, None);
+        choose(&mut dashboard, field);
+        let lines = drawn(&mut dashboard, 100, 30);
+        assert!(
+            lines.iter().any(|line| line.contains("^/v select")),
+            "{field}: the popup header is drawn: {lines:#?}"
+        );
+        assert_ascii(&format!("settings {section} {field} popup"), &lines);
+    }
+
+    // The dashboard's own dialogs.
+    for command in [
+        crate::CommandId::Help,
+        crate::CommandId::Palette,
+        crate::CommandId::NewSessionWizard,
+        crate::CommandId::Workspaces,
+        crate::CommandId::ResumeDialog,
+    ] {
+        let mut dashboard = ascii_dashboard();
+        dashboard.dispatch_command(command);
+        assert_ascii(&format!("{command:?}"), &drawn(&mut dashboard, 120, 40));
+        assert_ascii(
+            &format!("{command:?} narrow"),
+            &drawn(&mut dashboard, 80, 30),
+        );
+    }
 }
