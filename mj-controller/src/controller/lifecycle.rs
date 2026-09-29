@@ -1107,48 +1107,6 @@ impl Controller {
         }
     }
 
-    /// Record, before a destroy is acknowledged, that the session is being
-    /// destroyed (#1191). The destroy runs after the acknowledgement and a
-    /// parent's (its sub-agents first, then its own worker) can outlast a
-    /// daemon restart; without this record the next daemon brings the session
-    /// back as an ordinary live one and nothing finishes the destroy. The
-    /// record is the one a failed destroy leaves: `Error`, not polled, with
-    /// the destruction-failure sentence, which the daemon's startup finishes
-    /// through `interrupted_destroy_session_ids` while the target is still
-    /// recorded. A record that already carries that sentence, or has already
-    /// ended, is left alone. Reports whether the record changed.
-    pub fn record_destroy_requested(&mut self, session_id: &str) -> Result<bool> {
-        let Some(record) = self.state.sessions.get(session_id) else {
-            return Ok(false);
-        };
-        let recorded = record.state == SessionState::Error
-            && record
-                .last_error
-                .as_deref()
-                .is_some_and(|error| error.starts_with(mj_core::state::DESTRUCTION_FAILURE_PREFIX));
-        if !record.state.is_active() || recorded {
-            return Ok(false);
-        }
-        let previous = record.clone();
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.state = SessionState::Error;
-        record.last_error = Some(format!(
-            "{} yet: it is in progress, and if the daemon stops first its next start \
-             finishes it; if this session is still listed after that, run \
-             `mj destroy --session {session_id}` again",
-            mj_core::state::DESTRUCTION_FAILURE_PREFIX
-        ));
-        record.updated_at = now();
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "record that the session is being destroyed",
-            &crate::database::save_lifecycle_session,
-        )?;
-        Ok(true)
-    }
-
     fn force_destroy_session_steps(
         &mut self,
         session_id: &str,

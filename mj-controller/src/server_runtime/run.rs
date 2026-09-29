@@ -1188,11 +1188,7 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    // A suspend or destroy is acknowledged once its intent is
-                    // durable (`Closing`, or the destroy's record), so a daemon
-                    // stop after "accepted" leaves the next start something to
-                    // finish (#1191).
-                    let lifecycle_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }) {
+                    let suspension_reply = if matches!(action, ControllerAction::Suspend { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1218,16 +1214,13 @@ pub(crate) async fn run_server(
                         let _upgrade_work = upgrade_work;
                         let joined = tokio::task::spawn_blocking(move || {
                             let _upgrade_blocking = upgrade_blocking;
-                            let mut lifecycle_reply = lifecycle_reply;
+                            let mut suspension_reply = suspension_reply;
                             let result = (|| -> Result<()> {
                                 if let ControllerAction::Suspend { session_id, .. } = &action {
                                     mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                }
-                                if let ControllerAction::Destroy { session_id, .. } = &action {
-                                    mj_core::runtime::block_on(daemon_runtime.prepare_destruction(session_id))??;
-                                }
-                                if let Some(reply) = lifecycle_reply.take() {
-                                    let _ = reply.send(ActionOutcome::accepted());
+                                    if let Some(reply) = suspension_reply.take() {
+                                        let _ = reply.send(ActionOutcome::accepted());
+                                    }
                                 }
                                 if control.cancelled.load(Ordering::Acquire) {
                                     bail!("phone action cancelled");
@@ -1249,7 +1242,7 @@ pub(crate) async fn run_server(
                                 ))?
                             })();
                             let result = result.map_err(|error| PhoneActionFailure::of(&error));
-                            if let Some(reply) = lifecycle_reply {
+                            if let Some(reply) = suspension_reply {
                                 let outcome = match &result {
                                     Ok(()) => ActionOutcome::accepted(),
                                     Err(failure) => failure.outcome(&action_reference(action_id)),
