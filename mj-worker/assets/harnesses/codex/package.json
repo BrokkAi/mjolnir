@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "dependencies": {
     "@brokkai/codex-acp": "1.13.5",
-    "@openai/codex": "0.156.1"
+    "@openai/codex": "0.159.1"
   }
 }
