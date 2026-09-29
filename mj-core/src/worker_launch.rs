@@ -123,6 +123,13 @@ pub struct WorkerLaunchConfig {
     /// in a large working tree cheap.
     #[serde(default)]
     pub review_capture: bool,
+    /// The Bifrost executable the turn review runs on the target, taken from
+    /// the daemon's `MJ_BIFROST_BIN`. The review runs inside the worker, whose
+    /// environment is the target's login environment, so the daemon's own
+    /// variable never reaches it unless the controller states it here. `None`
+    /// means the `bifrost` found on the target's `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bifrost_binary: Option<PathBuf>,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,

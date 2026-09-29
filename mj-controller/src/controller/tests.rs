@@ -1460,6 +1460,63 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
     );
 }
 
+/// I1-5: the review runs inside the worker, whose environment is the target's
+/// login environment, so the daemon's `MJ_BIFROST_BIN` reaches it only through
+/// the launch configuration.
+#[test]
+fn a_launch_config_carries_the_daemons_bifrost_choice_to_the_worker() {
+    const MARKER: &str = "MJ_TEST_LAUNCH_BIFROST_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_launch_config_carries_the_daemons_bifrost_choice_to_the_worker",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "bifrost",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let backend = crate::targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: crate::targets::resource_name(&id).unwrap(),
+        workspace_storage: Default::default(),
+    };
+
+    // SAFETY: this test runs alone in its own child process.
+    unsafe { std::env::remove_var(mj_review::bifrost::BIFROST_BIN_ENV) };
+    assert_eq!(
+        controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .bifrost_binary,
+        None,
+        "without a choice the worker uses `bifrost` from the target's PATH"
+    );
+
+    // SAFETY: as above.
+    unsafe { std::env::set_var(mj_review::bifrost::BIFROST_BIN_ENV, "/opt/bifrost-new") };
+    assert_eq!(
+        controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .bifrost_binary,
+        Some(std::path::PathBuf::from("/opt/bifrost-new")),
+    );
+}
+
 fn durable_remote_template(host: &str) -> TargetTemplate {
     serde_json::from_value(serde_json::json!({
         "kind": "ssh-podman", "host": host, "user": "builder",

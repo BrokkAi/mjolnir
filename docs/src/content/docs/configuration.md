@@ -976,7 +976,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
-| `MJ_BIFROST_BIN` | Path or command name for the review analyzer. |
+| `MJ_BIFROST_BIN` | Path or command name of the Bifrost that turn review runs. Set it on the daemon; the daemon passes it to each new session's worker (a profile's `[environment]` table does not reach the review). The path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. `mj doctor` checks its version. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
 | `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |

@@ -228,6 +228,12 @@ impl Fixture {
     /// harness. `stage` controls whether the profile directory exists, since
     /// starting without one has to fail.
     fn new(stage: bool) -> Self {
+        Self::with_blocking_bifrost(stage, false)
+    }
+
+    /// As [`Self::new`], with the launch configuration naming the blocking
+    /// Bifrost script (see `blocking_bifrost_script`) as the review's analyzer.
+    fn with_blocking_bifrost(stage: bool, blocking_bifrost: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let worker_root = temp.path().join("worker");
         let workspace = temp.path().join("workspace");
@@ -260,6 +266,7 @@ impl Fixture {
                 worker_executable: bridge,
                 harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
                 review_capture: true,
+                bifrost_binary: blocking_bifrost.then(|| temp.path().join("blocking-bifrost")),
                 untracked_at_start: Default::default(),
             },
             primary_relay.clone(),
@@ -503,33 +510,6 @@ async fn wait_for_marker(path: &Path) {
     .unwrap_or_else(|_| panic!("marker {} did not appear", path.display()));
 }
 
-struct EnvironmentGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvironmentGuard {
-    fn set(key: &'static str, value: &Path) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: these tests are run with a dedicated worker fixture and
-        // restore the process-global override when the guard is dropped.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvironmentGuard {
-    fn drop(&mut self) {
-        // SAFETY: restore exactly the value observed by `set`.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
 fn blocking_bifrost_script(directory: &Path) -> PathBuf {
     let path = directory.join("blocking-bifrost.py");
     std::fs::write(
@@ -694,12 +674,11 @@ async fn disconnecting_during_start_pauses_only_the_in_flight_role() {
 
 #[tokio::test]
 async fn disconnecting_during_analysis_kills_bifrost_before_pausing_the_reviewer() {
-    let mut fixture = Fixture::new(true);
+    let mut fixture = Fixture::with_blocking_bifrost(true, true);
     let directory = fixture.script_directory();
     write_options(&directory, "options.json", &[]);
     fixture.start(config(0)).await;
-    let bifrost = blocking_bifrost_script(&directory);
-    let _bifrost_override = EnvironmentGuard::set(mj_review::bifrost::BIFROST_BIN_ENV, &bifrost);
+    blocking_bifrost_script(&directory);
 
     let (mut client, server) = reviewer_socket(&fixture).await;
     send_reviewer_request(
@@ -1564,6 +1543,7 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
             worker_executable: PathBuf::from("/bin/false"),
             harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
             review_capture: true,
+            bifrost_binary: None,
             untracked_at_start: Default::default(),
         },
         Arc::new(std::sync::Mutex::new(

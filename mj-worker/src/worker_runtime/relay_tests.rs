@@ -46,6 +46,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         review_capture: true,
+        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
