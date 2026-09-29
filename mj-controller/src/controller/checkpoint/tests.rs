@@ -3290,3 +3290,41 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
 }
+/// A direct `mj checkpoint` runs the controller's checkpoint futures inside
+/// the daemon's connection task, on a 2 MiB Tokio worker stack. In a debug
+/// build the capture protocol's own future is very large, and every wrapper
+/// that embeds it inline carries a full copy on that stack, so the daemon
+/// overflowed it (`mj checkpoint --session` aborted the daemon). The capture
+/// future must stay boxed below the wrappers, so the ones above it stay small.
+#[test]
+fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
+    // Measured in a debug build: 50000 and 39360 bytes unboxed, 24040 and 72
+    // boxed.
+    const ENTRY_LIMIT_BYTES: usize = 32 * 1024;
+    const WRAPPER_LIMIT_BYTES: usize = 4 * 1024;
+    let mut controller = Controller {
+        config: Default::default(),
+        state: State::default(),
+    };
+    let entry = controller.checkpoint_session("session-1");
+    let entry_size = std::mem::size_of_val(&entry);
+    drop(entry);
+    let executor = RefusingExecutor("not used");
+    let latched = controller.checkpoint_session_latched_with_recovery_stage(
+        "session-1",
+        &executor,
+        None,
+        LatchExclusivity::ReleaseAfterLatch,
+        CheckpointExportPolicy::Always,
+        false,
+        None,
+    );
+    let latched_size = std::mem::size_of_val(&latched);
+    drop(latched);
+    assert!(
+        entry_size < ENTRY_LIMIT_BYTES && latched_size < WRAPPER_LIMIT_BYTES,
+        "checkpoint_session future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
+         latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
+         capture future so the wrappers stay small"
+    );
+}

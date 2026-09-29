@@ -54,7 +54,13 @@ impl Controller {
         requested_operation_id: Option<&str>,
     ) -> Result<LatchedCheckpoint> {
         let layout = self.session_export_layout(session_id, executor)?;
-        self.checkpoint_session_latched_with_layout(
+        // The layout-level future holds the whole capture protocol and is
+        // very large in a debug build. Every wrapper above this one embeds
+        // its callee's future, so an unboxed call here made each of the
+        // wrappers that follow (up to the daemon action) carry a copy on the
+        // thread stack; a direct `mj checkpoint` overflowed a 2 MiB Tokio
+        // worker stack that way. Boxing it once here keeps them small.
+        Box::pin(self.checkpoint_session_latched_with_layout(
             session_id,
             executor,
             manager,
@@ -63,7 +69,7 @@ impl Controller {
             recovery_copy,
             requested_operation_id,
             layout,
-        )
+        ))
         .await
     }
 
