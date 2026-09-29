@@ -100,9 +100,7 @@ pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     let Some(memory) = &spec.project_memory else {
         return Vec::new();
     };
-    if spec.harness == HarnessKind::Muse
-        || (spec.harness == HarnessKind::Claude && memory.history_socket.is_none())
-    {
+    if spec.harness == HarnessKind::Claude && memory.history_socket.is_none() {
         return Vec::new();
     }
     let mut args = vec![
@@ -292,7 +290,7 @@ fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdi
     }
 }
 
-fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
+pub(super) fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
     let mut servers = extra_mcp(spec);
     if include_project_memory {
         servers.extend(project_memory_mcp(spec));

@@ -254,10 +254,6 @@ impl HarnessKind {
         }
     }
 
-    pub const fn supports_injected_mcp(self) -> bool {
-        !matches!(self, Self::Muse)
-    }
-
     pub const ALL: [Self; 5] = [
         Self::Codex,
         Self::Claude,

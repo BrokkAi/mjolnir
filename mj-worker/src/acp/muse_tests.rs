@@ -132,8 +132,142 @@ async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
         .expect("Muse runtime stopped unexpectedly")
 }
 
+/// Open a session with project memory through a fake muse-acp whose host
+/// grants session MCP, withholds it, or could not start. Returns the run's
+/// outcome, whether the session was configured, and the MCP server names the
+/// adapter received.
+async fn open_with_memory(host: &str) -> (Result<()>, bool, Vec<Vec<String>>) {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("muse_acp.py");
+    let log = root.path().join("mcp.jsonl");
+    std::fs::write(
+        &script,
+        r#"
+import json, os, sys
+host, log = os.environ['MJ_FAKE_MUSE_HOST'], os.environ['MJ_FAKE_MUSE_LOG']
+for line in sys.stdin:
+    request = json.loads(line)
+    method, ident = request.get('method'), request.get('id')
+    if ident is None: continue
+    params = request.get('params', {})
+    if method == 'initialize':
+        # muse-acp advertises HTTP MCP exactly when its host granted sessionMcp.
+        reply = {'result': {'protocolVersion': 1, 'agentCapabilities': {
+            'mcpCapabilities': {'http': host == 'granted'}}}}
+    elif method == 'session/new':
+        with open(log, 'a') as out:
+            out.write(json.dumps([s['name'] for s in params.get('mcpServers', [])]) + '\n')
+        if host == 'failed':
+            reply = {'error': {'code': -32000, 'message': 'Muse Code is not logged in'}}
+        else:
+            reply = {'result': {'sessionId': 'native'}}
+    else:
+        reply = {'result': {}}
+    print(json.dumps({'jsonrpc': '2.0', 'id': ident, **reply}), flush=True)
+"#,
+    )
+    .unwrap();
+    let spec = LaunchSpec {
+        bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+        subagent_mcp_socket: None,
+        runtime_constraint: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        environment: BTreeMap::from([
+            ("MJ_FAKE_MUSE_HOST".into(), host.into()),
+            (
+                "MJ_FAKE_MUSE_LOG".into(),
+                log.to_string_lossy().into_owned(),
+            ),
+        ]),
+        cwd: root.path().to_path_buf(),
+        additional_directories: Vec::new(),
+        project_memory: Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "abc".into(),
+            root: root.path().join("memory"),
+            baseline_root: root.path().join(".hel-memory-baseline"),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        }),
+        extra_mcp_servers: Vec::new(),
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        harness: HarnessKind::Muse,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let (commands, receiver) = mpsc::channel(16);
+    let (sender, mut events) = mpsc::channel(128);
+    let runtime = tokio::spawn(run(spec, receiver, sender));
+    let mut configured = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(15), events.recv())
+        .await
+        .expect("the fake adapter must make progress")
+    {
+        if matches!(event, RuntimeEvent::SessionConfigured { .. }) {
+            configured = true;
+            break;
+        }
+    }
+    drop(commands);
+    let outcome = tokio::time::timeout(Duration::from_secs(15), runtime)
+        .await
+        .expect("the runtime must stop")
+        .unwrap();
+    let received = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (outcome, configured, received)
+}
+
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.5.0"]
+async fn muse_sessions_receive_mcp_servers_only_when_the_host_accepts_them() {
+    let (outcome, configured, received) = open_with_memory("granted").await;
+    outcome.unwrap();
+    assert!(configured);
+    assert_eq!(received, [["mj-memory"]]);
+
+    // Without the grant muse-acp would drop the servers and the session would
+    // run without Mjolnir's tools, so it must not become ready.
+    let (outcome, configured, received) = open_with_memory("withheld").await;
+    let error = format!("{:#}", outcome.unwrap_err());
+    assert!(
+        error.contains("did not forward Mjolnir's MCP servers"),
+        "{error}"
+    );
+    assert!(!configured);
+    assert_eq!(received, [["mj-memory"]]);
+}
+
+#[tokio::test]
+async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
+    // A host that never started also withholds the grant; its diagnostic, not
+    // the missing grant, is what the person has to act on.
+    let (outcome, configured, _) = open_with_memory("failed").await;
+    let error = format!("{:#}", outcome.unwrap_err());
+    assert!(error.contains("Muse Code is not logged in"), "{error}");
+    assert!(!error.contains("MCP"), "{error}");
+    assert!(!configured);
+}
+
+#[tokio::test]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.8.1"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));

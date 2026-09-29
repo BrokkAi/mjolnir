@@ -156,12 +156,7 @@ impl ReviewSettingsDialog {
 
     pub(crate) fn new(config: &Config) -> Self {
         let mut profiles = vec![None];
-        profiles.extend(
-            config
-                .enabled_profiles()
-                .filter(|(_, profile)| profile.kind.supports_injected_mcp())
-                .map(|(id, _)| Some(id.to_owned())),
-        );
+        profiles.extend(config.enabled_profiles().map(|(id, _)| Some(id.to_owned())));
         let dialog = Self {
             review: config.review.clone(),
             original_review: config.review.clone(),

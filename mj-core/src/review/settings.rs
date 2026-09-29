@@ -120,16 +120,13 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 /// Startup baseline eligibility does not perform network or quota discovery.
 pub fn can_review(config: &crate::config::Config) -> bool {
     if let Some(id) = config.review.profile.as_deref() {
-        return config
-            .enabled_profile(id)
-            .is_some_and(|p| p.kind.supports_injected_mcp());
+        return config.enabled_profile(id).is_some();
     }
     config.enabled_profiles().any(|(_, p)| {
-        p.kind.supports_injected_mcp()
-            && ReviewProvider::for_profile(p)
-                .ok()
-                .and_then(ReviewProvider::main_policy)
-                .is_some()
+        ReviewProvider::for_profile(p)
+            .ok()
+            .and_then(ReviewProvider::main_policy)
+            .is_some()
     })
 }
 

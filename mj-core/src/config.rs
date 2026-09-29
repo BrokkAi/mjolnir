@@ -215,15 +215,9 @@ impl ReviewConfig {
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
         if let Some(profile_id) = self.profile.as_ref()
             && let Some(profile) = profiles.get(profile_id)
+            && !profile.enabled
         {
-            if !profile.enabled {
-                bail!("[review] profile {profile_id:?} is disabled");
-            }
-            if !profile.kind.supports_injected_mcp() {
-                bail!(
-                    "Muse Code cannot be a reviewer because muse-acp does not accept the required MCP tools"
-                );
-            }
+            bail!("[review] profile {profile_id:?} is disabled");
         }
         if self.profile.is_none() && (self.model.is_some() || self.effort.is_some()) {
             bail!(

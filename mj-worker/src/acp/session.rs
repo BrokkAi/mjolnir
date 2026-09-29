@@ -334,6 +334,21 @@ pub(super) async fn serve_session(
             )
         };
 
+    // muse-acp forwards MCP servers only when its Muse host granted session
+    // MCP, and advertises HTTP MCP exactly then; without the grant it drops
+    // every server with a log line. Checked after the open, because a host
+    // that could not start also withholds the grant, and the open's error
+    // carries that host's own diagnostic.
+    if spec.harness == HarnessKind::Muse
+        && !initialized.agent_capabilities.mcp_capabilities.http
+        && !session_mcp(spec, true).is_empty()
+    {
+        bail!(
+            "muse-acp did not forward Mjolnir's MCP servers because the Muse host did not grant session MCP; \
+             this needs muse-acp 0.8.0 and Muse Code 1.3.0 or newer"
+        );
+    }
+
     if availability_supported {
         native_agents::refresh_availability(connection, &session_id, events).await?;
     }

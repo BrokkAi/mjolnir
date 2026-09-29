@@ -1164,7 +1164,7 @@ pub(super) fn protocol_failure(
     }
 }
 
-/// muse-acp 0.5.0 asks, before each Muse question that offers choices, whether
+/// muse-acp asks, before each Muse question that offers choices, whether
 /// to answer it or to explain instead. Mjolnir answers that form itself so the
 /// person sees one form, the question. A route form that no longer offers this
 /// choice reaches the person unchanged.
