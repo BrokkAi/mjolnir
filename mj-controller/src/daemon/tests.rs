@@ -3400,6 +3400,77 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     ))
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive() {
+    const NAME: &str = "a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive";
+    const CHILD: &str = "MJ_TEST_CHECKPOINT_IO_RESPONSIVENESS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Checkpoint I/O").unwrap();
+    let session = runtime_test_session("checkpoint-io", &workspace.id, SessionState::Stopped);
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+
+    // Hold the checkpoint's first write at a real I/O boundary. The native
+    // watchdog releases it even if the checkpoint blocks this current-thread
+    // runtime, so the old implementation fails instead of hanging the suite.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked_tx.send(()).unwrap();
+        match release_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("checkpoint test release channel failed: {error}"),
+        }
+        connection.execute_batch("ROLLBACK").unwrap();
+    });
+    locked_rx.await.unwrap();
+    let checkpoint = tokio::spawn({
+        let state = state.clone();
+        async move { state.checkpoint_session_now("checkpoint-io").await }
+    });
+    let started = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let elapsed = started.elapsed();
+    let pending = !checkpoint.is_finished();
+    let reply = handle_action(
+        DaemonAction::Ping,
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let released = release_tx.send(());
+    lock.join().unwrap();
+    // This fixture has no live target: after the write is released it must
+    // report the checkpoint failure and leave the session in its prior state.
+    assert!(checkpoint.await.unwrap().is_err());
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions["checkpoint-io"].state,
+        SessionState::Stopped
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "timer stalled for {elapsed:?}"
+    );
+    released.unwrap();
+    assert!(pending, "checkpoint should still be waiting for I/O");
+    assert!(matches!(reply, DaemonReply::Pong));
+}
+
 /// The startup sweep picks up tombstones an older build left behind and any
 /// discard a daemon stop interrupted, and nothing else.
 #[test]
