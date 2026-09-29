@@ -651,6 +651,7 @@ impl Controller {
             || in_place_move_eligible(
                 source,
                 &selection,
+                &self.config.targets,
                 self.state.subagents.contains_key(&source.id),
                 retry,
             );
@@ -744,7 +745,7 @@ impl Controller {
         if retry.is_none()
             && source.state == SessionState::Running
             && source.last_profile == checked.selection.profile_id.as_deref().unwrap()
-            && move_environment_change(&source, &checked.selection).is_none()
+            && move_environment_change(&source, &checked.selection, false).is_none()
         {
             return Ok(outcome(
                 &prepared.operation_id,
@@ -798,6 +799,7 @@ impl Controller {
                 in_place: in_place_move_eligible(
                     &source,
                     &checked.selection,
+                    &self.config.targets,
                     self.state.subagents.contains_key(&id),
                     false,
                 ),
@@ -830,13 +832,24 @@ impl Controller {
         tracing::info!(
             session_id = id,
             in_place = operation.in_place,
-            reason = move_environment_change(&source, &checked.selection).unwrap_or(
-                if operation.in_place {
-                    "environment unchanged"
-                } else {
-                    "source environment unavailable or previously released"
-                }
-            ),
+            reason = move_environment_change(
+                &source,
+                &checked.selection,
+                bare_targets_share_environment(
+                    &self.config.targets,
+                    &source.target_template_id,
+                    checked
+                        .selection
+                        .target_template_id
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+            )
+            .unwrap_or(if operation.in_place {
+                "environment unchanged"
+            } else {
+                "source environment unavailable or previously released"
+            }),
             "move environment decision"
         );
         tracing::info!(
@@ -1195,6 +1208,7 @@ impl Controller {
                 Box::pin(self.restore_session_in_place(
                     &id,
                     operation.selection.profile_id.as_deref().unwrap(),
+                    operation.selection.target_template_id.as_deref().unwrap(),
                     executor,
                 ))
                 .await?;
@@ -1433,12 +1447,13 @@ fn validate_preserved_configuration(
 /// Whether this move can replace only the harness inside the source target.
 ///
 /// The environment is kept only when nothing about it changes: the same target
-/// template, the same attached mounts, and the same resource allocation. A
-/// retry takes its retention decision from the durable Move intent instead;
+/// template (or another one that names the same bare machine), the same
+/// attached mounts, and the same resource allocation. A retry takes its retention decision from the durable Move intent instead;
 /// a sub-agent never owns its own target.
 pub(super) fn in_place_move_eligible(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
     is_subagent: bool,
     retry: bool,
 ) -> bool {
@@ -1449,9 +1464,41 @@ pub(super) fn in_place_move_eligible(
             source.state,
             SessionState::Running | SessionState::Disconnected
         )
-        && move_environment_change(source, selection).is_none()
+        && move_environment_change(
+            source,
+            selection,
+            bare_targets_share_environment(
+                targets,
+                &source.target_template_id,
+                selection.target_template_id.as_deref().unwrap_or_default(),
+            ),
+        )
+        .is_none()
 }
 
+/// Whether two target templates are bare targets on the same machine, so the
+/// session's worker root and workspace are already where the destination wants
+/// them. Two local bare targets qualify, and so do two SSH bare targets with
+/// the same connection; only the template the session names changes.
+fn bare_targets_share_environment(
+    targets: &std::collections::BTreeMap<String, mj_core::config::TargetTemplate>,
+    source_id: &str,
+    destination_id: &str,
+) -> bool {
+    use mj_core::config::TargetTemplate::{LocalBare, SshBare};
+    match (targets.get(source_id), targets.get(destination_id)) {
+        (Some(LocalBare), Some(LocalBare)) => true,
+        (
+            Some(SshBare { ssh: source, .. }),
+            Some(SshBare {
+                ssh: destination, ..
+            }),
+        ) => {
+            crate::targets::SshTarget::from(source) == crate::targets::SshTarget::from(destination)
+        }
+        _ => false,
+    }
+}
 fn outcome(
     operation_id: &str,
     selection: &MoveSelection,
@@ -1470,12 +1517,17 @@ fn outcome(
     }
 }
 
-/// One decision shared by no-op detection and environment retention.
+/// One decision shared by no-op detection and environment retention. A
+/// different target template counts as a change unless `same_environment` says
+/// the two name the same bare machine.
 fn move_environment_change(
     source: &mj_core::state::SessionRecord,
     selection: &MoveSelection,
+    same_environment: bool,
 ) -> Option<&'static str> {
-    if Some(&source.target_template_id) != selection.target_template_id.as_ref() {
+    if Some(&source.target_template_id) != selection.target_template_id.as_ref()
+        && !same_environment
+    {
         Some("target changed")
     } else if Some(&source.additional_mounts) != selection.additional_mounts.as_ref() {
         Some("attached mounts changed")

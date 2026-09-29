@@ -3486,7 +3486,7 @@ function renderMoveForm() {
         draft.preparation = null;
       });
     }
-    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target, attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
+    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
     clearResourcesInput.type = 'checkbox';

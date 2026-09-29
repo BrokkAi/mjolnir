@@ -364,11 +364,15 @@ step when only one target suits the session and it has no size to set.
 
 How much is rebuilt depends on what changes. When the target, the attached
 directories, and the resource allocation all stay the same, Move replaces only
-the harness, in place: the container or bare worker root, the workspace,
-untracked files, and build caches are kept, and only the old worker daemon and
-profile home are removed before the new profile is staged and the harness state
+the harness, in place. Choosing another bare target on the same machine counts
+as staying the same: two local bare targets, or two SSH bare targets with the
+same connection, share one worker root and workspace, so the session keeps its
+environment, transfers no files, shows no **Choose files** page, and only
+records the new target. In place, the container or bare worker root, the
+workspace, untracked files, and build caches are kept, and only the old worker
+daemon and profile home are removed before the new profile is staged and the harness state
 is restored. The confirmation says so: "Only the harness and profile are
-replaced; the environment and workspace are kept." When the target changes,
+replaced; the environment and workspace are kept." When the target changes to a different machine or runtime,
 Move tears the source down and rebuilds the environment from the checkpoint,
 which does not migrate a running process, installed packages, container layers,
 or files outside the declared workspace. Either way the old harness process

@@ -141,7 +141,8 @@ A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
 refused with `this session's working tree lives on <host>; resume it there`.
 Such a session can change profile in place, or move to another bare target on
-the same host. To continue elsewhere, push its branch and start a new session
+the same host; that Move is the same in-place profile switch, keeping the
+checkout and transferring no files. To continue elsewhere, push its branch and start a new session
 from that branch. The same rule applies to `mj resume --target`.
 
 When the move copies a workspace, it transfers the repository history and

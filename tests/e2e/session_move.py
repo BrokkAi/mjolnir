@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 
-from reliability_lab import Lab
+from reliability_lab import Lab, ScenarioFailure
 
 
 def run(lab):
@@ -70,8 +70,18 @@ def run(lab):
             flags += ["--target", target]
         if selectors == "profile":
             flags += ["--clear-resources"]  # The TUI's historical bare-host request.
-        result = lab.command("move", "--session", session_id, *flags,
-                             "--queue", queue, "--yes", "--json", timeout=90)
+        # A Move that follows another operation closely can meet the automatic
+        # checkpoint of the turn that just finished, which holds the session's
+        # lifecycle lease for a moment. The refusal names it; ask again.
+        deadline = time.monotonic() + 30
+        while True:
+            result = lab.command("move", "--session", session_id, *flags,
+                                 "--queue", queue, "--yes", "--json", timeout=90, check=False)
+            if result.returncode == 0:
+                break
+            if "already has a lifecycle operation" not in result.stderr or time.monotonic() > deadline:
+                raise ScenarioFailure(f"Hel move failed ({result.returncode}): {result.stderr.strip()}")
+            time.sleep(0.5)
         outcome = json.loads(result.stdout)
         assert outcome["outcome"] == "completed", outcome
         assert outcome["session_id"] == session_id

@@ -458,7 +458,7 @@ impl Controller {
         if matches!(target, mj_core::config::TargetTemplate::LocalBare)
             && matches!(layout.backend, targets::TargetLocator::LocalBare { .. })
         {
-            assessment.blockers.push("These local targets share the source worker storage. Keep the current resource settings to switch profiles in place.".into());
+            assessment.blockers.push("These local targets share the source worker storage, so no files can be transferred between them.".into());
         }
         if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = target
             && let targets::TargetLocator::SshBare {
@@ -466,7 +466,7 @@ impl Controller {
             } = &layout.backend
             && *source_ssh == targets::SshTarget::from(ssh)
         {
-            assessment.blockers.push("These SSH targets share the source worker storage. Select the current target to keep the environment while changing profiles.".into());
+            assessment.blockers.push("These SSH targets share the source worker storage, so no files can be transferred between them.".into());
         }
         let (destination_ssh, destination_engine, destination_image) = match target {
             mj_core::config::TargetTemplate::LocalPodman { container } => {

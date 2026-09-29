@@ -939,8 +939,40 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
 
     // Each row is one departure from the baseline, and the flag says whether
     // the environment can be kept.
+    let ssh = |host: &str| mj_core::config::TargetTemplate::SshBare {
+        ssh: mj_core::config::SshConnection {
+            host: host.into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        permissions: mj_core::config::PermissionMode::Guardian,
+        workspace_prefix: PathBuf::from("/srv/work"),
+    };
+    let targets: std::collections::BTreeMap<String, mj_core::config::TargetTemplate> = [
+        ("local-bare", mj_core::config::TargetTemplate::LocalBare),
+        ("local-bare-two", mj_core::config::TargetTemplate::LocalBare),
+        ("ssh-bare", ssh("builder")),
+        ("ssh-bare-alias", ssh("builder")),
+        ("ssh-bare-other", ssh("other")),
+    ]
+    .into_iter()
+    .map(|(id, template)| (id.to_string(), template))
+    .collect();
     let cases: Vec<(&str, mj_core::state::MoveSelection, bool, bool, bool)> = vec![
         ("profile only", baseline.clone(), false, false, true),
+        (
+            "another local bare target",
+            mj_core::state::MoveSelection {
+                subagents: None,
+                workspace: Default::default(),
+                target_template_id: Some("local-bare-two".into()),
+                ..baseline.clone()
+            },
+            false,
+            false,
+            true,
+        ),
         (
             "different target template",
             mj_core::state::MoveSelection {
@@ -994,7 +1026,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     ];
     for (label, selection, is_subagent, retry, expected) in cases {
         assert_eq!(
-            super::in_place_move_eligible(&source, &selection, is_subagent, retry),
+            super::in_place_move_eligible(&source, &selection, &targets, is_subagent, retry),
             expected,
             "{label}"
         );
@@ -1007,21 +1039,54 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     assert!(!super::in_place_move_eligible(
         &without_target,
         &baseline,
+        &targets,
         false,
         false
     ));
     let mut stopped = source.clone();
     stopped.state = SessionState::Stopped;
     assert!(!super::in_place_move_eligible(
-        &stopped, &baseline, false, false
+        &stopped, &baseline, &targets, false, false
     ));
     let mut disconnected = source;
     disconnected.state = SessionState::Disconnected;
     assert!(super::in_place_move_eligible(
         &disconnected,
         &baseline,
+        &targets,
         false,
         false
+    ));
+}
+
+#[test]
+fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
+    let ssh = |host: &str| mj_core::config::TargetTemplate::SshBare {
+        ssh: mj_core::config::SshConnection {
+            host: host.into(),
+            user: None,
+            identity_file: None,
+            extra_args: Vec::new(),
+        },
+        permissions: mj_core::config::PermissionMode::Guardian,
+        workspace_prefix: PathBuf::from("/srv/work"),
+    };
+    let targets: std::collections::BTreeMap<String, mj_core::config::TargetTemplate> = [
+        ("a", ssh("builder")),
+        ("b", ssh("builder")),
+        ("c", ssh("other")),
+        ("local", mj_core::config::TargetTemplate::LocalBare),
+    ]
+    .into_iter()
+    .map(|(id, template)| (id.to_string(), template))
+    .collect();
+    assert!(super::bare_targets_share_environment(&targets, "a", "b"));
+    assert!(!super::bare_targets_share_environment(&targets, "a", "c"));
+    assert!(!super::bare_targets_share_environment(
+        &targets, "a", "local"
+    ));
+    assert!(!super::bare_targets_share_environment(
+        &targets, "a", "missing"
     ));
 }
 
@@ -1887,7 +1952,13 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
     let mut selection = prepared.selection;
     selection.clear_resource_allocation = true;
     assert!(
-        !super::in_place_move_eligible(&source, &selection, false, false),
+        !super::in_place_move_eligible(
+            &source,
+            &selection,
+            &fixture.controller.config.targets,
+            false,
+            false
+        ),
         "clearing a legacy CPU allocation changes the environment"
     );
 }
@@ -2119,6 +2190,103 @@ fn in_place_move_never_removes_a_shared_local_profile_home() {
     assert_eq!(
         controller.state.sessions[LATCH_RELAY_SESSION].state,
         SessionState::Running
+    );
+}
+
+/// Two local bare targets are the same machine and the same worker storage, so
+/// naming the other one is the in-place profile switch: the environment stays,
+/// nothing is transferred, and the session's target template follows the choice.
+#[cfg(unix)]
+fn add_second_local_bare_target() {
+    Config::update(|config| {
+        config.targets.insert(
+            "local-bare-two".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn preparing_a_move_to_another_local_bare_target_keeps_the_environment() {
+    let name = test_name("preparing_a_move_to_another_local_bare_target_keeps_the_environment");
+    if !isolated_test_child(&name, "MJ_MOVE_LOCAL_BARE_PREPARE_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    add_second_local_bare_target();
+    fixture.controller.config = Config::load().unwrap();
+    let mut selection =
+        in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
+    selection.target_template_id = Some("local-bare-two".into());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(selection, &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(
+        prepared.in_place,
+        "a local bare to local bare Move is in place"
+    );
+    assert!(
+        prepared.workspace.is_none(),
+        "an in-place Move has no workspace to transfer or block"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn in_place_move_to_another_local_bare_target_records_the_new_template() {
+    let name = test_name("in_place_move_to_another_local_bare_target_records_the_new_template");
+    if std::env::var_os("MJ_MOVE_LOCAL_BARE_SWITCH_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_LOCAL_BARE_SWITCH_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Codex, HarnessKind::Codex);
+    add_second_local_bare_target();
+    controller.config = Config::load().unwrap();
+    let source_target = controller.state.sessions[LATCH_RELAY_SESSION]
+        .target
+        .clone();
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.selection.target_template_id = Some("local-bare-two".into());
+    operation.configuration_fingerprint = controller
+        .move_configuration_fingerprint(&operation.selection)
+        .unwrap();
+    crate::database::save_move_operation(&operation).unwrap();
+
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
+
+    let moved = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(moved.state, SessionState::Running);
+    assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
+    assert_eq!(moved.target_template_id, "local-bare-two");
+    assert_eq!(moved.target, source_target, "the environment is kept");
+    assert_eq!(
+        fs::read(worker_root.join("build-cache.txt")).unwrap(),
+        b"warm cache"
     );
 }
 
