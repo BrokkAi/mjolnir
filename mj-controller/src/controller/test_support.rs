@@ -212,7 +212,6 @@ pub(crate) fn checkpoint_archive_input(
                     assessment: None,
                     continuation: mj_core::continuation::ContinuationState {
                         suppressed: true,
-                        quota_suppressed: true,
                         ..Default::default()
                     },
                     capacity_retry: None,
