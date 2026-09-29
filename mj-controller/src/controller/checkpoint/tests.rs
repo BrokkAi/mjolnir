@@ -1055,6 +1055,14 @@ pub(crate) const LATCH_RELAY_ANSWER_PROMPTS: &str = "MJ_TEST_LATCH_ANSWER_PROMPT
 #[cfg(unix)]
 pub(crate) const LATCH_RELAY_ANSWER: &str = "answered by the stand-in harness";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
+/// Journal one observation of the worker's own just before accepting a
+/// Close, and complete the Close once the barrier it seals has ended, the way
+/// a live worker does. See
+/// [`a_suspend_seals_when_the_worker_journals_after_the_close_cut`].
+#[cfg(unix)]
+const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
+#[cfg(unix)]
+const CLOSE_CUT_TEST_CHILD: &str = "MJ_TEST_CLOSE_CUT_CHILD";
 pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
 /// Whether the scripted relay understands the early checkpoint release.
 #[cfg(unix)]
@@ -1152,6 +1160,8 @@ fn latch_relay_child_serves_stdio() {
         );
     let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
     #[cfg(unix)]
+    let journals_before_close = std::env::var_os(LATCH_RELAY_JOURNALS_BEFORE_CLOSE).is_some();
+    #[cfg(unix)]
     let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
     #[cfg(unix)]
     let answer_prompts = std::env::var_os(LATCH_RELAY_ANSWER_PROMPTS).is_some();
@@ -1205,6 +1215,30 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
+        // A live worker keeps journaling while a checkpoint barrier holds:
+        // the barrier freezes command dispatch, not the completed-turn
+        // classifier's answer or the harness's own notifications. This lands
+        // one such write after the daemon's last look and before its Close.
+        #[cfg(unix)]
+        if journals_before_close
+            && matches!(
+                &request.request,
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::Close { .. },
+                    ..
+                }
+            )
+        {
+            relay
+                .record_session_update(
+                    serde_json::from_value(serde_json::json!({
+                        "sessionUpdate": "session_info_update",
+                        "title": "A title the harness chose after the turn"
+                    }))
+                    .unwrap(),
+                )
+                .expect("journal a worker-owned observation");
+        }
         let response = if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
         } else {
@@ -1245,6 +1279,12 @@ fn latch_relay_child_serves_stdio() {
                             },
                         )
                         .expect("complete the answered prompt");
+                }
+                #[cfg(unix)]
+                RelayCommand::Close { .. } if journals_before_close => {
+                    relay
+                        .record_command_completed(&claimed.command_id, RelayCommandOutcome::Closed)
+                        .expect("close the relay");
                 }
                 #[cfg(unix)]
                 RelayCommand::CancelTurn => {
@@ -3063,4 +3103,190 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         !purposes.iter().any(|purpose| purpose.contains("podman")),
         "no container command ran at all: {purposes:?}"
     );
+}
+
+/// I2-3 (test-and-fix campaign 2026-09-29): a suspend issued right after a
+/// turn ended failed with "close does not match the current checkpoint cut"
+/// and left the session `suspending` with an error.
+///
+/// Two parties write the relay journal while a close holds its checkpoint
+/// barrier. The daemon decides the cut it seals: the barrier's ready cursor,
+/// which it latches, archives, and revalidates, and whose revalidation
+/// deliberately accepts a frontier that moved past the cursor. The worker
+/// keeps journaling its own observations under that barrier, because the
+/// barrier freezes command dispatch only: the completed-turn classifier's
+/// answer (`TurnAssessmentUpdated`) and the harness's notifications land
+/// whenever they arrive. The worker's Close then requires the frontier to be
+/// exactly the cursor, so one such write between the daemon's last look and
+/// its Close makes the worker refuse, and the daemon records an interrupted
+/// close instead of returning the live session to `Running`.
+///
+/// Here the stand-in worker journals one harness notification just before it
+/// reads the Close, which is the window the real session hit about half a
+/// second after its first turn ended.
+///
+/// Ignored until the owner of the close cut is decided. Every fix found
+/// changes the worker relay or the relay protocol (see the I2-3 report), which
+/// the campaign rules send to the user first.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "I2-3: the close cut has two writers; the fix changes the worker relay or protocol"]
+async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
+    if std::env::var_os(CLOSE_CUT_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::a_suspend_seals_when_the_worker_journals_after_the_close_cut",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .include_ignored()
+            .env(CLOSE_CUT_TEST_CHILD, "1")
+            .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("the suspend never finished");
+        std::process::exit(101);
+    });
+
+    /// Every target command succeeds. The close reuses the installed archive,
+    /// so the only commands are the local target's teardown.
+    #[derive(Default)]
+    struct SucceedingExecutor {
+        purposes: std::sync::Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for SucceedingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            _input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            anyhow::bail!("unexpected streamed command {:?}", command.purpose)
+        }
+    }
+
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    let archive_directory = data_directory.join("archives");
+    for directory in [&relay_root, &profile_home, &archive_directory] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    // The installed archive holds exactly what the live relay journals at
+    // startup, so the close reuses it and nothing else moves the cut.
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
+    input.canonical_session.session.configuration.goal = Some(Box::new(
+        serde_json::from_value(serde_json::json!({
+            "known": true,
+            "execution": {"version": 1, "status": "idle"}
+        }))
+        .unwrap(),
+    ));
+    let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        &archive_directory,
+        LATCH_RELAY_SESSION,
+        &input,
+    );
+
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+    });
+    session.checkpoint = Some(checkpoint.clone());
+    crate::database::save_session(&session).unwrap();
+
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: profile_home,
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![ProjectRepository {
+                id: "project".into(),
+                github: Some("example/project".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+            }],
+        },
+    );
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let executor = SucceedingExecutor::default();
+    let suspended = controller
+        .suspend_session_managed_controlled(
+            LATCH_RELAY_SESSION,
+            &executor,
+            &channels.control,
+            true,
+            None,
+        )
+        .await;
+    channels.shutdown.shutdown().await.unwrap();
+
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    if let Err(error) = suspended {
+        panic!(
+            "the suspend failed: {error:#}; the session was left {:?} with error {:?}",
+            record.state, record.last_error
+        );
+    }
+    assert_eq!(record.state, SessionState::Stopped);
+    assert_eq!(record.last_error, None);
 }
