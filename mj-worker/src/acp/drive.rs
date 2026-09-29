@@ -157,12 +157,13 @@ where
                     let routed = native_agents.lock().expect("native agent router poisoned")
                         .route(&notification.session_id.to_string(), &notification.update);
                     match routed {
-                        Ok(Some(event)) => {
+                        Ok(native_agents::Routed::Event(event)) => {
                             notification_events.send(RuntimeEvent::NativeAgent { event }).await
                                 .map_err(|_| relay_event_channel_error())?;
                             return Ok(());
                         }
-                        Ok(None) => {}
+                        Ok(native_agents::Routed::Ignored) => return Ok(()),
+                        Ok(native_agents::Routed::Parent) => {}
                         Err(error) => {
                             notification_events.send(RuntimeEvent::Warning {
                                 message: format!("native agent update: {error:#}"),
