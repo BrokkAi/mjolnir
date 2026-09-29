@@ -1089,6 +1089,7 @@ fn claude_async_task_updates_publish_only_stop_capability_changes() {
         Some(ClaudeAsyncTaskControlUpdate::Set {
             task_id: "task-7".into(),
             can_stop: true,
+            settled: false,
         })
     );
     assert_eq!(
@@ -1101,6 +1102,21 @@ fn claude_async_task_updates_publish_only_stop_capability_changes() {
         Some(ClaudeAsyncTaskControlUpdate::Set {
             task_id: "task-7".into(),
             can_stop: false,
+            settled: false,
+        })
+    );
+    // A completed task is followed by a task-notification turn; a stopped one is not.
+    assert_eq!(
+        claude_async_task_control_update(&serde_json::json!({
+            "sessionUpdate": "async_task_state_update",
+            "asyncTaskId": "task-7",
+            "state": "completed",
+        }))
+        .unwrap(),
+        Some(ClaudeAsyncTaskControlUpdate::Set {
+            task_id: "task-7".into(),
+            can_stop: false,
+            settled: true,
         })
     );
     assert_eq!(

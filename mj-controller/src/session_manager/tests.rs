@@ -885,6 +885,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 native_agent_count: 0,
                 expected_continuation: None,
                 inferred_idle_since_ms: None,
+                task_settled_at_ms: None,
+                background_needed: None,
                 goal: Default::default(),
                 capacity_retry: None,
                 retry_assessment_pending: false,

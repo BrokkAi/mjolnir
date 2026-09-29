@@ -279,6 +279,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             native_agent_count: 0,
             expected_continuation: None,
             inferred_idle_since_ms: None,
+            task_settled_at_ms: None,
+            background_needed: None,
             goal: serde_json::from_value(
                 serde_json::json!({"known":true,"execution":{"version":1,"status":"idle"}}),
             )

@@ -22,7 +22,8 @@
     "goal_active": true,
     "active_user_shells": 0,
     "active_agent_terminals": 0,
-    "task_settled_s_ago": null
+    "task_settled_s_ago": null,
+    "background_needed": null
   },
   "evidence": {
     "authorization": {

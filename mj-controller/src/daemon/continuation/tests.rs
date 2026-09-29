@@ -782,6 +782,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
                     choice: Work::Unclear,
                     confidence: 0.5,
                 },
+                background: None,
             });
             assessment.action = Some(Action::RecoverQuota);
             assessment.status = Status::Deferred;

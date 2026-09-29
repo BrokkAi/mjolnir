@@ -193,6 +193,11 @@ pub struct DurableRelay {
     background_work_known: Option<bool>,
     /// Claude AIR tasks that the adapter currently says can be stopped.
     claude_stoppable_tasks: BTreeSet<String>,
+    /// When a Claude background task last completed or failed, until the
+    /// harness turn that answers it opens. Claude Code always follows such a
+    /// settle with a task-notification turn; publishing the settle time lets
+    /// every quiet check treat the gap as a turn in flight.
+    task_settled_at_ms: Option<i64>,
     /// ACP terminals are connection-owned and disappear when that connection
     /// is torn down, so they belong in memory rather than the durable relay
     /// snapshot or transcript journal.
@@ -461,6 +466,7 @@ impl DurableRelay {
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             claude_stoppable_tasks: BTreeSet::new(),
+            task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             agent_terminal_tool_calls: BTreeMap::new(),
@@ -640,6 +646,8 @@ impl DurableRelay {
         let facts = self.activity_facts();
         state.expected_continuation = facts.expected_continuation;
         state.inferred_idle_since_ms = facts.inferred_idle_since_ms;
+        state.task_settled_at_ms = facts.task_settled_at_ms;
+        state.background_needed = facts.background_needed;
         state.activity = Some(mj_core::activity::classify(&facts));
         state
     }
@@ -735,8 +743,23 @@ impl DurableRelay {
             last_acp_activity_at_ms: self.acp_activity.last_at_ms(),
             current_step_started_at_ms: self.step_clock.started_at_ms(),
             idle_since_ms: self.snapshot.idle_since_ms,
+            // A settle only counts until the turn it promised has started:
+            // no turn open now, and none started since the settle.
+            task_settled_at_ms: self.task_settled_at_ms.filter(|settled| {
+                self.snapshot.active_prompt.is_none()
+                    && self.snapshot.harness_turn.is_none()
+                    && self
+                        .snapshot
+                        .activity_turn_started_at_ms
+                        .is_none_or(|started| *settled >= started)
+            }),
+            background_needed: None,
         };
-        (facts.expected_continuation, facts.inferred_idle_since_ms) = self
+        (
+            facts.expected_continuation,
+            facts.inferred_idle_since_ms,
+            facts.background_needed,
+        ) = self
             .replied_verdict
             .inference(self.turn_context.generation(), &facts);
         facts
@@ -1026,6 +1049,8 @@ impl DurableRelay {
             return self.record_observation(RelayObservation::Notice { message });
         }
         if claude && !ack && self.opens_harness_turn(&update) {
+            // The turn a settled task promised has arrived.
+            self.task_settled_at_ms = None;
             self.append_relay_event(
                 None,
                 RelayObservation::HarnessTurnStarted {

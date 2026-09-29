@@ -267,6 +267,7 @@ impl TurnContext {
         let summary = state.summary.latest_user_messages();
         let mut evidence = TurnEvidence {
             authorization: None,
+            background: Vec::new(),
             harness,
             phase,
             silent_for_s: facts

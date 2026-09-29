@@ -35,6 +35,17 @@ pub enum Work {
     Unclear,
 }
 
+/// Whether anyone still depends on the background commands the session holds.
+/// Asked only when leftover processes are the one thing keeping a session
+/// from being quiet; see `mj_core::activity::quiet_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Background {
+    Needed,
+    Unneeded,
+    Unclear,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Judgment<T> {
     pub choice: T,
@@ -45,6 +56,10 @@ pub struct Verdict {
     pub failure: Judgment<Failure>,
     pub input: Judgment<Input>,
     pub work: Judgment<Work>,
+    /// Absent from answers older proxies return, and ignored unless the
+    /// request listed background commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Judgment<Background>>,
 }
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
@@ -73,6 +88,11 @@ impl Verdict {
             failure: choice(answers, "failure")?,
             input: choice(answers, "input")?,
             work: choice(answers, "work")?,
+            background: answers
+                .get("background")
+                .filter(|answer| !answer.is_null())
+                .map(|_| choice(answers, "background"))
+                .transpose()?,
         })
     }
     pub fn action(self, authorization_complete: bool) -> Action {
@@ -367,6 +387,7 @@ mod tests {
                 choice: work,
                 confidence: 0.99,
             },
+            background: None,
         }
     }
     #[test]

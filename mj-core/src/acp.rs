@@ -579,6 +579,9 @@ pub enum RuntimeEvent {
     ClaudeAsyncTaskControlChanged {
         task_id: String,
         can_stop: bool,
+        /// The task completed or failed, so Claude Code will follow it with a
+        /// task-notification turn. A task the user stopped gets no turn.
+        settled: bool,
     },
     /// Claude Code reported the end of one model cycle. It travels on the
     /// same ordered stream as `SessionUpdate`, so everything the adapter sent

@@ -578,6 +578,14 @@ pub struct RelayOperationalState {
     /// Process-local Jev inference, never recovered as proof of idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inferred_idle_since_ms: Option<i64>,
+    /// When a background task the harness will follow up on settled, while no
+    /// turn has opened since. See `ActivityFacts::task_settled_at_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_settled_at_ms: Option<i64>,
+    /// Process-local Jev judgment of the leftover background processes.
+    /// See `ActivityFacts::background_needed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_needed: Option<bool>,
     #[serde(default)]
     pub goal: crate::goal::GoalState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -803,6 +811,8 @@ impl RelayOperationalState {
                 .is_some_and(|retry| !retry.submitted),
             last_acp_activity_at_ms: self.last_acp_activity_at_ms,
             current_step_started_at_ms: self.current_step_started_at_ms,
+            task_settled_at_ms: self.task_settled_at_ms,
+            background_needed: self.background_needed,
             idle_since_ms: self.idle_since_ms,
         }
     }
@@ -839,6 +849,12 @@ impl RelayOperationalState {
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
         crate::activity::safe_to_replace(&self.facts(), harness)
+    }
+
+    /// Why the session is or is not quiet right now, for a log line.
+    #[must_use]
+    pub fn quiet(&self) -> crate::activity::Quiet {
+        crate::activity::quiet_at(&self.facts(), crate::clock::epoch_millis())
     }
 
     /// Whether a routine checkpoint may admit a barrier without risking
@@ -1388,6 +1404,8 @@ impl RelaySnapshot {
                 .count(),
             expected_continuation: None,
             inferred_idle_since_ms: None,
+            task_settled_at_ms: None,
+            background_needed: None,
             goal: self.goal.clone(),
             capacity_retry: self.capacity_retry.clone().filter(|r| !r.submitted),
             retry_assessment_pending: self.assessment.as_ref().is_some_and(|a| {

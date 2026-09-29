@@ -312,6 +312,7 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
             choice: Work::Unclear,
             confidence: 0.24,
         },
+        background: None,
     };
     assert_eq!(
         relay.apply_turn_assessment(generation, answer).unwrap(),
@@ -367,6 +368,7 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
             choice: Work::Unclear,
             confidence: 0.5,
         },
+        background: None,
     };
     assert_eq!(
         relay.apply_turn_assessment(generation, answer).unwrap(),
@@ -405,6 +407,7 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
             choice: Work::Unclear,
             confidence: 0.5,
         },
+        background: None,
     };
     relay.apply_turn_assessment(generation, answer).unwrap();
     assert!(relay.pending_replied_verdict().is_none());

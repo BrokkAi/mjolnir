@@ -125,7 +125,7 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
         .claude_background_tasks_changed(vec![claude_task("build", "Independent build")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("build".into(), true)
+        .claude_async_task_control_changed("build".into(), true, false)
         .unwrap();
     let before = relay.operational_state();
     assert_eq!(before.native_agent_count, 1);
@@ -3489,7 +3489,7 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), true)
+        .claude_async_task_control_changed("shared-id".into(), true, false)
         .unwrap();
     assert_eq!(
         relay
@@ -3508,7 +3508,7 @@ fn background_task_stop_targets_are_live_capability_checked_and_namespaced() {
     );
 
     relay
-        .claude_async_task_control_changed("shared-id".into(), false)
+        .claude_async_task_control_changed("shared-id".into(), false, false)
         .unwrap();
     assert!(
         relay
@@ -3544,7 +3544,7 @@ fn claude_relay_with_stoppable_task(root: &std::path::Path) -> DurableRelay {
         .claude_background_tasks_changed(vec![claude_task("sleeper", "Sleep 600")])
         .unwrap();
     relay
-        .claude_async_task_control_changed("sleeper".into(), true)
+        .claude_async_task_control_changed("sleeper".into(), true, false)
         .unwrap();
     relay
 }

@@ -29,10 +29,23 @@ pub struct ToolEvidence {
     pub running_s: u64,
 }
 
+/// One background command the agent left running, as the quiet judgment sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BackgroundEvidence {
+    pub id: String,
+    /// The command line, cut to [`TOOL_TITLE_BYTES`].
+    pub command: String,
+    pub started_s_ago: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<crate::assessment::ContextHistory>,
+    /// The background commands behind `background_commands`, sent so Jev can
+    /// judge whether anyone still depends on them. Empty on older workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<BackgroundEvidence>,
     pub harness: HarnessKind,
     pub phase: TurnPhase,
     pub silent_for_s: u64,

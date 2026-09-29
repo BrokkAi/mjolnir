@@ -22,7 +22,8 @@
     "goal_active": false,
     "active_user_shells": 0,
     "active_agent_terminals": 0,
-    "task_settled_s_ago": null
+    "task_settled_s_ago": 0,
+    "background_needed": null
   },
   "evidence": {
     "authorization": {
@@ -597,13 +598,12 @@
       "finished"
     ]
   },
-  "known_failure": [
-    "quiet"
-  ],
+  "known_failure": [],
   "outcome": {
     "mjolnir": "nothing; no upgrade was due so the quiet window passed unused",
     "judgment": "harmless",
-    "next": "harness started the notification turn 3 s later"
+    "next": "harness started the notification turn 3 s later",
+    "fix": "the settled task now counts as an imminent turn for 60 s, so the session is not quiet"
   },
   "context": {
     "after": [

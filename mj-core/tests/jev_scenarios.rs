@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use mj_core::activity::verdict::TurnEvidence;
-use mj_core::activity::{ActivityFacts, InFlightToolCall, is_quiet};
+use mj_core::activity::{ActivityFacts, InFlightToolCall, quiet_at};
 use mj_core::assessment::{Action, Verdict};
 use mj_core::relay::RelayExecutionState;
 use serde::Deserialize;
@@ -53,6 +53,8 @@ struct Facts {
     active_user_shells: usize,
     active_agent_terminals: usize,
     task_settled_s_ago: Option<u64>,
+    /// Jev's confident judgment of the leftover processes, when one exists.
+    background_needed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +63,10 @@ struct Expected {
     failure: String,
     input: String,
     work: String,
+    /// The right answer to the background question, when the evidence lists
+    /// background commands.
+    #[serde(default)]
+    background: Option<String>,
     /// `None` when the runtime facts were not recorded, so quiet is unknown.
     quiet: Option<bool>,
     /// The right Mjolnir action given a correct verdict.
@@ -114,7 +120,7 @@ fn authorization_complete(evidence: &TurnEvidence) -> bool {
 fn activity_facts(fixture: &Fixture) -> ActivityFacts {
     let evidence = &fixture.evidence;
     let running = fixture.facts.execution == "running";
-    let now = 1_000_000_000_i64;
+    let now = NOW_MS;
     ActivityFacts {
         execution: if running {
             RelayExecutionState::Running
@@ -144,9 +150,18 @@ fn activity_facts(fixture: &Fixture) -> ActivityFacts {
         goal_running: fixture.facts.goal_active && running,
         goal_synchronized: true,
         acp_ready: Some(true),
+        task_settled_at_ms: fixture
+            .facts
+            .task_settled_s_ago
+            .map(|seconds| now - (seconds as i64) * 1_000),
+        background_needed: fixture.facts.background_needed,
         ..ActivityFacts::default()
     }
 }
+
+/// The clock every fixture is evaluated at; `activity_facts` places events
+/// relative to it.
+const NOW_MS: i64 = 1_000_000_000;
 
 #[test]
 fn fixtures_are_well_formed_and_uniquely_named() {
@@ -220,6 +235,11 @@ fn fixtures_are_well_formed_and_uniquely_named() {
             path.display()
         );
         assert!(
+            expected.background.is_none() || !fixture.evidence.background.is_empty(),
+            "{}: a background expectation needs background evidence",
+            path.display()
+        );
+        assert!(
             fixture.outcome.is_some(),
             "{}: outcome is not filled in",
             path.display()
@@ -269,7 +289,7 @@ fn quiet_matches_the_recorded_facts() {
         let Some(expected_quiet) = fixture.expected.as_ref().and_then(|e| e.quiet) else {
             continue;
         };
-        let quiet = is_quiet(&activity_facts(&fixture));
+        let quiet = quiet_at(&activity_facts(&fixture), NOW_MS).is_yes();
         if fixture.known_failure.iter().any(|name| name == "quiet") {
             assert_ne!(
                 quiet,

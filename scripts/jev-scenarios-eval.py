@@ -88,8 +88,10 @@ def authorization_complete(evidence):
 
 def parse_answers(answers):
     verdict = {}
-    for axis in ("failure", "input", "work"):
-        answer = answers[axis]
+    for axis in ("failure", "input", "work", "background"):
+        answer = answers.get(axis)
+        if answer is None and axis == "background":
+            continue
         if answer.get("type") != "choice":
             raise ValueError(f"{axis}: not a choice answer")
         confidence = float(answer["confidence"])
@@ -207,6 +209,10 @@ def report(args):
             wrong = act in expected.get("wrong_actions", [])
             stats["wrong_high"] += wrong
             cells = " ".join(f"{axis[0]}={verdict[axis]['choice']}:{verdict[axis]['confidence']:.2f}" for axis in ("failure", "input", "work"))
+            if fixture["evidence"].get("background") and "background" in verdict:
+                cells += f" b={verdict['background']['choice']}:{verdict['background']['confidence']:.2f}"
+                if expected.get("background") and verdict["background"]["choice"] != expected["background"]:
+                    agree = False
             rows.append((identity, fixture["category"], record["repeat"], cells, act, expected["action"], "agree" if agree else "differ", "WRONG" if wrong else ""))
     lines = ["# Jev scenario replay", "", f"Results: `{args.output / 'results.jsonl'}`", ""]
     lines += ["| category | requests | axes agree | agree and all >= 0.85 | action as expected | wrong action | errors |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]

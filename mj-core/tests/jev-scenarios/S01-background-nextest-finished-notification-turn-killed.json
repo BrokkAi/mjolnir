@@ -22,7 +22,8 @@
     "goal_active": false,
     "active_user_shells": 0,
     "active_agent_terminals": 0,
-    "task_settled_s_ago": null
+    "task_settled_s_ago": 0,
+    "background_needed": null
   },
   "evidence": {
     "authorization": {
@@ -112,13 +113,12 @@
       "finished"
     ]
   },
-  "known_failure": [
-    "quiet"
-  ],
+  "known_failure": [],
   "outcome": {
     "mjolnir": "worker-upgrade coordinator judged the session quiet 1 s after the task settled and replaced the worker; the notification turn was interrupted",
     "judgment": "wrong",
-    "next": "user typed continue 18 minutes later"
+    "next": "user typed continue 18 minutes later",
+    "fix": "the settled task now counts as an imminent turn for 60 s, so the session is not quiet"
   },
   "context": {
     "after": [

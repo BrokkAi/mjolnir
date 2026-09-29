@@ -497,8 +497,12 @@ pub(crate) fn record_runtime_event(
         RuntimeEvent::ClaudeBackgroundTasksChanged { tasks } => {
             relay.claude_background_tasks_changed(tasks)?;
         }
-        RuntimeEvent::ClaudeAsyncTaskControlChanged { task_id, can_stop } => {
-            relay.claude_async_task_control_changed(task_id, can_stop)?;
+        RuntimeEvent::ClaudeAsyncTaskControlChanged {
+            task_id,
+            can_stop,
+            settled,
+        } => {
+            relay.claude_async_task_control_changed(task_id, can_stop, settled)?;
         }
         RuntimeEvent::ClaudeTurnResult(result) => {
             if !nominate_claude_prompt_result(in_flight, commands, &result) {
