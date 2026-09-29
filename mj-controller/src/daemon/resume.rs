@@ -607,9 +607,28 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
+        self.prepare_destruction(&session_id).await?;
         self.index_before_destroy(&session_id).await;
         self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
             .await
+    }
+
+    /// Record that `session_id` is being destroyed, before the destroy is
+    /// acknowledged, so a daemon stop before it finishes leaves a record the
+    /// next start finishes instead of a live session (#1191); see
+    /// [`Controller::record_destroy_requested`]. A request that cannot be
+    /// recorded is refused, so the person is told to try again.
+    pub async fn prepare_destruction(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        let changed = blocking({
+            let session_id = session_id.to_owned();
+            move || Controller::load()?.record_destroy_requested(&session_id)
+        })
+        .await?;
+        if changed {
+            self.reload_controller().await?;
+            self.publish_revision();
+        }
+        Ok(())
     }
 
     /// [`Self::force_destroy_session`] once the session and its sub-agents
@@ -645,7 +664,17 @@ impl RuntimeState {
         self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
-            move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
+            move || {
+                let mut controller = Controller::load()?;
+                // A cancelled create or close re-persists its record as it
+                // unwinds, which can overwrite the destroy's own record; it is
+                // written again before the teardown, so a daemon stop during
+                // it still leaves a destroy for the next start (#1191).
+                if kind == LifecycleKind::ForceDestroy {
+                    controller.record_destroy_requested(&session_id)?;
+                }
+                Ok(controller.state.sessions.contains_key(&session_id))
+            }
         })
         .await?;
         if !exists {

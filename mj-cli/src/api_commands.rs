@@ -1115,7 +1115,7 @@ pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
     } else {
         println!("destruction accepted for {}", args.session);
         println!(
-            "check removal with `mj sessions --session {}`",
+            "it finishes in the background; check removal with `mj sessions --session {}`",
             args.session
         );
         Ok(())

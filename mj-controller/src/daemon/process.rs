@@ -312,8 +312,9 @@ pub(super) async fn run_daemon_runtime(
         });
         interrupted_close_tasks.push(interrupted_close_task);
     }
-    // A destroy that failed left its record in `Error` with the target still
-    // present; it is finished the way `mj destroy` finishes it. The branch is
+    // A destroy that failed, or that this daemon's predecessor stopped before
+    // it finished, left its record in `Error` with the target still present;
+    // it is finished the way `mj destroy` finishes it. The branch is
     // kept, because whether to delete it was that command's choice and is not
     // recorded.
     for session_id in interrupted_destroy_session_ids(&controller) {

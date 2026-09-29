@@ -39,10 +39,12 @@ pub fn interrupted_suspend_session_ids(controller: &Controller) -> Vec<String> {
         .collect()
 }
 
-/// Sessions whose destroy failed and stopped partway: `Error`, still holding
-/// their target, with the destruction failure recorded by
-/// `record_lifecycle_failure`. The person asked for them to be destroyed, so
-/// startup finishes the removal (the next `mj destroy` does the same).
+/// Sessions whose destroy failed or was stopped partway: `Error`, still
+/// holding their target, with the destruction failure recorded by
+/// `record_lifecycle_failure`, or the record a destroy writes before it is
+/// acknowledged (`Controller::record_destroy_requested`, #1191). The person
+/// asked for them to be destroyed, so startup finishes the removal (the next
+/// `mj destroy` does the same).
 pub fn interrupted_destroy_session_ids(controller: &Controller) -> Vec<String> {
     controller
         .state
