@@ -130,6 +130,12 @@ pub(crate) struct TargetReadiness {
     template: TargetTemplate,
     generation: u64,
     result: Option<Result<(), String>>,
+    /// Whether the target's runtime is not present on this host (Docker or
+    /// Podman not installed). That is permanent for the host, unlike a host
+    /// that did not answer, so the pickers leave the target out. It is kept
+    /// while a recheck is pending, so the row does not come back as
+    /// "checking…" every minute.
+    runtime_missing: bool,
     /// When `result` was stored. Only meaningful once `result` is `Some`; a
     /// pending check (`result: None`) is never considered stale, so a
     /// probe already in flight is never re-requested.

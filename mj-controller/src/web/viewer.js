@@ -1361,12 +1361,25 @@ function abortPendingNewPreflight() {
   pendingNewPreflight = null;
 }
 
+// A target whose runtime (Docker, Podman) is not installed on the daemon's
+// host will never run a session there, so no picker lists it. A host that
+// merely did not answer its last check is a different fact and stays listed.
+function launchableTargets(targets) {
+  return (targets || []).filter(target => !target.runtime_missing);
+}
+
+// Whether a target id may be offered: unknown ids pass, because the server
+// answers for those.
+function targetLaunchable(id) {
+  return !(snapshot?.targets || []).find(target => target.id === id)?.runtime_missing;
+}
+
 function freshDraft() {
   return {
     workspaceId: selectedWorkspaceId(),
     step: 0,
     profileId: snapshot?.profiles[0]?.id || '',
-    targetId: snapshot?.targets[0]?.id || '',
+    targetId: launchableTargets(snapshot?.targets)[0]?.id || '',
     bundleId: '',
     projectDirectory: '',
     title: '',
@@ -1537,7 +1550,7 @@ function renderNewForm() {
   const signature = JSON.stringify({
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
-    targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
+    targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind]) : null,
     project: step.key === 'project' ? [
       newDraft.targetId, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
       newDraft.projectMultiple, newDraft.bundleSources,
@@ -1573,7 +1586,7 @@ function renderNewForm() {
     }
     case 'target': {
       body.append(
-        pickerField('Where to run', 'new-target', snapshot.targets, newDraft.targetId, value => {
+        pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
           cancelProjectRequests();
           newDraft.projectPicker = freshProjectPicker();
           newDraft.projectPickers = {};
@@ -2344,7 +2357,7 @@ async function advanceNew() {
     newError.textContent = 'Choose an available account before continuing.';
     return;
   }
-  if (step.key === 'target' && !snapshot.targets.some(t => t.id === newDraft.targetId)) {
+  if (step.key === 'target' && !launchableTargets(snapshot.targets).some(t => t.id === newDraft.targetId)) {
     newError.textContent = 'Choose where to run before continuing.';
     return;
   }
@@ -2851,9 +2864,9 @@ function wikiDraft(wikiId) {
       profileId: held(snapshot?.profiles, row?.profile)
         ? row.profile
         : (snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : ''),
-      targetId: held(snapshot?.targets, row?.target)
+      targetId: held(launchableTargets(snapshot?.targets), row?.target)
         ? row.target
-        : (snapshot?.targets?.length === 1 ? snapshot.targets[0].id : ''),
+        : (launchableTargets(snapshot?.targets).length === 1 ? launchableTargets(snapshot.targets)[0].id : ''),
       error: '',
     };
     wikiState.drafts.set(wikiId, draft);
@@ -2909,7 +2922,7 @@ function renderWikiDetail(wikiId) {
   else briefBox.append(renderMarkdown(brief.markdown));
   card.append(briefBox);
   const profileItems = (snapshot?.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
-  const targetItems = (snapshot?.targets || []).map(target => ({
+  const targetItems = launchableTargets(snapshot?.targets).map(target => ({
     id: target.id,
     label: target.label || target.name || target.id,
   }));
@@ -3068,7 +3081,7 @@ function conversionBlocksResume(draft) {
 function resumeCardSignature(session) {
   const draft = resumeDraft(session);
   return JSON.stringify([
-    session.compatible_resume_targets || [],
+    (session.compatible_resume_targets || []).filter(targetLaunchable),
     draft.targetId,
     draft.conversion?.status || '',
     draft.conversion?.detail || '',
@@ -3093,7 +3106,7 @@ function resumeCardSignature(session) {
 }
 
 function resumeTargetItems(session) {
-  return (session.compatible_resume_targets || []).map(id => {
+  return (session.compatible_resume_targets || []).filter(targetLaunchable).map(id => {
     const target = (snapshot.targets || []).find(item => item.id === id);
     return { id, label: target?.label || target?.name || id };
   });
@@ -3290,7 +3303,7 @@ function renderResumeDetail() {
 // under an old confirmation.
 
 function freshMoveDraft(session) {
-  const compatible = session.compatible_resume_targets || [];
+  const compatible = (session.compatible_resume_targets || []).filter(targetLaunchable);
   const recovery = session.move_recovery;
   const recoveryTarget = recovery?.destination_target_template_id;
   return {
@@ -3466,7 +3479,7 @@ function renderMoveForm() {
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
-    ].filter(Boolean))];
+    ].filter(Boolean).filter(targetLaunchable))];
     const targets = targetIds.map(id => snapshot.targets.find(target => target.id === id) || { id });
     const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
       if (draft.queueLocked) return;

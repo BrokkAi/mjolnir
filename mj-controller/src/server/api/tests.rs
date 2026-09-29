@@ -4079,6 +4079,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 id: "docker".into(),
                 kind: "local-docker".into(),
                 requires_project_directory: false,
+                runtime_missing: false,
                 recent_project_directories: Vec::new(),
             });
             snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
@@ -4124,6 +4125,84 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
     );
     assert_eq!(target("podman")["availability"], "ready");
     assert_eq!(target("raw")["availability"], "ready");
+}
+
+/// A runtime missing on the daemon's host is permanent, so the options say so
+/// with `runtime_missing`; a host that did not answer is unavailable but not
+/// missing, so callers keep it listed.
+#[tokio::test]
+async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        snapshot.targets.push(crate::server::ViewerTarget {
+            id: "docker".into(),
+            kind: "local-docker".into(),
+            requires_project_directory: false,
+            runtime_missing: true,
+            recent_project_directories: Vec::new(),
+        });
+        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+            id: "builder".into(),
+            label: "builder".into(),
+            target_ids: vec!["podman".into()],
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            logical_cores: None,
+            disk_total_bytes: None,
+            virtual_machines: None,
+            sampled_at_epoch_seconds: None,
+            refreshing: false,
+            stale: false,
+            has_error: true,
+        }];
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    let targets = body["targets"].as_array().unwrap();
+    let target = |id: &str| targets.iter().find(|target| target["id"] == id).unwrap();
+
+    assert_eq!(target("docker")["availability"], "unavailable");
+    assert_eq!(target("docker")["runtime_missing"], true);
+    assert_eq!(target("podman")["availability"], "unavailable");
+    assert!(target("podman").get("runtime_missing").is_none());
+}
+
+/// Naming a target whose runtime is not installed is refused by name, with the
+/// reason, for New, Resume and Move alike, since they share one validator.
+#[tokio::test]
+async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.targets.push(crate::server::ViewerTarget {
+                id: "docker".into(),
+                kind: "local-docker".into(),
+                requires_project_directory: false,
+                runtime_missing: true,
+                recent_project_directories: Vec::new(),
+            });
+        });
+    let response = app
+        .oneshot(start_request(
+            r#"{"profile_id":"codex-1","target_id":"docker","bundle_id":"hel"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(body.contains("docker"), "{body}");
+    assert!(
+        body.contains("Docker is not installed on this host"),
+        "{body}"
+    );
+    assert!(actions.try_recv().is_err(), "nothing was launched");
 }
 
 #[tokio::test]

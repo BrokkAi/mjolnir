@@ -43,12 +43,14 @@ impl DashboardState {
         self.target_readiness_generation = self.target_readiness_generation.wrapping_add(1);
         let generation = self.target_readiness_generation;
         for id in &target_ids {
+            let runtime_missing = self.target_runtime_missing(id);
             self.target_readiness.insert(
                 id.clone(),
                 TargetReadiness {
                     template: self.config.targets[id].clone(),
                     generation,
                     result: None,
+                    runtime_missing,
                     recorded_at: now,
                 },
             );
@@ -97,6 +99,77 @@ impl DashboardState {
         })
     }
 
+    /// Whether the last check found the runtime `target_id` needs not
+    /// installed on this host. Such a target is permanently unavailable here,
+    /// so the wizards do not offer it; a host that merely did not answer is
+    /// transient and stays listed.
+    pub(crate) fn target_runtime_missing(&self, target_id: &str) -> bool {
+        let Some(template) = self.config.targets.get(target_id) else {
+            return false;
+        };
+        self.target_readiness
+            .get(target_id)
+            .is_some_and(|check| &check.template == template && check.runtime_missing)
+    }
+
+    /// The indexes into `config.targets` of the targets the wizards list:
+    /// every one whose runtime is not known to be missing on this host.
+    /// `wizard.target` keeps indexing the full map; only the rows shown, and
+    /// the position selected among them, go through this list.
+    pub(in crate::wizards) fn offered_target_indices(&self) -> Vec<usize> {
+        self.config
+            .targets
+            .keys()
+            .enumerate()
+            .filter(|(_, id)| !self.target_runtime_missing(id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The row `target` (an index into `config.targets`) has among the
+    /// offered targets. A target that is not offered has no row, so the first
+    /// stands in and Next stays disabled by the target's own rejection.
+    pub(in crate::wizards) fn target_row(&self, target: usize) -> usize {
+        self.offered_target_indices()
+            .iter()
+            .position(|index| *index == target)
+            .unwrap_or(0)
+    }
+
+    /// Record that the check of `target_id` found its runtime not installed.
+    pub fn apply_target_runtime_missing(
+        &mut self,
+        generation: u64,
+        target_id: String,
+        reason: String,
+    ) {
+        self.apply_target_readiness(generation, target_id.clone(), Err(reason));
+        let Some(check) = self.target_readiness.get_mut(&target_id) else {
+            return;
+        };
+        if check.generation != generation {
+            return;
+        }
+        check.runtime_missing = true;
+        self.move_wizard_off_missing_target(&target_id);
+    }
+
+    /// A wizard left on a target that has just disappeared from its list
+    /// moves to the first target still offered.
+    fn move_wizard_off_missing_target(&mut self, target_id: &str) {
+        let Some(missing) = self.config.targets.keys().position(|id| id == target_id) else {
+            return;
+        };
+        let Some(first) = self.offered_target_indices().first().copied() else {
+            return;
+        };
+        match &mut self.mode {
+            Mode::New(wizard) if wizard.target == missing => wizard.target = first,
+            Mode::Resume(wizard) if wizard.target == missing => wizard.target = first,
+            _ => {}
+        }
+    }
+
     pub fn apply_target_readiness(
         &mut self,
         generation: u64,
@@ -112,6 +185,7 @@ impl DashboardState {
             return;
         }
         check.result = Some(result);
+        check.runtime_missing = false;
         check.recorded_at = Instant::now();
     }
 

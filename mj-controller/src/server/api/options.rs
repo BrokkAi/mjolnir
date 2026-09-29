@@ -184,15 +184,19 @@ fn launch_target(
     let host = hosts
         .iter()
         .find(|host| host.target_ids.iter().any(|id| id == &target.id));
+    // Not installed is permanent for this host, and is read from the
+    // snapshot as well as the probe so the two cannot disagree.
+    let runtime_missing =
+        target.runtime_missing || matches!(engine, Some(LocalEngineReadiness::NotInstalled));
     let engine_failure = match engine {
-        Some(LocalEngineReadiness::NotInstalled) => Some(crate::targets::engine_not_installed(
-            engine_name(&target.kind),
+        _ if runtime_missing => Some(crate::targets::engine_not_installed(
+            crate::server::engine_name(&target.kind),
         )),
         Some(LocalEngineReadiness::NotReady) => Some(format!(
             "{} did not answer its check on this host; start it and try again",
-            engine_name(&target.kind)
+            crate::server::engine_name(&target.kind)
         )),
-        Some(LocalEngineReadiness::Ready) | None => None,
+        Some(LocalEngineReadiness::Ready | LocalEngineReadiness::NotInstalled) | None => None,
     };
     let availability = match host {
         _ if engine_failure.is_some() => LaunchAvailability::Unavailable,
@@ -215,17 +219,8 @@ fn launch_target(
         requires_project_directory: target.requires_project_directory,
         availability,
         unavailable_reason,
+        runtime_missing,
         host: host.map(|host| host.label.clone()),
-    }
-}
-
-/// How a person names the engine behind a local container target kind.
-fn engine_name(kind: &str) -> &'static str {
-    match kind {
-        "local-podman" => "Podman",
-        "local-docker" => "Docker",
-        "apple-container" => "Apple container",
-        _ => "The container engine",
     }
 }
 

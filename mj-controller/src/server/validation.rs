@@ -160,7 +160,7 @@ pub(super) fn validate_move_selection(
     }
     if let Some(target_id) = selection.target_template_id.as_deref() {
         validate_public_id(target_id)?;
-        require_target(snapshot, target_id)?;
+        require_launchable_target(snapshot, target_id)?;
         let session = require_session_record(snapshot, &selection.session_id)?;
         if session
             .incompatible_resume_targets
@@ -387,7 +387,7 @@ fn validate_action_against(
                 ));
             }
             require_profile(snapshot, profile_id)?;
-            let target = require_target(snapshot, target_id)?;
+            let target = require_launchable_target(snapshot, target_id)?;
             // Bare sessions open the selected directory; the browser has no
             // bundle selection to supply for that flow.
             if !target.requires_project_directory || !bundle_id.is_empty() {
@@ -431,7 +431,7 @@ fn validate_action_against(
             let session = require_session_record(snapshot, session_id)?;
             require_workspace(snapshot, workspace_id)?;
             require_profile(snapshot, profile_id)?;
-            require_target(snapshot, target_id)?;
+            require_launchable_target(snapshot, target_id)?;
             if session
                 .incompatible_resume_targets
                 .iter()
@@ -716,6 +716,33 @@ pub(super) fn require_target<'a>(
         .iter()
         .find(|target| target.id == id)
         .ok_or_else(|| ApiError::bad_request("unknown target"))
+}
+
+/// A target a session may be launched on: it exists, and its runtime is on
+/// this host. A target whose runtime is not installed is refused by name with
+/// the reason, the same sentence the launch options and `mj doctor` give.
+pub(super) fn require_launchable_target<'a>(
+    snapshot: &'a ViewerSnapshot,
+    id: &str,
+) -> Result<&'a ViewerTarget, ApiError> {
+    let target = require_target(snapshot, id)?;
+    if target.runtime_missing {
+        return Err(ApiError::bad_request(format!(
+            "target \"{id}\" cannot run sessions: {}. Install it or choose another target.",
+            crate::targets::engine_not_installed(engine_name(&target.kind)),
+        )));
+    }
+    Ok(target)
+}
+
+/// How a person names the engine behind a local container target kind.
+pub(crate) fn engine_name(kind: &str) -> &'static str {
+    match kind {
+        "local-podman" => "Podman",
+        "local-docker" => "Docker",
+        "apple-container" => "Apple container",
+        _ => "The container engine",
+    }
 }
 
 pub(super) fn require_bundle(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {

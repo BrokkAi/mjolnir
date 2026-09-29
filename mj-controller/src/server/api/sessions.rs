@@ -219,6 +219,9 @@ fn resolve_launch(
             ))
         });
     }
+    // A target whose runtime is not on this host is refused by name, with
+    // the reason, whether the caller named it or took it from the default.
+    crate::server::require_launchable_target(&snapshot, &target_id)?;
     Ok((profile_id, target_id))
 }
 
@@ -494,7 +497,7 @@ pub(super) async fn wiki_restore(
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
     crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
-    crate::server::require_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    crate::server::require_launchable_target(&state.snapshot_rx.borrow(), &request.target_id)?;
     let session_id = backend
         .wiki_restore(mj_client::daemon::WikiRestoreRequest {
             wiki_id: wiki_id.clone(),

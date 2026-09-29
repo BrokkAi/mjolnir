@@ -993,8 +993,14 @@ impl DashboardContext {
                          again only when its configuration changes or the engine is installed"
                     );
                 }
-                self.dashboard
-                    .apply_target_readiness(generation, target_id, result);
+                match (&absent_engine, result) {
+                    (Some(_), Err(message)) => self
+                        .dashboard
+                        .apply_target_runtime_missing(generation, target_id, message),
+                    (_, result) => self
+                        .dashboard
+                        .apply_target_readiness(generation, target_id, result),
+                }
             }
             DashboardIoUpdate::TargetTest { target_id, result } => {
                 self.target_test_cancel = None;

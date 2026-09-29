@@ -306,6 +306,7 @@ impl ViewerSnapshot {
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
+                runtime_missing: false,
                 recent_project_directories: project_history_host(target)
                     .map(|host| {
                         state
@@ -887,6 +888,12 @@ pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
     pub requires_project_directory: bool,
+    /// Whether this target's runtime (Docker, Podman) is not installed on the
+    /// host running the daemon. That is permanent for the host, so pickers
+    /// leave the target out and a request that names it is refused. A host
+    /// that merely did not answer is not this; it stays listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_missing: bool,
     /// Recent raw project directories for this target's physical host. Managed
     /// targets intentionally publish an empty list because they select a
     /// configured bundle rather than a host checkout.

@@ -24,15 +24,20 @@ fn target_step_choices<W: WizardDraft>(
     dashboard: &DashboardState,
     wizard: &W,
     sizing_error: Option<&str>,
-) -> (Vec<PickerChoice>, Vec<Line<'static>>) {
+) -> (Vec<PickerChoice>, Vec<Line<'static>>, usize) {
     let warning = Style::default().fg(theme::palette().warning);
     let mut help = Vec::new();
     let mut selected_sized = false;
+    // A target whose runtime is not on this host is not listed at all; one
+    // whose host did not answer is, with its status.
+    let offered = dashboard.offered_target_indices();
+    let selected_row = dashboard.target_row(wizard.target());
     let rows = dashboard
         .config
         .targets
         .iter()
         .enumerate()
+        .filter(|(index, _)| offered.contains(index))
         .map(|(index, (id, target))| {
             let selected = index == wizard.target();
             let rejection = wizard.target_rejection(dashboard, id);
@@ -87,7 +92,7 @@ fn target_step_choices<W: WizardDraft>(
             None => "↑/↓ select · Tab moves focus · Enter activates".to_owned(),
         }
     }));
-    (target_table(rows), help)
+    (target_table(rows), help, selected_row)
 }
 
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
@@ -460,7 +465,7 @@ pub(crate) fn render_new_wizard(
             wizard.bundle,
         ),
         WizardStep::Target => {
-            let (rows, lines) =
+            let (rows, lines, selected_row) =
                 target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
             target_help = lines;
             (
@@ -469,7 +474,7 @@ pub(crate) fn render_new_wizard(
                     step_counter(2, 4, target_hidden)
                 ),
                 rows,
-                wizard.target,
+                selected_row,
             )
         }
         WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
@@ -1703,13 +1708,13 @@ pub(crate) fn render_resume_wizard(
             )
         }
         WizardStep::Target => {
-            let (rows, help) =
+            let (rows, help, selected_row) =
                 target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
             let step = format!("{} new target", step_counter(2, 3, target_hidden));
             (
                 resume_wizard_title(wizard, &step, &step),
                 rows,
-                wizard.target,
+                selected_row,
                 help,
             )
         }

@@ -466,7 +466,7 @@ pub(crate) async fn apply_dashboard_action(
                 ) {
                     context
                         .dashboard
-                        .apply_target_readiness(generation, target_id, Err(message));
+                        .apply_target_runtime_missing(generation, target_id, message);
                     continue;
                 }
                 let checked_template = template.clone();

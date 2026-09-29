@@ -442,6 +442,20 @@ pub(super) fn viewer_snapshot_selected(
         ),
         None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
     };
+    // Whether a target's runtime is installed is a fact about this host, so
+    // the daemon sets it where it publishes, from the one classifier the
+    // terminal wizards and the launch options also read.
+    let path = std::env::var_os("PATH");
+    for target in &mut snapshot.targets {
+        target.runtime_missing =
+            controller
+                .config
+                .targets
+                .get(&target.id)
+                .is_some_and(|template| {
+                    crate::targets::runtime_missing_on_host(template, path.as_deref())
+                });
+    }
     snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces
         .iter()

@@ -5233,6 +5233,121 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     assert!(target.contains("Move · 2/3 new target"), "{target}");
 }
 
+/// Answers the profile step's availability checks the way the dashboard loop
+/// does on a host with no Docker: `docker` is not installed (permanent for
+/// the host), `machine` did not answer (transient), and the rest are ready.
+fn answer_checks_without_docker(dashboard: &mut DashboardState) {
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the profile step checks the targets");
+    };
+    for id in target_ids {
+        match id.as_str() {
+            "docker" => dashboard.apply_target_runtime_missing(
+                generation,
+                id,
+                "Docker is not installed on this host. Install Docker or choose another target."
+                    .into(),
+            ),
+            "machine" => dashboard.apply_target_readiness(
+                generation,
+                id,
+                Err("the host did not answer its last check".into()),
+            ),
+            _ => dashboard.apply_target_readiness(generation, id, Ok(())),
+        }
+    }
+}
+
+/// The user's rule: a target whose runtime is not on this host is left out of
+/// the pickers, while a host that did not answer stays listed with its
+/// status. The step shows the same rows for New, Resume and Move.
+#[test]
+fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
+    for flow in ["New session", "Resume", "Move"] {
+        let mut session = if flow == "Move" {
+            running_session()
+        } else {
+            stopped_session()
+        };
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some("/work/project".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.config = standard_local_targets_config();
+        dashboard
+            .config
+            .targets
+            .insert("machine".into(), bare_ssh_target());
+        match flow {
+            "New session" => {
+                open_new_session_wizard(&mut dashboard);
+            }
+            "Resume" => {
+                assert_eq!(
+                    dashboard.begin_resume_for("session-1"),
+                    DashboardAction::None
+                );
+            }
+            _ => {
+                dashboard.focus_sessions();
+                assert_eq!(dashboard.begin_move(), DashboardAction::None);
+            }
+        }
+        answer_checks_without_docker(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Enter));
+        let text = drawn(&mut dashboard, 160, 40).join("\n");
+        assert!(text.contains("target"), "{flow}: {text}");
+        assert!(text.contains("podman"), "{flow}: {text}");
+        assert!(
+            text.contains("machine") && text.contains("unavailable"),
+            "{flow}: an unresponsive host stays listed with its status: {text}"
+        );
+        assert!(
+            !text.contains("docker"),
+            "{flow}: a missing runtime is not listed: {text}"
+        );
+        assert!(
+            !text.contains("Docker is not installed"),
+            "{flow}: nor is its reason: {text}"
+        );
+    }
+}
+
+/// Moving the selection lands on the next listed target, not the next config
+/// entry, because the hidden target shifts the rows.
+#[test]
+fn selecting_a_row_skips_the_hidden_target() {
+    let mut dashboard = DashboardState::new(
+        standard_local_targets_config(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    open_new_session_wizard(&mut dashboard);
+    answer_checks_without_docker(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+    // Config order is docker, localhost, podman; the rows are the last two.
+    let position = |dashboard: &DashboardState, id: &str| {
+        dashboard
+            .config
+            .targets
+            .keys()
+            .position(|key| key == id)
+            .unwrap()
+    };
+    let localhost = position(&dashboard, "localhost");
+    let podman = position(&dashboard, "podman");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard.target = localhost;
+    drawn(&mut dashboard, 160, 40);
+    dashboard.handle_key(key(KeyCode::Down));
+    assert_eq!(new_wizard(&dashboard).target, podman);
+}
+
 fn ctrl_space() -> KeyEvent {
     KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
 }

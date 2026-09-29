@@ -739,6 +739,12 @@ pub struct LaunchTarget {
     /// and stays on the controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// Whether the target's runtime (Docker, Podman) is not installed on the
+    /// daemon's host. That is permanent for the host, unlike a host that did
+    /// not answer its last check: a picker leaves such a target out, and a
+    /// request that names it is refused with `unavailable_reason`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_missing: bool,
     /// How a person names the host, when a reading covers this target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,

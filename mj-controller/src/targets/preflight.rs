@@ -178,6 +178,18 @@ pub fn local_engine_command(template: &mj_core::config::TargetTemplate) -> Optio
     }
 }
 
+/// Whether `template` needs a local container engine whose command is not on
+/// `path`, a PATH value. That is a fact about this host and stays true until
+/// the engine is installed, unlike a host that did not answer its last check.
+/// Every place that decides whether to offer a target reads this one answer:
+/// the terminal wizards, the web viewer's snapshot, and the launch options.
+pub fn runtime_missing_on_host(
+    template: &mj_core::config::TargetTemplate,
+    path: Option<&std::ffi::OsStr>,
+) -> bool {
+    local_engine_command(template).is_some_and(|engine| !program_on_path(engine, path))
+}
+
 /// Whether `program` is a file in one of the directories of `path`, a PATH
 /// value. A missing PATH finds nothing.
 pub fn program_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
