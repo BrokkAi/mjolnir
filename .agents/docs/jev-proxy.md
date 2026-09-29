@@ -58,9 +58,9 @@ Help search was deployed as version `c625e686-1591-420d-b6ae-2dc5902ffd63` on 20
 
 Deploy the backward-compatible proxy before shipping mj workers using `/v2/turn-verdict`. V1 retains its exact field validator and question resource so old workers continue working. Test v2 with synthetic evidence replacing `recent_tools` in the example with `transcript_summary`; both routes must return typed answers. No deployment was performed by the shared-summary implementation task.
 
-Worker request logs report summary size and active tool count rather than serializing evidence. The separate, user-authorized bifrost2 replay is documented in `.agents/docs/jev-bifrost2-evidence-experiment-20260920.md`; it is not a production smoke-test procedure.
+Worker request logs report summary size and active tool count rather than serializing evidence. The separate, user-authorized bifrost2 replay is summarized in `.agents/docs/jev.md` (section "What the evaluations found"); it is not a production smoke-test procedure.
 
-The 0+1 policy selection and authorized fifty-request strict pilot plus one-hundred-request exploratory comparison are documented in `.agents/docs/jev-turn-evidence-comparison-20260920.md`. Confirmed steering establishes a new delivered-user boundary; merely queued or unconfirmed steering does not.
+The 0+1 policy selection and the authorized fifty-request strict pilot plus one-hundred-request exploratory comparison are summarized in `.agents/docs/jev.md`; the full report is in Git history at `.agents/docs/jev-turn-evidence-comparison-20260920.md` (commit af11979f). Confirmed steering establishes a new delivered-user boundary; merely queued or unconfirmed steering does not.
 
 ## Authorized continuation
 
