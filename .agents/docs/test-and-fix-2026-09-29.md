@@ -501,3 +501,7 @@ The coordinator's reading was wrong: nothing was left set by the harness-started
 ### User request (16:35): Sessions filter label order
 
 `Sessions · idle · 8 hidden ×` becomes `Sessions · 8 hidden · idle ×` (count first, then state and search text, then the clear glyph), with the `×` hit region kept correct. Fix wave F20 (Sonnet).
+
+### F20 — landed
+
+`20992efe`: the Sessions title's count-bearing label is `{hidden} hidden · {existing label}` (`Sessions · 8 hidden · idle ×`, ASCII `Sessions - 8 hidden - idle x`; with search text `8 hidden · /qui · idle ×`; no hidden rows unchanged); the `×` hit region follows the label width, so no hit-test change. Tests updated and `the_sessions_title_leads_with_the_hidden_count_and_ends_with_the_clear_chip` added. tui 881 green; clippy and fmt clean.
