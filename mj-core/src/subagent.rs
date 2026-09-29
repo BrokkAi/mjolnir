@@ -123,7 +123,8 @@ impl SubagentOptions {
         }
         if !self.models.iter().any(|choice| &choice.value == model) {
             return Err(format!(
-                "Selected subagent model {model:?} is unavailable. {PROFILE_HELP}"
+                "Selected subagent model {model:?} is unavailable.{} {PROFILE_HELP}",
+                choice_list(" Available models", &self.models)
             ));
         }
         if self.efforts.is_empty() && effort.is_none() {
@@ -135,10 +136,29 @@ impl SubagentOptions {
         {
             return Ok(());
         }
+        if self.efforts.is_empty() {
+            return Err(format!(
+                "Subagent model {model:?} offers no efforts; leave the effort unset."
+            ));
+        }
         Err(format!(
-            "Select an available effort for subagent model {model:?}. {PROFILE_HELP}"
+            "Select an available effort for subagent model {model:?}.{} {PROFILE_HELP}",
+            choice_list(" Available efforts", &self.efforts)
         ))
     }
+}
+
+/// "<label>: a, b." for a non-empty list of choices, otherwise nothing.
+fn choice_list(label: &str, choices: &[crate::acp::SessionConfigChoice]) -> String {
+    if choices.is_empty() {
+        return String::new();
+    }
+    let values = choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{label}: {values}.")
 }
 
 pub fn delegation_policy(limit: usize) -> String {
@@ -1035,6 +1055,47 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_choices_list_what_is_available() {
+        let choice = |value: &str| crate::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let single = |model: &str, effort: Option<&str>| SubagentPolicy::SingleModel {
+            model: model.into(),
+            effort: effort.map(str::to_owned),
+        };
+        let options = SubagentOptions {
+            models: vec![choice("haiku"), choice("sonnet")],
+            efforts: vec![choice("low"), choice("high")],
+            unavailable: Vec::new(),
+        };
+        let message = options.validate(&single("opus", None)).unwrap_err();
+        assert!(
+            message.contains("Available models: haiku, sonnet."),
+            "{message}"
+        );
+        let message = options.validate(&single("haiku", Some("max"))).unwrap_err();
+        assert!(
+            message.contains("Available efforts: low, high."),
+            "{message}"
+        );
+        assert!(options.validate(&single("haiku", Some("low"))).is_ok());
+
+        // A model with no efforts refuses one, saying so, instead of asking
+        // for a selection that cannot be made.
+        let no_efforts = SubagentOptions {
+            models: vec![choice("haiku")],
+            ..SubagentOptions::default()
+        };
+        let message = no_efforts
+            .validate(&single("haiku", Some("low")))
+            .unwrap_err();
+        assert!(message.contains("offers no efforts"), "{message}");
+        assert!(no_efforts.validate(&single("haiku", None)).is_ok());
+    }
+
     #[test]
     fn single_model_without_a_model_asks_for_one_instead_of_quoting_nothing() {
         let policy = SubagentPolicy::SingleModel {

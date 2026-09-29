@@ -483,11 +483,9 @@ mod tests {
 
     #[test]
     fn a_policy_on_a_harness_without_delegation_is_refused_with_its_message() {
-        let error = refuse_unsupported_policy(
-            mj_core::config::HarnessKind::Grok,
-            &SubagentPolicy::None,
-        )
-        .unwrap_err();
+        let error =
+            refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::None)
+                .unwrap_err();
         assert_eq!(
             refusal_message(&error).as_deref(),
             Some("subagent policies are supported only by Claude and Codex")
@@ -507,7 +505,10 @@ mod tests {
         let error =
             refuse_unavailable_choice(&SubagentOptions::default(), &unavailable).unwrap_err();
         let message = refusal_message(&error).expect("a refusal, not an internal error");
-        assert!(message.contains("\"fake-child-model\" is unavailable"), "{message}");
+        assert!(
+            message.contains("\"fake-child-model\" is unavailable"),
+            "{message}"
+        );
 
         // A model that is offered but a missing effort is refused the same way.
         let choice = |value: &str| mj_core::acp::SessionConfigChoice {
