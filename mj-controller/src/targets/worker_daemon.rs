@@ -110,7 +110,7 @@ hel_signal() {
     fi
     kill -"$1" "$2" 2>/dev/null
 }
-hel_running() {
+hel_group_running() {
     if [ "$hel_group" = "$1" ]; then
         hel_processes=$(hel_ps -eo pgid=,stat=) || return 2
         printf '%s\n' "$hel_processes" | awk -v group="$1" '$1 == group && $2 !~ /^Z/ {found=1} END {exit !found}'
@@ -119,13 +119,56 @@ hel_running() {
         printf '%s\n' "$hel_process_state" | awk '$1 !~ /^Z/ && NF {found=1} END {exit !found}'
     fi
 }
+# The harness and its helpers lead process groups of their own, so the leader's
+# group can empty while they still write into the worker root. `hel_tree` is the
+# snapshot, taken before any signal, of every process descended from the leader
+# or in its group, as "pid pgid" lines; the stop is finished only when none is
+# left.
+hel_snapshot_tree() {
+    hel_tree=$(hel_ps -eo pid=,ppid=,pgid= | awk -v lead="$1" -v self="$$" '
+        {pid[NR]=$1; ppid[NR]=$2; pg[NR]=$3; n=NR}
+        END {
+            for (i = 1; i <= n; i++) if (pid[i] == lead || pg[i] == lead) member[pid[i]] = 1
+            do {
+                grew = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in member) && (ppid[i] in member)) { member[pid[i]] = 1; grew = 1 }
+            } while (grew)
+            for (i = 1; i <= n; i++) if ((pid[i] in member) && pid[i] != self) print pid[i], pg[i]
+        }') || hel_tree=""
+}
+hel_tree_running() {
+    [ -n "$hel_tree" ] || return 1
+    hel_processes=$(hel_ps -eo pid=,stat=) || return 2
+    printf '%s\n' "$hel_processes" | awk -v tree="$hel_tree" '
+        BEGIN { n = split(tree, lines, "\n"); for (i = 1; i <= n; i++) { split(lines[i], f, " "); want[f[1]] = 1 } }
+        ($1 in want) && $2 !~ /^Z/ {found=1}
+        END {exit !found}'
+}
+hel_running() {
+    hel_group_running "$1"
+    hel_run_status=$?
+    [ "$hel_run_status" -eq 1 ] || return "$hel_run_status"
+    hel_tree_running
+}
+hel_kill_tree() {
+    printf '%s\n' "$hel_tree" | while read -r hel_tpid hel_tgroup; do
+        [ -n "$hel_tpid" ] || continue
+        kill -KILL "$hel_tpid" 2>/dev/null || true
+        case "$hel_tgroup" in
+            '' | 0 | 1 | *[!0-9]*) ;;
+            *) kill -KILL -- "-$hel_tgroup" 2>/dev/null || kill -KILL "-$hel_tgroup" 2>/dev/null || true ;;
+        esac
+    done
+}
 hel_stop() {
     hel_group=$1
+    hel_tree=""
     hel_running "$1" || {
         hel_status=$?
         [ "$hel_status" -eq 1 ] || return "$hel_status"
         hel_group=legacy
     }
+    hel_snapshot_tree "$1"
     hel_signal TERM "$1" || true
     hel_waited=0
     while [ "$hel_waited" -lt 2 ]; do
@@ -134,13 +177,14 @@ hel_stop() {
         hel_waited=$((hel_waited + 1))
     done
     hel_signal KILL "$1" || true
+    hel_kill_tree
     hel_waited=0
     while [ "$hel_waited" -lt 3 ]; do
         hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
         sleep 1
         hel_waited=$((hel_waited + 1))
     done
-    echo "worker process group still running after stop: $1" >&2
+    echo "worker process tree still running after stop: $1" >&2
     return 1
 }
 if hel_pid=$(hel_recorded_worker); then
@@ -406,6 +450,58 @@ mod tests {
         assert!(
             state.is_empty() || state.starts_with('Z'),
             "descendant survived: {state}"
+        );
+    }
+
+    /// The harness runs in a process group of its own, so the worker leader's
+    /// group empties as soon as the leader exits. The stop must still wait for
+    /// the harness, or the `rm` that follows races its last writes (I2-9).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
+        use std::os::unix::process::CommandExt;
+        let outside = tempfile::tempdir().unwrap();
+        let root = outside.path().join("worker");
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        // The harness ignores TERM and keeps writing into the staged home.
+        let harness = format!(
+            "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
+            out = outside.path().display()
+        );
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", &format!("setsid sh -c '{harness}' & wait")])
+            .current_dir(&root)
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !outside.path().join("harness").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(
+            root.join(mj_core::relay::WORKER_STARTUP_FILE),
+            serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
+        )
+        .unwrap();
+        let root_path = root.to_string_lossy().into_owned();
+        let script = format!(
+            "{}\nrm -rf -- \"$hel_root\"\n",
+            stop_worker_daemon_script(&root_path)
+        );
+        let (status, _) = run_script(&script);
+        let _ = leader.wait();
+        assert_eq!(status, 0, "the stop and the removal succeed");
+        assert!(!root.exists(), "the removal is complete");
+        let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
+        let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
+        assert!(
+            state.is_empty() || state.starts_with('Z'),
+            "harness survived: {state}"
         );
     }
 }
