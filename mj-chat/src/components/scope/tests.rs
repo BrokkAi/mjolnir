@@ -945,3 +945,28 @@ fn shift_g_jumps_to_the_last_row_and_ctrl_d_u_page_by_eight() {
         Some(Interaction::Select(1, 11))
     );
 }
+
+#[test]
+fn open_popup_takes_clicks_over_a_later_control_it_covers() {
+    let mut form = Form::new();
+    form.register_combobox(
+        1,
+        ControlKind::ComboBox {
+            len: 3,
+            selected: 0,
+            expanded: true,
+        },
+        Rect::new(0, 0, 8, 1),
+        true,
+        Rect::new(0, 1, 10, 5),
+        vec![None, Some(0), Some(1), Some(2), None],
+    );
+    form.register(2, ControlKind::Button, Rect::new(0, 3, 8, 1), true);
+    form.end_frame(1);
+    form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 3));
+    assert_eq!(
+        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 3))
+            .action,
+        Some(Interaction::ComboBoxCommit(1, 1))
+    );
+}

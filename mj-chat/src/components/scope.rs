@@ -942,13 +942,17 @@ impl<K: Copy + Eq> Form<K> {
         if self.dismiss_active && self.dismiss_area.contains((x, y).into()) {
             return Some(PointerHit::Dismiss);
         }
-        self.order
-            .iter()
-            .rev()
-            .filter_map(|id| self.active_control(*id))
-            .find(|control| {
-                control.area.contains((x, y).into()) || control.popup_area.contains((x, y).into())
-            })
+        // An open popup is painted over later controls, so it wins even when
+        // its owner registered earlier in tab order.
+        let controls = || {
+            self.order
+                .iter()
+                .rev()
+                .filter_map(|id| self.active_control(*id))
+        };
+        controls()
+            .find(|control| control.popup_area.contains((x, y).into()))
+            .or_else(|| controls().find(|control| control.area.contains((x, y).into())))
             .map(|control| PointerHit::Control(control.id))
     }
 
