@@ -280,12 +280,13 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             // A quota goal resume is automatic work, not the user taking over.
             let user_control = !crate::continuation::is_quota_goal_resume(command_id);
+            // A checkpoint barrier is Mjolnir's own housekeeping (a routine
+            // copy, a worker replacement, a file write), not the user taking
+            // over, so it leaves a scheduled recovery alone (F18).
             if (cancels_capacity_retry(command) && user_control)
                 || matches!(
                     command,
-                    RelayCommand::CancelTurnFor { .. }
-                        | RelayCommand::ClearContext
-                        | RelayCommand::BeginCheckpoint { .. }
+                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ClearContext
                 )
             {
                 snapshot.continuation.quota_recovery = None;

@@ -239,7 +239,7 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
 
 #[test]
 fn quota_retry_requires_a_due_deadline_and_is_cancelled_by_user_work() {
-    for action in ["early", "unknown", "cancel", "prompt", "checkpoint"] {
+    for action in ["early", "unknown", "cancel", "prompt"] {
         let root = tempfile::tempdir().unwrap();
         let mut relay = open(root.path());
         submit_relay(&mut relay, "user-request", prompt("Implement"));
@@ -255,22 +255,64 @@ fn quota_retry_requires_a_due_deadline_and_is_cancelled_by_user_work() {
         match action {
             "cancel" => submit_relay(&mut relay, "cancel-quota", RelayCommand::Cancel),
             "prompt" => submit_relay(&mut relay, "new-user", prompt("Stop; explain first")),
-            "checkpoint" => submit_relay(
-                &mut relay,
-                "checkpoint",
-                RelayCommand::BeginCheckpoint { reason: None },
-            ),
             _ => 0,
         };
         assert!(
             relay.submit_command("quota-retry", retry).unwrap().is_err(),
             "{action}"
         );
-        if matches!(action, "cancel" | "prompt" | "checkpoint") {
+        if matches!(action, "cancel" | "prompt") {
             assert!(relay.snapshot.continuation.quota_recovery.is_none());
         }
         assert_eq!(relay.snapshot.continuation.attempts, 0);
     }
+}
+
+/// F18, session e33442fe: a quota refusal ended three turns the harness had
+/// started on its own, each scheduled a recovery, and a routine checkpoint
+/// then cleared the recovery and set `quota_suppressed`, so nothing resumed at
+/// the deadline. A checkpoint barrier is housekeeping, not the user taking
+/// over: the recovery survives it and is submittable once the barrier lifts.
+#[test]
+fn a_routine_checkpoint_keeps_the_quota_recovery_of_a_self_started_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "user-request", prompt("Implement"));
+    completed(&mut relay, "user-request");
+    let start = self_started_turn(&mut relay);
+    // The refused turn is over: nothing about it may hold `can_submit` false.
+    let facts = relay.activity_facts();
+    assert!(facts.harness_turn_started_at_ms.is_none());
+    assert!(facts.tools_in_flight.is_empty());
+    assert!(mj_core::activity::can_submit(&facts));
+    let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
+    submit_relay(&mut relay, "quota-schedule", cmd);
+    assert_eq!(
+        relay
+            .snapshot
+            .continuation
+            .quota_recovery
+            .as_ref()
+            .map(|r| r.completed_command_id.clone()),
+        Some(mj_core::continuation::harness_turn_id(start))
+    );
+
+    ready_checkpoint(&mut relay, "routine-checkpoint");
+    let held = relay.snapshot.continuation.clone();
+    assert!(held.quota_recovery.is_some(), "the checkpoint kept it");
+    assert!(!held.quota_suppressed);
+    // While the barrier stands the resume waits, as it must.
+    assert!(!mj_core::activity::can_submit(&relay.activity_facts()));
+    submit_relay(
+        &mut relay,
+        "release-routine-checkpoint",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "routine-checkpoint".into(),
+        },
+    );
+    assert!(mj_core::activity::can_submit(&relay.activity_facts()));
+    let resume = quota_resume(&relay);
+    assert!(relay.submit_command("quota-retry", resume).unwrap().is_ok());
 }
 
 /// Opens and ends a turn the harness starts on its own; returns its start ordinal.
