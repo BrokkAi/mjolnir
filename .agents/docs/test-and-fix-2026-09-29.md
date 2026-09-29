@@ -199,3 +199,7 @@ Findings, with verdicts:
 - **D-2** (rough, product): two status live regions announce the offline state (`Reconnecting.` and `Reconnecting… Offline. Showing the last state received.`). Fix wave: one region.
 
 Runbook errors: the Web dialog is `prefix+u`; the lab viewer is plain HTTP; `run-browser-reliability.sh` runs a scripted scenario and tears the lab down, so `prepare-luna-lab.py` plus the dialog code is the interactive path; web attach is images only; a bare-target session runs in a managed clone, so a big file must be placed under `.mj/clones/<id>/` to count; there is no `mj rename`, the daemon action is `set_session_title`. Cleanup complete, 0 leftovers.
+
+### Merged during the run
+
+- `8a2884fe` (user, merged as `29b0173e`): Move offers the sub-agent policy when the destination is Claude or Codex; Move stops parked children the way Suspend does and tells the session on resume; the target step of New, Resume and Move is a table (TARGET, KIND, SIZE, STATUS) with wrapped reasons; fixes #1175. Re-verify on the next build: a Move review with a policy change on a Claude parent with a parked child, and the target table at 80 columns. The C-1 blocker in `transfer.rs` is unchanged.
