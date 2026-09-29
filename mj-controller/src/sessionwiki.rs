@@ -563,6 +563,21 @@ impl WikiIndexer {
         self.inner.notify.notify_one();
     }
 
+    /// An indexer with no worker, so a test can see a request that nothing
+    /// takes and no test runs a sync against the real index.
+    #[cfg(test)]
+    pub(crate) fn inert() -> Self {
+        Self {
+            inner: Arc::new(Indexer::default()),
+        }
+    }
+
+    /// Whether a sync has been requested and not yet taken by the worker.
+    #[cfg(test)]
+    pub(crate) fn sync_requested(&self) -> bool {
+        self.inner.requested.load(Ordering::Acquire)
+    }
+
     /// Run a sync and wait for it, joining a sync already in flight.
     pub async fn sync_now(&self, full: bool) -> Result<()> {
         self.inner.sync(full).await

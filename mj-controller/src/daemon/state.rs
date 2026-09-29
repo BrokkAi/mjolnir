@@ -104,11 +104,7 @@ impl RuntimeState {
     /// Search the user's SessionWiki index, with this daemon's own live
     /// sessions marked so a surface can resume them instead of restoring them.
     pub async fn wiki_search(&self, query: String, limit: usize) -> Result<WikiSearchPage> {
-        if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
-            // Fresh enough matters less than answering now: the sync runs in
-            // the background and the next keystroke sees its result.
-            self.wiki.request_sync(false);
-        }
+        self.request_wiki_sync_if_stale();
         let live = self.live_session_ids();
         // Every caller is a resume list, and a sub-agent is never resumed on
         // its own.
@@ -122,8 +118,21 @@ impl RuntimeState {
         })
     }
 
-    /// The live sessions whose user or agent messages contain `query`.
+    /// Ask for a background sync when the index is stale. Every search asks
+    /// here, so this is the one place that decides when a search syncs.
+    /// Answering now matters more than answering fresh: the sync runs in the
+    /// background and the next keystroke sees its result.
+    fn request_wiki_sync_if_stale(&self) {
+        if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
+            self.wiki.request_sync(false);
+        }
+    }
+
+    /// The live sessions whose user or agent messages contain `query`. Like
+    /// [`Self::wiki_search`], it answers from the index as it is and asks for
+    /// a sync for the next search.
     pub async fn session_text_search(&self, query: String) -> Result<Vec<SessionTextMatch>> {
+        self.request_wiki_sync_if_stale();
         let live = self.live_session_ids();
         blocking(move || crate::sessionwiki::session_text_matches(&query, &live)).await
     }
@@ -1333,5 +1342,29 @@ impl RuntimeState {
             }
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::test_runtime_state;
+    use std::sync::Arc;
+
+    /// RCL-1 (2026-09-29): the Sessions filter's conversation search asks for
+    /// the same non-forced sync the resume dialog's search asks for, so a
+    /// message sent since the last sync is found by the next keystroke.
+    #[tokio::test]
+    async fn a_session_text_search_asks_for_a_sync_like_the_resume_search() {
+        let mut state = test_runtime_state();
+        Arc::get_mut(&mut state).expect("the only handle").wiki =
+            crate::sessionwiki::WikiIndexer::inert();
+        assert!(!state.wiki().sync_requested());
+
+        // An empty query never reads the index, so the request is all it does.
+        state.session_text_search("  ".into()).await.unwrap();
+        assert!(
+            state.wiki().sync_requested(),
+            "a stale index is synced for the next search"
+        );
     }
 }
