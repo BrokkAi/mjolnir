@@ -154,9 +154,7 @@ pub(crate) struct NewWizard {
     /// Whether this session gets Mjolnir's delegation tools instead of its
     /// harness's own. Only Claude and Codex can, so the review step hides the
     /// control for every other kind and the request then sends `None`.
-    pub(crate) subagents: Box<mj_core::subagent::SubagentPolicy>,
-    pub(crate) subagent_combo: Box<ComboBoxState<WizardControl>>,
-    pub(crate) subagent_discovery: Option<Box<subagents::SubagentDiscovery>>,
+    pub(crate) subagents: Box<subagents::SubagentDraft>,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
@@ -197,8 +195,6 @@ impl PartialEq for NewWizard {
         self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
             && self.subagents == other.subagents
-            && self.subagent_combo == other.subagent_combo
-            && self.subagent_discovery == other.subagent_discovery
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
@@ -452,12 +448,16 @@ pub(crate) struct ResumeWizard {
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) discard_queue: bool,
+    /// Move's delegation choice for its destination. A plain resume keeps the
+    /// session's own policy and never shows it.
+    pub(crate) subagents: Box<subagents::SubagentDraft>,
     pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
+            && self.subagents == other.subagents
             && self.files == other.files
             && self.source == other.source
             && self.title == other.title
@@ -840,19 +840,6 @@ fn resource_allocation_description(allocation: Option<&SessionResourceAllocation
             format_resource_bytes(*memory_bytes)
         ),
         None => "fixed/default resources".into(),
-    }
-}
-
-/// The compute description as a suffix for a target-list row, with any
-/// sizing error after it.
-fn resource_allocation_label(
-    allocation: Option<&SessionResourceAllocation>,
-    error: Option<&str>,
-) -> String {
-    let allocation = format!(" · {}", resource_allocation_description(allocation));
-    match error {
-        Some(error) => format!("{allocation} · {error}"),
-        None => allocation,
     }
 }
 

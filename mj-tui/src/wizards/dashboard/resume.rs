@@ -95,7 +95,9 @@ impl DashboardState {
         wizard.preparation_request_id = Some(request_id);
         wizard.preparing = true;
         wizard.preparation_error = None;
+        let subagents = wizard.subagent_change(self);
         let action = DashboardAction::MoveSession {
+            subagents,
             workspace_selection: wizard.files.selection.clone(),
             session_id: wizard.session_id.clone(),
             profile_id,
@@ -112,6 +114,29 @@ impl DashboardState {
         };
         self.mode = Mode::Resume(wizard);
         action
+    }
+
+    /// Prepares a Move again once an edit on its review discarded the old
+    /// preparation, such as a new delegation choice. A failed preparation
+    /// waits for the explicit retry instead.
+    pub(in crate::wizards) fn take_stale_move_preparation(&mut self) -> Option<DashboardAction> {
+        let Mode::Resume(wizard) = &self.mode else {
+            return None;
+        };
+        if !wizard.moving
+            || wizard.step != WizardStep::Review
+            || wizard.preparing
+            || wizard.preparation.is_some()
+            || wizard.preparation_error.is_some()
+            || (wizard.subagent_choice_applies(self) && wizard.subagents.error().is_some())
+        {
+            return None;
+        }
+        let profile_id = wizard.destination_profile(self);
+        let Mode::Resume(wizard) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
+            unreachable!("checked above");
+        };
+        Some(self.start_move_preparation(wizard, profile_id))
     }
 
     pub(in crate::wizards) fn request_move_preparation_for_review(
@@ -158,6 +183,7 @@ impl DashboardState {
                 return DashboardAction::None;
             }
             let action = DashboardAction::MoveSession {
+                subagents: selection.subagents.clone(),
                 workspace_selection: selection.workspace.clone(),
                 session_id: selection.session_id.clone(),
                 profile_id: selection.profile_id.clone().unwrap(),

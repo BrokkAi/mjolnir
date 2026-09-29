@@ -107,7 +107,7 @@ impl RuntimeState {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
-        let policy = blocking(move || {
+        let (config, policy) = blocking(move || {
             let controller = Controller::load()?;
             let kind = controller
                 .config
@@ -121,22 +121,15 @@ impl RuntimeState {
                     Default::default()
                 }
             });
-            anyhow::ensure!(
-                kind.supports_delegation_tools()
-                    || policy == mj_core::subagent::SubagentPolicy::Native,
-                "subagent policies are supported only by Claude and Codex"
-            );
-            Ok(policy)
+            Ok((controller.config, policy))
         })
         .await?;
-        if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = &policy {
-            let options = crate::controller::profile_config::subagent_options(
-                request.profile_id.clone(),
-                Some(model.clone()),
-            )
-            .await?;
-            options.validate(&policy).map_err(anyhow::Error::msg)?;
-        }
+        crate::controller::profile_config::validate_session_subagent_policy(
+            &config,
+            &request.profile_id,
+            &policy,
+        )
+        .await?;
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);

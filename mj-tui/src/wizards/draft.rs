@@ -301,18 +301,7 @@ impl WizardDraft for NewWizard {
             self.open_projects(dashboard);
             return Ok(dashboard.keep(self));
         }
-        let selected = match id {
-            WizardControl::Subagents => Some(self.subagents.index()),
-            WizardControl::SubagentModel => Some(self.subagent_model_index()),
-            WizardControl::SubagentEffort => Some(self.subagent_effort_index()),
-            _ => None,
-        };
-        if let Some(selected) = selected {
-            self.subagent_combo.open(id, selected);
-            return Ok(dashboard.keep(self));
-        }
-        if id == WizardControl::SubagentRetry {
-            self.subagent_discovery = None;
+        if self.subagents.activate(id) {
             return Ok(dashboard.keep(self));
         }
         if id == WizardControl::Back {
@@ -402,7 +391,7 @@ impl WizardDraft for NewWizard {
         &mut self,
         interaction: Option<Interaction<WizardControl>>,
     ) -> Option<Interaction<WizardControl>> {
-        self.subagent_combo.route(interaction)
+        self.subagents.combo.route(interaction)
     }
 
     /// Every target is offered, and the size is prepared for whichever one is
@@ -461,21 +450,13 @@ impl WizardDraft for NewWizard {
                 self.create_managed_worktree = !self.create_managed_worktree;
                 dashboard.record_event_handled();
             }
-            Interaction::ComboBoxCommit(WizardControl::Subagents, selected)
-                if self.subagent_choice_applies(&dashboard.config) =>
-            {
-                if self.subagents.index() != *selected {
-                    *self.subagents = mj_core::subagent::SubagentPolicy::at_index(*selected);
-                    self.subagent_discovery = None;
-                }
-                dashboard.record_event_handled();
-            }
-            Interaction::ComboBoxCommit(WizardControl::SubagentModel, selected) => {
-                self.select_subagent_model(*selected);
-                dashboard.record_event_handled();
-            }
-            Interaction::ComboBoxCommit(WizardControl::SubagentEffort, selected) => {
-                self.select_subagent_effort(*selected);
+            Interaction::ComboBoxCommit(
+                WizardControl::Subagents
+                | WizardControl::SubagentModel
+                | WizardControl::SubagentEffort,
+                _,
+            ) if self.subagent_choice_applies(&dashboard.config) => {
+                self.subagents.apply(interaction);
                 dashboard.record_event_handled();
             }
             _ => {}
@@ -611,52 +592,15 @@ impl WizardDraft for NewWizard {
             );
         }
         if self.subagent_choice_applies(&dashboard.config) {
-            form.declare_with_enabled(
-                WizardControl::Subagents,
-                ControlKind::ComboBox {
-                    len: 4,
-                    selected: self
-                        .subagent_combo
-                        .selection(WizardControl::Subagents, self.subagents.index()),
-                    expanded: self.subagent_combo.is_open(WizardControl::Subagents),
-                },
-                true,
-            );
-            if matches!(
-                *self.subagents,
-                mj_core::subagent::SubagentPolicy::SingleModel { .. }
-            ) {
-                form.declare_with_enabled(
-                    WizardControl::SubagentModel,
-                    ControlKind::ComboBox {
-                        len: self.subagent_models().len(),
-                        selected: self
-                            .subagent_combo
-                            .selection(WizardControl::SubagentModel, self.subagent_model_index()),
-                        expanded: self.subagent_combo.is_open(WizardControl::SubagentModel),
-                    },
-                    self.subagent_options().is_some(),
-                );
-                form.declare_with_enabled(
-                    WizardControl::SubagentEffort,
-                    ControlKind::ComboBox {
-                        len: self.subagent_efforts().len(),
-                        selected: self
-                            .subagent_combo
-                            .selection(WizardControl::SubagentEffort, self.subagent_effort_index()),
-                        expanded: self.subagent_combo.is_open(WizardControl::SubagentEffort),
-                    },
-                    self.subagent_options().is_some(),
-                );
-                form.declare_with_enabled(WizardControl::SubagentRetry, ControlKind::Button, true);
-            }
+            self.subagents.declare(form);
         }
         let ready = !is_bare_project_target(target)
             || self.selected_worktree_options(&dashboard.config).is_some()
             || self.remote_preflight_error.is_some();
         ready
             && !self.remote_preflight_in_flight
-            && (!self.subagent_choice_applies(&dashboard.config) || self.subagent_error().is_none())
+            && (!self.subagent_choice_applies(&dashboard.config)
+                || self.subagents.error().is_none())
     }
 }
 
@@ -788,6 +732,9 @@ impl WizardDraft for ResumeWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
+        if self.step == WizardStep::Review && self.subagents.activate(id) {
+            return Ok(dashboard.keep(self));
+        }
         if id == WizardControl::ChooseMoveFiles
             && self
                 .preparation
@@ -850,11 +797,28 @@ impl WizardDraft for ResumeWizard {
             .is_none()
     }
 
+    fn route_extra_interaction(
+        &mut self,
+        interaction: Option<Interaction<WizardControl>>,
+    ) -> Option<Interaction<WizardControl>> {
+        self.subagents.combo.route(interaction)
+    }
+
     fn apply_extra_interaction(
         &mut self,
-        _dashboard: &mut DashboardState,
+        dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     ) {
+        if self.subagent_choice_applies(dashboard)
+            && let Some(changed) = self.subagents.apply(interaction)
+        {
+            // A prepared Move describes one exact destination draft.
+            if changed {
+                invalidate_move_preparation(self);
+            }
+            dashboard.record_event_handled();
+            return;
+        }
         if let Interaction::Toggle(WizardControl::MoveFile(index)) = interaction
             && let Some(assessment) = self.preparation.as_ref().and_then(|p| p.workspace.as_ref())
             && let Some((node, _)) = self.files.rows(assessment).get(*index)
@@ -932,13 +896,20 @@ impl WizardDraft for ResumeWizard {
         if self.has_queued_work(dashboard) {
             form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
         }
-        !self.moving || self.preparation.is_some() || self.preparation_error.is_some()
+        let subagents_ready = if self.subagent_choice_applies(dashboard) {
+            self.subagents.declare(form);
+            self.subagents.error().is_none()
+        } else {
+            true
+        };
+        subagents_ready
+            && (!self.moving || self.preparation.is_some() || self.preparation_error.is_some())
     }
 }
 
 impl ResumeWizard {
     /// The profile this resume or move lands on.
-    fn destination_profile(&self, dashboard: &DashboardState) -> String {
+    pub(crate) fn destination_profile(&self, dashboard: &DashboardState) -> String {
         dashboard
             .resume_wizard_profiles(self)
             .get(self.profile)

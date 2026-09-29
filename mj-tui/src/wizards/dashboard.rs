@@ -31,13 +31,17 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                 },
                 true,
             );
+            // Indexed by display row, so the table's heading comes first.
             form.set_row_enabled(
                 WizardControl::TargetList,
-                dashboard
-                    .config
-                    .targets
-                    .keys()
-                    .map(|id| wizard.target_rejection(dashboard, id).is_none())
+                std::iter::once(false)
+                    .chain(
+                        dashboard
+                            .config
+                            .targets
+                            .keys()
+                            .map(|id| wizard.target_rejection(dashboard, id).is_none()),
+                    )
                     .collect(),
             );
             declare_wizard_buttons(&mut form, true, enabled);

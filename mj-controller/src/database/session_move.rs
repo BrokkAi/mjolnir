@@ -266,6 +266,7 @@ mod tests {
             source_checkpoint_only: false,
             operation_id: "move-one".into(),
             selection: MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session.id.clone(),

@@ -140,7 +140,7 @@ impl DashboardState {
                     .position(|id| id == &recipe.target_id)
                     .unwrap_or(0);
                 wizard.create_managed_worktree = recipe.create_managed_worktree.unwrap_or(false);
-                *wizard.subagents = recipe.subagents.clone().unwrap_or_default();
+                wizard.subagents.policy = recipe.subagents.clone().unwrap_or_default();
                 wizard.resource_allocation = recipe.resource_allocation.clone();
                 wizard.mounts.mounts = recipe.additional_mounts.clone();
             }

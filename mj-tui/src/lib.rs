@@ -323,6 +323,8 @@ pub enum DashboardAction {
     /// The workspace is intentionally absent: it is fixed by the session
     /// record and never offered as a move selector.
     MoveSession {
+        /// Delegation policy for the destination; `None` keeps the session's.
+        subagents: Option<mj_core::subagent::SubagentPolicy>,
         workspace_selection: mj_core::move_workspace::WorkspaceSelection,
         session_id: String,
         profile_id: String,

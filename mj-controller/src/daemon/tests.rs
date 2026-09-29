@@ -5065,6 +5065,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         in_place: false,
         operation_id: "retained-move".into(),
         selection: MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             session_id: session.id.clone(),
             profile_id: Some(session.last_profile.clone()),

@@ -21,6 +21,9 @@ pub struct MoveSelection {
     pub target_template_id: Option<String>,
     pub additional_mounts: Option<Vec<AdditionalMount>>,
     pub resource_allocation: Option<SessionResourceAllocation>,
+    /// Delegation policy for the destination. `None` keeps the session's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagents: Option<crate::subagent::SubagentPolicy>,
 }
 
 /// What moving a local checkout into an isolated workspace will do, shown

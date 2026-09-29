@@ -1393,9 +1393,9 @@ function freshDraft() {
 
 /// Only Claude and Codex receive Mjolnir's delegation tools, so only they are
 /// offered the choice. Every other harness sends no opinion, which means
-/// native sub-agents.
-function subagentChoiceApplies() {
-  const kind = snapshot?.profiles.find(profile => profile.id === newDraft?.profileId)?.harness_kind;
+/// native sub-agents. `draft` is a New session or Move draft.
+function subagentChoiceApplies(draft = newDraft) {
+  const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
   return kind === 'claude' || kind === 'codex';
 }
 
@@ -1409,7 +1409,7 @@ function subagentDiscoveryKey(draft) {
 }
 
 function subagentSelectionError(draft) {
-  if (!draft || !subagentChoiceApplies() || draft.subagents.mode !== 'single_model') return '';
+  if (!draft || !subagentChoiceApplies(draft) || draft.subagents.mode !== 'single_model') return '';
   const discovery = draft.subagentDiscovery;
   if (!discovery || discovery.key !== subagentDiscoveryKey(draft) || discovery.loading) return 'Loading eligible models and efforts…';
   if (discovery.error) return discovery.error;
@@ -1420,7 +1420,8 @@ function subagentSelectionError(draft) {
   return '';
 }
 
-function discoverSubagentOptions(draft, force = false) {
+/// `rerender` redraws the form the draft belongs to, if it is still open.
+function discoverSubagentOptions(draft, rerender, force = false) {
   const key = subagentDiscoveryKey(draft);
   if (!force && draft.subagentDiscovery?.key === key) return;
   draft.subagentDiscovery?.controller?.abort();
@@ -1430,15 +1431,15 @@ function discoverSubagentOptions(draft, force = false) {
   const model = draft.subagents.model ? `?model=${encodeURIComponent(draft.subagents.model)}` : '';
   request(`/api/v1/profiles/${encodeURIComponent(draft.profileId)}/subagent-options${model}`, { signal: controller.signal })
     .then(options => {
-      if (newDraft !== draft || draft.subagentDiscovery !== discovery || subagentDiscoveryKey(draft) !== key) return;
+      if (draft.subagentDiscovery !== discovery || subagentDiscoveryKey(draft) !== key) return;
       discovery.options = options;
       discovery.loading = false;
-      renderNewForm();
+      rerender();
     }).catch(error => {
-      if (newDraft !== draft || draft.subagentDiscovery !== discovery || controller.signal.aborted) return;
+      if (draft.subagentDiscovery !== discovery || controller.signal.aborted) return;
       discovery.error = error.message;
       discovery.loading = false;
-      renderNewForm();
+      rerender();
     });
 }
 
@@ -1459,30 +1460,35 @@ function subagentSelect(body, label, id, choices, selected, onChange, disabled =
   body.append(field);
 }
 
-function renderSubagentFields(body) {
-  const draft = newDraft;
-  subagentSelect(body, 'Subagents', 'new-subagents', SUBAGENT_MODES, draft.subagents.mode, mode => {
+/// The delegation fields for a New session or Move draft. `prefix` keeps the
+/// element ids of the two forms apart; `onChange` runs after an edit, before
+/// `rerender`.
+function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
+  subagentSelect(body, 'Subagents', `${prefix}-subagents`, SUBAGENT_MODES, draft.subagents.mode, mode => {
     draft.subagentDiscovery?.controller?.abort();
     draft.subagentDiscovery = null;
     draft.subagents = mode === 'single_model' ? { mode, model: '', effort: null } : { mode };
-    renderNewForm();
+    onChange();
+    rerender();
   });
   if (draft.subagents.mode !== 'single_model') return;
-  discoverSubagentOptions(draft);
+  discoverSubagentOptions(draft, rerender);
   const discovery = draft.subagentDiscovery;
   const options = discovery.options;
   const models = [['', 'Select model'], ...(options?.models || []).map(choice => [choice.value, choice.name])];
   if (draft.subagents.model && !models.some(([value]) => value === draft.subagents.model)) models.push([draft.subagents.model, `${draft.subagents.model} (unavailable)`]);
-  subagentSelect(body, 'Model', 'new-subagent-model', models, draft.subagents.model, model => {
+  subagentSelect(body, 'Model', `${prefix}-subagent-model`, models, draft.subagents.model, model => {
     draft.subagents = { mode: 'single_model', model, effort: null };
-    renderNewForm();
+    onChange();
+    rerender();
   }, discovery.loading || !options);
   const efforts = options?.efforts || [];
   const choices = [['', efforts.length ? 'Select effort' : 'Harness default'], ...efforts.map(choice => [choice.value, choice.name])];
   if (draft.subagents.effort && !choices.some(([value]) => value === draft.subagents.effort)) choices.push([draft.subagents.effort, `${draft.subagents.effort} (unavailable)`]);
-  subagentSelect(body, 'Effort', 'new-subagent-effort', choices, draft.subagents.effort || '', effort => {
+  subagentSelect(body, 'Effort', `${prefix}-subagent-effort`, choices, draft.subagents.effort || '', effort => {
     draft.subagents.effort = effort || null;
-    renderNewForm();
+    onChange();
+    rerender();
   }, discovery.loading || !options || !efforts.length);
   body.append(el('p', 'dim', 'Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session’s own profile is always eligible.'));
   const error = subagentSelectionError(draft);
@@ -1491,7 +1497,7 @@ function renderSubagentFields(body) {
   const retry = el('button', 'secondary', 'Refresh profiles');
   retry.type = 'button';
   retry.disabled = discovery.loading;
-  retry.onclick = () => { discoverSubagentOptions(draft, true); renderNewForm(); };
+  retry.onclick = () => { discoverSubagentOptions(draft, rerender, true); rerender(); };
   body.append(retry);
 }
 
@@ -1678,7 +1684,10 @@ function renderNewForm() {
         ? 'The target provides its own isolated workspace.'
         : checkbox.checked ? 'Create a separate session-owned clone on the selected or default branch.'
           : 'Use the selected directory directly.'));
-      if (subagentChoiceApplies()) renderSubagentFields(body);
+      if (subagentChoiceApplies()) {
+        const draft = newDraft;
+        renderSubagentFields(body, draft, 'new', () => { if (newDraft === draft) renderNewForm(); });
+      }
     }
   }
   newStep.replaceChildren(body);
@@ -3305,7 +3314,26 @@ function freshMoveDraft(session) {
     fileExpanded: new Set(),
     showOtherFiles: false,
     workspaceSelection: { exclusions: [], acknowledge_large_transfer: false },
+    // The session's own policy; the prepare request names a policy only
+    // when the draft differs from it.
+    storedSubagents: session.subagents || { mode: 'native' },
+    subagents: structuredClone(session.subagents || { mode: 'native' }),
+    subagentDiscovery: null,
   };
+}
+
+/// The delegation policy a Move prepare request carries: null keeps the
+/// session's own.
+function moveSubagentChange(draft) {
+  if (!subagentChoiceApplies(draft)) return null;
+  return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
+}
+
+/// Children that are live or parked, which Move stops as a suspend would.
+function moveStoppedChildren(session) {
+  return (session.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child?.lifecycle === 'live').length;
 }
 
 function moveQueueItemText(item) {
@@ -3453,6 +3481,11 @@ function renderMoveForm() {
       }
     }
     moveStep.append(targetPicker);
+    if (subagentChoiceApplies(draft)) {
+      renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
+        draft.preparation = null;
+      });
+    }
     moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target, attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
@@ -3493,6 +3526,14 @@ function renderMoveForm() {
     }
     if (preparation.source_unavailable) {
       moveStep.append(el('p', 'move-warning', 'Source is unavailable; Move will recover its saved data without starting its old harness.'));
+    }
+    if (preparation.selection.subagents) {
+      const mode = SUBAGENT_MODES.find(([value]) => value === preparation.selection.subagents.mode)?.[1] || preparation.selection.subagents.mode;
+      moveStep.append(el('p', 'dim', `Subagents: ${mode}${preparation.selection.subagents.model ? ` (${preparation.selection.subagents.model})` : ''}.`));
+    }
+    const stoppedChildren = moveStoppedChildren(session);
+    if (stoppedChildren) {
+      moveStep.append(el('p', 'move-warning', `${stoppedChildren} sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
     }
     if (preparation.conversion) {
       moveStep.append(el('p', '', conversionSummary(preparation.conversion)));
@@ -3546,7 +3587,8 @@ function renderMoveForm() {
     moveNextButton.textContent = 'Confirm move';
   }
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy || (preparation?.active === true && !draft.acknowledge)
+  moveNextButton.disabled = busy || (!preparation && !!subagentSelectionError(draft))
+    || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
   for (const input of moveStep.querySelectorAll('input, select, button')) input.disabled = busy;
@@ -3573,6 +3615,7 @@ async function prepareMove() {
         clear_resource_allocation: draft.clearResourceAllocation,
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
+        subagents: moveSubagentChange(draft),
       }),
     });
     if (draft.preparation.workspace && !draft.filesReviewed) {

@@ -264,6 +264,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             state,
         };
         let selection = MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session_id.clone(),
@@ -340,6 +341,7 @@ fn move_configuration_fingerprint_changes_when_destination_changes() {
         },
     };
     let selection = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: "0123456789abcdef0123456789abcdef".into(),
@@ -380,6 +382,13 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
     let home = tempfile::tempdir().unwrap();
     let mut config = resume_compatibility_config();
     add_codex_profile(&mut config, home.path());
+    config.profiles.insert(
+        "kimi".into(),
+        HarnessProfile {
+            kind: HarnessKind::Kimi,
+            ..config.profiles["codex"].clone()
+        },
+    );
     let session_id = "0123456789abcdef0123456789abcdef";
 
     let mut running = checkpoint_test_session(session_id);
@@ -395,6 +404,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown target",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -408,6 +418,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unknown profile",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -421,6 +432,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "invalid resource allocation",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -433,6 +445,20 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 }),
             },
             "resource allocation",
+        ),
+        (
+            "delegation policy the destination harness cannot run",
+            mj_core::state::MoveSelection {
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                session_id: session_id.into(),
+                profile_id: Some("kimi".into()),
+                target_template_id: Some("podman".into()),
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            "supported only by Claude and Codex",
         ),
     ];
 
@@ -462,6 +488,19 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         );
     }
 
+    // A Move's new delegation policy is written with the destination's
+    // lifecycle fields.
+    let mut moved = state.sessions[session_id].clone();
+    moved.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    crate::database::save_resumed_session(&moved, None).unwrap();
+    assert_eq!(
+        crate::database::load_session_record(session_id)
+            .unwrap()
+            .unwrap()
+            .subagents,
+        Some(mj_core::subagent::SubagentPolicy::AllModels)
+    );
+
     let mut incompatible = managed_raw_session(ssh_worktree_target());
     incompatible.state = SessionState::Running;
     incompatible.bundle_id = "project".into();
@@ -482,6 +521,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         .unwrap()
         .block_on(controller.prepare_move_session_controlled(
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -630,6 +670,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
 
     let mut controller = Controller { config, state };
     let selection = MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: MOVE_QUEUE_SESSION_ID.into(),
@@ -789,6 +830,7 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
         state: state.clone(),
     };
     let selection = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
@@ -875,6 +917,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     source.additional_mounts = Vec::new();
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: source.id.clone(),
@@ -901,6 +944,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different target template",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 target_template_id: Some("ssh-bare".into()),
                 ..baseline.clone()
@@ -912,6 +956,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different attached mounts",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 additional_mounts: another_mount,
                 ..baseline.clone()
@@ -923,6 +968,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "different resource allocation",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 resource_allocation: another_allocation,
                 ..baseline.clone()
@@ -934,6 +980,7 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
         (
             "clearing absent resources is a no-op",
             mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 clear_resource_allocation: true,
                 ..baseline.clone()
@@ -987,6 +1034,7 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
         source_checkpoint_only: false,
         operation_id: "move-source-recovery".into(),
         selection: MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: session.id.clone(),
@@ -1221,6 +1269,7 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
@@ -1334,6 +1383,7 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
     crate::database::save_state(&state).unwrap();
     let controller = Controller { config, state };
     let selection = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: session_id.into(),
@@ -1693,6 +1743,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
 #[cfg(unix)]
 fn in_place_operation(controller: &Controller, destination_profile: &str) -> MoveOperation {
     let selection = MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),
