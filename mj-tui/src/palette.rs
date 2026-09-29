@@ -114,6 +114,7 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::RenameSession,
     CommandId::PinSession,
     CommandId::UnpinSession,
+    CommandId::ChangeWorkspace,
     CommandId::ContainerSettings,
     CommandId::MoveSession,
     CommandId::SuspendSession,
@@ -266,8 +267,12 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
         .unwrap_or(0)
 }
 
-fn session_menu_label(id: CommandId) -> &'static str {
-    match id {
+fn session_menu_label(id: CommandId) -> String {
+    let label = match id {
+        // Opens a second choice, so it carries the menu's submenu glyph.
+        CommandId::ChangeWorkspace => {
+            return format!("Change Workspace {}", theme::glyphs().navigate);
+        }
         CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
         CommandId::PinSession => "Pin…",
@@ -278,7 +283,8 @@ fn session_menu_label(id: CommandId) -> &'static str {
         CommandId::InterruptAll => "Interrupt all (parent + sub-agents)…",
         CommandId::DestroySession => "Destroy…",
         _ => spec(id).label,
-    }
+    };
+    label.to_owned()
 }
 
 /// The heading printed above the group `entry` opens, or `None` when the row
@@ -686,7 +692,10 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
                 CommandId::OpenSession | CommandId::ChangedFiles => 0,
-                CommandId::RenameSession | CommandId::PinSession | CommandId::UnpinSession => 1,
+                CommandId::RenameSession
+                | CommandId::PinSession
+                | CommandId::UnpinSession
+                | CommandId::ChangeWorkspace => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
@@ -901,7 +910,7 @@ pub(crate) fn render_palette(
                 let label = if palette.session_only {
                     session_menu_label(entry.id)
                 } else {
-                    spec.label
+                    spec.label.to_owned()
                 };
                 let text =
                     truncate_to_cells(&format!("{label}{reason}"), label_width, Truncate::PLAIN);
@@ -915,7 +924,7 @@ pub(crate) fn render_palette(
                     Style::default().fg(theme::palette().text)
                 };
                 let padding = label_width.saturating_sub(Line::raw(text.as_str()).width()) + 2;
-                let split = if text.starts_with(label) {
+                let split = if text.starts_with(label.as_str()) {
                     label.len()
                 } else {
                     text.len()
@@ -1158,6 +1167,7 @@ mod tests {
                 "Rename…",
                 "Pin…",
                 "Unpin",
+                "Change Workspace ›",
                 "[Lifecycle]",
                 "Container settings",
                 "Move…",
@@ -1241,9 +1251,7 @@ mod tests {
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
                 PaletteLine::Separator => "---".to_owned(),
-                PaletteLine::Command(index) => {
-                    session_menu_label(palette.entries[index].id).to_owned()
-                }
+                PaletteLine::Command(index) => session_menu_label(palette.entries[index].id),
             })
             .collect()
     }

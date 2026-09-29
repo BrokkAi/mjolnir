@@ -21,11 +21,11 @@ use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
     ResumeRepositoryPreflightApply, config_only_controller, report, spawn_cancellable_io,
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
-    spawn_create_bundle, spawn_dashboard_container_settings, spawn_dashboard_create_session,
-    spawn_dashboard_rename, spawn_lifecycle_operation, spawn_remove_bundle,
-    spawn_review_settings_discovery, spawn_startup_prompt, spawn_workspace_close,
-    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
+    spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
+    spawn_remove_bundle, spawn_review_settings_discovery, spawn_startup_prompt,
+    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -725,6 +725,20 @@ pub(crate) async fn apply_dashboard_action(
             spawn_dashboard_rename(
                 session_id,
                 title,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::ChangeWorkspace {
+            session_id,
+            workspace_id,
+            workspace_name,
+        } => {
+            context.dashboard.set_notice("Moving session…");
+            spawn_dashboard_change_workspace(
+                session_id,
+                workspace_id,
+                workspace_name,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

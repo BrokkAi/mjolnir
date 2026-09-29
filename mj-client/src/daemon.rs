@@ -519,6 +519,10 @@ pub enum DaemonAction {
         session_id: String,
         title: String,
     },
+    SetSessionWorkspace {
+        session_id: String,
+        workspace_id: String,
+    },
     SetSessionContainerSettings {
         session_id: String,
         cpus: Option<String>,
@@ -1487,6 +1491,23 @@ impl DaemonClient {
         {
             DaemonReply::Text(title) => Ok(title),
             reply => bail!("unexpected session-title reply {reply:?}"),
+        }
+    }
+
+    pub async fn set_session_workspace(
+        &mut self,
+        session_id: String,
+        workspace_id: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SetSessionWorkspace {
+                session_id,
+                workspace_id,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected session-workspace reply {reply:?}"),
         }
     }
 

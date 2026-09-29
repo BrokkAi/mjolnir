@@ -179,6 +179,19 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Text(title))
         }
+        DaemonAction::SetSessionWorkspace {
+            session_id,
+            workspace_id,
+        } => {
+            ensure!(
+                !crate::controller::move_session::move_owns_session(&session_id),
+                "session is moving; change its workspace after Move finishes"
+            );
+            blocking(move || Controller::load()?.set_session_workspace(&session_id, &workspace_id))
+                .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SetSessionContainerSettings {
             session_id,
             cpus,

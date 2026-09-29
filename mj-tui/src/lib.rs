@@ -33,7 +33,7 @@ use mj_core::targets::AdditionalMount;
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
-    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog, WorkspacePicker,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -399,6 +399,12 @@ pub enum DashboardAction {
         session_id: String,
         title: String,
     },
+    /// Move a session, and its sub-agents, to another workspace.
+    ChangeWorkspace {
+        session_id: String,
+        workspace_id: String,
+        workspace_name: String,
+    },
     /// Re-probe every target's capacity and ask every profile for its quota
     /// again. One key does both, so there is one action rather than two.
     RefreshAll,
@@ -722,6 +728,8 @@ pub(crate) enum Mode {
     Web(WebDialog),
     WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
+    /// The workspace choice for one session, before its confirmation.
+    ChangeWorkspace(WorkspacePicker),
     /// The selected session's changed files, branch, and upstream distance.
     ChangedFiles(ChangedFilesDialog),
     /// The last notices the footer showed, newest first.

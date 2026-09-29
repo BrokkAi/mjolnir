@@ -167,6 +167,11 @@ pub(crate) enum DashboardIoUpdate {
         title: String,
         result: std::result::Result<String, String>,
     },
+    ChangeWorkspace {
+        session_id: String,
+        workspace_name: String,
+        result: std::result::Result<(), String>,
+    },
     /// A prompt typed into a standby composer and handed to the daemon for
     /// delivery once the session is live.
     StartupPromptQueued {
@@ -974,6 +979,20 @@ impl DashboardContext {
                     self.dashboard
                         .set_notice(format!("Rename failed for {title}: {error}"));
                 }
+            },
+            DashboardIoUpdate::ChangeWorkspace {
+                session_id,
+                workspace_name,
+                result,
+            } => match result {
+                Ok(()) => self.dashboard.set_notice(format!(
+                    "Moved {} to workspace \"{workspace_name}\".",
+                    self.session_notice_name(&session_id)
+                )),
+                Err(error) => self.dashboard.set_failure_notice(format!(
+                    "Could not move {} to workspace \"{workspace_name}\": {error}",
+                    self.session_notice_name(&session_id)
+                )),
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
                 Ok(controller) => {

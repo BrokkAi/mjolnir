@@ -471,6 +471,43 @@ pub fn reassign_resumable_session_workspace_at(
     Ok(())
 }
 
+/// Move sessions to another workspace, all together or not at all.
+///
+/// The caller passes a session and the sub-agents under it, so a family
+/// never splits across workspaces. This is the one path that moves a session
+/// of any state; the resume path above is limited to stopped sessions.
+pub fn set_sessions_workspace(session_ids: &[String], workspace_id: &str) -> Result<()> {
+    let session_ids = session_ids.to_vec();
+    let workspace_id = workspace_id.to_owned();
+    submit_database_write("set_sessions_workspace", move |_| {
+        set_sessions_workspace_at(&database_path(), &session_ids, &workspace_id)
+    })
+}
+
+pub fn set_sessions_workspace_at(
+    path: &Path,
+    session_ids: &[String],
+    workspace_id: &str,
+) -> Result<()> {
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let destination_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?1)",
+        [workspace_id],
+        |row| row.get(0),
+    )?;
+    ensure!(destination_exists, "unknown workspace {workspace_id:?}");
+    for session_id in session_ids {
+        let changed = tx.execute(
+            "UPDATE session_contexts SET workspace_id = ?2 WHERE session_id = ?1",
+            params![session_id, workspace_id],
+        )?;
+        ensure!(changed == 1, "unknown session {session_id}");
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn workspace_for_session_at(path: &Path, session_id: &str) -> Result<Option<String>> {
     open_reader(path)?
         .query_row(

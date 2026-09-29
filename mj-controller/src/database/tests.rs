@@ -3771,6 +3771,40 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
 }
 
 #[test]
+fn a_running_session_and_its_sub_agent_change_workspace_together() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut parent = session("session-parent", "project-1");
+    parent.workspace_id = source.id.clone();
+    parent.state = SessionState::Running;
+    let mut child = session("session-child", "project-1");
+    child.workspace_id = source.id.clone();
+    child.state = SessionState::Running;
+    save_session_to(&database, &parent).unwrap();
+    save_session_to(&database, &child).unwrap();
+
+    let ids = vec![parent.id.clone(), child.id.clone()];
+    set_sessions_workspace_at(&database, &ids, &destination.id).unwrap();
+    for id in &ids {
+        assert_eq!(
+            workspace_for_session_at(&database, id).unwrap(),
+            Some(destination.id.clone())
+        );
+    }
+
+    // A missing destination or session changes nothing.
+    assert!(set_sessions_workspace_at(&database, &ids, "missing-workspace").is_err());
+    let with_missing = vec![parent.id.clone(), "no-such-session".to_owned()];
+    assert!(set_sessions_workspace_at(&database, &with_missing, &source.id).is_err());
+    assert_eq!(
+        workspace_for_session_at(&database, &parent.id).unwrap(),
+        Some(destination.id)
+    );
+}
+
+#[test]
 fn setup_workspace_creation_returns_the_concurrent_name_winner() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

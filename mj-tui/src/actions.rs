@@ -24,6 +24,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     OpenSession,
     PinSession,
+    ChangeWorkspace,
     UnpinSession,
     OpenSessionSplitRight,
     OpenSessionSplitBelow,
@@ -362,6 +363,19 @@ fn live_session(dashboard: &DashboardState) -> Availability {
     } else {
         Availability::Blocked("the session's target is not running")
     }
+}
+
+fn change_workspace_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.workspace_ids().len() < 2 {
+        return Availability::Blocked("there is no other workspace");
+    }
+    if dashboard.move_queue_admission_incomplete(&session.id) {
+        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
+    }
+    Availability::Ready
 }
 
 fn container_session(dashboard: &DashboardState) -> Availability {
@@ -992,6 +1006,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: container_session,
     },
     CommandSpec {
+        id: CommandId::ChangeWorkspace,
+        label: "Change workspace…",
+        description: "Move the selected session, and its sub-agents, to another workspace, after you confirm.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: change_workspace_available,
+    },
+    CommandSpec {
         id: CommandId::MoveSession,
         label: "Move session…",
         description: "Restore the selected session on another profile and/or target.",
@@ -1473,6 +1499,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
                         | CommandId::MoveSession
+                        | CommandId::ChangeWorkspace
                         | CommandId::DestroySession
                 ))
         })
@@ -1562,6 +1589,7 @@ impl DashboardState {
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
                     | CommandId::MoveSession
+                    | CommandId::ChangeWorkspace
                     | CommandId::SuspendSession
                     | CommandId::DestroySession
             )
@@ -1694,6 +1722,10 @@ impl DashboardState {
             }
             CommandId::ContainerSettings => {
                 self.begin_container_edit();
+                DashboardAction::None
+            }
+            CommandId::ChangeWorkspace => {
+                self.begin_change_workspace();
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),

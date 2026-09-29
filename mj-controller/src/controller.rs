@@ -974,6 +974,30 @@ impl Controller {
         Ok(title)
     }
 
+    /// Move a session, and the sub-agents under it, to another workspace.
+    /// Returns how many sessions moved.
+    pub fn set_session_workspace(&mut self, session_id: &str, workspace_id: &str) -> Result<usize> {
+        ensure!(
+            self.state.sessions.contains_key(session_id),
+            "unknown session {session_id}"
+        );
+        let mut ids = vec![session_id.to_owned()];
+        ids.extend(
+            self.state
+                .subagents
+                .values()
+                .filter(|child| child.parent_session_id == session_id)
+                .map(|child| child.child_session_id.clone()),
+        );
+        crate::database::set_sessions_workspace(&ids, workspace_id)?;
+        for id in &ids {
+            if let Some(record) = self.state.sessions.get_mut(id) {
+                record.workspace_id = workspace_id.to_owned();
+            }
+        }
+        Ok(ids.len())
+    }
+
     pub fn rename_profile_id(&mut self, old_id: &str, new_id: &str) -> Result<()> {
         mj_core::config::validate_id("profile", new_id)?;
         if old_id == new_id {

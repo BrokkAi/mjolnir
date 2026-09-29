@@ -915,6 +915,33 @@ pub(crate) fn spawn_dashboard_rename(
     );
 }
 
+pub(crate) fn spawn_dashboard_change_workspace(
+    session_id: String,
+    workspace_id: String,
+    workspace_name: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    let moved_session_id = session_id.clone();
+    spawn_critical_async(
+        tracker,
+        format!("moving session {} to a workspace", short_id(&session_id)),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .set_session_workspace(moved_session_id, workspace_id)
+                .await
+        },
+        move |result| DashboardIoUpdate::ChangeWorkspace {
+            session_id,
+            workspace_name,
+            result,
+        },
+    );
+}
+
 pub(crate) fn spawn_startup_prompt(
     session_id: String,
     text: String,
