@@ -460,3 +460,7 @@ Ownership today: the worker's reviewer sidecar owns each role's harness, journal
 ### Decision (14:40): #1191 by draining, no record
 
 The user: "is destroy fast enough that we can afford to block restarts for it?" — yes: one bounded SessionWiki index pass, then per process tree 2 s TERM plus 3 s after KILL and a removal; tens of seconds at most. O6 reworks: no pre-"accepted" record; `mj daemon restart`, graceful stop and the upgrade handoff drain in-flight destroys (bounded, 60 s, abandoned ones logged); a crash mid-destroy stays "the session comes back; destroy again". `Destroying` was not usable as the record: in the store it means a suspend past its verified checkpoint and startup would finish it as a suspend.
+
+### 14:45 — Opus limit; Sonnet finishes O5 and O6; new request
+
+Both Opus agents were terminated by the account's session limit (HTTP 429). O5 had option A half-written (uncommitted) and O6 had committed the removal of the durable record (`a30b5651`) with the drain test in progress; Sonnet agents finish both in the same worktrees. New user request (F17, Sonnet): a `Filter: _____` input at the top of the Sessions list to the right of the create/open buttons, hidden in the most compact list view, with an `x` to clear when active; it edits the existing `/` search state. Cap stays at three running subagents.
