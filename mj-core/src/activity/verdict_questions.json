@@ -5,7 +5,7 @@
     "criteria": {
       "none": {"what": "The turn has no current failure."},
       "transient_provider": {"what": "A current temporary provider overload, capacity refusal, throttling or server failure that a delayed Continue may recover."},
-      "quota": {"what": "A current exhausted subscription, session or weekly usage allowance."},
+      "quota": {"what": "A current exhausted subscription, session or weekly usage allowance, e.g. \"You've hit your session limit · resets 1:30am\", \"You've hit your usage limit\", \"weekly limit reached\", \"You hit your weekly limit.\", \"You've reached your free Grok Build usage limit for now\", \"Quota exhausted: Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.\". A message naming a reset time for a usage limit is quota."},
       "other": {"what": "A current failure that is not temporary provider unavailability or subscription quota."},
       "unclear": {"what": "Insufficient evidence to identify the current failure or its absence."}
     }
