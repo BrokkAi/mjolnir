@@ -5680,3 +5680,81 @@ async fn move_copy_releases_admission_and_control_transition_reacquires_it() {
     release.notify_one();
     RuntimeState::wait_lifecycle_result(result).await.unwrap();
 }
+
+/// Changing a live session's workspace is published to every dashboard: the
+/// runtime row carries the new workspace id, and a dashboard that attaches
+/// afterwards is given the session under the new workspace only.
+#[tokio::test]
+async fn changing_a_sessions_workspace_reaches_the_published_projection() {
+    let Some(_writer) =
+        startup_prompt_test_store("changing_a_sessions_workspace_reaches_the_published_projection")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let destination = crate::database::create_workspace("destination").unwrap();
+    let mut live = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    live.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/worker/session-1".into(),
+    });
+    crate::database::save_session(&live).unwrap();
+    assert!(state.session_record("session-1").is_some());
+    let initial = state.runtime_changes(None, false).await.unwrap();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica.apply(initial).unwrap();
+    assert_eq!(
+        replica
+            .projection
+            .records
+            .get("session-1")
+            .unwrap()
+            .workspace_id,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID
+    );
+
+    handle_action(
+        DaemonAction::SetSessionWorkspace {
+            session_id: "session-1".into(),
+            workspace_id: destination.id.clone(),
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("change the workspace");
+
+    let cursor = replica.cursor.clone();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert_eq!(
+        replica
+            .projection
+            .records
+            .get("session-1")
+            .unwrap()
+            .workspace_id,
+        destination.id,
+        "the attached dashboard kept the old workspace"
+    );
+    let fresh = state.runtime_changes(None, false).await.unwrap();
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } = fresh else {
+        panic!("a new dashboard is given a snapshot")
+    };
+    let members = |workspace: &str| {
+        projection
+            .records
+            .iter()
+            .filter(|(_, record)| record.workspace_id == workspace)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(members(&destination.id), ["session-1"]);
+    assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
+}

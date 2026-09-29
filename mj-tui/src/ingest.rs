@@ -640,10 +640,14 @@ impl DashboardState {
         }
         state.sessions = rows;
         self.state = state;
-        if self
-            .navigation
-            .retain_sessions(|id| self.state.sessions.contains_key(id))
-        {
+        if self.navigation.retain_sessions(|id| {
+            crate::dashboard_conversation::session_belongs_in_layout(
+                &self.state,
+                &self.native_agents,
+                self.active_workspace_id.as_deref(),
+                id,
+            )
+        }) {
             self.reconcile_pins();
             self.mark_layout_modified();
         }

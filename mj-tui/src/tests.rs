@@ -1434,6 +1434,34 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
 }
 
 #[test]
+fn a_feed_record_with_a_new_workspace_moves_the_row_between_tabs() {
+    let mut dashboard = dashboard_with_attention_mix();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    dashboard.set_active_workspace(Some("default".into()));
+    // The session is open in a pane, so it is the selected one: the list keeps
+    // the selected row visible, which must not outlive its workspace.
+    dashboard.select_active_session("quiet");
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+    assert!(ids(&dashboard).contains(&"quiet".to_owned()));
+    let mut next = dashboard.state.clone();
+    next.sessions.get_mut("quiet").unwrap().workspace_id = "other".into();
+    dashboard.set_state(next);
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert!(!ids(&dashboard).contains(&"quiet".to_owned()));
+    dashboard.set_active_workspace(Some("other".into()));
+    assert!(ids(&dashboard).contains(&"quiet".to_owned()));
+    dashboard.set_active_workspace(Some("default".into()));
+    assert!(!ids(&dashboard).contains(&"quiet".to_owned()));
+    assert_eq!(dashboard.selected_session_id(), None);
+}
+
+#[test]
 fn workspace_arrows_keep_focus_while_restoring_other_workspace_views() {
     let mut dashboard = dashboard_with_session(running_session());
     let first = dashboard.active_workspace_id().unwrap().to_owned();
