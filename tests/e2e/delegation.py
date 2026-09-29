@@ -56,7 +56,6 @@ def main():
             + repr(options)
             + '}\n    elif method == "session/set_mode":',
         )
-        script = script.replace("prompts = 0", "prompts = 0\nfixture_socket = None")
         # This fixture never owns a native goal. Report that alongside every
         # execution update, including after loading a parked conversation.
         script = script.replace(
@@ -64,12 +63,8 @@ def main():
             "def report_execution(status, goal_cleared=True):",
         )
         script = script.replace(
-            "        delay()\n        rollout_dir",
-            '        delay()\n        for server in message.get("params", {}).get("mcpServers", []):\n            arguments = server.get("args", [])\n            if "--socket" in arguments:\n                fixture_socket = arguments[arguments.index("--socket") + 1]\n        rollout_dir',
-        )
-        script = script.replace(
             '        report_execution("running")',
-            '        report_execution("running")\n        if fixture_socket:\n            with open(os.path.join(os.path.dirname(fixture_socket), "fixture-prompt.txt"), "w") as marker:\n                marker.write(text)',
+            '        report_execution("running")\n        with open(os.path.join(os.environ["CODEX_HOME"], "fixture-prompt.txt"), "a") as marker:\n            marker.write(text + "\\n")',
         )
         script = script.replace(
             "        if wait_for_prompt_cancel():",
@@ -207,9 +202,11 @@ def main():
         def wait_prompt(session, text):
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                marker = endpoint(session).parent / "fixture-prompt.txt"
-                if marker.exists() and text in marker.read_text():
-                    return
+                # The fake ACP agent appends each prompt to a file in its
+                # session-private CODEX_HOME, which lies under the session id.
+                for marker in lab.runtime_root.rglob("fixture-prompt.txt"):
+                    if session in marker.parts and text in marker.read_text():
+                        return
                 time.sleep(0.05)
             raise RuntimeError(f"worker did not begin prompt: {text}")
 
@@ -220,6 +217,7 @@ def main():
             parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
         )
         assert first["status"] == "complete", first
+        assert first["agents"][0]["output"] == "first report without a dashboard", first
 
         def wait_parked(session):
             deadline = time.monotonic() + 20
@@ -236,19 +234,35 @@ def main():
             raise RuntimeError(f"child completion did not park {session}: {row}")
 
         wait_parked(child)
-        tool(
-            parent, "send_input", {"child_session_id": child, "message": "second turn"}
+        # A wait on a parked child whose report is already delivered answers
+        # at once, not after its timeout.
+        asked = time.monotonic()
+        parked = tool(
+            parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
         )
-        wait_prompt(child, "second turn")
-        # Submit a wait, then replace only this instance's daemon. Workers and
-        # their accepted input survive; the replacement rebuilds delegation.
+        parked_seconds = time.monotonic() - asked
+        assert parked["status"] == "complete", parked
+        assert parked["agents"][0]["output"] == "first report without a dashboard", parked
+        assert parked_seconds < 5, f"wait on a parked child took {parked_seconds}"
+        # Submit the next wait while send_input is still starting the parked
+        # child. It must not answer with the old report or return early, and
+        # the daemon must not re-park the child under the input. Then replace
+        # only this instance's daemon: workers and their accepted input
+        # survive, and the replacement rebuilds delegation.
         with concurrent.futures.ThreadPoolExecutor() as pool:
+            tool(
+                parent,
+                "send_input",
+                {"child_session_id": child, "message": "second turn"},
+            )
             waiting = pool.submit(
                 tool,
                 parent,
                 "wait_agents",
                 {"child_session_ids": [child], "timeout_seconds": 60},
             )
+            wait_prompt(child, "second turn")
+            assert not waiting.done(), "wait answered before the second report"
             time.sleep(1)
             started = time.monotonic()
             cli("daemon", "restart")
@@ -267,6 +281,9 @@ def main():
             )
             second = waiting.result(timeout=40)
             assert second["status"] == "complete", second
+            assert second["agents"][0]["output"] == (
+                "second report across daemon replacement"
+            ), second
         tool(parent, "list_agents")
         wait_parked(child)
         print(
