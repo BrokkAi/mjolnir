@@ -597,7 +597,20 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
-            cancellation.cancel();
+            // A destroy in flight was acknowledged as accepted and nothing
+            // about it is durable, so the stop waits for it, up to a bound
+            // (#1191). The reply does not wait.
+            if crate::upgrade::gate().destroys_hold_the_stop() {
+                let cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    while crate::upgrade::gate().destroys_hold_the_stop() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    cancellation.cancel();
+                });
+            } else {
+                cancellation.cancel();
+            }
             Ok(DaemonReply::Done)
         }
     }

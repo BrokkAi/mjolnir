@@ -607,6 +607,9 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
+        // The destroy holds this from the acknowledgement to its last step, so
+        // a graceful stop or handoff waits for it, sub-agents first (#1191).
+        let _upgrade_work = crate::upgrade::destroy_activity(&session_id)?;
         self.index_before_destroy(&session_id).await;
         self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
             .await

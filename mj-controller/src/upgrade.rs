@@ -17,18 +17,53 @@ use std::time::{Duration, Instant};
 /// and deferrable work may start again.
 const DRAIN_LAPSE: Duration = Duration::from_secs(10);
 
+/// The label a session destroy holds admission under.
+pub(crate) const DESTROY_LABEL: &str = "session destroy";
+
+/// How long a stop or handoff waits for destroys in flight before it goes
+/// ahead and abandons them. The client waits longer than this for the daemon
+/// to exit (`STOP_DRAIN_TIMEOUT`).
+pub(crate) const DESTROY_WAIT_BOUND: Duration = Duration::from_secs(60);
+
 #[derive(Default)]
 pub(crate) struct Gate(Mutex<State>);
 
 #[derive(Default)]
 struct State {
     closed: bool,
+    /// The sessions whose destroy holds admission, one entry per hold.
+    destroying: Vec<String>,
+    /// When a stop or handoff first found a destroy still running.
+    destroy_wait_started: Option<Instant>,
+    /// Tests shorten [`DESTROY_WAIT_BOUND`].
+    destroy_wait_bound: Option<Duration>,
     /// When the most recent handoff attempt found work still running.
     drain_requested: Option<Instant>,
     active: BTreeMap<&'static str, usize>,
 }
 
 impl State {
+    /// Whether the destroys still running should be waited for. Refuses new
+    /// deferrable work while it does.
+    fn destroy_wait_holds(&mut self) -> bool {
+        let started = *self.destroy_wait_started.get_or_insert_with(Instant::now);
+        let bound = self.destroy_wait_bound.unwrap_or(DESTROY_WAIT_BOUND);
+        if started.elapsed() < bound {
+            return true;
+        }
+        tracing::warn!(
+            sessions = ?self.destroying,
+            bound_seconds = bound.as_secs_f64(),
+            "daemon stops with session destroys unfinished; each session comes back and needs `mj destroy` again"
+        );
+        false
+    }
+
+    /// True when every active hold is a destroy.
+    fn holds_only_destroys_or_nothing(&self) -> bool {
+        self.active.keys().all(|label| *label == DESTROY_LABEL)
+    }
+
     fn draining(&self) -> bool {
         self.drain_requested
             .is_some_and(|requested| requested.elapsed() < DRAIN_LAPSE)
@@ -45,6 +80,7 @@ pub(crate) struct Work {
 struct Registration {
     gate: Arc<Gate>,
     label: &'static str,
+    destroying: Option<String>,
 }
 
 impl Gate {
@@ -79,14 +115,52 @@ impl Gate {
         Ok(self.register(&mut state, label))
     }
 
+    /// Admit the destroy of `session_id`. The handoff and the graceful stop
+    /// wait for it, but only up to [`DESTROY_WAIT_BOUND`].
+    pub(crate) fn enter_destroy(self: &Arc<Self>, session_id: &str) -> anyhow::Result<Work> {
+        let mut state = self.lock();
+        anyhow::ensure!(!state.closed, "daemon upgrade handoff is underway");
+        state.destroying.push(session_id.to_owned());
+        Ok(self.register_as(&mut state, DESTROY_LABEL, Some(session_id.to_owned())))
+    }
+
     fn register(self: &Arc<Self>, state: &mut State, label: &'static str) -> Work {
+        self.register_as(state, label, None)
+    }
+
+    fn register_as(
+        self: &Arc<Self>,
+        state: &mut State,
+        label: &'static str,
+        destroying: Option<String>,
+    ) -> Work {
         *state.active.entry(label).or_default() += 1;
         Work {
             _registration: Arc::new(Registration {
                 gate: self.clone(),
                 label,
+                destroying,
             }),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_destroy_wait_bound(bound: Duration) -> Arc<Self> {
+        let gate = Arc::new(Self::default());
+        gate.lock().destroy_wait_bound = Some(bound);
+        gate
+    }
+
+    /// Whether a stop should still wait for destroys. Starts the wait on the
+    /// first call that finds one. Once the bound has passed it logs the
+    /// destroys it abandons and answers no.
+    pub(crate) fn destroys_hold_the_stop(&self) -> bool {
+        let mut state = self.lock();
+        if state.destroying.is_empty() {
+            return false;
+        }
+        state.drain_requested = Some(Instant::now());
+        state.destroy_wait_holds()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -115,7 +189,9 @@ impl Gate {
     /// starts or extends draining.
     pub(crate) fn try_close(&self) -> bool {
         let mut state = self.lock();
-        if !state.active.is_empty() {
+        if !state.holds_only_destroys_or_nothing()
+            || (!state.destroying.is_empty() && state.destroy_wait_holds())
+        {
             tracing::debug!(work = ?state.active, "daemon upgrade is waiting for accepted work");
             state.drain_requested = Some(Instant::now());
             return false;
@@ -128,6 +204,14 @@ impl Gate {
 impl Drop for Registration {
     fn drop(&mut self) {
         let mut state = self.gate.lock();
+        if let Some(session_id) = &self.destroying
+            && let Some(index) = state.destroying.iter().position(|id| id == session_id)
+        {
+            state.destroying.remove(index);
+        }
+        if state.destroying.is_empty() {
+            state.destroy_wait_started = None;
+        }
         let count = state
             .active
             .get_mut(self.label)
@@ -150,6 +234,10 @@ pub(crate) fn activity(label: &'static str) -> anyhow::Result<Work> {
 
 pub(crate) fn activity_unless_draining(label: &'static str) -> anyhow::Result<Work> {
     gate().enter_unless_draining(label)
+}
+
+pub(crate) fn destroy_activity(session_id: &str) -> anyhow::Result<Work> {
+    gate().enter_destroy(session_id)
 }
 
 pub(crate) fn is_draining() -> bool {
@@ -228,6 +316,52 @@ mod tests {
         assert!(!gate.is_draining());
         assert!(gate.enter_unless_draining("worker swap").is_ok());
         drop(running);
+    }
+
+    #[test]
+    fn a_handoff_waits_for_a_destroy_until_the_bound_and_then_abandons_it_with_a_warning() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let gate = Gate::with_destroy_wait_bound(Duration::from_millis(200));
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        assert_eq!(gate.active_labels(), vec![DESTROY_LABEL.to_owned()]);
+        assert!(!gate.try_close(), "a destroy in flight holds the handoff");
+        assert!(gate.is_draining());
+        assert!(gate.destroys_hold_the_stop());
+        assert!(log.at(tracing::Level::WARN).is_empty());
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(!gate.destroys_hold_the_stop());
+        assert!(gate.try_close(), "past the bound the gate proceeds");
+        let warnings = log.at(tracing::Level::WARN);
+        assert!(
+            warnings.iter().any(|line| line.contains("aaaa1111")),
+            "the warning names the abandoned session: {warnings:?}"
+        );
+        drop(destroy);
+    }
+
+    #[test]
+    fn other_work_still_holds_the_handoff_past_the_destroy_bound() {
+        let gate = Gate::with_destroy_wait_bound(Duration::ZERO);
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        let lifecycle = gate.enter("session lifecycle").unwrap();
+        assert!(!gate.try_close());
+        drop(lifecycle);
+        assert!(gate.try_close());
+        drop(destroy);
+    }
+
+    #[test]
+    fn a_finished_destroy_lets_the_handoff_close_without_a_warning() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let gate = Gate::with_destroy_wait_bound(Duration::from_secs(60));
+        let destroy = gate.enter_destroy("aaaa1111").unwrap();
+        assert!(!gate.try_close());
+        drop(destroy);
+        assert!(!gate.destroys_hold_the_stop());
+        assert!(gate.try_close());
+        assert!(log.at(tracing::Level::WARN).is_empty());
     }
 
     #[test]

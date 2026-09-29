@@ -3810,6 +3810,131 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     assert!(!restarted.close_is_requested(&session.id));
 }
 
+/// #1191: `mj destroy` is answered "accepted" before the destroy finishes,
+/// and a parent's destroy (its sub-agents first, then its own worker) can
+/// still be running when `mj daemon restart` or `mj daemon stop` asks the
+/// daemon to stop. Nothing about the destroy is durable, so the graceful stop
+/// waits for it: the daemon stops only once the destroy has finished, and the
+/// upgrade handoff names it as work it waits for.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
+    const NAME: &str = "a_graceful_stop_waits_for_a_destroy_in_flight";
+    const CHILD: &str = "MJ_TEST_STOP_DRAINS_DESTROY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Destroy drain").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "11111111111111111111111111111111";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    // An operation on the parent that does not stop when cancelled holds the
+    // destroy after its sub-agent is gone and before the parent's worker is
+    // stopped, the stretch a Codex parent's destroy was in when the restart
+    // came.
+    let release = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle(parent_id.into(), LifecycleKind::Resume, {
+            let release = release.clone();
+            move |_state, _session_id, _cancelled| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let destroy = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .force_destroy_session(parent_id.to_owned(), BranchDisposition::Keep)
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while crate::database::load_state()
+        .unwrap()
+        .sessions
+        .contains_key(child_id)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sub-agent is destroyed first"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let blockers = match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+        .await
+        .unwrap()
+    {
+        DaemonReply::UpgradeBlockers(labels) => labels,
+        other => panic!("expected named blockers, got {other:?}"),
+    };
+    assert!(
+        blockers
+            .iter()
+            .any(|label| label.starts_with("session destroy")),
+        "the upgrade handoff waits for the destroy: {blockers:?}"
+    );
+    assert!(matches!(
+        handle_action(DaemonAction::Stop, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !shutdown.is_cancelled(),
+        "the daemon does not stop under a destroy it accepted"
+    );
+    assert!(!destroy.is_finished());
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), shutdown.cancelled())
+        .await
+        .expect("the daemon stops once the destroy is done");
+    assert!(
+        destroy.is_finished(),
+        "the destroy finished before the stop"
+    );
+    destroy.await.unwrap().unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(parent_id)
+    );
+}
+
 /// Suspending a parent stops its sub-agents instead of suspending them, and
 /// checkpoints only the parent. Each child is removed the way a destroy
 /// removes one, after SessionWiki has taken its conversation, and the parent's

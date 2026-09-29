@@ -902,7 +902,11 @@ pub fn process_is_zombie(pid: u32) -> bool {
 /// stop": a daemon that is still winding down has not refused, and the two
 /// read very differently to somebody deciding whether to reach for a kill.
 pub async fn wait_for_exit(pid: u32) -> Result<()> {
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    wait_for_exit_within(pid, STOP_TIMEOUT).await
+}
+
+async fn wait_for_exit_within(pid: u32, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     while daemon_process_is_alive(pid) {
         ensure!(Instant::now() < deadline, "process {pid} is still running");
         tokio::time::sleep(RETRY_DELAY).await;
@@ -2025,12 +2029,14 @@ impl ManagementClient {
     pub async fn stop_and_wait(mut self) -> Result<()> {
         let pid = self.inner.metadata.pid;
         self.stop().await?;
-        wait_for_exit(pid).await.with_context(|| {
-            format!(
-                "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
-                STOP_TIMEOUT.as_secs()
-            )
-        })
+        wait_for_exit_within(pid, STOP_DRAIN_TIMEOUT)
+            .await
+            .with_context(|| {
+                format!(
+                    "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
+                    STOP_DRAIN_TIMEOUT.as_secs()
+                )
+            })
     }
 }
 
@@ -2080,6 +2086,9 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// reporting a stop that had in fact worked as `did not stop` and aborting the
 /// restart that depended on it.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a requested stop may take: the daemon waits up to 60 seconds for
+/// session destroys in flight (#1191) before it winds down.
+pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
     pub async fn prepare_move_session(
