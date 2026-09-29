@@ -1,0 +1,335 @@
+{
+  "id": "S13",
+  "title": "Confident finished, session idle",
+  "category": "replied-finished",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "0305d10cd40fb1342e5ad6171d6ae993",
+    "session_title": "bifrost3 via codex",
+    "decision": "assessment-0305d10cd40fb1342e5ad6171d6ae993-7811",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T12:53:03.770Z",
+    "assessed_at": "2026-09-29T15:56:20.988Z",
+    "recorded_action": "finished",
+    "recorded_status": "superseded",
+    "recorded_reason": "turn_or_lifecycle_changed"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-2183f70a3d793470d87f1dd64ce1f0f9",
+          "role": "user",
+          "text": "I need defensible performance numbers for an investor pitch deck around the claim that Bifrost is fast enough to sit inside an AI coding agent's edit/check/fix loop.\n\nPlease design and run a benchmark of Bifrost warm-query latency on this repository.\n\nThe primary numbers I want are:\n\n1. **Warm steady-state query latency:** repository already indexed and analyzer process already running; no source changes between calls.\n2. **Warm incremental latency after a one-file edit:** repository/analyzer already warm, modify one representative source file in a way that invalidates the relevant analysis, let Bifrost observe/update that change, then execute the query.\n\nFor each, report **p50, p95, min, max, and sample count**.\n\n### Measure what the agent experiences\n\nThe primary latency metric should be **end-to-end elapsed wall-clock time from the persistent client issuing the query until the complete result is received**.\n\nDo NOT use CLI process startup time: this is modeling a long-lived coding-agent/Bifrost session.\n\nDo NOT report `CodeQueryProfile.timings_ns.total` as the primary number. Bifrost documentation explicitly says that it excludes query-scope setup/cleanup, report projection, serialization, transport, and host initialization.\n\nIf practical, benchmark through the same persistent MCP interface an agent would use. Otherwise use the closest long-lived public API and state exactly what is and is not included.\n\nUse ordinary, unprofiled query executions for the primary latency measurements, because profiling itself adds instrumentation overhead. Separately run a small number of profiled executions to explain where the time goes and verify cache behavior.\n\n### Query workloads\n\nPick 3 representative workloads that correspond to real SlopCop/Bifrost usage:\n\n**A. Structural / policy-style query**\nA nontrivial RQL query that has enough matches/work to be representative, rather than an exact lookup that trivially returns one symbol.\n\n**B. Cross-file semantic query**\nSomething involving references, calls, resolved identity, or another cross-file relationship representative of a correctness rule.\n\n**C. Deep semantic query**\nA realistic value-flow / taint / typestate / correctness-policy query that exercises the semantic engine.\n\nPrefer existing checked-in queries or policies that we can publish and reproduce. Do not invent an artificially favorable microbenchmark.\n\nFor each workload, record:\n- exact query/policy\n- result cardinality\n- completion/proof status\n- whether result is complete or inconclusive\n- repository commit\n- repository size: files and LOC\n- machine CPU, RAM, OS\n- Bifrost build/version\n\n### Warm-state methodology\n\nDefine precisely what \"warm\" means.\n\nStart a fresh Bifrost process/session, initialize the repository normally, and run enough untimed executions to ensure indexes and legitimate reusable analyzer state are populated.\n\nThen perform at least **100 measured ordinary executions** per workload if runtime permits.\n\nBefore trusting the result, inspect Bifrost's cache/profile telemetry and source to make sure repeated execution is not simply returning a whole-query result from a memoized result cache. Reuse of indexes, parsed facts, Git-blob-derived analysis, call/reference relations, semantic summaries, etc. is desirable and is exactly what \"warm\" is supposed to capture. Returning a cached final answer without executing the query would make this benchmark misleading; if such a cache exists, bypass it or clearly separate that result.\n\nRandomize or interleave workloads if useful to avoid measuring an artifact of one repeated tight loop.\n\n### Incremental-edit methodology\n\nFor the incremental benchmark, use a representative source file involved in each workload.\n\nFor every measured iteration:\n\n1. Start from the same warm analyzer/session state.\n2. Make a small realistic edit to one source file, ideally changing a method body without causing a large dependency/schema rebuild.\n3. Ensure Bifrost has observed the new workspace state.\n4. Start the latency timer at the point corresponding to an agent asking Bifrost to check its work.\n5. Execute the relevant query/policy and wait for the complete response.\n6. Stop the timer.\n7. Verify the result corresponds to the edited snapshot.\n8. Restore or alternate the edit so another iteration can be measured without restarting the analyzer.\n\nIf change detection and incremental re-analysis happen synchronously as part of the query request, include them in the end-to-end number. If they happen asynchronously before the request, report BOTH:\n- edit-to-ready latency\n- ready-to-query-response latency\n\nDo not hide update/indexing work outside the measured interval without documenting it.\n\n### Profiling / validation\n\nRun representative executions with `profile` enabled and capture at least:\n- `timings_ns`\n- `work`\n- `cache_layers`\n- semantic request-cache / summary reuse where applicable\n- access-path/index reuse\n- operator timings\n\nUse these to explain why the warm result is warm and how much work is actually being reused.\n\nAlso compare one genuinely cold execution for context, but cold performance is secondary here.\n\n### Output\n\nGive me a concise table like:\n\n| Workload | Warm p50 | Warm p95 | After 1-file edit p50 | After 1-file edit p95 | Results |\n|---|---:|---:|---:|---:|---:|\n| Structural | | | | | |\n| Cross-file | | | | | |\n| Semantic | | | | | |\n\nThen recommend the **single most defensible headline number** for an investor deck.\n\nFor example, if supported by the data:\n\n> \"Typical Bifrost checks return in XX ms warm and YY ms p95 after a source edit on a XXXk/1M-line repository.\"\n\nDo not cherry-pick the fastest query. Prefer the workload that best represents a SlopCop correctness check inside an agent loop.\n\nSave the benchmark harness/scripts and raw measurements in a reproducible location in the repo, but do not commit them unless they clearly belong in the project."
+        },
+        {
+          "id": "user:prompt-d1613b0162ab1f13220887648c6401a9",
+          "role": "user",
+          "text": "(we used the `tract` repo from /nfs/morannon/nvme/repo-clones as a test candidate. only rust is native so far)"
+        },
+        {
+          "id": "user:prompt-f62f28ee784e1c1ee0ed81f35f253ea1",
+          "role": "user",
+          "text": "i don't want to scope creep this to new analysis implementation tho, if we can't do that then pick something existing or a minor variant"
+        },
+        {
+          "id": "user:prompt-9095ec5896195375bc87a9b68a2a42e4",
+          "role": "user",
+          "text": "implement the plan"
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3c5c207487d1b09cc15eefce0b68",
+          "role": "assistant",
+          "text": "The release build is currently blocked by the host’s mbx cache: Cargo is wrapped correctly, but mbx tried to write its managed target metadata under `/mnt/optane/mbx-targets`, which is read-only in this session. I’m checking the configured mbx fallback before deciding whether a safe cache bypass or an approved target setting is needed; I won’t redirect Cargo’s target directory blindly."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3c759e3887d1a12212efee62c24b",
+          "role": "assistant",
+          "text": "mbx has an explicit supported fallback: `MBX_CACHE_DIR` and `MBX_TARGET_ROOT` can point at local storage. I’m reading that configuration guidance and the current user config, then I’ll retry with those two paths under `/tmp` so Cargo remains mbx-managed and the target layout is intentional."
+        },
+        {
+          "id": "user:prompt-99afd83c303f11fb9a035490df5f6f67",
+          "role": "user",
+          "text": "fuck\n\nthat means you need to go outside the sandbox, not redirect the build"
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3caf0a8c87d1a332e6ff66901252",
+          "role": "assistant",
+          "text": "You’re right. I misread the mbx failure as a configuration problem and started exploring a redirected build. You explicitly said to go outside the sandbox and keep the configured build paths. I’ll do that now with the normal mbx-wrapped Cargo command, using the repository-pinned Rust toolchain."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3d04b86087d1a5f6c879a1c6334b",
+          "role": "assistant",
+          "text": "The build is now running with the existing mbx cache and managed target paths. The first attempt compiled nothing because its metadata write was sandbox-blocked; outside the sandbox, compilation has progressed into Bifrost’s analysis crates. I also found a harness edge case in the review: edit samples need an explicit baseline warm query after restoration, so I’m tightening that before the pilot."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3d6a8dc487d1901b6c9d432e7955",
+          "role": "assistant",
+          "text": "The harness now warms and checks the baseline again after each restoration before timing an edit. It also caps each cell at its requested sample count, keeps the exact MCP arguments with each record, and preserves the original JSON-line behavior in the structural edit.\n\nOnce the release build finishes, I’ll run a three-workload pilot first. That will establish whether the chosen tract queries are complete and useful before a longer measurement campaign."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3dd51bdc87d18419260371f0e500",
+          "role": "assistant",
+          "text": "The build is progressing through the MCP crate. I’m preserving the configured mbx paths as requested; the earlier cache write failure was sandbox-only. I’ll record the current machine load at the measurement start so the report can show the host conditions alongside the latency samples."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3e8dfe0887d18bf0ec253e25aea5",
+          "role": "assistant",
+          "text": "The release build completed successfully with the configured mbx target and cache paths. I’m starting the small pilot now. It will verify the three response contracts and edit effects; if those checks pass, I’ll launch the full two-hour campaign with a fresh tract copy and separate cache."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3eba1ef887d1b2033856429adbce",
+          "role": "assistant",
+          "text": "The pilot has passed MCP initialization and Bifrost is still constructing tract’s analyzer snapshot. Its isolated cache has grown to about 800 MB; there are no measured samples yet. I’m letting this readiness call finish so the cold setup remains outside the warm latency figures."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3eeeca7487d1a4e1c59a0ad2a6f8",
+          "role": "assistant",
+          "text": "The pilot exposed a query-shape issue, not a missing analyzer feature: `references-of` needs a declaration input, so the initial `function` match was rejected. The structural policy itself returned three complete findings, although the report separately marks unrelated pack-activation decisions incomplete. I’m narrowing the cross-file query through the existing `enclosing-decl` step and will verify each workload’s own completion fields before measuring."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb3f5c349087d1afb5e76668b58d52",
+          "role": "assistant",
+          "text": "The corrected cross-file query runs, but Bifrost reports its Rust reference enumeration as incomplete for tract’s `load_tensor`. The procedure-local flow query is also explicitly unsupported by the current Rust adapter, so neither is suitable for defensible complete-result timings.\n\nI’m checking existing Rust-supported policies and semantic query surfaces now. If a shipped semantic workload completes on tract, I’ll use that; otherwise I’ll keep the benchmark focused on capabilities the current build can actually prove and state that limit clearly."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4013c2dc87d182461c6d169f37e4",
+          "role": "assistant",
+          "text": "The first pilot ruled out two tempting candidates: Rust reference inventory is incomplete on tract, and the flow-state query is unsupported. I’m switching to an existing Rust correctness policy and a documented call-site query, then I’ll validate both before spending the full measurement budget. No analyzer changes or Cargo path changes."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4174180087d18ca8e7ed23c1e95f",
+          "role": "assistant",
+          "text": "The replacement candidates are both shipped workloads: parsing inside a loop for the structural check, and the existing loop-invariant sort policy for value-identity reasoning. The cross-file candidate now uses the documented `call-sites-to` operation. I’m tightening the harness so completeness is judged for the selected policy run, and incomplete query diagnostics cannot slip into the reported sample count."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb430feb9087d1abd084f7b57cac86",
+          "role": "assistant",
+          "text": "The documented incoming-call query also returns rows but Bifrost marks the Rust result incomplete on tract, so I’ve excluded it. I’m checking the other shipped relationship surfaces now; the performance run won’t count any incomplete result as a sample. For incremental timing I’m using MCP `update_paths` on exactly the edited file and will time that update plus the following query, with each component retained separately."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb445b8fa887d1a120588c0a44d23d",
+          "role": "assistant",
+          "text": "The MCP tool registry for this server does not expose `update_paths` (`Unknown tool`), despite the service having an internal handler. I stopped the resulting retry loop. I’m switching to the public synchronous `refresh` request and will include its full elapsed time plus query time in the edited-snapshot latency; I’m checking whether refresh reuses unchanged analysis before labeling the measurement incremental."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb453faea887d1ad0ae9dd62533af5",
+          "role": "assistant",
+          "text": "There is a public, file-aware freshness path: MCP `get_symbol_sources` checks the selected file against disk and applies a stale-file update before returning. I’ll use it as the edit-to-ready barrier, then time the actual workload query separately and report their sum. That keeps updates scoped to one changed file and includes the readiness request instead of silently moving it outside the measurement."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4794f3a487d1811c52d3bb47f169",
+          "role": "assistant",
+          "text": "The validated pilot now completes all three workloads and confirms each edited method is observed before its query. The one-file update is being applied through Bifrost’s public stale-source path, with readiness and query times split out. One pilot cold call raced initial workspace construction and returned incomplete; I’m changing the cold-context procedure to retry only until the first complete query, recording startup retries separately."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4882174487d1a2af0ac1863872c2",
+          "role": "assistant",
+          "text": "The validated pilot passed: structural and semantic policies were complete, the two-hop import query returned 65 complete rows, and every edited method’s unique marker was returned before the timed query. The cache audit also confirms fresh query/policy execution with reuse below that boundary. I’ve prepared a clean tract copy and am starting the 100-sample-per-condition campaign now."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb48e357bc87d19eec9253324a310e",
+          "role": "assistant",
+          "text": "The full run is progressing normally. It has completed 12–13 valid samples per condition so far; every measured query is complete, and every edited-snapshot marker has been verified. The semantic workload returns zero findings but a complete policy result, so those checks remain valid samples."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4938e8d887d1977eee10c2199e5e",
+          "role": "assistant",
+          "text": "The full campaign remains clean at roughly 27 of 100 samples per condition. The deep policy’s edits are verified by their returned source markers even when its complete finding set stays empty; the cross-file query’s edited response also changes its provenance as expected."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb499fc5f087d18b60a8518adf11bc",
+          "role": "assistant",
+          "text": "The campaign is at 77 samples in each of the six workload/condition pairs, with zero incomplete or unverified measurements so far. Warm latencies are staying in the subsecond range; the final report will use the recorded end-to-end percentiles, not these interim observations."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4a08cc9c87d1acae1c2f43981824",
+          "role": "assistant",
+          "text": "All six primary groups now have 100 valid samples, with no incomplete or freshness failures. The harness is finishing its post-run profiles and cold-context observations; I’ll report the final percentiles once those are written and checked."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4acc89dc87d1b1cbf52380104837",
+          "role": "assistant",
+          "text": "The 100-sample campaign is complete. I’m extracting the final cache/profile counters now, then I’ll write the report and finish the reproducibility notes with the actual results."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4b243cbc87d1b9db370a5951735c",
+          "role": "assistant",
+          "text": "The final raw logs are present (about 18 MB), including all requests, responses, edit observations, and profiles. The cache audit shows fresh query execution on each call with index/fact reuse; the semantic policy’s `run_policy` response exposes stage/work counters but not its lower-level semantic cache counters, so I’ll state that limit explicitly."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4c5bcdd887d1a75e94adb788f8b6",
+          "role": "assistant",
+          "text": "I’ve drafted the report around the deep semantic policy as the headline and included the paired edit-to-ready and query timings. I’m doing a final consistency pass on the raw counts, artifact links, and tract source restoration now."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abb4d13d5cc87d19d5e747b63912120",
+          "role": "assistant",
+          "text": "The benchmark completed: **100 unprofiled warm calls and 100 one-file-edit calls per workload**, all with complete responses and verified edit snapshots.\n\n| Workload | Warm p50 / p95 (min–max; n) | After edit p50 / p95 (min–max; n) | Results |\n|---|---:|---:|---|\n| Structural policy | 100.3 / 128.6 ms (78.0–152.6; 100) | 482.6 / 712.5 ms (379.5–1,279.0; 100) | 3 → 2 findings; selected run complete, findings proven |\n| Cross-file imports | 117.9 / 144.3 ms (46.3–183.1; 100) | 493.6 / 610.7 ms (436.9–1,028.8; 100) | 65 → 65 results; complete and untruncated |\n| Deep semantic policy | 159.0 / 191.7 ms (123.3–328.8; 100) | 1,001.6 / 1,591.4 ms (865.6–2,234.0; 100) | 0 → 0 findings; selected run complete |\n\n**Recommended headline:** “On a 358k-line repository, Bifrost’s existing deep semantic correctness check returns in **159 ms p50 / 192 ms p95 warm**; after a one-file edit, the measured freshness-update-plus-check path returns in **1.00 s p50 / 1.59 s p95**.”\n\nThe edit measurement includes a public `get_symbol_sources` freshness request, any update it triggers, and the query response. The separate freshness and ready-to-query timings are in the report; the freshness request adds a round trip because the MCP registry doesn’t expose `update_paths`. The benchmark used persistent stdio MCP sessions, with timers through receipt and decoding of the complete response. Primary calls were unprofiled; source audit found no whole-query final-answer cache. Profile and cache findings, cold context, exact workloads, and limitations are documented in the report.\n\nThe repository was tract commit `26edc98`; Bifrost was `4b87647` / v0.12.0. The host was a Threadripper PRO 9985WX with 120 logical CPUs and about 98 GiB RAM, running Ubuntu 26.04 under WSL2. The release build used the configured mbx paths; **Cargo’s target was not redirected**.\n\nArtifacts are saved but uncommitted: [benchmark report](/home/jonathan/Projects/bifrost3/.agents/docs/tract-warm-latency/REPORT.md), [reproduction guide](/home/jonathan/Projects/bifrost3/.agents/docs/tract-warm-latency/README.md), [harness](/home/jonathan/Projects/bifrost3/.agents/docs/tract-warm-latency/benchmark.py), and [raw measurements](/home/jonathan/Projects/bifrost3/.agents/docs/tract-warm-latency/runs/final/raw/measurements.jsonl)."
+        },
+        {
+          "id": "user:web-prompt-8ee78788ea224f9e391056e3387a8ee7",
+          "role": "user",
+          "text": "What check did you test? Does it have an analog in our competitors? "
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abba5c38a9887d1a0c3cceec6c0f668",
+          "role": "assistant",
+          "text": "The headline workload was the shipped `loop-invariant-sort` policy. I’ll check current official rule catalogs for comparable checks and distinguish a direct equivalent from a rule you’d have to write yourself."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abba655e7a887d19669f4d30ca8d101",
+          "role": "assistant",
+          "text": "The headline check was Bifrost’s existing **`loop-invariant-sort`** policy. It looks for sort calls inside loops where the receiver’s value was established outside the loop and isn’t reassigned inside it. It uses binding identity and value-origin analysis, so it’s more specific than “there’s a sort call in a loop.” It’s a static, lexical check; it doesn’t prove how many times the loop or call executes at runtime.\n\nOn tract, it returned **zero findings**, with a complete policy result. The benchmark also ran the existing `parsing-in-loop` policy, which returned three proven findings at baseline, and a two-hop Rust import query, which returned 65 results. [The report has the exact workloads and results.](/home/jonathan/Projects/bifrost3/.agents/docs/tract-warm-latency/REPORT.md)\n\n**There are adjacent competitor checks, but I haven’t established an exact equivalent.** The closest specific match I found is a recent SonarJava rule, S9142, for expensive compilation or preparation operations inside loops. Its stated scope is adjacent; that alone doesn’t show it tracks the sort receiver’s binding and assignments the way this Bifrost policy does. [SonarSource’s implementation reference](https://github.com/SonarSource/sonar-java/actions/runs/31089981735)\n\nSemgrep supports Rust rules and custom structural patterns, so a basic “sort inside a loop” check is expressible there. Matching the same unchanged-value condition would require additional semantic analysis and validation; I haven’t tested whether a Semgrep rule can achieve parity. [Semgrep rule syntax](https://docs.semgrep.dev/writing-rules/rule-syntax)\n\nSo I’d describe the result as **a fast run of a semantic loop-invariance policy**, not as proof that competitors lack the capability. This was not a head-to-head competitor benchmark."
+        },
+        {
+          "id": "user:prompt-2e096f31018c21ce34aff61baab5e627",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
+          "id": "user:prompt-bcacfa868730ef3285a075b0c571efbc",
+          "role": "user",
+          "text": "if we run multiple policies against a workspace with a small number of changes, \n\n1. do they run concurrently?\n2. how does the \"process changes\" run? once for each query, or once?"
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb1b52c5887d1a974f1843d5904b1",
+          "role": "assistant",
+          "text": "I’ll check how policy requests share the analyzer and how workspace updates are coordinated, so the answer reflects the current implementation."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb1fea2b487d1a72214c2b376cd37",
+          "role": "assistant",
+          "text": "The key distinction is whether each request merely checks for changes or actually repeats analysis. I’m tracing that alongside the policy execution locks; accepting concurrent MCP requests alone doesn’t establish concurrent policy execution."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb24510ec87d1a856e8ce49bfc384",
+          "role": "assistant",
+          "text": "I’m also checking whether a policy pack behaves differently from separate policy calls. That affects whether several checks share one update cost and whether their query times add together."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb28d4f2c87d1aa6a856f14ba661a",
+          "role": "assistant",
+          "text": "The source review is still checking the update path. I’ll distinguish guaranteed shared work from work that can repeat, so we don’t infer multi-policy performance from the single-policy benchmark."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb2e22f8887d19082f4cda8608ce2",
+          "role": "assistant",
+          "text": "The MCP server admits up to four analyzer requests concurrently. A call containing several policies occupies one request slot; I’m confirming the execution order inside that call and the exact update-sharing behavior."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb34694f087d188b75cf1c7058313",
+          "role": "assistant",
+          "text": "The remaining distinction is between detecting a file change and applying it to the analyzer snapshot. That matters here because a request can share the indexed workspace while still doing its own freshness or query setup work."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb3cde1cc87d18723228c7c7ea7ba",
+          "role": "assistant",
+          "text": "The investigator finished the source review, but its report hasn’t come through correctly. I’m retrieving the findings before giving you a definitive answer."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb43fb5b087d1a72a48caccbf5100",
+          "role": "assistant",
+          "text": "The update path confirms that pending changes are applied under a shared session write lock, then queries take the resulting snapshot. Each request checks for pending changes, but the same drained change batch is not deliberately reprocessed for every policy."
+        },
+        {
+          "id": "msg_05a3fe33e7b07c30016abbb4a47b4487d180dd1c855f5a8971",
+          "role": "assistant",
+          "text": "**1. Policies within one `run_policy` call run sequentially.** They share a workspace snapshot and some batch preparation. The coordinator explicitly loops through them serially. [Source](/home/jonathan/Projects/bifrost3/crates/bifrost-policy/src/coordinator.rs:2720)\n\n**Separate MCP requests can execute concurrently**, with up to **four analyzer requests across the server**. That permits overlap; it doesn’t guarantee fourfold speedup. [Source](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/analyzer_pool.rs:21)\n\n**2. Workspace changes are applied once per pending change batch, shared across requests—not once per policy.** In a watched session:\n\n- A request checks whether the watcher has pending changes.\n- If so, it takes the session write lock, drains those changes, and updates the shared snapshot.\n- Subsequent requests use that updated snapshot. A single multi-policy call uses the same snapshot throughout.\n\nSee [snapshot acquisition](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/searchtools_service.rs:5887) and [change processing](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/searchtools_service.rs:6179).\n\nThat shared update doesn’t eliminate **policy-specific query and semantic work**. Each policy still evaluates, and additional watcher events can produce another update batch. Requests already executing retain their earlier snapshot.\n\nFor the benchmark, this means **don’t multiply the full after-edit latency by the number of policies**. For one batch, the useful model is:\n\n**shared update/preparation + sequential policy evaluations + response overhead**\n\nWe measured individual policies, so we haven’t yet measured the actual multi-policy total or concurrency benefit."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "if we run multiple policies against a workspace with a small number of changes, \n\n1. do they run concurrently?\n2. how does the \"process changes\" run? once for each query, or once?",
+    "assistant_text_tail": "**1. Policies within one `run_policy` call run sequentially.** They share a workspace snapshot and some batch preparation. The coordinator explicitly loops through them serially. [Source](/home/jonathan/Projects/bifrost3/crates/bifrost-policy/src/coordinator.rs:2720)\n\n**Separate MCP requests can execute concurrently**, with up to **four analyzer requests across the server**. That permits overlap; it doesn’t guarantee fourfold speedup. [Source](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/analyzer_pool.rs:21)\n\n**2. Workspace changes are applied once per pending change batch, shared across requests—not once per policy.** In a watched session:\n\n- A request checks whether the watcher has pending changes.\n- If so, it takes the session write lock, drains those changes, and updates the shared snapshot.\n- Subsequent requests use that updated snapshot. A single multi-policy call uses the same snapshot throughout.\n\nSee [snapshot acquisition](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/searchtools_service.rs:5887) and [change processing](/home/jonathan/Projects/bifrost3/crates/bifrost-mcp/src/searchtools_service.rs:6179).\n\nThat shared update doesn’t eliminate **policy-specific query and semantic work**. Each policy still evaluates, and additional watcher events can produce another update batch. Requests already executing retain their earlier snapshot.\n\nFor the benchmark, this means **don’t multiply the full after-edit latency by the number of policies**. For one batch, the useful model is:\n\n**shared update/preparation + sequential policy evaluations + response overhead**\n\nWe measured individual policies, so we haven’t yet measured the actual multi-policy total or concurrency benefit.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9800000190734863
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.9700000286102295
+    },
+    "work": {
+      "choice": "finished",
+      "confidence": 0.9100000262260437
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": true,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "marked finished",
+    "judgment": "right",
+    "next": "idle"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T13:05:31.951Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T14:29:37.717Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T15:56:19.701Z",
+        "kind": "user",
+        "text": "does any of our competition support rust so we can do a h2h test?"
+      },
+      {
+        "at": "2026-09-29T15:56:26.796Z",
+        "kind": "agent",
+        "text": "I’ll check current Rust support and whether it’s usable for a comparable local benchmark."
+      },
+      {
+        "at": "2026-09-29T15:56:39.953Z",
+        "kind": "agent",
+        "text": "**Yes—Semgrep, CodeQL, and SonarQube all currently support Rust.** We have viable head-to-head candidates.  | Competitor | Current Rust support | Benchmark fit | |---|---|---| | **Semgrep** | Generall"
+      },
+      {
+        "at": "2026-09-29T16:01:12.280Z",
+        "kind": "user",
+        "text": "no cross file support in semgrep means we're almost completely certain to not be able to do a meaningful comparison  have luna see if it can find a common comparison with codeql"
+      }
+    ]
+  }
+}

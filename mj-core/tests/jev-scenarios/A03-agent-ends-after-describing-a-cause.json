@@ -1,0 +1,263 @@
+{
+  "id": "A03",
+  "title": "Agent ends after describing a cause, intending to run clippy",
+  "category": "should-continue-program",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "728ee69f7f4aac97366e018d9f888c28",
+    "session_title": "eval20 3505 opus",
+    "reply_position": 2595,
+    "captured_at": "2026-09-22T08:25:15.287Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3505: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Judge notes\n\nThe selector grammar uses `$` and `.` as separators, so a file whose name contains either (`ConstellationNode$.scala`, `UnityAsyncExtensions.AsyncInstantiate.cs`) breaks the I3 contract: `get_summaries` lists a symbol under that path and `get_symbol_sources` cannot resolve it from that listing context. Both conventions are common. The fix is in the selector grammar and its printer, not in the two tools: a path segment must survive any separator, by quoting or escaping or by a path/name delimiter that cannot occur in a path segment, and every producer that prints a `path#name` selector must use the same encoder. #3302 (companion pair printing) was the same tension.\n\n# Issue\n\nIssue #3505: FUZZ: a file name containing a selector separator ($ or .) breaks the get_summaries -> get_symbol_sources round trip\n\n**Tier-21 finding (pin `844ca7606`).** I3 contract: *a symbol `get_summaries` lists resolves via `get_symbol_sources` from its listing context.* It fails when the **file name itself** contains a character the selector grammar uses as a separator.\n\n### Scala: `$` in the file name\n\n`Constellation-Labs__constellation`:\n\n```\nsrc/main/scala/org/constellation/ConstellationNode$.scala      (21,932 bytes, exists on disk)\n```\n\n`get_summaries` lists `org.constellation.ConstellationNode` under that path. Resolving it from that listing context fails. `$` is bifrost's companion-object decoration in Scala selectors, so `path#name` where the *path* contains `$` is ambiguous with a decorated name.\n\n### C#: a dotted file name\n\n`Alex-Rachel__TEngine`:\n\n```\nUnityProject/Packages/UniTask/Runtime/UnityAsyncExtensions.AsyncInstantiate.cs   (exists on disk)\n```\n\n`get_summaries` lists `Cysharp.Threading.Tasks.AsyncInstantiateOperationExtensions.AsyncInstantiateOperationAwaiter...` under that path, and resolving from that context fails. The file name carries an interior `.`, which is also the fq-name separator.\n\n### Expected\n\n`get_summaries` and `get_symbol_sources` must agree: anything the first lists under a path must resolve from that path. A file name is chosen by the repository, not by bifrost, so the selector grammar has to survive `$`, `.` and any other separator appearing inside a path segment -- by quoting, escaping, or by splitting the path from the name on a delimiter that cannot occur in a path segment.\n\nUnity's `Foo.Bar.cs` convention and Scala's `Foo$.scala` are both common, so this is not a corner case.\n\n### Related\n\n- #3302 (companion pair printing the same selector for both halves, closed) is the same underlying tension between `$` as decoration and `$` as content.\n- The same tier found `apache__brpc` reporting a different path from `get_symbol_sources` than `get_summaries` listed the symbol under (`BUTIL_HASH_NAMESPACE`), which may share this cause.\n\n### Reproduce\n\nLedger `m4-tier21.jsonl` lines 2501 (constellation) and 872 (TEngine); each record carries `listed_under` and the symbol as listed.\n"
+        },
+        {
+          "id": "agent:1518",
+          "role": "assistant",
+          "text": "The `$`-as-separator assumption is spread across several cross-language readers, so I'll scope that separately. Let me run full validation now."
+        },
+        {
+          "id": "agent:1624",
+          "role": "assistant",
+          "text": "Those 6 are a build-identity mismatch caused by my mid-run edit, not a regression. Let me keep waiting for the rest."
+        },
+        {
+          "id": "agent:1662",
+          "role": "assistant",
+          "text": "API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com."
+        },
+        {
+          "id": "user:1668",
+          "role": "user",
+          "text": "Judge note. Your previous turn was ended by a transient server-side error (API 529 Overloaded), not by anything you did. Continue the work from where it stopped: check the state of any background command you had running (poll it in the foreground, never end the turn to wait for it), keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n"
+        },
+        {
+          "id": "agent:1669",
+          "role": "assistant",
+          "text": "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com."
+        },
+        {
+          "id": "user:1674",
+          "role": "user",
+          "text": "Judge note. Your previous turn was ended by a transient server-side error (API 529 Overloaded), not by anything you did. Continue the work from where it stopped: check the state of any background command you had running (poll it in the foreground, never end the turn to wait for it), keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n"
+        },
+        {
+          "id": "agent:1675",
+          "role": "assistant",
+          "text": "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com."
+        },
+        {
+          "id": "agent:1700",
+          "role": "assistant",
+          "text": "A real compile error — `parent_fq_name_for_target` is re-exported and used by `searchtools`. Let me check its consumers and restore it."
+        },
+        {
+          "id": "agent:1724",
+          "role": "assistant",
+          "text": "Now let me run clippy, fmt, the analysis lib tests, and the affected CLI suite in one pass."
+        },
+        {
+          "id": "user:1737",
+          "role": "user",
+          "text": "Judge note. Your previous turn was ended by a transient server-side error (API 529 Overloaded), not by anything you did. Continue the work from where it stopped: check the state of any background command you had running (poll it in the foreground, never end the turn to wait for it), keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n"
+        },
+        {
+          "id": "agent:1762",
+          "role": "assistant",
+          "text": "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com."
+        },
+        {
+          "id": "user:1770",
+          "role": "user",
+          "text": "Judge note. Your previous turn was ended by a transient server-side error (API 529 Overloaded), not by anything you did. Continue the work from where it stopped: check the state of any background command you had running (poll it in the foreground, never end the turn to wait for it), keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n"
+        },
+        {
+          "id": "agent:1772",
+          "role": "assistant",
+          "text": "Formatting is clean. No background command is running — the validation run finished. Now the post-fix-up validation pass."
+        },
+        {
+          "id": "agent:1854",
+          "role": "assistant",
+          "text": "`suite_mcp_cli` is now fully green, confirming those 8 were build artifacts. Let me re-run the deadline test in isolation and run clippy."
+        },
+        {
+          "id": "agent:1877",
+          "role": "assistant",
+          "text": "The deadline test passes in isolation (0.8s vs 48.9s under load) — a load flake. Let me install clippy and run it."
+        },
+        {
+          "id": "agent:1918",
+          "role": "assistant",
+          "text": "Clippy is clean. Let me commit the work, then gather before/after evidence on the witness repositories."
+        },
+        {
+          "id": "agent:1934",
+          "role": "assistant",
+          "text": "Now let me build the fixed CLI and measure the after-state on both witness repositories."
+        },
+        {
+          "id": "agent:1973",
+          "role": "assistant",
+          "text": "Now the TEngine after-state (larger repo, will take longer to index)."
+        },
+        {
+          "id": "agent:1996",
+          "role": "assistant",
+          "text": "**TEngine after: 53/53 round-trip, zero not-found, zero ambiguous.** (The 6 \"shared\" symbols are genuine overloads sharing one indexed name — they resolve to all their declarations, so each still reaches its own line.) Now the base build for before-evidence."
+        },
+        {
+          "id": "agent:2025",
+          "role": "assistant",
+          "text": "Tree is clean and HEAD is at my commit. Now the before-state measurements with the base binary."
+        },
+        {
+          "id": "agent:2041",
+          "role": "assistant",
+          "text": "Before-state on constellation reveals something important: the `run`/`run$` pair resolved at base (grouped under one shared selector) and is now ambiguous. Let me look at the resolution tiering."
+        },
+        {
+          "id": "agent:2068",
+          "role": "assistant",
+          "text": "The remaining `run`/`run$` collision is now the binding defect for the witness. Let me add an exact-recorded-spelling precedence to the matcher."
+        },
+        {
+          "id": "agent:2106",
+          "role": "assistant",
+          "text": "Let me extend the regression fixture to pin the `run` / `run$` pair from the real witness file."
+        },
+        {
+          "id": "agent:2132",
+          "role": "assistant",
+          "text": "223/223 pass including the new `run`/`run$` pin. Running full validation again.\n\n`★ Insight ─────────────────────────────────────`\n- The matcher had exactly two tiers — *full* alias match and *suffix* alias match — with no notion of \"you typed this declaration's recorded name.\" Adding that tier is the structured analogue of the existing `prefer_exact_lookup_matches`, which compares *rendered* names and therefore can't separate `run` from `run$`.\n- `fq_segment_texts()` is the only spelling that never went through a renderer, so it is the one alias that can't confuse a segment's own `$` with the renderer's.\n- The narrowing is a no-op unless some candidate qualifies, so it can only ever turn an ambiguity into the answer the caller spelled — it never invents a match.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:2396",
+          "role": "assistant",
+          "text": "Only the load-sensitive deadline tests failed. Let me re-run those in isolation plus fmt and clippy."
+        },
+        {
+          "id": "agent:2423",
+          "role": "assistant",
+          "text": "All three flaky tests pass in isolation. Clippy flags two redundant closures — let me fix them."
+        },
+        {
+          "id": "agent:2451",
+          "role": "assistant",
+          "text": "Clippy and fmt are clean. Let me commit the matcher change and rebuild the CLI for final witness measurement."
+        },
+        {
+          "id": "agent:2502",
+          "role": "assistant",
+          "text": "Both witnesses now hold at 100%. Let me verify the final test file fails at the base commit, and probe the third named repository."
+        },
+        {
+          "id": "agent:2530",
+          "role": "assistant",
+          "text": "The final test file fails 4/5 at base and the path-anchor test passes — exactly the evidence needed. Tree restored. Final confirmation run plus the brpc probe."
+        },
+        {
+          "id": "agent:2563",
+          "role": "assistant",
+          "text": "5/5 pass at HEAD. Let me check the brpc probe."
+        },
+        {
+          "id": "agent:2581",
+          "role": "assistant",
+          "text": "The brpc case is a different defect (a line offset, not a path mismatch) and is unchanged by this fix. Final state check."
+        },
+        {
+          "id": "agent:2595",
+          "role": "assistant",
+          "text": "The work is complete and committed. Here is the report.\n\nFINAL REPORT\n\n## 1. Confirmed cause with structured evidence\n\n**The selector grammar is not the defect.** Measured at the base commit with the base build: `src/main/scala/org/constellation/ConstellationNode$.scala#org.constellation.ConstellationNode$` **resolves**, and the C# failure reproduces unchanged in a file named `Plain.cs`. `split_definition_selector_with_resolver` (`crates/bifrost-analysis/src/searchtools/selectors.rs:1337`) splits on `#` alone, so `$` and `.` inside a path segment are never separators. The regression test `a_path_segment_carrying_a_separator_character_still_anchors_a_selector` **passes at the base commit** — that is the evidence.\n\nWhat fails is the **symbol** each tool prints, and then how it resolves. Two confirmed causes:\n\n**(a) Greedy `$` stripping on a rendered name (Scala).** `FqName::render` (`crates/bifrost-core/src/analyzer/fq_name.rs:397`) appends exactly **one** `$` per `SegmentKind::Companion` segment. `ScalaLanguageSupport::display_symbol_name` removed **every** trailing `$` per dot-separated piece with `trim_end_matches('$')`. `object ConstellationNode$` is legal Scala, so its Companion segment's own text ends in `$`; the rendering carries two and the strip ate the one the source wrote. Printed `org.constellation.ConstellationNode` — verified `not_found`, because the identifier index holds `ConstellationNode$`.\n\n**(b) A \"not taken\" test where an \"addresses me\" test was needed.** `addressable_symbol_name` (`crates/bifrost-analysis/src/analyzer/common.rs:76`) kept the undecorated spelling unless another declaration owned it as its own `fq_name`. C#'s `Owner$Name` and ``Owner$Name`1`` both display arity-free as `Owner.Name`, neither owns it, so both printed it and it resolved ambiguously. Measured before-state on TEngine: **7 of 53 listed elements satisfied the contract**; 46 were ambiguous.\n\n**(c) Exposed by fixing (a): the same `$` confusion on the resolution side.** `codeunit_lookup_aliases` derives aliases from rendered names; `symbol_path_variants`' Scala reading and `split_segments_on_dollar` both strip a trailing `$` from every segment. `def run$` therefore acquired `org.constellation.ConstellationNode.run` as an alias — the undecorated reading of its sibling `def run`. Once each printed its own spelling, `collect_fuzzy_matches` saw two full matches for either query and could only report ambiguity.\n\n## 2. Changes and reasons\n\nBase: `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19` · Final: `1ef2dd714fdbe5d6474c86121ee44ccbeaad7077` (two commits on detached HEAD; base confirmed an ancestor).\n\n- `analyzer/languages.rs` — new `LanguageSupport::undecorated_fq_name(&FqName) -> Option<FqName>`. Decoration is a segment *kind*, so it is removed by changing the kind, not by editing a rendering. Default `None` leaves every other language on today's string path.\n- `analyzer/scala/mod.rs` — implements it via the existing `scala_normalize_fq_name` (Companion → Type), gated on the name actually having a Companion segment. `display_symbol_name` stays as the string reading for callers that *accept* a typed spelling.\n- `analyzer/common.rs` — `display_symbol_for_target`, `display_parent_symbol_for_target`, `display_identifier_for_target` and `prefetch_display_symbols` now work from the structured `FqName`. The contest test gains a second clause: a candidate that would print the same spelling contests it, **but only if it carries different segment text**. A Scala companion pair has identical segment texts (one name, two decorations) and `distinct_definitions` deliberately groups it under one selector (#2451), so that pairing is preserved; C#'s arity pair carries the arity *in* the segment text and is correctly separated.\n- `analyzer/symbol_lookup.rs` — `prefer_recorded_spelling_matches` adds a tier the matcher lacked: candidates whose `fq_segment_texts()` equal a reading of the query outrank ones reached through a derived alias. `fq_segment_texts()` is the only spelling that never passed through a renderer. It is a no-op unless some candidate qualifies, so it can only turn an ambiguity into the answer the caller spelled. Stage 2 also now reuses stage 1's per-language readings.\n- `tests/suite_issues/issue_3505_printed_selector_resolves.rs` (+ `main.rs`) — five tests asserting the contract, not a literal spelling.\n\nNo extraction epoch bump: segment texts and kinds are unchanged; this alters only how a persisted name is printed and compared.\n\n## 3. Exact validation commands and results\n\nAll with `JAVA_HOME` cleared, `BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1`, nextest default concurrency.\n\n| Command | Result |\n|---|---|\n| `cargo nextest run --max-fail 100 --test suite_issues --test suite_symbols --test suite_usages --test suite_analyzers --test suite_lsp_parity --test suite_mcp_cli --test suite_semantic --test suite_cross_language` | 7324 run: **7321 passed**, 2 failed, 1 timed out |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib` | 3070 run: **3069 passed**, 1 failed |\n| `cargo nextest run --max-fail 100 --test suite_mcp_cli -E 'test(evidence_status_surfaces) or test(declaration_identity_surfaces) or test(lsp_click_around_regression)'` | **19/19 passed** |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib -E 'test(a_held_build_lock_ends_a_budgeted_request_by_naming_the_lock)'` | **1/1 passed** (0.97 s vs 72 s under load) |\n| `cargo nextest run --max-fail 100 --test suite_issues -E 'test(issue_3505)'` at HEAD | **5/5 passed** |\n| same, with the four source files reverted to base | **4 failed, 1 passed** |\n| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | **exit 0** |\n| `cargo fmt -- --check` | **exit 0** |\n\nThe 4 non-passes are all deadline-sensitive tests that pass in isolation: `evidence_status_surfaces` and `declaration_identity_surfaces` (`query_code exhausted its 4.5s request budget`), `lsp_click_around_regression::milestone_2_rust_trait_impl_click_around` (600 s cap — it also timed out on the pre-change build), and `blast_radius::tests::a_held_build_lock_ends_a_budgeted_request_by_naming_the_lock` (`waited 15.9 s past a 300 ms deadline`). None touches display or resolution naming.\n\n## 4. Before/after on the named repositories\n\nContract measured per element: does `path#symbol` reach the declaration at the line it was printed for? Built the base CLI from the reverted tree and the fixed CLI from `1ef2dd714`, fresh caches under `/workspace`.\n\n**Constellation-Labs/constellation @ `5ccd5d471`**, `src/main/scala/org/constellation/ConstellationNode$.scala` (17 listed):\n\n| | before | after |\n|---|---|---|\n| contract holds | 16/17 | **17/17** |\n| violation | `org.constellation.ConstellationNode` (line 55) → `not_found` — the issue's witness | none |\n\nPrinted spellings changed from `org.constellation.ConstellationNode…` to `org.constellation.ConstellationNode$…`, and `def run` / `def run$` (lines 64/71) went from one shared selector to `…ConstellationNode$.run` and `…ConstellationNode$.run$`, each resolving to its own line.\n\n**Alex-Rachel/TEngine @ `482a441e3`**, `UnityProject/Packages/UniTask/Runtime/UnityAsyncExtensions.AsyncInstantiate.cs` (53 listed):\n\n| | before | after |\n|---|---|---|\n| contract holds | **7/53** | **53/53** |\n| violations | 46, all `ambiguous` on the `AsyncInstantiateOperationConfiguredSource` / `…<T>` pair and their members | none |\n\n**apache/brpc @ `ab532daf1`**, `src/butil/containers/hash_tables.h`: 16/18 before **and** after. The two violations (`butil.HashInts32` listed at 124 → resolves at 123; `HashInts64` at 135 → 130) are a line offset within the same file, unchanged by this fix. That answers the issue's \"may share this cause\": **it does not**.\n\n## 5. `git status --short`, limitations, separately actionable findings\n\n`git status --short` is empty; HEAD is `1ef2dd714fdbe5d6474c86121ee44ccbeaad7077`, detached, with the base as ancestor. Nothing pushed, no branches, no labels or comments.\n\nLimitations:\n- The evidence repositories were cloned at current HEAD, not a pinned commit (the issue pins only the bifrost commit). The TEngine file no longer contains the `AsyncInstantiateOperationAwaiter` name the issue quotes; the same nested generic/non-generic shape is present and reproduces.\n- Fresh caches were used throughout; a warm shared cache was never reused across before/after.\n- Two container-level interruptions occurred (the `target/` directory was reset mid-run twice). Every affected run was repeated cleanly; the figures reported are from clean runs.\n\nSeparately actionable:\n1. **`$`-as-separator assumptions beyond the matcher.** `suffix_search_pattern` emits `\\$?` after every segment and includes `$` in its delimiter class; `split_segments_on_dollar` splits a trailing `$` off any segment; `scala_normalize_full_name` strips greedily and is what the persisted `normalized_name` column is built from. The new precedence rule covers the case where the caller spells a declaration exactly, but a query that does not name any declaration exactly still sees `run` and `run$` as one name. Correcting the persisted normalization would change a persisted language fact and needs its own schema/epoch decision.\n2. **brpc line offset.** `get_summaries` lists `butil.HashInts32` at line 124 while `get_symbol_sources` reports 123 (and 135 → 130) in `src/butil/containers/hash_tables.h`. Unrelated to this fix; worth its own issue.\n3. **`display_symbol_name`'s string path is still greedy for Scala** where no `CodeUnit` is available (`summaries.rs:1506`, module-kind signature fallback). Harmless today because Scala module names carry no Companion segment, but it is the same latent shape.\n\n## 6. Draft GitHub approach comment\n\nThe report attributes this to file names containing `$` or `.`, but measurement at the pinned commit does not support that. The selector grammar splits `path#name` on `#` only, so a `$` or `.` inside a path segment is never read as a separator: `src/main/scala/org/constellation/ConstellationNode$.scala#org.constellation.ConstellationNode$` resolves fine on the base build, and the C# failure reproduces with an ordinary file name like `Plain.cs`. What is broken is the symbol each tool prints. In Scala, `FqName::render` appends exactly one `$` for a companion segment, but the display normalizer stripped every trailing `$` from the rendering — and `object ConstellationNode$` is legal Scala whose own name ends in one, so the printed `org.constellation.ConstellationNode` named nothing. In C#, a nested type and its generic sibling are indexed `Owner$Name` and `` Owner$Name`1 `` and both displayed arity-free as `Owner.Name`, so one printed selector resolved ambiguously and addressed neither. The common root is that the printing rule asked whether another declaration *owned* the stripped spelling rather than whether the spelling *addresses this declaration*. The fix takes the undecorated name from the structured `FqName` by changing a segment's kind instead of editing its rendering, and lets a same-spelling sibling contest the selector only when it carries different segment text — which separates the C# arity pair while preserving the Scala companion-pair grouping from #2451. Printing honest Scala spellings then exposed a second defect: `def run` and `def run$` in the same object became indistinguishable to the resolver, because the lookup aliases strip trailing `$` from every segment. So the matcher gained a tier it lacked — a candidate whose recorded segment texts match the query exactly outranks one reached through a derived alias, the structured counterpart of the existing `prefer_exact_lookup_matches`. On the two named repositories the contract goes from 16/17 to 17/17 on constellation and from 7/53 to 53/53 on TEngine. The `apache/brpc` `BUTIL_HASH_NAMESPACE` note does not share this cause: what reproduces there is a one-line offset between the listed and reported declaration line, identical before and after, and it deserves its own issue."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Judge note. Your previous turn was ended by a transient server-side error (API 529 Overloaded), not by anything you did. Continue the work from where it stopped: check the state of any background command you had running (poll it in the foreground, never end the turn to wait for it), keep the same base and commit discipline, and finish with the FINAL REPORT in this turn.\n",
+    "assistant_text_tail": "separator: `src/main/scala/org/constellation/ConstellationNode$.scala#org.constellation.ConstellationNode$` resolves fine on the base build, and the C# failure reproduces with an ordinary file name like `Plain.cs`. What is broken is the symbol each tool prints. In Scala, `FqName::render` appends exactly one `$` for a companion segment, but the display normalizer stripped every trailing `$` from the rendering — and `object ConstellationNode$` is legal Scala whose own name ends in one, so the printed `org.constellation.ConstellationNode` named nothing. In C#, a nested type and its generic sibling are indexed `Owner$Name` and `` Owner$Name`1 `` and both displayed arity-free as `Owner.Name`, so one printed selector resolved ambiguously and addressed neither. The common root is that the printing rule asked whether another declaration *owned* the stripped spelling rather than whether the spelling *addresses this declaration*. The fix takes the undecorated name from the structured `FqName` by changing a segment's kind instead of editing its rendering, and lets a same-spelling sibling contest the selector only when it carries different segment text — which separates the C# arity pair while preserving the Scala companion-pair grouping from #2451. Printing honest Scala spellings then exposed a second defect: `def run` and `def run$` in the same object became indistinguishable to the resolver, because the lookup aliases strip trailing `$` from every segment. So the matcher gained a tier it lacked — a candidate whose recorded segment texts match the query exactly outranks one reached through a derived alias, the structured counterpart of the existing `prefer_exact_lookup_matches`. On the two named repositories the contract goes from 16/17 to 17/17 on constellation and from 7/53 to 53/53 on TEngine. The `apache/brpc` `BUTIL_HASH_NAMESPACE` note does not share this cause: what reproduces there is a one-line offset between the listed and reported declaration line, identical before and after, and it deserves its own issue.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "continue",
+    "wrong_actions": [
+      "finished",
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "wrong",
+    "next": "eval judge note 10 minutes later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-22T08:35:19.403Z",
+        "kind": "user",
+        "text": "Judge note. You ended your turn intending to install clippy and run it, and no notification will arrive between turns. Continue now: run clippy in the foreground (or poll a background run in waits of "
+      },
+      {
+        "at": "2026-09-22T08:35:23.326Z",
+        "kind": "agent",
+        "text": "Clippy was already installed and run (exit 0), and both commits landed — but let me verify the current state directly rather than rely on that, and re-run clippy now."
+      },
+      {
+        "at": "2026-09-22T08:35:28.052Z",
+        "kind": "agent",
+        "text": "Clippy is installed, both commits are in place, and the tree is clean. Re-running clippy and fmt now to confirm against the committed state."
+      },
+      {
+        "at": "2026-09-22T08:39:48.719Z",
+        "kind": "agent",
+        "text": "Clean. One final confirmation of the regression suite against the committed state."
+      },
+      {
+        "at": "2026-09-22T08:40:47.750Z",
+        "kind": "agent",
+        "text": "All validation is complete: 18/18 on the #3505 regression plus the #2451/#3302/#2419/#2409 neighbours, clippy and fmt clean, tree clean, both commits in place.  FINAL REPORT  ## 1. Confirmed cause wit"
+      },
+      {
+        "at": "2026-09-23T02:08:33.555Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

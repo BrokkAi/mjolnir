@@ -1,0 +1,414 @@
+{
+  "id": "S27",
+  "title": "Claude session-limit error as the final message",
+  "category": "quota",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "2905480cf21356d4fbfe6d9ca06a3c38",
+    "session_title": "eval29 3508 sonnet55",
+    "reply_position": 2959,
+    "captured_at": "2026-09-29T01:02:58.685Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3508: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nRepository history after the base commit is out of bounds. This issue was\nsolved on master after the base commit; do not read, fetch, log, diff or\ncheck out anything newer than the base commit named above, do not look at\nclosed pull requests or issue comments, and do not search master for the\nlanded solution. Solve it from the base commit and the issue text below.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Judge notes\n\nC++ in-class member prototypes are built as synthetic code units, and `modeled_procedure_key_for_unit` refuses synthetic units, so a real header declaration can never receive a procedure key even after #3493 recorded its callable modifiers. Definitions get keys; the prototype beside them does not, so declaration-backed summaries (and the C++ network row, #3458) cannot bind through headers. The work is to distinguish real source declarations from generated or recovery-only units without bypassing the canonical-key safety gate, and to make a prototype and its out-of-line definition resolve to one compatible receiver/signature identity. #3507 (non-virtual dispatch exhaustiveness) and #3510 (virtual modifiers) are separate and must not be pulled in.\n\n# Issue\n\nIssue #3508: C++: real in-class member prototypes are synthetic and cannot receive procedure keys\n\nFound while validating #3493 at base `a6cb9de6cd8e432dd2f670eb8fd31f70828d56eb`; blocks declaration-backed summaries needed by #3458.\n\nIn-class member prototypes are built with `code_unit_with_synthetic(file, scope.class_unit.is_some())`. `modeled_procedure_key_for_unit` refuses synthetic units. Recording the missing callable modifiers therefore does not make a real header declaration keyable: two synthetic prototypes remain explicitly unkeyable in the receiver-contract regression, while definitions receive keys.\n\nCandidate `9c66e27d690b4a2eb089631d283f6dd8d770ea36` identifies this boundary; `1dfe10c261aa92c3ba55466addc5ccb88cbd48a5` pins the existing rejection in its #3493 tests. Neither changes it.\n\nDistinguish real source declarations from generated/recovery-only code units without bypassing the canonical-key safety gate. A header member prototype and its definition must resolve to compatible receiver/signature identity, including static members, constructors, overloads and missing-body controls. A declaration without a body must not by itself establish exhaustive reachable effects. Test exact reviewed-summary binding and persistence reload behavior.\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout is clean, then fetch and check out the base commit."
+        },
+        {
+          "id": "agent:42",
+          "role": "assistant",
+          "text": "Base is `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`. Now the repository guidance."
+        },
+        {
+          "id": "agent:55",
+          "role": "assistant",
+          "text": "`AGENTS.md` matches `CLAUDE.md`, which is already loaded. Next, the two routed docs that apply: architecture/analyzer-store, and testing/Rust validation."
+        },
+        {
+          "id": "agent:80",
+          "role": "assistant",
+          "text": "Now the code. I'll locate the three symbols named in the issue."
+        },
+        {
+          "id": "agent:98",
+          "role": "assistant",
+          "text": "Now the #3493 test file, which pins the current rejection."
+        },
+        {
+          "id": "agent:113",
+          "role": "assistant",
+          "text": "Now the C++ declaration builder, starting at each `code_unit_with_synthetic` call site."
+        },
+        {
+          "id": "agent:136",
+          "role": "assistant",
+          "text": "Let me check what `synthetic` means on `CodeUnit` and whether it participates in identity."
+        },
+        {
+          "id": "agent:244",
+          "role": "assistant",
+          "text": "`reconcile_member_modifiers` (#3509) is the existing overlay that gives an out-of-line definition its receiver facts from the header declaration. I'll read the full overlay."
+        },
+        {
+          "id": "agent:262",
+          "role": "assistant",
+          "text": "Now `callable_signature_reports` and `receiver_contract_of`, which produce the key's receiver and arity."
+        },
+        {
+          "id": "agent:281",
+          "role": "assistant",
+          "text": "I have a picture of the key gate. Before designing, I want to see what a header prototype looks like today. First I'll check the toolchain and set the environment the brief requires."
+        },
+        {
+          "id": "agent:300",
+          "role": "assistant",
+          "text": "No `target/` yet, so the first build is cold. I'll check the test target names and start the `suite_issues` build in the background while I keep reading."
+        },
+        {
+          "id": "agent:325",
+          "role": "assistant",
+          "text": "While that builds, I'll read how the effect walk uses keys, and how it treats a callee that has no body."
+        },
+        {
+          "id": "agent:339",
+          "role": "assistant",
+          "text": "The arm origin is named `WorkspaceBody`. I need to see whether anything in the walk checks that a keyed workspace callee actually has a body."
+        },
+        {
+          "id": "agent:359",
+          "role": "assistant",
+          "text": "Now the RQL walk that consumes keys, around `effects.rs:1573`, and how it treats callees with and without bodies."
+        },
+        {
+          "id": "agent:438",
+          "role": "assistant",
+          "text": "Status: I've read the key gate and the effect walk, and I'm checking the build I started earlier. I'll then write a probe test to see what a header prototype produces today."
+        },
+        {
+          "id": "agent:456",
+          "role": "assistant",
+          "text": "`brokk-bifrost-analysis` is the largest crate and is still compiling. In the meantime, the fixpoint's handling of `Unestablished`:"
+        },
+        {
+          "id": "agent:517",
+          "role": "assistant",
+          "text": "There's a `MaterializationRecord` with a `RecoveredDeclaration` variant. That looks like a persisted provenance channel for how a unit came to exist. Let me read it."
+        },
+        {
+          "id": "agent:553",
+          "role": "assistant",
+          "text": "`DeclarationOrigin { Parsed, Generated, Recovered }` matches the issue's \"real vs generated/recovery-only\" distinction exactly. Let me find how a unit's origin is queried."
+        },
+        {
+          "id": "agent:594",
+          "role": "assistant",
+          "text": "Let me check the build, then run a first probe against the real analyzer rather than reasoning from code alone."
+        },
+        {
+          "id": "agent:609",
+          "role": "assistant",
+          "text": "While the build continues: the #3509 overlay uses `visibility.same_logical_callable`. That looks like the existing predicate for \"prototype and definition are the same overload\", so I'll read it."
+        },
+        {
+          "id": "agent:635",
+          "role": "assistant",
+          "text": "Foreground `sleep` is blocked here, so I'll poll with a bounded until-loop instead."
+        },
+        {
+          "id": "agent:671",
+          "role": "assistant",
+          "text": "Tree is clean and the target is built (that `pgrep` matched itself). Now a temporary probe test to see what a header prototype looks like today: synthetic flag, signature entries, key, and origin."
+        },
+        {
+          "id": "agent:730",
+          "role": "assistant",
+          "text": "Now I'll check whether `tests/common` already has a shared semantic-pack helper I can reuse for an effect-walk probe, instead of copying the #3493 machinery."
+        },
+        {
+          "id": "agent:847",
+          "role": "assistant",
+          "text": "Status: I'm tracing where call dispatch turns a call into a body-less C++ declaration into an \"unresolved\" verdict. That decides where the fix has to go beyond the key gate."
+        },
+        {
+          "id": "agent:942",
+          "role": "assistant",
+          "text": "I'll parameterize the probe's match kind and try `callable`, `method` and `declaration` as roots."
+        },
+        {
+          "id": "agent:1137",
+          "role": "assistant",
+          "text": "Status: I've settled the scope and am now reading the #3493 persistence test at `store/mod.rs:19590` to model my reload test on it."
+        },
+        {
+          "id": "agent:1304",
+          "role": "assistant",
+          "text": "`workspace_analyzer` is ephemeral, so the reload test needs a persisted build. `issue_1333_small_repo_cache_warmth.rs` is the closest existing example."
+        },
+        {
+          "id": "agent:1595",
+          "role": "assistant",
+          "text": "Status: writing the regression test file now. The persisted pattern in `usages_rust_graph_test.rs:44` (`build_persisted(project.project_dyn(), …)` cold, then warm) is what I'll follow."
+        },
+        {
+          "id": "agent:1615",
+          "role": "assistant",
+          "text": "That existing test states the model directly: implementation non-synthetic, declaration synthetic, identical FQ name and signature. Now the regression test file."
+        },
+        {
+          "id": "agent:1634",
+          "role": "assistant",
+          "text": "That header-include test has an ugly `leak()` workaround. Putting the header beside the source removes the need for it."
+        },
+        {
+          "id": "agent:1650",
+          "role": "assistant",
+          "text": "That on-disk change is my own scripted edit. Now the important step: run the new tests against the **unfixed** base to see which fail."
+        },
+        {
+          "id": "agent:1721",
+          "role": "assistant",
+          "text": "Now the edit to the key gate, with its doc comment updated to state the real rule."
+        },
+        {
+          "id": "agent:1740",
+          "role": "assistant",
+          "text": "Now the same tests with the fix in place."
+        },
+        {
+          "id": "agent:1752",
+          "role": "assistant",
+          "text": "The identity, overload and persisted-reload tests now pass. The pure-virtual declaration-backed test still fails. I need to see why before deciding whether it's my premise or my fix that is wrong."
+        },
+        {
+          "id": "agent:1896",
+          "role": "assistant",
+          "text": "Now format and run the issue tests again (with the fix in place)."
+        },
+        {
+          "id": "agent:1910",
+          "role": "assistant",
+          "text": "`rustfmt` isn't installed for this toolchain, and the brief requires both formatting and clippy. Installing the components is environment setup, not a repo change, so I'll do that."
+        },
+        {
+          "id": "agent:1933",
+          "role": "assistant",
+          "text": "All six pass with the fix. Now the policy-CLI acceptance test. That needs the `suite_bench_policy` binary plus the `bifrost` CLI, which is a big build, so I'll run it in the background and poll."
+        },
+        {
+          "id": "agent:1954",
+          "role": "assistant",
+          "text": "The policy test passes with the fix. For a clean before/after record on the *final* tests, I'll revert only the fix, rerun both suites, and restore it."
+        },
+        {
+          "id": "agent:2004",
+          "role": "assistant",
+          "text": "The scratch probe is removed. Now a temporary unit probe in `effects.rs`'s test module that prints the dataflow-side target lookup for the risky C++ shapes."
+        },
+        {
+          "id": "agent:2077",
+          "role": "assistant",
+          "text": "In `flow_state` the lookup only acts when every arm is `UnmaterializedExternal`, so a `WorkspaceBody` arm has no effect there. I'll check the other consumers before choosing the guard."
+        },
+        {
+          "id": "agent:2135",
+          "role": "assistant",
+          "text": "Now the permanent unit test. First, refactor `go_shape` into a path-generic helper with a thin Go wrapper, so I don't duplicate its ~20 lines."
+        },
+        {
+          "id": "agent:2161",
+          "role": "assistant",
+          "text": "Now run the new lookup test with both the gate change and the guard."
+        },
+        {
+          "id": "agent:2173",
+          "role": "assistant",
+          "text": "Passes with the guard. To prove the guard is necessary (and the test meaningful), I'll disable *only* the guard clause and confirm the test fails, then restore it."
+        },
+        {
+          "id": "agent:2279",
+          "role": "assistant",
+          "text": "Status: while the suite runs, I'm writing the changelog entry and updating the #581 policy row. The validation doc comes last, once results exist."
+        },
+        {
+          "id": "agent:2298",
+          "role": "assistant",
+          "text": "No Rust source changed after the analysis-lib run started, only docs and changelog. Let me check whether the public docs describe this limitation anywhere that would now be stale."
+        },
+        {
+          "id": "agent:2323",
+          "role": "assistant",
+          "text": "The C++ row of the network-effect matrix lists \"synthetic member-prototype keying (#3508)\" as open. That should be updated to state precisely what is now closed and what is not."
+        },
+        {
+          "id": "agent:2341",
+          "role": "assistant",
+          "text": "Waiting on the analysis-lib run."
+        },
+        {
+          "id": "agent:2372",
+          "role": "assistant",
+          "text": "While that runs I'll draft the validation doc's \"separately actionable findings\" from the evidence already gathered. First a poll of the crate run."
+        },
+        {
+          "id": "agent:2399",
+          "role": "assistant",
+          "text": "Consumer crates (cpp, rql, policy, flow, semantic-packs): **1997 passed, 0 failed**. The root suites are running now."
+        },
+        {
+          "id": "agent:2414",
+          "role": "assistant",
+          "text": "The policy-CLI tests are slow under load. I'll keep polling."
+        },
+        {
+          "id": "agent:2477",
+          "role": "assistant",
+          "text": "While clippy builds, let me poll it, since the validation doc needs its result."
+        },
+        {
+          "id": "agent:2492",
+          "role": "assistant",
+          "text": "Clippy exited 0. Let me confirm there were no warnings at all, and run the format check on every changed Rust file."
+        },
+        {
+          "id": "agent:2552",
+          "role": "assistant",
+          "text": "No rustflags in the repo config; the hourly workflow just sets `RUSTFLAGS=--cfg scheduled_tests`. Starting the filtered scheduled-only run in the background."
+        },
+        {
+          "id": "agent:2568",
+          "role": "assistant",
+          "text": "While that builds, I'll write the validation doc, leaving the scheduled-run line to fill in once it finishes."
+        },
+        {
+          "id": "agent:2629",
+          "role": "assistant",
+          "text": "The scheduled-only C++/effect/summary subset: **964 passed, 0 failed**, and the helper removed its isolated target. I'll record that in the validation doc, including the second `mbx` warning I saw."
+        },
+        {
+          "id": "agent:2697",
+          "role": "assistant",
+          "text": "While that runs, I'll wait on the analysis-lib step first."
+        },
+        {
+          "id": "agent:2771",
+          "role": "assistant",
+          "text": "The targeted tests on the final code: 24 passed (my 7 new tests plus the #3493 and #2610 key suites). Clippy is still running."
+        },
+        {
+          "id": "agent:2792",
+          "role": "assistant",
+          "text": "Clippy on the final code exited 0. Now the isolated rerun of the load-sensitive test, with the host otherwise quiet on my side."
+        },
+        {
+          "id": "agent:2829",
+          "role": "assistant",
+          "text": "Committed as `177de859ad351c060dbdc3aa10894f8fa66af883` with a clean working tree. Now the full consumer-crate and root-suite gates once more against the committed tree."
+        },
+        {
+          "id": "agent:2889",
+          "role": "assistant",
+          "text": "Both evidence trees are pinned: googletest `4267679b…`, fmt `5da4e9a3…`. Now I'll wait for the recheck chain to finish before touching the tree."
+        },
+        {
+          "id": "agent:2915",
+          "role": "assistant",
+          "text": "Consumer crates on the committed tree: **1997 passed**. The four root suites are running now."
+        },
+        {
+          "id": "agent:2959",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 1:30am (UTC)"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "r prototypes are built with `code_unit_with_synthetic(file, scope.class_unit.is_some())`. `modeled_procedure_key_for_unit` refuses synthetic units. Recording the missing callable modifiers therefore does not make a real header declaration keyable: two synthetic prototypes remain explicitly unkeyable in the receiver-contract regression, while definitions receive keys.\n\nCandidate `9c66e27d690b4a2eb089631d283f6dd8d770ea36` identifies this boundary; `1dfe10c261aa92c3ba55466addc5ccb88cbd48a5` pins the existing rejection in its #3493 tests. Neither changes it.\n\nDistinguish real source declarations from generated/recovery-only code units without bypassing the canonical-key safety gate. A header member prototype and its definition must resolve to compatible receiver/signature identity, including static members, constructors, overloads and missing-body controls. A declaration without a body must not by itself establish exhaustive reachable effects. Test exact reviewed-summary binding and persistence reload behavior.\n\n",
+    "assistant_text_tail": "You've hit your session limit · resets 1:30am (UTC)",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "quota",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "recover_quota",
+    "wrong_actions": [
+      "continue",
+      "await_input",
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "wrong",
+    "next": "operator continued by hand hours later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T01:02:58.777Z",
+        "kind": "system",
+        "text": "warning: prompt failed: Internal error: You've hit your session limit · resets 1:30am (UTC): {   \"errorKind\": \"rate_limit\" }"
+      },
+      {
+        "at": "2026-09-29T01:03:30.246Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T02:42:31.480Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T03:06:47.451Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T04:08:48.044Z",
+        "kind": "user",
+        "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running or finished jobs"
+      },
+      {
+        "at": "2026-09-29T04:08:59.337Z",
+        "kind": "agent",
+        "text": "I'll start by checking the repository state, since two of my committed files are reported as changed on disk, and then poll the background chain."
+      }
+    ]
+  }
+}

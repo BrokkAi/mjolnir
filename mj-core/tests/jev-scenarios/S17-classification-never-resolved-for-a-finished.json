@@ -1,0 +1,85 @@
+{
+  "id": "S17",
+  "title": "Classification never resolved for a finished child",
+  "category": "unclear-abstention",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "1339f145253a8e669cb31ee688d34f8e",
+    "session_title": "Review query cache behavior for latency benchmark",
+    "decision": "assessment-1339f145253a8e669cb31ee688d34f8e-462",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T04:54:16.831Z",
+    "assessed_at": "2026-09-29T04:54:16.834Z",
+    "recorded_action": null,
+    "recorded_status": "pending",
+    "recorded_reason": "awaiting_classification"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_0c5139c7d0ae113d016abb438cd01c87d19bf24b2081903540",
+          "role": "assistant",
+          "text": "I’ll trace the MCP dispatch and cache paths for `query_code`, `run_policy`, and `profile`, then identify which profile fields distinguish whole-result reuse from analyzer or index reuse. I’ll keep this read-only and cite source locations with line numbers."
+        },
+        {
+          "id": "msg_0c5139c7d0ae113d016abb441cfcb887d191c6669c44c720c9",
+          "role": "assistant",
+          "text": "The key path is becoming clear: each `query_code` request opens a fresh request scope and calls the query executor, while the service retains a workspace analyzer and shared semantic repositories. I’m checking the stdio host construction and cache counter semantics now, especially which counters survive between requests."
+        },
+        {
+          "id": "msg_0c5139c7d0ae113d016abb447860c487d1823246b58cbf942e",
+          "role": "assistant",
+          "text": "Read-only audit complete. The findings and source references were handed back to the parent session. No files were changed and no tests were run."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ted baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nRead-only audit for the tract MCP latency benchmark. Determine whether repeated ordinary `query_code` and `run_policy` requests can return a memoized whole-query final result without re-executing the query. Map relevant request dispatch, caches, analyzer/index reuse, semantic request/summary cache telemetry, and profile fields that can demonstrate reused work. Focus on decisive Rust source/docs references (file and line ranges) and state uncertainties. Do not edit files, run tests, or change code. The benchmark uses one long-lived MCP stdio `bifrost --root <tract> --mcp searchtools` session, ordinary calls, plus separate `profile` calls and one-file `update_paths` updates. The goal is defensible evidence about final-result memoization vs legitimate analyzer/fact/index reuse.",
+    "assistant_text_tail": "Read-only audit complete. The findings and source references were handed back to the parent session. No files were changed and no tests were run.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": true,
+    "action": "finished",
+    "wrong_actions": [
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "pending forever",
+    "judgment": "harmless",
+    "next": "child parked"
+  },
+  "context": {
+    "after": []
+  }
+}

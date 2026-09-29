@@ -1,0 +1,107 @@
+{
+  "id": "S04",
+  "title": "Confident finished after a small code fix",
+  "category": "replied-finished",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "c677a683ed940070fa8102f9c614bf1b",
+    "session_title": "autocull via codex",
+    "decision": "assessment-c677a683ed940070fa8102f9c614bf1b-14147",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-28T00:05:19.795Z",
+    "assessed_at": "2026-09-29T14:29:38.412Z",
+    "recorded_action": "finished",
+    "recorded_status": "assessed",
+    "recorded_reason": "work_finished"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\npls switch from counting files to counting photos (pairing raw/jpeg) globally\n</user>\n<assistant>\nI’ll trace the counts across opening, progress, and review, and make photo counts treat each RAW/JPEG pair as one photo.\n</assistant>\n<assistant>\nOpening and recent-shoot counts use files today; analysis and review mostly already use paired photos. Finish and recovery also count individual files. I’ll change those progress totals to photos, completing each photo only when all its file operations are done.\n</assistant>\n<assistant>\nThe counts now use the same pairing rules as discovery. I’ve also added coverage for a Finish interrupted halfway through a RAW/JPEG pair: it stays at 0 completed photos, then reaches 1 after retry finishes the remaining files.\n</assistant>\n<assistant>\nThe UI now shows photo counts for opening, recent shoots, Finish, and recovery. I’m checking the cancellation and collision tests too, since several used per-file progress callbacks to trigger an interruption.\n</assistant>\n<assistant>\nThe application tests and the new pairing/Finish tests have passed so far. The full engine suite is still running; I’ll finish that and Clippy before committing.\n</assistant>\n<assistant>\nAll 812 tests passed, and Clippy is clean. The photo-count changes are ready. There’s newer panorama work on `master`, so I’ll merge it and check the combined build before pushing.\n</assistant>\n<assistant>\nThe merge was clean. The combined build is still compiling the incoming panorama changes; the photo-count checks passed before the merge.\n</assistant>\n<assistant>\nThe combined suite passed: 866 tests. I’m pushing the change now. Photo totals count each RAW/JPEG pair once, including in Finish and recovery progress.\n</assistant>\n<assistant>\nDone and pushed. Counts now treat RAW/JPEG pairs and sidecars as one photo across opening, recent shoots, Finish, and recovery.\n\n866 tests passed; Clippy clean.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "pls switch from counting files to counting photos (pairing raw/jpeg) globally",
+    "assistant_text_tail": "Done and pushed. Counts now treat RAW/JPEG pairs and sidecars as one photo across opening, recent shoots, Finish, and recovery.\n\n866 tests passed; Clippy clean.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9800000190734863
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 1.0
+    },
+    "work": {
+      "choice": "finished",
+      "confidence": 0.9700000286102295
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": true,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "marked finished",
+    "judgment": "right",
+    "next": "session idle"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-28T01:32:26.763Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-28T01:50:13.143Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-28T03:35:54.080Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-28T04:14:03.025Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-28T13:51:24.157Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-28T17:08:46.537Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

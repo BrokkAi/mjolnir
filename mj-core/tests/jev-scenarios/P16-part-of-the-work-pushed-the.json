@@ -1,0 +1,257 @@
+{
+  "id": "P16",
+  "title": "Part of the work pushed, the rest left uncommitted",
+  "category": "should-continue-weak",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "249b620ea02209220090ad4aec3ba746",
+    "session_title": "hel-2 via codex3",
+    "reply_position": 3772,
+    "captured_at": "2026-09-19T23:13:17.825Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "did #1066 get implemented? i think the ticket may be stale"
+        },
+        {
+          "id": "user:598",
+          "role": "user",
+          "text": "hmm i thought we were using sessionwiki as a rust library, apparently not"
+        },
+        {
+          "id": "user:804",
+          "role": "user",
+          "text": "give me the pros and cons of our options (mj command, ship sw binary, switch to an mcp tool, ???)"
+        },
+        {
+          "id": "user:1622",
+          "role": "user",
+          "text": "can we move this into the existing mj memory toolset? main hiccup there is we currently only install on non-claude harnesses, we'd need to make this dynamic (modest preference for doing that over another toolset but could change my mind based on implementation details)"
+        },
+        {
+          "id": "user:1652",
+          "role": "user",
+          "text": "this=mcp tool"
+        },
+        {
+          "id": "user:2157",
+          "role": "user",
+          "text": "> The current launch code deliberately omits project-memory MCP from load/resume requests\n\nis that saying that i lose memory tools when i resume a session? that sounds bad"
+        },
+        {
+          "id": "agent:2161",
+          "role": "assistant",
+          "text": "I’ll trace the resume paths and check whether the harness restores the tools itself. If it doesn’t, that omission would indeed make memory tools disappear."
+        },
+        {
+          "id": "agent:2203",
+          "role": "assistant",
+          "text": "Yes—for Codex, the current code indicates that `mj-memory` tools disappear when the harness is relaunched to resume a session. That’s a bug.\n\nWe already fixed this exact failure for `mj-agents` in commit [`e6bf0f7f`](https://github.com/BrokkAi/mjolnir/commit/e6bf0f7f): Codex rebuilds its MCP configuration from the load/resume request. That fix explicitly left project memory excluded in [launch.rs](/workspace/249b620ea02209220090ad4aec3ba746/hel/mj-worker/src/acp/launch.rs:203).\n\nThe distinction matters:\n\n- The saved memory documents remain intact; access through the MCP tools is lost.\n- Reattaching the UI to an already-running harness doesn’t trigger this.\n- Claude’s native memory is unaffected; harnesses configured through profile files follow a different path.\n\nThe exclusion cites a history-replay problem. We should fix that problem while preserving tools across resume, rather than accept losing memory access. My previous wording made this sound like a valid lifecycle constraint; it’s an existing defect to address before extending `mj-memory`.\n\nThis conclusion comes from the code and the earlier delegation fix; I haven’t reproduced it against a live Codex session here."
+        },
+        {
+          "id": "user:2475",
+          "role": "user",
+          "text": "give me a plan to fix the tools-on-resume and move the recall skill into mcp; is there a separate provenance skill? should also move imo"
+        },
+        {
+          "id": "agent:2481",
+          "role": "assistant",
+          "text": "Yes—there’s a separate `provenance` skill for `trace`, `blame`, and listing files changed by a session. I’ll include both skills in the move to `mj-memory`, along with the resume fix, and check the interfaces and harness setup needed for an implementation-ready plan."
+        },
+        {
+          "id": "agent:2567",
+          "role": "assistant",
+          "text": "The resume fix can be a separate first milestone. Provenance has an extra complication: line attribution needs Git data from the session’s actual checkout, while the session index stays on the controller. I’m checking the library API so the plan handles container and SSH paths correctly."
+        },
+        {
+          "id": "agent:2646",
+          "role": "assistant",
+          "text": "Two findings affect the plan. The pinned Claude adapter does accept MCP servers in launch requests, so `mj-memory` can use that route on macOS without editing the user’s profile. The repository comments saying otherwise are stale.\n\nAlso, Mjolnir currently indexes its own sessions with an empty changed-file list. Moving provenance into MCP will need to populate that data; otherwise the tools would miss Mjolnir sessions."
+        },
+        {
+          "id": "user:2754",
+          "role": "user",
+          "text": "> Mjolnir currently indexes its own sessions with an empty changed-file list\n\ntbc this is a bug no matter where provenance tool lives right?"
+        },
+        {
+          "id": "agent:2760",
+          "role": "assistant",
+          "text": "Yes. It’s an existing indexing bug, independent of whether provenance is exposed through a CLI, MCP, or anything else.\n\nMjolnir’s adapter explicitly returns `touched: Vec::new()` and `edits: Vec::new()`, even though its stored tool calls contain file paths and edit evidence. That makes its sessions invisible to file-based provenance queries. Native sessions indexed by other adapters may still appear, masking the gap.\n\nI’ll make fixing that—and backfilling sessions whose source records or checkpoints remain available—a separate milestone in the plan. Already-pruned sessions may lack enough retained evidence to reconstruct their changed-file lists."
+        },
+        {
+          "id": "user:2903",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:2909",
+          "role": "assistant",
+          "text": "I’ll keep the indexing bug as its own milestone. The plan will cover preserving tools on resume, repairing provenance data, and exposing recall and provenance through `mj-memory`. I’m checking the library’s existing MCP interface and the skill-upgrade path before finalizing it."
+        },
+        {
+          "id": "agent:2980",
+          "role": "assistant",
+          "text": "# Preserve memory tools on resume and move recall/provenance into `mj-memory`\n\n## Summary\n\nDeliver three independently validated changes: fix tools disappearing on resume, repair Mjolnir’s missing provenance data, and expose recall and provenance through the existing `mj-memory` MCP server.\n\nThe separate managed `recall` and `provenance` skills will be retired. Their guidance will move into MCP instructions and tool descriptions. SessionWiki remains a Rust library on the controller; targets need neither its binary nor its database.\n\nUse an ExecPlan at `.agents/plans/memory-recall-provenance.md` during implementation, following `.agents/PLANS.md`.\n\n## 1. Fix tool delivery across session lifecycles\n\n- Assemble Mjolnir-owned MCP definitions through one launch helper and include the applicable servers in new, load, and resume requests. Recompute target-specific commands and paths after checkpoint restoration or a move.\n- Remove the rule in `mj-worker/src/acp/launch.rs` that excludes project memory on resume. Preserve replay suppression and rejection of delayed updates for historical tool calls; tool availability must not depend on suppressing server registration.\n- Keep existing harness-specific delivery where necessary, including Kimi’s staged profile. Ensure each server is registered once.\n- Test both load-with-replay and resume-without-replay, including bridge crashes and worker restarts. Existing native-child replay must continue working.\n- Commit this fix independently, before adding history tools.\n\nAcceptance: a Codex session can write a memory document, close/resume or recover from a bridge restart, then read and update that document through MCP without duplicating its old transcript.\n\n## 2. Repair provenance indexing independently\n\nMjolnir’s SessionWiki adapter currently returns empty `touched` and `edits` lists. Fix the source of that missing data.\n\n- Add one shared extractor for successful ACP file-edit evidence. Use structured diff paths and edit locations from both live projections and checkpoint transcripts. Exclude reads, failed edits, and paths mentioned only in prose.\n- Populate touched files and bounded edit evidence where retained content supports it. Reuse stored diff helpers; compacted records that retain only paths still contribute file provenance.\n- Preserve recorded paths. Normalize separators only at the index boundary; do not resolve a historical target path against the controller’s filesystem.\n- Backfill recoverable existing sessions in the controller’s background indexer. Track a per-session extraction revision using existing index metadata, and commit provenance updates and that revision together. Retry failures without marking them complete.\n- Keep session IDs, annotations, summaries, and archived transcripts intact. Do not rebuild the entire index or change its schema merely to refresh extraction.\n- Explicitly report incomplete historical coverage where original records and checkpoints have already been pruned.\n\nAcceptance: edits made in a Mjolnir session become discoverable by file, including after checkpointing and archiving. Previously indexed sessions are repaired when their evidence remains available.\n\n## 3. Extend `mj-memory` with recall and provenance\n\nSelect capabilities at server startup:\n\n| Harness | Advertised capabilities |\n|---|---|\n| Claude | Recall and provenance; native project memory remains unchanged |\n| Codex, Grok, Kimi | Existing document `list`/`read`/`write`, plus recall and provenance |\n| Muse | No new MCP support; its adapter currently lacks injection support |\n\nUse ACP registration for Claude’s new `mj-memory` server. Inspection of pinned `claude-agent-acp` 0.79.0 confirms it consumes `mcpServers` on new/load/resume requests. This also avoids modifying the user’s profile on local macOS. Correct stale comments about Claude’s support without expanding this work into unrelated MCP migrations.\n\nAdd these tools:\n\n| Tool | Contract |\n|---|---|\n| `search_sessions` | Search the controller’s existing corpus; return session IDs, titles, projects, snippets, and index freshness. |\n| `get_session_brief` | Return a bounded briefing for one session. |\n| `search_session` | Find literal text within a session, with bounded neighboring messages and message indices. |\n| `read_session` | Read a page starting at a message index; optional role filtering supports user-turn outlines. |\n| `trace_file` | Return sessions that recorded edits to a path, with the matched recorded paths. |\n| `session_files` | Return a paginated list of files a session changed. |\n| `blame_file` | Attribute a requested line range using Git evidence from the target and session evidence from the controller. |\n\nUse explicit session IDs from results. Reject ambiguous prefixes. Message indices remain those of the indexed transcript, including when filtering roles.\n\nDefault discovery pages to 20 results, capped at 100. Default transcript pages to 20 messages with a 16,000-character text budget, capped at 64,000. Return continuation information and explicit truncation indicators. Mark missing timestamps and unavailable original transcript content honestly.\n\nAll new tools are read-only. Search covers the same corpus as the existing session viewer. Continuing or restoring a session remains outside this toolset.\n\n## 4. Transport, concurrency, and migration\n\n- Add a typed history-query channel between the worker and controller, following the existing delegation request/response pattern but independent of delegation enablement. A session with subagents disabled must still have history tools.\n- Use bounded, transient pending requests with request IDs, a 60-second deadline, and cleanup on disconnection or expiry. Controller work runs in supervised background tasks. Failed or timed-out requests return explicit tool errors.\n- Keep history data on the controller and document operations on the target’s existing memory replica. No database mounts, replicated history index, web-viewer dependency, or full daemon API token on targets.\n- Run MCP requests concurrently while serializing document-store operations to preserve compare-and-swap behavior. Slow history queries must not block local memory access; shutdown must cancel waiting work and remain bounded.\n- For `blame_file`, resolve the path relative to the session’s working directory and run Git on that target through shared subprocess helpers. Send bounded blame evidence to the controller for SessionWiki attribution. Preserve confident/ambiguous/unattributed outcomes and label attribution as heuristic. Uncommitted lines remain unattributed; Git failures are errors, not silent substitutes for line attribution.\n- Match provenance using recorded paths and repository-relative tails, returning the actual matches. Do not silently broaden a failed path query to its basename or imply that equal suffixes prove repository identity.\n- Bump and negotiate the relay protocol for the new messages. Preserve legacy document-only operation for older launch configurations; enable history capabilities through the normal worker upgrade/relaunch path.\n- Remove the two packaged skills from managed installation after the MCP replacement is complete. Normal reconciliation removes obsolete managed copies from session-owned homes; preserve user-owned skills. Carry over guidance to search selectively, cite session IDs, and treat retrieved conversations as historical evidence.\n- Keep existing index-version mismatch protection and background freshness handling. No Mjolnir database migration is expected.\n\n## 5. Validation and delivery\n\n- Exercise actual MCP calls before and after new/load/resume, bridge restart, checkpoint restore, and target relocation. Verify Claude receives history tools without duplicate document tools or changes to its user profile.\n- Test replayed historical tool events, delayed updates, and native-child replay alongside successful post-resume tool calls.\n- Test the complete recall sequence: search → matching message → surrounding transcript. Include archived sessions, Unicode, missing/ambiguous IDs, pagination, and oversized messages.\n- Test provenance for live, checkpointed, compacted, and backfilled sessions; reads and failed edits must not count. Include identical filenames in different repositories, paths containing spaces or SQL wildcard characters, deleted files, and uncertain blame results.\n- Test container/SSH path differences, disabled delegation, controller disconnection/reconnection, request expiry, concurrent document writes, and responsive shutdown. Use payloads exceeding 64 KB for pipe/transport tests.\n- Run live acceptance with Codex and Claude, including resume, plus container and SSH targets. Use isolated configuration, data, and SessionWiki stores.\n- Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` in the dev profile. Commit each validated milestone to the current branch; do not push or close #1066 as part of this implementation.\n\nThe acceptance boundary is usable tools and repaired indexing—not merely advertised tool definitions. Historical data that was already discarded cannot be reconstructed and must remain an explicit coverage limitation.\n"
+        },
+        {
+          "id": "agent:2991",
+          "role": "assistant",
+          "text": "I’ll implement this in three checkpoints: restore tools on resume, repair provenance indexing, then add recall and provenance to `mj-memory`. I’ll record the plan in the repository and validate each checkpoint before committing it."
+        },
+        {
+          "id": "user:3052",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:3056",
+          "role": "assistant",
+          "text": "I’m continuing from the clean working tree. First I’ll save the approved plan and fix the launch requests so memory tools survive load and resume."
+        },
+        {
+          "id": "agent:3119",
+          "role": "assistant",
+          "text": "The resume change is in place, and the worker tests are building from a cold dependency cache. The regression tests now require `mj-memory` on both resume paths while still checking that replayed history stays out of the live transcript. I’m working on provenance extraction while that build runs."
+        },
+        {
+          "id": "user:3217",
+          "role": "user",
+          "text": "> building from a cold dependency cache\n\nis mbx not working or did you say that for another reason?"
+        },
+        {
+          "id": "agent:3221",
+          "role": "assistant",
+          "text": "I said that because Cargo downloaded crates and compiled dependencies before running the tests. That alone doesn’t tell me whether `mbx` is working. I’ll check the build-cache configuration and correct that description if needed."
+        },
+        {
+          "id": "agent:3274",
+          "role": "assistant",
+          "text": "`mbx` is active: `cargo` resolves to its shim, `target` points into `/mnt/nvme/mbx`, and the compiler runs through `mbx-rustc`. My wording was too broad. The container’s Cargo registry needed downloads, but Cargo’s “Compiling” messages don’t establish cache misses. I haven’t found evidence of an `mbx` failure.\n\nThe worker suite passed: 503 tests, including the resume regression tests. I’m continuing with the provenance and MCP work."
+        },
+        {
+          "id": "agent:3440",
+          "role": "assistant",
+          "text": "The resume fix is committed as `f06a95ce`. The initial provenance tests also pass: successful structured edits produce file evidence, and that evidence is visible through SessionWiki’s file queries. I’m adding backfill coverage and wiring the history requests through the worker connection."
+        },
+        {
+          "id": "agent:3522",
+          "role": "assistant",
+          "text": "The environment is using the mbx Cargo wrapper and a target directory under `/mnt/nvme/mbx`. I’m checking the wrapper to distinguish dependency downloads from build-cache misses."
+        },
+        {
+          "id": "agent:3562",
+          "role": "assistant",
+          "text": "“Cold dependency cache” was imprecise—I inferred too much from Cargo downloading dependencies. That doesn’t establish an mbx build-cache miss.\n\nThe environment is using the mbx Cargo wrapper and an mbx-backed target directory. I haven’t found evidence that mbx is broken; I also haven’t verified the hit rate for that build."
+        },
+        {
+          "id": "user:3646",
+          "role": "user",
+          "text": "push to origin/master"
+        },
+        {
+          "id": "agent:3650",
+          "role": "assistant",
+          "text": "I’ll check the branch, commits, and unfinished changes before pushing to `origin/master`."
+        },
+        {
+          "id": "agent:3673",
+          "role": "assistant",
+          "text": "The committed change is the tools-on-resume fix (`f06a95ce`). The recall/provenance MCP migration is still uncommitted and incomplete. I’ll push the committed fix to `origin/master`; the unfinished work will remain here."
+        },
+        {
+          "id": "agent:3731",
+          "role": "assistant",
+          "text": "`origin/master` has newer commits, so the push was rejected. I’ll merge those commits into the current branch, preserve the unfinished changes, and retry the push."
+        },
+        {
+          "id": "agent:3772",
+          "role": "assistant",
+          "text": "Pushed to `origin/master` at `7968c56b`, including the tools-on-resume fix and merged upstream changes.\n\nThe unfinished recall/provenance MCP migration remains uncommitted locally and was not pushed."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "push to origin/master",
+    "assistant_text_tail": "Pushed to `origin/master` at `7968c56b`, including the tools-on-resume fix and merged upstream changes.\n\nThe unfinished recall/provenance MCP migration remains uncommitted locally and was not pushed.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "continue",
+    "wrong_actions": [
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "wrong",
+    "next": "user: 'complete that work then push it too'"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-19T23:13:45.530Z",
+        "kind": "user",
+        "text": "complete that work then push it too"
+      },
+      {
+        "at": "2026-09-19T23:13:46.835Z",
+        "kind": "agent",
+        "text": "I’ll finish the recall/provenance MCP migration, validate it, and push the completed changes to `origin/master`."
+      },
+      {
+        "at": "2026-09-19T23:15:23.696Z",
+        "kind": "agent",
+        "text": "The remaining wiring is now in place: Claude receives history tools while keeping native notes, and Kimi’s staged configuration passes the history connection too. I’m testing the controller queries an"
+      },
+      {
+        "at": "2026-09-19T23:19:56.465Z",
+        "kind": "agent",
+        "text": "The provenance tests pass, including repair of an unchanged checkpoint without rebuilding the index. I’m adding transport tests for large replies, timeouts, and disconnects, plus target-side Git blame"
+      },
+      {
+        "at": "2026-09-19T23:24:37.888Z",
+        "kind": "agent",
+        "text": "The MCP tests now cover local note writes while a history query waits, large Unicode replies, and cancellation on shutdown. I’m starting the full checks. Docker and Podman are unavailable here, so con"
+      },
+      {
+        "at": "2026-09-19T23:25:15.877Z",
+        "kind": "agent",
+        "text": "The focused history tests pass. The full build hit an environment problem: Cargo’s C compiler path points to a missing mbx shim, `/mnt/nvme/mbx/shims/mbx-cc`. That is separate from the earlier depende"
+      }
+    ]
+  }
+}

@@ -1,0 +1,168 @@
+{
+  "id": "P13",
+  "title": "Agent agrees to a scope change and stops before running anything",
+  "category": "should-continue",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "0305d10cd40fb1342e5ad6171d6ae993",
+    "session_title": "bifrost3 via codex",
+    "reply_position": 1593,
+    "captured_at": "2026-09-29T04:02:24.213Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "do we have warm query numbers for the native engine in .agents/plans/{stack-graph-engine.md,stack-graph-rows-and-identity.md} ?"
+        },
+        {
+          "id": "user:137",
+          "role": "user",
+          "text": "fixed ur branch. try now"
+        },
+        {
+          "id": "user:433",
+          "role": "user",
+          "text": "> The tract usage_graph took 490.432 s\n\npretty sure that was cold"
+        },
+        {
+          "id": "user:701",
+          "role": "user",
+          "text": "I need defensible performance numbers for an investor pitch deck around the claim that Bifrost is fast enough to sit inside an AI coding agent's edit/check/fix loop.\n\nPlease design and run a benchmark of Bifrost warm-query latency on this repository.\n\nThe primary numbers I want are:\n\n1. **Warm steady-state query latency:** repository already indexed and analyzer process already running; no source changes between calls.\n2. **Warm incremental latency after a one-file edit:** repository/analyzer already warm, modify one representative source file in a way that invalidates the relevant analysis, let Bifrost observe/update that change, then execute the query.\n\nFor each, report **p50, p95, min, max, and sample count**.\n\n### Measure what the agent experiences\n\nThe primary latency metric should be **end-to-end elapsed wall-clock time from the persistent client issuing the query until the complete result is received**.\n\nDo NOT use CLI process startup time: this is modeling a long-lived coding-agent/Bifrost session.\n\nDo NOT report `CodeQueryProfile.timings_ns.total` as the primary number. Bifrost documentation explicitly says that it excludes query-scope setup/cleanup, report projection, serialization, transport, and host initialization.\n\nIf practical, benchmark through the same persistent MCP interface an agent would use. Otherwise use the closest long-lived public API and state exactly what is and is not included.\n\nUse ordinary, unprofiled query executions for the primary latency measurements, because profiling itself adds instrumentation overhead. Separately run a small number of profiled executions to explain where the time goes and verify cache behavior.\n\n### Query workloads\n\nPick 3 representative workloads that correspond to real SlopCop/Bifrost usage:\n\n**A. Structural / policy-style query**\nA nontrivial RQL query that has enough matches/work to be representative, rather than an exact lookup that trivially returns one symbol.\n\n**B. Cross-file semantic query**\nSomething involving references, calls, resolved identity, or another cross-file relationship representative of a correctness rule.\n\n**C. Deep semantic query**\nA realistic value-flow / taint / typestate / correctness-policy query that exercises the semantic engine.\n\nPrefer existing checked-in queries or policies that we can publish and reproduce. Do not invent an artificially favorable microbenchmark.\n\nFor each workload, record:\n- exact query/policy\n- result cardinality\n- completion/proof status\n- whether result is complete or inconclusive\n- repository commit\n- repository size: files and LOC\n- machine CPU, RAM, OS\n- Bifrost build/version\n\n### Warm-state methodology\n\nDefine precisely what \"warm\" means.\n\nStart a fresh Bifrost process/session, initialize the repository normally, and run enough untimed executions to ensure indexes and legitimate reusable analyzer state are populated.\n\nThen perform at least **100 measured ordinary executions** per workload if runtime permits.\n\nBefore trusting the result, inspect Bifrost's cache/profile telemetry and source to make sure repeated execution is not simply returning a whole-query result from a memoized result cache. Reuse of indexes, parsed facts, Git-blob-derived analysis, call/reference relations, semantic summaries, etc. is desirable and is exactly what \"warm\" is supposed to capture. Returning a cached final answer without executing the query would make this benchmark misleading; if such a cache exists, bypass it or clearly separate that result.\n\nRandomize or interleave workloads if useful to avoid measuring an artifact of one repeated tight loop.\n\n### Incremental-edit methodology\n\nFor the incremental benchmark, use a representative source file involved in each workload.\n\nFor every measured iteration:\n\n1. Start from the same warm analyzer/session state.\n2. Make a small realistic edit to one source file, ideally changing a method body without causing a large dependency/schema rebuild.\n3. Ensure Bifrost has observed the new workspace state.\n4. Start the latency timer at the point corresponding to an agent asking Bifrost to check its work.\n5. Execute the relevant query/policy and wait for the complete response.\n6. Stop the timer.\n7. Verify the result corresponds to the edited snapshot.\n8. Restore or alternate the edit so another iteration can be measured without restarting the analyzer.\n\nIf change detection and incremental re-analysis happen synchronously as part of the query request, include them in the end-to-end number. If they happen asynchronously before the request, report BOTH:\n- edit-to-ready latency\n- ready-to-query-response latency\n\nDo not hide update/indexing work outside the measured interval without documenting it.\n\n### Profiling / validation\n\nRun representative executions with `profile` enabled and capture at least:\n- `timings_ns`\n- `work`\n- `cache_layers`\n- semantic request-cache / summary reuse where applicable\n- access-path/index reuse\n- operator timings\n\nUse these to explain why the warm result is warm and how much work is actually being reused.\n\nAlso compare one genuinely cold execution for context, but cold performance is secondary here.\n\n### Output\n\nGive me a concise table like:\n\n| Workload | Warm p50 | Warm p95 | After 1-file edit p50 | After 1-file edit p95 | Results |\n|---|---:|---:|---:|---:|---:|\n| Structural | | | | | |\n| Cross-file | | | | | |\n| Semantic | | | | | |\n\nThen recommend the **single most defensible headline number** for an investor deck.\n\nFor example, if supported by the data:\n\n> \"Typical Bifrost checks return in XX ms warm and YY ms p95 after a source edit on a XXXk/1M-line repository.\"\n\nDo not cherry-pick the fastest query. Prefer the workload that best represents a SlopCop correctness check inside an agent loop.\n\nSave the benchmark harness/scripts and raw measurements in a reproducible location in the repo, but do not commit them unless they clearly belong in the project."
+        },
+        {
+          "id": "agent:1034",
+          "role": "assistant",
+          "text": "The MCP interface has a freshness wrinkle: file watching queues changes asynchronously, and an immediate query can run before the edit arrives. There is no public acknowledgment for a particular watcher event. The public `refresh` tool does provide a synchronous update boundary, so a reproducible measurement can report refresh latency, query latency, and their combined elapsed time."
+        },
+        {
+          "id": "user:1115",
+          "role": "user",
+          "text": "(we used the `tract` repo from /nfs/morannon/nvme/repo-clones as a test candidate. only rust is native so far)"
+        },
+        {
+          "id": "agent:1124",
+          "role": "assistant",
+          "text": "That helps: I’ll restrict the workloads to Rust-native analysis and check the local `tract` checkout as a corpus candidate. I’ll keep the current Bifrost source commit as the build under measurement."
+        },
+        {
+          "id": "agent:1188",
+          "role": "assistant",
+          "text": "Tract will be the primary corpus, pinned at its clean commit `26edc98ea88bf973622853fa8f7c35d236d6ffc5`. I’ll specify an isolated local copy so edits leave the shared clone untouched and the timings describe local-disk use.\n\nThe cache audit found no general cache of complete query responses. It did find reusable semantic summaries and specialized type-flow results, so the profile evidence will distinguish those from query execution work."
+        },
+        {
+          "id": "agent:1302",
+          "role": "assistant",
+          "text": "The remaining design question is workload selection on tract. I’m checking existing Rust policies against its production code so the semantic case exercises real analysis rather than a small fixture.\n\nI’ll label the incremental table columns as **refresh + query**. The report will also show query-only time after refresh, but the deck number will include the update cost."
+        },
+        {
+          "id": "agent:1377",
+          "role": "assistant",
+          "text": "The harness will retain every measured response, including completion status, result counts, errors, and timeouts. It will use nearest-rank percentiles and report min, max, and sample count alongside p50/p95. Workload selection will be fixed before measurement, so it cannot be influenced by which query happens to be fastest."
+        },
+        {
+          "id": "agent:1461",
+          "role": "assistant",
+          "text": "There are suitable structural and cross-file candidates: the existing “parsing in a loop” policy and references to tract’s `load_tensor` function across multiple files.\n\nThe deep case needs a tract-specific query. A candidate follows an ONNX external-data path through the resolver to file opening. It exercises meaningful value flow, but tract already checks path components, so a flow result must not be presented as a vulnerability. The pilot will need to establish whether Bifrost can complete that analysis."
+        },
+        {
+          "id": "user:1584",
+          "role": "user",
+          "text": "i don't want to scope creep this to new analysis implementation tho, if we can't do that then pick something existing or a minor variant"
+        },
+        {
+          "id": "agent:1589",
+          "role": "assistant",
+          "text": "# Benchmark persistent Bifrost checks on tract\n\n## Summary\n\nMeasure ordinary, unprofiled requests through a persistent MCP client, using tract as the primary corpus.\n\n- **Bifrost:** `4b876479cd9d0dcbecf05cb03be007e3a832d425`, version `0.12.0`, release build.\n- **Tract:** `26edc98ea88bf973622853fa8f7c35d236d6ffc5`.\n- **Budget:** two hours of measurement, excluding compilation and initial indexing.\n- **Target:** 100 observations per workload for steady state and after editing one file.\n- **Incremental path:** public MCP `refresh`, followed immediately by the query; report both phases and combined elapsed time.\n\nNo latency measurements have been collected yet. Execution requires leaving Plan Mode.\n\n## Workloads and correctness gates\n\nFreeze workloads before collecting timings. Analyze the full Rust corpus; disclose any narrower query scope.\n\n| Workload | Fixed definition | Incremental edit and freshness check |\n|---|---|---|\n| Structural | Rust branches of the checked-in `bifrost.performance.parsing-in-loop` policy’s subject query, covering `serde_json`, `bincode`, and `toml` parsing inside loops. Label this as structural candidate detection, not the complete policy verdict. | Extract the JSON parsing expression in `cli/src/bench_common.rs::read_metrics` into a helper outside the loop. Verify the original structural match disappears. |\n| Cross-file | `(references-of :proof proven (language rust (function :name \"load_tensor\")))` | Extract the delegation in `onnx/src/model.rs::ParsingContext::load_tensor` into a private helper. Verify the reference moves into that helper while references from other files remain. |\n| Deep semantic | A tract-specific taint policy tracing the return value of `as_str` inside `get_external_resources` to argument zero of `open` inside `read_bytes_from_path`. Execute actual propagation through `run_policy`; do not benchmark projection of an already registered taint result. | Extract the resolver call in `onnx/src/tensor.rs::get_external_resources` into a private helper. Require updated source evidence and the additional helper hop in the flow witness. |\n\nFor the deep policy, use `may` analysis, explicit source/sink selectors, and strict handling of unmodeled calls. Preserve the existing path-validation guard. Describe this as an **external-data flow audit**, not a vulnerability finding.\n\nBefore measurement, validate baseline and edited results. The deep case must demonstrate source binding, path-value propagation, and cross-file resolver traversal. If unsupported or inconclusive, retain and report that outcome; do not silently substitute an easier query or invent semantic models.\n\nSave exact RQL, policy text, request arguments, limits, and edit-generation rules with the harness.\n\n## Harness and measurement procedure\n\n**Environment and isolation**\n\nUse a local, independent Git copy of the pinned tract checkout. Do not edit the shared NFS clone. Build Bifrost through the existing mbx configuration without changing Cargo target placement; use the repository toolchain.\n\nLaunch the release executable directly with production defaults, recording effective parallelism, cache settings, semantic-pack identities, binary digest, and build command. Record CPU, available RAM, OS/WSL version, storage, process affinity, and background load.\n\nCount both tracked repository files/LOC and the Rust files/LOC actually analyzed. Preserve the counting command and exclusion list.\n\n**Persistent transport**\n\nImplement a Python standard-library harness that starts:\n\n`bifrost --root <absolute-local-tract-root> --mcp searchtools`\n\nInitialize MCP once and retain that process and client throughout each measurement campaign. Match response IDs, drain stderr, and retain full responses.\n\nTime with `perf_counter_ns()` immediately before issuing each request through complete response receipt and JSON decoding. Include serialization, transport, server execution, report construction, and client decoding. Exclude process launch and independent correctness checks.\n\n**Warm steady state**\n\nStart with an isolated analyzer store. Run ten untimed rounds of all workloads, then three diagnostic profile rounds. Require stable result identities and evidence of reusable indexes/facts before timing; extend warm-up to thirty rounds if necessary and report failure to establish warm state.\n\nCollect 100 rounds, each containing all three workloads in a seeded randomized order. Allow one outstanding request at a time. Disable profiling and diagnostic timing instrumentation during primary samples.\n\n**One-file edits**\n\nUse a fresh campaign warmed on the baseline. Before each sample, restore the preceding edit, refresh, and re-establish baseline results outside the measured interval.\n\nGenerate one edited file from baseline bytes. Use a uniquely named extracted helper per iteration so measured edits have previously unseen content hashes. Keep the semantic transformation equivalent across iterations.\n\nRecord:\n\n1. File-write completion timestamp.\n2. MCP refresh request and response timestamps.\n3. Query request and complete response timestamps.\n4. Edited file hash, response, and freshness-validation outcome.\n\nIssue the query immediately after refresh. Report edit-to-refresh acknowledgment, refresh-request-to-query-response, and query-only latency. Any deferred index work encountered by the query remains included. Explicitly disclose that `refresh` rescans the workspace.\n\nRestore files on completion or interruption. Keep restoration and warm-up costs separate from measured edit samples.\n\n**Budget and failures**\n\nDistribute the two-hour budget equally across the six workload/condition cells. Keep production request budgets and record them. Stop a cell at 100 attempts or its allocated budget, preserving failures and timeouts. Never replace failed samples silently or discard slow observations.\n\n## Validation and reporting\n\nAudit evidence already indicates no general cross-request cache of complete `CodeQueryResult` responses. Confirm this for the selected workloads using source references and separate diagnostic executions.\n\nCapture three representative diagnostic executions per workload and condition, including:\n\n- `timings_ns`, `work`, `cache_layers`, access-path/index reuse, and operator timings where exposed.\n- Semantic artifact/request-cache and summary reuse counters where exposed.\n- Cardinality, proof, completion, truncation, diagnostics, and witness status.\n\nThe policy interface may expose different telemetry from `query_code`. Mark unavailable fields explicitly; selector profiles cannot stand in for propagation profiling. Never use internal profile totals as primary latency.\n\nCompare representative edited responses with independently initialized analyzers on identical edited snapshots. Compare semantic results after normalizing incidental ordering and timestamps.\n\nFor cold context, run each workload once with a fresh process and empty Bifrost stores. Record initialization separately and retain any readiness retries in time-to-first-complete-result. Label this **application-cache cold**; do not claim cold OS filesystem caches.\n\nReport nearest-rank p50/p95, min, max, attempts, successful completions, and incomplete/error counts. Retain all observations; show complete-result statistics separately from incomplete responses.\n\nProduce the requested summary table, with incremental columns explicitly labeled **refresh + query**, followed by phase-level statistics. Preselect the deep flow audit as the headline candidate only if it completes with validated evidence. Otherwise narrow the claim to the measured supported workload and state that deep correctness-loop performance remains unproven. Do not generalize from the fastest row.\n\n## Artifacts and defaults\n\nSave the execution plan under `.agents/plans/`. Save the harness, frozen workloads, README, and raw JSONL responses under `.agents/docs/tract-warm-latency/`, grouped by run ID.\n\nInclude a machine-readable manifest, generated edit patches, response hashes, profile captures, summary CSV, and reproduction command. Leave benchmark artifacts uncommitted as requested.\n\nNo engine changes, public API changes, performance fixes, or publication are part of this benchmark. Any discovered limitation remains visible in the report.\n# Benchmark existing Bifrost analysis on tract\n\n## Scope and fixed workloads\n\nThis is benchmark work only: harness, query selection, source-edit variants, measurements, and reporting. **No analyzer implementation, new semantic models, engine fixes, or API changes.**\n\nUse release Bifrost at `4b876479cd9d0dcbecf05cb03be007e3a832d425` against a local copy of tract at `26edc98ea88bf973622853fa8f7c35d236d6ffc5`. Leave the shared NFS checkout untouched.\n\n| Workload | Existing capability |\n|---|---|\n| Structural | Rust subject query from the checked-in `bifrost.performance.parsing-in-loop` policy, across the Rust corpus. Label results as policy candidates, not complete policy verdicts. |\n| Cross-file | `(references-of :proof proven (language rust (function :name \"load_tensor\")))`, using the documented references query. |\n| Semantic | The documented flow-sensitive reaching-definitions query, adapted to tract’s `get_external_resources` function. |\n\nReplace the proposed custom taint policy with this minor variant of the checked-in documentation example:\n\n```lisp\n(flow-target\n  (flow-relations-of :relation [reaching] :certainty [exact]\n    (state-events-of\n      (procedure-of\n        (language rust\n          (function :name \"get_external_resources\"))))))\n```\n\nThis exercises existing control-flow-based dataflow analysis. Describe it as a **procedure-local semantic check**, not interprocedural taint analysis or proof of path confinement.\n\nPilot the fixed queries for meaningful results, completion, and observable edit invalidation. If a query exposes an unsupported capability, report that limitation without implementing support. Freeze queries before collecting timings; do not choose based on speed.\n\n## Measurement method\n\nImplement a persistent Python MCP client launching:\n\n`bifrost --root <local-tract-copy> --mcp searchtools`\n\nBuild through existing mbx configuration without changing Cargo target placement. Launch the release binary directly with documented production settings.\n\nMeasure ordinary requests using a monotonic nanosecond clock from issuing the request through receipt and decoding of its complete response. Include serialization, transport, server execution, and report construction. Exclude process startup.\n\n**Warm steady state:** initialize normally, run ten untimed rounds, and inspect separate profiles for stable results and reusable analyzer state. Extend warm-up to thirty rounds if needed. Target 100 ordinary observations per workload, interleaved using a recorded random seed, with one request outstanding.\n\n**After editing one file:** restore and warm the baseline before each observation, then make one small edit:\n\n- Structural: extract parsing from `read_metrics` into a helper; verify the original loop-nested match disappears.\n- Cross-file: extract the `load_tensor` delegation into a helper; verify the reference moves while other files’ references remain.\n- Semantic: introduce a local alias for the computed path before the resolver call; verify the reaching-definition result reflects the new binding.\n\nGive each measured helper or alias a unique name to produce unseen file contents. Record hashes and exact patches. Keep edits structurally equivalent across samples.\n\nImmediately call public MCP `refresh`, then query. Record refresh latency, query latency, their combined elapsed time, and edit-to-response time. Label the primary incremental number **refresh + query**, explicitly including refresh’s workspace scan and any deferred work encountered by the query.\n\nUse the agreed two-hour measurement budget, excluding compilation and initial indexing, distributed across the six workload/condition cells. Target 100 attempts per cell; retain timeouts, errors, and smaller sample counts honestly.\n\n## Validation and evidence\n\nUse separate profiled executions to capture `timings_ns`, `work`, `cache_layers`, access-path reuse, operator timings, and semantic reuse counters where applicable. Never use profile totals as the primary metric.\n\nConfirm repeated calls execute the query rather than retrieve a memoized final response. Distinguish reusable facts, indexes, and semantic artifacts from final-result caching.\n\nFor each response retain cardinality, completion, proof, diagnostics, and truncation. Check representative edited results against a fresh analyzer on identical bytes. Restore edited files on completion or interruption.\n\nRun one application-cache-cold execution per workload using a fresh process and empty Bifrost stores. Report initialization and readiness handling separately; do not claim cold OS filesystem caches.\n\nRecord both commits, binary digest/version, build configuration, CPU, RAM, OS/WSL, storage, background load, and repository file/LOC counts. Distinguish total repository size from analyzed Rust size.\n\n## Deliverables and headline rule\n\nSave the plan under `.agents/plans/` and the reproducible harness, exact queries, edit patches, raw responses, profiles, manifest, and report under `.agents/docs/tract-warm-latency/`. Leave these artifacts uncommitted.\n\nReport the requested summary table plus p50, p95, min, max, and sample count for every condition. Use nearest-rank percentiles and report incomplete/error observations separately without silently dropping them.\n\nChoose the semantic workload for the headline only if its results complete and freshness checks pass. Name its procedure-local scope explicitly. Otherwise use a narrower claim supported by the completed workloads. Do not present these measurements as evidence for unmeasured interprocedural taint or full-policy performance.\n"
+        },
+        {
+          "id": "agent:1593",
+          "role": "assistant",
+          "text": "Agreed. The benchmark won’t include new analysis implementation. I’ll replace the custom taint case with an existing semantic query or a minor variant, and report any limitations it exposes."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "i don't want to scope creep this to new analysis implementation tho, if we can't do that then pick something existing or a minor variant",
+    "assistant_text_tail": "Agreed. The benchmark won’t include new analysis implementation. I’ll replace the custom taint case with an existing semantic query or a minor variant, and report any limitations it exposes.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "continue",
+    "wrong_actions": [
+      "finished",
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Jev: work authorized_unfinished 0.99, input none 0.73, uncertain",
+    "judgment": "wrong",
+    "next": "user: 'implement the plan' 517 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T04:10:44.828Z",
+        "kind": "system",
+        "text": "model set to gpt-5.6-luna"
+      },
+      {
+        "at": "2026-09-29T04:10:46.958Z",
+        "kind": "system",
+        "text": "effort set to max"
+      },
+      {
+        "at": "2026-09-29T04:10:52.158Z",
+        "kind": "system",
+        "text": "collaboration_mode set to default"
+      },
+      {
+        "at": "2026-09-29T04:11:01.533Z",
+        "kind": "user",
+        "text": "implement the plan"
+      },
+      {
+        "at": "2026-09-29T04:11:12.723Z",
+        "kind": "agent",
+        "text": "I’m moving from the agreed plan into execution. I’ll create the reproducible benchmark artifact, build the release binary, run a pilot to validate the three existing queries on tract, then collect the"
+      },
+      {
+        "at": "2026-09-29T04:19:15.006Z",
+        "kind": "agent",
+        "text": "The harness and ExecPlan are now in the repository. It uses one persistent MCP session, stores complete JSONL responses and separate profile calls, applies fresh unique edits, and restores the local c"
+      }
+    ]
+  }
+}

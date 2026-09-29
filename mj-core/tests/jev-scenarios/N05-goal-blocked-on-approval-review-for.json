@@ -1,0 +1,387 @@
+{
+  "id": "N05",
+  "title": "Goal blocked on approval review for a payload",
+  "category": "control-blocker",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "81b21c67199a48f8cfad7ddc7076683b",
+    "session_title": "autocull via codex2",
+    "reply_position": 22230,
+    "captured_at": "2026-09-27T22:59:31.446Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "what inference could we potentially offload from flash to local models, or use local models to help flash be more accurate? top 3 ideas"
+        },
+        {
+          "id": "user:756",
+          "role": "user",
+          "text": "cool. see if you can get 1 and 2 working. note that i have another agent using this machine and the display-connected gpu. if you can do your tests headless on one of the B5000s that's probably best"
+        },
+        {
+          "id": "user:922",
+          "role": "user",
+          "text": "my main photo library is D:\\Photos\\Originals, lots more there, but it's a slow hdd, recommend copying jpgs of anything you want to test with"
+        },
+        {
+          "id": "user:1099",
+          "role": "user",
+          "text": "there aren't many blurry photos in my kept Originals tho\n\nfor that you'll need to look in my unprocessed backlog in C:\\Users\\jbell\\Pictures\n\nthe phone imports are probably fertile ground for low quality pics"
+        },
+        {
+          "id": "user:1478",
+          "role": "user",
+          "text": "fuck\n\ni explicitly approve testing with flash, that's the entire point"
+        },
+        {
+          "id": "user:2357",
+          "role": "user",
+          "text": "re panoramas,\n\n1. any additional ideas to try? 2/3 success isn't amazing\n\n2. expensive is panorama geometry to compute? how optimized is our implementation? i'm basically asking how slow it would be if we moved it to the a4000 instead of the higher end b5000"
+        },
+        {
+          "id": "user:2568",
+          "role": "user",
+          "text": "continue (host rebooted)"
+        },
+        {
+          "id": "user:3060",
+          "role": "user",
+          "text": "the 4000 connected to monitor is the 20G model fwiw\n\nbut yes \"runs on slow 16G a4000\" should be a goal"
+        },
+        {
+          "id": "user:3859",
+          "role": "user",
+          "text": "/goal make panorama accuracy production quality"
+        },
+        {
+          "id": "user:7209",
+          "role": "user",
+          "text": "> Four sessions saved only 11 seconds\n\nwe should make this adaptive instead of hardcoding right? i assume B5000 has more processing capacity"
+        },
+        {
+          "id": "user:7214",
+          "role": "user",
+          "text": "(and on the other end of the scale, we do want to run on 8GB GPUs that are even smaller, but i don't have one to test here)"
+        },
+        {
+          "id": "agent:17666",
+          "role": "assistant",
+          "text": "The updated B5000 run passed too: 544 images in 40 seconds, with all 543 pair results exactly matching the reference, versus 138 seconds on the A4000. It used about 16.7GiB at peak. The same scheduler is adapting to both available memory and useful throughput; it has no fixed session count by GPU model."
+        },
+        {
+          "id": "agent:17765",
+          "role": "assistant",
+          "text": "All 36 initial panorama windows have returned successfully. The pipeline is now reconciling their overlapping answers and will request focused checks where they disagree. The B5000 comparison is complete and its sessions have been released."
+        },
+        {
+          "id": "agent:17825",
+          "role": "assistant",
+          "text": "The focused checks are still running. Several Flash responses have taken minutes, so the full-shoot elapsed time is now dominated by service latency. The local geometry measurements remain 40 seconds on the B5000, 138 seconds on the A4000, and 154 seconds with the A4000 limited to an 8GiB budget."
+        },
+        {
+          "id": "agent:17900",
+          "role": "assistant",
+          "text": "Panorama membership and focused review have finished. Ordinary-photo ranking is now at 49 of 56 groups, with no reported request failures. Once the catalog is published, I’ll score the ten frozen landscape cases against it."
+        },
+        {
+          "id": "agent:17962",
+          "role": "assistant",
+          "text": "The full 544-photo run completed under the 8GiB ceiling, peaking at 4.94GiB. It took about 19 minutes end to end.\n\nIt also exposed an accuracy gap: several previously confirmed panoramas became “Needs review” in the full-shoot context. Their components were retained, but memory success doesn’t establish membership accuracy. I’m scoring those differences now."
+        },
+        {
+          "id": "agent:18073",
+          "role": "assistant",
+          "text": "The scoring confirms that all labeled panorama components were kept, but four sweeps were left uncertain. One likely contributor is context size: membership requests currently include both Auto and original renderings, leaving room for only about 30 photographs.\n\nI’m changing membership analysis to use the original rendering alone. That preserves room for up to 60 chronological photographs; quality ranking will still receive Auto plus its original reference. I’ll test the request contract and rerun the failed cases without changing their labels."
+        },
+        {
+          "id": "agent:18201",
+          "role": "assistant",
+          "text": "The new contract test passes, and all 470 engine tests pass. It verifies that one membership request can contain 40 original photographs without duplicate references, while ordinary quality ranking still receives the selected Auto rendering and its original.\n\nI’m building the change for a comparison against the saved full-shoot result."
+        },
+        {
+          "id": "agent:18296",
+          "role": "assistant",
+          "text": "The comparison run is underway on the same SSD shoot with the same 8GiB ceiling. Tests and Clippy pass. The first catalog and its membership responses are saved separately, so this run can be checked against the original result and unchanged labels."
+        },
+        {
+          "id": "agent:18369",
+          "role": "assistant",
+          "text": "The comparison is sending the larger chronological windows as intended. It has reused the completed local work and boundary checks, and new membership responses are arriving without reported failures. I’m waiting for publication before treating the context change as an accuracy improvement."
+        },
+        {
+          "id": "agent:18428",
+          "role": "assistant",
+          "text": "Eleven of the eighteen initial windows have returned in the comparison run. The requests now carry up to 60 distinct photographs. I’m checking whether the focused reviews can see enough of each disputed sweep to resolve it, while still keeping restarted sweeps separate."
+        },
+        {
+          "id": "agent:18495",
+          "role": "assistant",
+          "text": "The larger-window responses are still arriving successfully, including the window covering the multirow case. Some calls are taking several minutes. The GPU work is finished; I’m waiting for the remaining Flash answers and final reconciliation."
+        },
+        {
+          "id": "agent:18557",
+          "role": "assistant",
+          "text": "The comparison has reached focused review. One request now includes the complete multirow sweep and the neighboring arch sweep in a single context window, which the previous 30-photo limit could not provide. I’m checking the published result to see whether that resolves the uncertainty without joining the two sets."
+        },
+        {
+          "id": "agent:18635",
+          "role": "assistant",
+          "text": "The comparison improved strict case matches from 4/10 to 7/10. It recovered the portrait, weak-overlap, and hard-edge sweeps as confirmed panoramas, and every labeled component is still kept.\n\nThe multirow sweep remains uncertain, and the second arch sweep changed from confirmed to uncertain; 205–206 remain under review too. I’m retaining those results as unresolved accuracy work. The adaptive-memory changes and the broader-context change are ready for checkpointing, but panorama qualification is not complete."
+        },
+        {
+          "id": "agent:18785",
+          "role": "assistant",
+          "text": "8GB is now an explicit target. Concurrency adapts to available VRAM and measured throughput.\n\nFor 544 images, with identical geometry results:\n\n| Configuration | Time | Peak VRAM |\n|---|---:|---:|\n| B5000 | 40s | 16.7GiB |\n| A4000 | 138s | 4.21GiB |\n| A4000, 8GiB ceiling | 154s | 2.15GiB |\n\nThe cold full-pipeline test under that ceiling peaked at **4.94GiB**. Physical 8GB hardware remains untested.\n\nBroader panorama testing improved from 4/10 to 7/10 strict case matches; every labeled component was retained, but uncertainty remains. **470 engine tests pass.** Committed and pushed as `4d9c779`."
+        },
+        {
+          "id": "agent:18970",
+          "role": "assistant",
+          "text": "The last turn made concrete progress: the larger membership context recovered three sweeps, and the full pipeline passed the constrained-memory test. I’m now addressing the Re-evaluate path, which can still bypass panorama membership and undo that protection."
+        },
+        {
+          "id": "agent:19041",
+          "role": "assistant",
+          "text": "I’ll make explicit Re-evaluate request fresh membership evidence, while reusing deterministic local geometry. That lets it correct an earlier decision without blindly repeating a cached answer or dropping panorama protection. Forced user policies and atomic catalog publication will remain authoritative."
+        },
+        {
+          "id": "agent:19142",
+          "role": "assistant",
+          "text": "The shared membership and conflict-handling code is now connected to Re-evaluate. I’m adding regressions for fresh reclassification, forced policies, unavailable geometry, and cancellation—the cases where stale answers or partial publication could otherwise damage the catalog."
+        },
+        {
+          "id": "agent:19229",
+          "role": "assistant",
+          "text": "The regressions now cover changing a panorama to ordinary photos and back, resolving uncertainty with a fresh answer, and honoring a forced policy. They also check that geometry failure still allows visual membership analysis and that conflicting quality advice remains reviewable with every component kept. I’m running the full engine suite now."
+        },
+        {
+          "id": "agent:19333",
+          "role": "assistant",
+          "text": "All 474 engine tests pass. Re-evaluate now preserves confirmed and uncertain components, requests fresh membership—including fresh focused checks—and can replace an old decision with new evidence.\n\nI’m preparing a headless live check against the two remaining uncertain sweeps, using their current catalog groups."
+        },
+        {
+          "id": "agent:19437",
+          "role": "assistant",
+          "text": "The review caught one distinction worth preserving: a successful “uncertain” answer may publish a reviewable set, but a failed membership request should leave the previous catalog unchanged. I’ve added that behavior and a regression, so a service failure during Re-evaluate cannot overwrite an existing answer."
+        },
+        {
+          "id": "agent:19532",
+          "role": "assistant",
+          "text": "The updated suite passes all 475 engine tests, and Clippy is clean. The new tests confirm that cancelled or failed membership requests leave both the published answer and its restore checkpoint intact. The live check will now exercise that same Re-evaluate implementation against saved photos and native geometry."
+        },
+        {
+          "id": "agent:19650",
+          "role": "assistant",
+          "text": "The live multirow Re-evaluate completed and retained all 32 photos, but it still judged the intent uncertain. Its explanation specifically treats the rapid looping burst as possibly accidental, even with the whole set visible. That makes the photographer-intent question useful; I won’t relabel this as a pass simply because the files were preserved.\n\nI’m checking the second arch sweep next."
+        },
+        {
+          "id": "agent:19755",
+          "role": "assistant",
+          "text": "The live arch Re-evaluate changed the second sweep from “Needs review” to “Panorama” and kept all 18 frames. The multirow set stayed uncertain, with all 32 retained.\n\nI also found a misleading geometry label: `direction_coherence` is really net displacement divided by total travel, so a deliberate loop scores low. A saved Flash explanation used that low value as evidence of camera shake. That is a concrete accuracy issue to correct next."
+        },
+        {
+          "id": "agent:19908",
+          "role": "assistant",
+          "text": "The late-policy-change test passes as well: if the user changes policy while membership is running, Re-evaluate discards the obsolete answer and preserves the user’s change. Both live runs also passed source-hash and complete-member checks.\n\nI’m checkpointing this workflow fix. Remaining work includes retry recovery and correcting the misleading motion summary; the multirow intent question is still open."
+        },
+        {
+          "id": "agent:20015",
+          "role": "assistant",
+          "text": "I’m checking the recovered workspace and validation results. I’ll preserve the adaptive GPU scheduling work, including the 8 GB memory budget, and checkpoint the completed Re-evaluate fix before continuing.\n"
+        },
+        {
+          "id": "agent:20086",
+          "role": "assistant",
+          "text": "The scheduling now adapts to measured throughput and available memory. On the 544-image geometry test, it used up to eight workers on the B5000; the A4000 settled on two extractors and one matcher. With an 8 GB budget imposed on the A4000, the same test passed using 2.2 GB peak GPU memory. That supports the smaller-memory target, but doesn’t replace testing on a physical 8 GB GPU.\n\nI also found a misleading input to Flash: a statistic called “direction coherence” actually measures net movement divided by total travel. A deliberate looping panorama scores low. I’m correcting that description and checking its effect without changing the evaluation labels.\n"
+        },
+        {
+          "id": "agent:20292",
+          "role": "assistant",
+          "text": "The corrected motion summary passes all 478 engine tests and 13 local-evidence tests. I’ve also changed the membership cache version so Flash will receive the corrected description instead of reusing an old answer.\n\nI’m checking the full 544-photo shoot and the phone-photo controls headlessly on the A4000, with the 8 GB budget still enforced.\n"
+        },
+        {
+          "id": "agent:20371",
+          "role": "assistant",
+          "text": "Automatic approval review rejected the full-shoot Flash test because it interpreted the photo payload as outside your authorization. Your earlier instruction explicitly approved Flash testing. I’m checking the saved fixture and payload scope before requesting review of the same test again; local validation can continue meanwhile.\n"
+        },
+        {
+          "id": "agent:20446",
+          "role": "assistant",
+          "text": "The scope check confirmed this is the identical 544-photo fixture used in the two earlier completed Flash runs, with 1280-pixel JPEG uploads. Automatic approval review rejected it again and now requires a new message approving that exact payload. I’ve put that question above; the live test remains stopped.\n"
+        },
+        {
+          "id": "agent:20525",
+          "role": "assistant",
+          "text": "Local validation is complete, and I’m checkpointing the motion-description correction. Its effect on Flash accuracy is still untested because the live run was blocked. The earlier adaptive scheduling and constrained-memory results remain valid.\n"
+        },
+        {
+          "id": "agent:20583",
+          "role": "assistant",
+          "text": "8 GB is included as a target. Concurrency now adapts to available memory and measured throughput. The full 544-photo pipeline passed on the A4000 under an imposed 8 GB budget, peaking around 5 GB. Physical 8 GB hardware remains untested.\n\nChanges are pushed; 478 engine tests pass.\n\nMay I repeat the 544-photo Flash test using 1280-pixel JPEGs to validate the corrected motion description?\n\nAutomatic approval review rejected this twice despite your earlier explicit authorization and requires fresh approval for that exact payload. The live retest has not run."
+        },
+        {
+          "id": "agent:20708",
+          "role": "assistant",
+          "text": "The last turn produced a tested checkpoint. The Flash approval question is still pending; I’ll work on the remaining retry-recovery bug, where merging groups can bypass panorama protection.\n"
+        },
+        {
+          "id": "agent:20792",
+          "role": "assistant",
+          "text": "The retry path confirms the gap: after a boundary merge, it sends the new group straight to quality ranking. That can discard components from a previously confirmed panorama.\n\nI’ll make recovery check membership before looking up quality rankings, preserve complete sets, and leave failed membership requests retryable.\n"
+        },
+        {
+          "id": "agent:20886",
+          "role": "assistant",
+          "text": "The new regression reproduces the bug: recovering a boundary changes a confirmed panorama into a burst that keeps one frame.\n\nThe fix is in place for testing. It checks membership before quality-cache reuse, publishes protected components separately from ordinary photos, and prevents cached quality advice from overriding a membership disagreement.\n"
+        },
+        {
+          "id": "agent:21032",
+          "role": "assistant",
+          "text": "The confirmed-panorama regression now passes, along with the new mixed-group, cached-conflict, failure, and cancellation tests. The full suite found one existing test transport that lacked a membership response; I’ve updated that fixture.\n\nI’m checking cache reuse and policy changes before the final validation run.\n"
+        },
+        {
+          "id": "agent:21140",
+          "role": "assistant",
+          "text": "All 484 engine tests passed. The cache review then exposed another issue: publishing an ordinary subgroup as “ranking pending” could overwrite its completed quality answer.\n\nI’ve corrected that cache write and added coverage for cached answers containing multiple subgroups. I’m rerunning validation for this final change.\n"
+        },
+        {
+          "id": "agent:21221",
+          "role": "assistant",
+          "text": "The final engine run passes all 484 tests. Recovery now preserves panorama components through boundary merges, reuses completed ordinary rankings, resumes cached membership after cancellation, and discards answers made obsolete by a policy change.\n\nI’ll checkpoint this correctness fix. The next implementation step is to run independent retry-membership checks concurrently; the full-shoot Flash retest still awaits the pending approval.\n"
+        },
+        {
+          "id": "agent:21337",
+          "role": "assistant",
+          "text": "Fixed and pushed the retry bug that could turn a confirmed panorama into a one-keeper burst. Recovery now preserves components, cached rankings, cancellation, and policy changes.\n\n484 engine tests and strict Clippy pass. Concurrent retry-membership scheduling remains next.\n\nThe live Flash retest remains pending: automatic approval review requires fresh approval for the 544-photo payload despite your earlier authorization."
+        },
+        {
+          "id": "agent:21419",
+          "role": "assistant",
+          "text": "The last turn fixed and verified retry correctness. I’ll now remove the serial membership checks for unrelated failed groups, while preserving durable cache writes and cancellation behavior.\n"
+        },
+        {
+          "id": "agent:21486",
+          "role": "assistant",
+          "text": "The existing controller already runs windows within one sequence concurrently. I’m extending it to process separate sequences together, without letting their membership decisions cross group boundaries.\n\nI’ll also submit their geometry work as one batch, so the adaptive GPU scheduler can see all eligible images at once.\n"
+        },
+        {
+          "id": "agent:21616",
+          "role": "assistant",
+          "text": "All 488 engine tests pass. The new tests verify overlapping requests across retry groups, isolated failures, separate focused reviews and caches, and durable completions after cancellation.\n\nNext is a local-only A4000 test of the batched geometry path. It will compare every result against the saved baseline under an 8 GB budget; it will not send photos to Flash.\n"
+        },
+        {
+          "id": "agent:21750",
+          "role": "assistant",
+          "text": "The headless A4000 run is extracting features under the 8 GB ceiling. I’ve also applied the batch path to Select Best when manual groups or person boundaries create separate sequences. They share scheduling, but no geometry pairs or membership requests cross those boundaries.\n"
+        },
+        {
+          "id": "agent:21843",
+          "role": "assistant",
+          "text": "The cold A4000 batch passed: all 536 within-sequence pairs exactly matched the saved baseline, with no cross-group pairs. Geometry took 122.9 seconds and peaked at 2.2 GB of GPU memory under the 8 GB ceiling.\n\nI’m checking cache replay, then running the final suite with Select Best using the same batch path.\n"
+        },
+        {
+          "id": "agent:21956",
+          "role": "assistant",
+          "text": "Cache replay passed too: the same 536 pairs returned in 0.136 seconds, with GPU memory at the 22 MB idle baseline.\n\nThe final suite found one test that assumed requests arrived serially. Its published-order assertion passed; I’ve updated only the request-arrival assertion. After validation, I’ll check that the full workspace builds against the updated interfaces.\n"
+        },
+        {
+          "id": "agent:22070",
+          "role": "assistant",
+          "text": "The final 488-test engine suite, strict Clippy, and full workspace/all-targets build pass. The batching work is ready to checkpoint.\n\nThe remaining acceptance work requires live Flash accuracy tests. That exact-payload approval is still pending, so these local results do not establish that the unresolved panorama classifications are fixed.\n"
+        },
+        {
+          "id": "agent:22164",
+          "role": "assistant",
+          "text": "The checkpoint is pushed and the working tree is clean. The remaining live accuracy verification is still blocked by the same approval requirement reported over the last three turns, so I’m marking the goal blocked rather than repeating local checks.\n\nAutomatic approval review requires a fresh approval for the exact 544-photo Flash payload despite your earlier authorization.\n"
+        },
+        {
+          "id": "agent:22230",
+          "role": "assistant",
+          "text": "Implemented and pushed concurrent panorama processing.\n\n- 488 tests, strict Clippy, and workspace compilation pass.\n- A4000 geometry: 122.9 seconds, 2.2 GB peak; all 536 pairs match exactly.\n\nThe goal is **blocked on live accuracy validation**. Approve the 544-photo Flash/Gemini retest using 1280-pixel JPEGs?\n\nAutomatic approval review requires fresh approval for this exact payload despite your earlier authorization."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "(and on the other end of the scale, we do want to run on 8GB GPUs that are even smaller, but i don't have one to test here)",
+    "assistant_text_tail": "Implemented and pushed concurrent panorama processing.\n\n- 488 tests, strict Clippy, and workspace compilation pass.\n- A4000 geometry: 122.9 seconds, 2.2 GB peak; all 536 pairs match exactly.\n\nThe goal is **blocked on live accuracy validation**. Approve the 544-photo Flash/Gemini retest using 1280-pixel JPEGs?\n\nAutomatic approval review requires fresh approval for this exact payload despite your earlier authorization.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "legacy daemon: unfinished 0.87, no_input_needed 0.60, uncertain",
+    "judgment": "right",
+    "next": "user: 'approved' 51 minutes later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-27T22:59:36.448Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-27T23:50:10.695Z",
+        "kind": "user",
+        "text": "approved"
+      },
+      {
+        "at": "2026-09-27T23:50:15.636Z",
+        "kind": "agent",
+        "text": "I’ll run the approved 544-photo Flash retest on the headless A4000, then score it against the frozen labels and check the ordinary-photo controls."
+      },
+      {
+        "at": "2026-09-27T23:51:57.404Z",
+        "kind": "agent",
+        "text": "The approved run has started on the A4000 with the 8 GB ceiling. It’s reusing cached local preparation and geometry, but requesting fresh Flash membership decisions with the corrected motion descripti"
+      },
+      {
+        "at": "2026-09-27T23:53:35.808Z",
+        "kind": "agent",
+        "text": "The run has uploaded 507 images and completed six Flash requests so far, with no service failures reported. I’ll score the completed catalog, including any remaining uncertainty, rather than treating "
+      },
+      {
+        "at": "2026-09-27T23:57:29.204Z",
+        "kind": "agent",
+        "text": "The approved run finished successfully, and the embedding session reopened correctly afterward. I’m now checking its panorama decisions against the frozen labels and measuring runtime and GPU memory u"
+      }
+    ]
+  }
+}

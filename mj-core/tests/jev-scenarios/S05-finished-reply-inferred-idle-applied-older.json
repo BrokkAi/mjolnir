@@ -1,0 +1,99 @@
+{
+  "id": "S05",
+  "title": "Finished reply, inferred idle applied (older contract)",
+  "category": "replied-finished",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "c677a683ed940070fa8102f9c614bf1b",
+    "session_title": "autocull via codex",
+    "decision": "3964862-1790457023819-00000000000000000003",
+    "contract": "turn-verdict-v4",
+    "captured_at": "2026-09-26T21:13:11.708Z",
+    "assessed_at": "2026-09-26T21:13:12.053Z",
+    "recorded_action": "InferIdle",
+    "recorded_status": "applied",
+    "recorded_reason": "applied"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\n the numbers don't line up, pls keep the \"original\" numbers in the grid view instead of renumbering per group so Flash's comments make sense\n</user>\n<assistant>\nI’ll trace the numbers used in Flash’s comments and use those same original numbers in the grid captions.\n</assistant>\n<assistant>\nFixed grid and filmstrip captions to show the original capture numbers used by Flash, so its comments match the photos.\n\nCompile and formatting checks pass. Committed as `aa655bd`.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": " the numbers don't line up, pls keep the \"original\" numbers in the grid view instead of renumbering per group so Flash's comments make sense",
+    "assistant_text_tail": "Fixed grid and filmstrip captions to show the original capture numbers used by Flash, so its comments match the photos.\n\nCompile and formatting checks pass. Committed as `aa655bd`.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "work_state": "Finished",
+    "work_state_confidence": 1.0,
+    "needs_user_input": 0.07999999821186066,
+    "retryable_server_error": 0.019999999552965164
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": true,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "InferIdle applied",
+    "judgment": "right",
+    "next": "user sent a follow-up prompt 34 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-26T21:13:47.386Z",
+        "kind": "user",
+        "text": "otoh i do want to renumber the groups as they get changed  , and match \"next group\" (after keep/reject on the last photo in group N) to group N+1 in display order"
+      },
+      {
+        "at": "2026-09-26T21:13:51.694Z",
+        "kind": "agent",
+        "text": "I’ll make group labels follow the current display order and make advancing past the last photo move to the next group in that same order."
+      },
+      {
+        "at": "2026-09-26T21:14:39.852Z",
+        "kind": "agent",
+        "text": "The rail already sorts groups by ranking status and person, but captions and automatic advancement still use catalog order. I’ll give labels, navigation, and prefetch one shared display order, while k"
+      },
+      {
+        "at": "2026-09-26T21:17:08.970Z",
+        "kind": "agent",
+        "text": "Labels and movement now use the same display order. I’m testing reordered groups, including undo and reaching the last displayed group when its catalog position is earlier than the others."
+      },
+      {
+        "at": "2026-09-26T21:19:03.071Z",
+        "kind": "agent",
+        "text": "The navigation tests pass. I also found that saved review logs contain keep/reject actions that depend on the old order. I’m preserving that replay behavior so reopening a shoot won’t apply past decis"
+      },
+      {
+        "at": "2026-09-26T21:20:11.655Z",
+        "kind": "system",
+        "text": "Interrupted"
+      }
+    ]
+  }
+}

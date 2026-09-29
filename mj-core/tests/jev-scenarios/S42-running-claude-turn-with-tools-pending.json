@@ -1,0 +1,102 @@
+{
+  "id": "S42",
+  "title": "Running Claude turn with tools pending for a minute",
+  "category": "running-tool-in-flight",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "a460eb82ca61a947c5e634abf72dab06",
+    "session_title": "/home/jonathan/Projects/bifrost5 via codex",
+    "decision": "874445-1790692488187-00000000000000000001",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T15:08:31.843Z",
+    "assessed_at": "2026-09-29T15:08:32.051Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "harness": "claude",
+    "phase": "running",
+    "silent_for_s": 60,
+    "tools_in_flight": [
+      {
+        "title": "ls ; ls | head ; echo ; ls | head ; ls | head [pending]",
+        "running_s": 61
+      },
+      {
+        "title": "Terminal [pending]",
+        "running_s": 60
+      }
+    ],
+    "transcript_summary": "<user>\nthat's reasonable. create an umbrella epic to own. then give me prioritized next steps\n</user>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "that's reasonable. create an umbrella epic to own. then give me prioritized next steps",
+    "assistant_text_tail": ""
+  },
+  "recorded_verdict": {
+    "work_state": "StillWorking",
+    "work_state_confidence": 0.6200000047683716,
+    "needs_user_input": 0.06000000238418579,
+    "retryable_server_error": 0.0,
+    "assessment": {
+      "failure": {
+        "choice": "unclear",
+        "confidence": 0.8500000238418579
+      },
+      "input": {
+        "choice": "none",
+        "confidence": 0.9399999976158142
+      },
+      "work": {
+        "choice": "authorized_unfinished",
+        "confidence": 0.6200000047683716
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "nothing",
+    "judgment": "right",
+    "next": "tool results arrived 33 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T15:09:50.809Z",
+        "kind": "agent",
+        "text": "The recovery directory lost its regular files but kept directories; and upstream edited the plan file four times, so my uncommitted plan edit needs to be re-applied over a merge. Doing both now."
+      },
+      {
+        "at": "2026-09-29T15:10:19.475Z",
+        "kind": "agent",
+        "text": "Both sides belong; the conflict is just two appended sections. Resolving by keeping both, then committing and pushing."
+      },
+      {
+        "at": "2026-09-29T15:11:18.146Z",
+        "kind": "agent",
+        "text": "Epic #3745 is filed, linked from #3331, #3333, #3334, #3335 and #3163, and recorded in the plan (pushed as 5b449f1b3). One thing to know: the `/tmp` recovery directory lost every regular file while th"
+      }
+    ]
+  }
+}

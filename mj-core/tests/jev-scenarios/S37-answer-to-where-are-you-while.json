@@ -1,0 +1,427 @@
+{
+  "id": "S37",
+  "title": "Answer to 'where are you' while the user is actively conversing",
+  "category": "continuation-should-not-fire",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "81b21c67199a48f8cfad7ddc7076683b",
+    "session_title": "autocull via codex2",
+    "decision": "assessment-81b21c67199a48f8cfad7ddc7076683b-30115",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-28T17:29:11.778Z",
+    "assessed_at": "2026-09-28T17:29:40.390Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "superseded",
+    "recorded_reason": "turn_or_lifecycle_changed"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-51d65cc1aa59d5f0e3b2a43636d56337",
+          "role": "user",
+          "text": "what inference could we potentially offload from flash to local models, or use local models to help flash be more accurate? top 3 ideas"
+        },
+        {
+          "id": "user:prompt-db68b3579404fcb531b90743b7fdb98b",
+          "role": "user",
+          "text": "cool. see if you can get 1 and 2 working. note that i have another agent using this machine and the display-connected gpu. if you can do your tests headless on one of the B5000s that's probably best"
+        },
+        {
+          "id": "user:prompt-fd791ffb796e5a5881fe36f21ea4448a",
+          "role": "user",
+          "text": "my main photo library is D:\\Photos\\Originals, lots more there, but it's a slow hdd, recommend copying jpgs of anything you want to test with"
+        },
+        {
+          "id": "user:prompt-b5ed26af48b0cd383b04ee913dd95e0c",
+          "role": "user",
+          "text": "there aren't many blurry photos in my kept Originals tho\n\nfor that you'll need to look in my unprocessed backlog in C:\\Users\\jbell\\Pictures\n\nthe phone imports are probably fertile ground for low quality pics"
+        },
+        {
+          "id": "user:prompt-3e49d458c356109024f1e8fffa0e83a5",
+          "role": "user",
+          "text": "fuck\n\ni explicitly approve testing with flash, that's the entire point"
+        },
+        {
+          "id": "user:prompt-0287cd08f7385dba64bb348ed050984a",
+          "role": "user",
+          "text": "re panoramas,\n\n1. any additional ideas to try? 2/3 success isn't amazing\n\n2. expensive is panorama geometry to compute? how optimized is our implementation? i'm basically asking how slow it would be if we moved it to the a4000 instead of the higher end b5000"
+        },
+        {
+          "id": "user:prompt-c208a397a3890a6dbb5802afbcfbfa07",
+          "role": "user",
+          "text": "continue (host rebooted)"
+        },
+        {
+          "id": "user:prompt-73d7fbf8639b79ced7662cae6d594fe9",
+          "role": "user",
+          "text": "the 4000 connected to monitor is the 20G model fwiw\n\nbut yes \"runs on slow 16G a4000\" should be a goal"
+        },
+        {
+          "id": "user:prompt-fbe3eb43bfa1e3ca57024f14ebadf34f",
+          "role": "user",
+          "text": "/goal make panorama accuracy production quality"
+        },
+        {
+          "id": "user:prompt-4dce7c67c15f3f6d7fb1a90c4ce1a6a3",
+          "role": "user",
+          "text": "> Four sessions saved only 11 seconds\n\nwe should make this adaptive instead of hardcoding right? i assume B5000 has more processing capacity"
+        },
+        {
+          "id": "user:prompt-d8e0b96306438ff123355012f13c6af4",
+          "role": "user",
+          "text": "(and on the other end of the scale, we do want to run on 8GB GPUs that are even smaller, but i don't have one to test here)"
+        },
+        {
+          "id": "user:prompt-6cf875a145390a1113b91b460cb58497",
+          "role": "user",
+          "text": "approved"
+        },
+        {
+          "id": "user:prompt-7344cef2f0bdbcf781b16e28282ab5be",
+          "role": "user",
+          "text": "i explicitly approve this and future flash tests"
+        },
+        {
+          "id": "user:prompt-da4faf69c8181812e840ebb97a9eade7",
+          "role": "user",
+          "text": "phone controls?"
+        },
+        {
+          "id": "user:prompt-b1f6e1753db01d837a0f952eb585e982",
+          "role": "user",
+          "text": "what's with the june shoot failures?"
+        },
+        {
+          "id": "user:prompt-ab0789f3b8007f4674addf7a56a17538",
+          "role": "user",
+          "text": "2+minutes it's definitely not an intentional panorama, i think flash is right\n\nnot sure about the other two, wdyt"
+        },
+        {
+          "id": "user:prompt-cf3f618861f1aa72b6d1840e7ceb2d45",
+          "role": "user",
+          "text": "great, so is enhanced local panorama evidence wired up to prod now?"
+        },
+        {
+          "id": "user:prompt-10e26bfd30ca32c515e878da0c1eec89",
+          "role": "user",
+          "text": "what was the other local-inference project we spec'd out?"
+        },
+        {
+          "id": "user:prompt-375966cf4967baca892fb2ec45cf7d42",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
+          "id": "user:prompt-4712ac850804f141e2573c9760ef09ba",
+          "role": "user",
+          "text": "i want to incorporate The preference-aware AWB module in SamsungLabs/modular_neural_isp, specifically its awb_ccm directory\n\nAWB should be on by default for auto-develop\n\nadd an AWB icon like the A icon to allow disabling it separately, we don't need to precompute all combinations tho\n\nideally we can do this in the existing develop pipeline rather than adding another raw decode stage"
+        },
+        {
+          "id": "user:prompt-98de8267289614dc799e38f3f11b40a1",
+          "role": "user",
+          "text": "sorry, i didn't see your 2nd question"
+        },
+        {
+          "id": "user:prompt-26362cc0866d34991af9ad69d023dc88",
+          "role": "user",
+          "text": "we want to support both but we only engage AWB when A is also engaged, so when SOOC jpeg doesn't need A then it doesn't get AWB either unless user asks for it later; use the same linearization that we do for applying A to jpeg, if that makes sense"
+        },
+        {
+          "id": "user:prompt-46def787b9f588628e9c957d50d81b88",
+          "role": "user",
+          "text": "\"we only engage AWB when A is also engaged\" -> should be \"we only auto-AWB when A is also auto-engaged\""
+        },
+        {
+          "id": "user:prompt-1984f6c06d2a62c7f0fa25704c7f6085",
+          "role": "user",
+          "text": "i also want the AWB and A to be exported in lightroom-compatible sidecars on Finish"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9f7be77b487d18962c49c6057b46d",
+          "role": "assistant",
+          "text": "The final domain and engine suites pass, including 505 engine tests. App tests and the final native-photo check are still running. The first 8 GiB-ceiling run hit an inference allocation failure while builds were active, so I’m repeating it without that overlap before drawing conclusions about small-GPU support.\n"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9f89865e487d18249b65bdd57fe94",
+          "role": "assistant",
+          "text": "The isolated 8 GiB-ceiling run completed without allocation failures. The daylight magenta cast is gone; the warm-light fallback produced byte-identical A-only pixels and exported “As Shot” WB. I’ve also added an explicit AWB retry path so a temporary inference failure doesn’t permanently block the control.\n"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9fb03eb8887d1aa43ce5783b77062",
+          "role": "assistant",
+          "text": "All 304 app tests now pass, alongside 506 engine tests. I’m finishing the last targeted checks: all four renditions staying resident without re-decoding, and preserving existing XMP filename case during moves. Then I’ll push the completed work.\n"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9fc2cf4f887d1808c1debaca9203a",
+          "role": "assistant",
+          "text": "The four-rendition cache test passed: switching among Original, A, AWB, and A+AWB needs no further source reads once they’re loaded. The final lint check found an unused UI task in a test; I’m fixing that and checking Finish’s preservation of existing `.XMP` filenames before committing."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9fc7abfe887d1895deaf7888f07d4",
+          "role": "assistant",
+          "text": "The final checks passed, including strict workspace Clippy and all 44 Finish tests. Finish exports the selected A/AWB settings as editable XMP approximations; JPEG sidecars can be imported as named Lightroom presets. Lightroom’s actual rendering remains untested. I’m committing and pushing the completed work now."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016ab9fcb4269c87d1858d9695c7577bfa",
+          "role": "assistant",
+          "text": "Implemented and pushed to `origin/master` (`c6754e3`).\n\n- AWB defaults on when A automatically engages; separate A/AWB controls support all four combinations.\n- Uses the existing decode pipeline and generates variants lazily.\n- Finish exports selected A/AWB settings to XMP. JPEG sidecars are importable Lightroom presets; settings approximate Autocull’s rendering.\n- Invalid AWB estimates visibly fall back to A-only.\n\nValidation: 885 tests passed, strict Clippy passed, and headless A4000 testing succeeded with an 8GB memory ceiling. Actual 8GB hardware and Lightroom rendering remain untested."
+        },
+        {
+          "id": "user:prompt-c479191d5f52e68a8e492d920a556950",
+          "role": "user",
+          "text": "> Invalid AWB estimates\n\nhow does this arise?"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8b53eb4487d1a29f7f06486c5744",
+          "role": "assistant",
+          "text": "Samsung’s pipeline has two stages: estimate the scene’s neutral white balance, then shift it toward Samsung’s preferred rendering.\n\nOn two warm-lit Sony dinner photos (`DSC01439` and `DSC01440`), **the second network produced a negative component in its predicted XYZ illuminant**—an unusable result for calculating white balance. Running the same inputs through upstream Python reproduced it, so this wasn’t introduced by our ONNX conversion.\n\nMy suspicion is that those inputs fall outside the preference network’s training distribution; we haven’t established that conclusively.\n\nWe currently reject that result and keep A-only. A useful improvement would be to fall back to the first stage’s neutral AWB when it’s valid, preserving white-balance correction even when the preference mapping fails."
+        },
+        {
+          "id": "user:prompt-cbfeb6bc85bbeba31efc19bf7ec53db9",
+          "role": "user",
+          "text": "agreed, i want to fall back\n\nwhat about \"JPEG sidecars can be imported\", are you mutating the jpegs? or saying \"lr will use the jpeg settings\" [i don't think this is correct] or maybe \"you can create a lr preset to prefer the jpeg rendering\" (maybe this is correct idk)"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8ba24bbc87d1b622dca2b711a1ab",
+          "role": "assistant",
+          "text": "I’ll add neutral AWB as the fallback when Samsung’s preference stage fails.\n\nThe JPEG files are untouched. Finish writes a separate XMP formatted as a photo-specific Lightroom preset, which you would manually import and apply. Lightroom does **not** automatically use it as that JPEG’s sidecar. It approximates our A/AWB adjustments; it doesn’t tell Lightroom to prefer the JPEG rendering. My earlier wording obscured that distinction."
+        },
+        {
+          "id": "user:prompt-7c5fe38c260a91e343b519b3f7b764e4",
+          "role": "user",
+          "text": "what were you communicating w/ your earlier wording then"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8bbc6b6487d1ab1a03bb839ccb92",
+          "role": "assistant",
+          "text": "I meant: “We export a photo-specific XMP preset that you can manually import into Lightroom and apply to that JPEG.”\n\nCalling that “Lightroom-compatible sidecars” overstated it. It does **not** give JPEGs the automatic sidecar workflow you requested, and it doesn’t make Lightroom prefer the JPEG’s rendering. It’s a separate, manual preset workflow."
+        },
+        {
+          "id": "user:prompt-a9fef14aa259ac852e7b43e5f8aa8142",
+          "role": "user",
+          "text": "but i want \"hey lightroom pull in this folder\" and have it recognize the xmp alongside jpeg and raw and use the xmp by default, is that not how it works?"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8be5a09887d1b2aa74f936226327",
+          "role": "assistant",
+          "text": "I’ll check Adobe’s documented import behavior for RAW and JPEG so I can give you a precise answer."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8bee435887d1950334150bc6592f",
+          "role": "assistant",
+          "text": "That is the normal workflow for proprietary RAW files such as ARW and NEF. JPEGs are different: Lightroom Classic expects their XMP settings embedded inside the JPEG, rather than in an adjacent `.xmp` file. [Adobe documents that distinction here](https://helpx.adobe.com/lightroom-classic/desktop/organize-photos-in-lightroom-classic/metadata-basics-actions.html).\n\nTo deliver your folder-import workflow for JPEGs, we would need to embed the settings as metadata. That changes the file’s metadata, but can preserve the compressed image data exactly—no recompression or baked-in edits. The preset workaround I implemented does not meet that workflow.\n\nI’m continuing the neutral-AWB fallback you approved while we settle the JPEG behavior."
+        },
+        {
+          "id": "user:prompt-b46fbdff10f07c2e44065dd3d9a708d9",
+          "role": "user",
+          "text": "ok so in my common case (paired jpg + raw) lr would ignore the jpg (except for previews) and respect the xmp for develop/export right? we only need to care about jpg metadata if there is no raw to pair the xmp with?"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8c4db08c87d1b2d3f6a1f485cde0",
+          "role": "assistant",
+          "text": "Yes—for your paired RAW+JPEG workflow, with **“Treat JPEG files next to raw files as separate photos” unchecked**, Lightroom Classic treats the JPEG as a companion and develops/exports the RAW using its XMP settings. The pair must share the same basename and folder. [Adobe’s import preference documentation](https://helpx.adobe.com/uk/lightroom-classic/desktop/import-photos/file-import-formats-settings.html).\n\nSo JPEG metadata matters only for JPEG-only photos, or JPEGs you deliberately import as separate photos. I wouldn’t assume the separate JPEG is always used for previews; Lightroom can also use the RAW’s embedded preview.\n\nOne implementation detail matters here: the shared XMP must contain **RAW-derived adjustments**, not JPEG correction curves. I’m checking that alongside the AWB fallback."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8c852efc87d1a10abbcb7e8c490d",
+          "role": "assistant",
+          "text": "The paired-file path already develops from the RAW and exports those RAW settings, so it matches your common Lightroom workflow.\n\nThe neutral-AWB fallback now passes its tests and the workspace lint check. I’m testing it on the two warm-lit RAWs that previously failed, to confirm they retain AWB rather than dropping to A-only."
+        },
+        {
+          "id": "user:prompt-464b1fe38a2e5e496b49e9e983ad0a90",
+          "role": "user",
+          "text": "ok. that's fine. create a ticket documenting the limitation for jpg-only photos and we'll descope it for now"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8c99593487d1864b910177f02b07",
+          "role": "assistant",
+          "text": "I’ll file a ticket for automatic Lightroom import of JPEG-only adjustments and leave that out of scope. The paired RAW+JPEG workflow will continue to use the RAW’s XMP, with JPEG files untouched."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8cc97ad887d193f1edda9266aec1",
+          "role": "assistant",
+          "text": "Created [issue #1](https://github.com/jbellis/autocull/issues/1) documenting and deferring JPEG-only automatic import.\n\nBoth previously failing warm-lit RAWs now successfully render with neutral AWB, in both AWB-only and A+AWB modes. The saved settings record the neutral correction and why the preference stage was skipped. I’m committing that fix now."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba8cf8818887d18bf1f7600f94b23b",
+          "role": "assistant",
+          "text": "Created [issue #1](https://github.com/jbellis/autocull/issues/1) and deferred JPEG-only automatic Lightroom import. Paired RAW+JPEG uses RAW XMP; JPEGs remain untouched.\n\nAlso implemented and pushed neutral-AWB fallback (`afc6dd3`). Both previously failing RAWs now retain AWB. Focused tests and strict Clippy passed."
+        },
+        {
+          "id": "user:prompt-007da03aaef35637d55823bcc28e18d3",
+          "role": "user",
+          "text": "i want to replace the classic auto-develop with SVDLUT — ICCV, here is part of my discussion w GPT-web \n---\n| Model | Why it belongs on your shortlist | Available implementation | Expected integration |\n|---|---|---|---|\n| **SVDLUT — ICCV 2025** | My first choice for the quality/footprint/speed compromise. Spatially aware, rather than just a global color LUT. | Official PyTorch implementation and pretrained models; Apache-2.0. | Export the predictor; port the fused LUT/grid application kernel. |\n| **LLF-LUT++ — TPAMI, released 2025** | Most directly aligned with developing high-dynamic-range input into a pleasing image, including local detail and contrast. | Official code and pretrained checkpoints; MIT. | More work: LUT application plus multiscale pyramid processing. |\n| **BPAM — ICCV 2025** | Another strong local-enhancement architecture: predicts tiny, spatially varying MLPs instead of one global transform. | Official PyTorch repository with a pretrained directory; MIT. | Grid slicing and per-pixel MLP application need careful GPU deployment. |\n| **SepLUT — ECCV 2022** | Older, but a useful low-complexity baseline: learned 1D curves plus a 3D LUT. | Official pretrained sRGB and XYZ models; Apache-2.0. | Probably the easiest full-resolution rendering stage to port. |"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba95666c3487d19659d6b03c1ba0e0",
+          "role": "assistant",
+          "text": "I’ll check SVDLUT’s official code and pretrained models against our RAW/JPEG pipeline, including its input color space, GPU rendering path, and what replacing A would mean for Lightroom export."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba95813d9087d1a25addf1f1c92941",
+          "role": "assistant",
+          "text": "The official implementation includes separate sRGB retouching and XYZ tone-mapping paths, so there’s a plausible fit for both JPEG and RAW. Its small predictor can be separated from the full-resolution GPU transform. [Official code](https://github.com/WontaeaeKim/SVDLUT)\n\nThe major tradeoff is Lightroom export: SVDLUT changes the same color differently depending on its position in the image. Our current global exposure/curve XMP cannot reproduce that. We need to decide how much matching Lightroom output matters before settling the replacement plan."
+        },
+        {
+          "id": "user:prompt-4cf76b551cbdae8baa54f557f6217cef",
+          "role": "user",
+          "text": "can we tell lr to import tiff + raw + jpeg, w tiff as part of a stack?"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba968d2b7c87d19195b896c01494f7",
+          "role": "assistant",
+          "text": "I’ll check whether Lightroom can read stack membership from metadata, or whether that requires an import option or plugin."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba96a15be087d195dab960b436e01c",
+          "role": "assistant",
+          "text": "Yes, through a **Lightroom Classic import plugin**. Its SDK can import a photo into a stack with another photo and place it above or below. We could provide an “Import Autocull shoot” command that groups each TIFF with its RAW/JPEG and puts the TIFF on top. That would be a plugin command, rather than ordinary folder import recognizing stack instructions in XMP. [Adobe SDK reference, mirrored](https://lrc.mcor.dev/modules/LrCatalog.html#addPhoto)\n\nWithout a plugin, Lightroom offers capture-time auto-stacking after import, but that is less precise for bursts and doesn’t guarantee our TIFF is on top. [Adobe stacking documentation](https://helpx.adobe.com/ee/lightroom-classic/help/grouping-photos-stacks.html)"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016aba9ef6d68087d1bb0b3f5485b71e2b",
+          "role": "assistant",
+          "text": "I found a significant issue in the released SVDLUT code: both CPU and CUDA kernels use integer division for spatial coordinates. Almost every pixel therefore samples the same spatial corner, undermining the advertised local adaptation. There’s an [open upstream report](https://github.com/WontaeaeKim/SVDLUT/issues/2) with no author response.\n\nSimply correcting the division could change the behavior expected by the pretrained weights. I recommend comparing the released and corrected kernels on your photos before replacing A. The Lightroom plugin will remain deferred as requested."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa008d16487d182c36ed57374d63a",
+          "role": "assistant",
+          "text": "I’ll interpret the TIFF scope as **kept captures that have a RAW and have A selected**, including A+AWB. JPEG-only photos stay unchanged on disk, and the Lightroom plugin is deferred.\n\nFor the replacement, I’m keeping the existing A/AWB controls and automatic gate. The first milestone will compare the released and corrected SVDLUT kernels, and verify the XYZ checkpoint’s color conventions before feeding it our RAW output. Our current intermediate XYZ is D50; treating every input called “XYZ” as interchangeable could introduce another color mismatch."
+        },
+        {
+          "id": "01a0e8d7-8e4e-7422-89f9-fc913b5118b9-plan",
+          "role": "assistant",
+          "text": "# Replace classic A with SVDLUT\n\n## Summary\n\nReplace Basicadj auto-adjustment behind the existing **A** control with SVDLUT for RAW and JPEG development. Preserve independent AWB controls, automatic activation rules, lazy variants, and the existing RAW decode.\n\nFinish will create a full-resolution TIFF for **kept captures with a RAW and A selected**. RAW sidecars retain AWB settings; the TIFF carries the SVDLUT appearance. Lightroom stacking and JPEG-only automatic handoff remain deferred.\n\n## 1. Qualify the pretrained models first\n\n- Pin official SVDLUT revision `4759030cb6a51641a97f4031f56bc21e032e5cea`, checkpoint hashes, and Apache-2.0 attribution. Evaluate the small `fiveK_XYZ` and `fiveK_sRGB` checkpoints; exclude the larger PPR10K models initially.\n- Compare the released kernel against a corrected floating-point spatial-coordinate implementation. Preserve both in qualification tooling, not as user-facing modes. The released CPU/CUDA kernels have the [reported integer-division defect](https://github.com/WontaeaeKim/SVDLUT/issues/2).\n- Establish the XYZ checkpoint’s white point, channel ordering, scaling, and clipping conventions from upstream data/reference outputs. Do not directly substitute our D50 XYZ intermediate without verifying the conversion.\n- Compare Original, classic A, and both SVDLUT implementations on copied daylight, indoor, skin, mixed-light, sunset, underexposed, and highlight-heavy photographs. Include the previously problematic warm Sony RAWs and JPEG phone images.\n- Present comparisons before the production switch. If corrected processing introduces systematic artifacts or the RAW input convention cannot be established, retain classic A and report the blocker. Retraining is outside this plan.\n\n## 2. Native inference and rendering\n\n- Export the predictor and table reconstruction to ONNX for existing DirectML inference. Run prediction from the upstream 256×256 input convention; port fused grid slicing/LUT application to WGSL.\n- RAW processing retains black correction, selected white balance, highlight reconstruction, demosaic, and calibrated color conversion. SVDLUT replaces Basicadj’s automatic tone/color stage.\n- JPEG processing uses normalized sRGB. When AWB is selected, apply its existing linear-light correction before returning to the model’s sRGB input domain.\n- Preserve floating-point precision until final output; do not route RAW development through an intermediate 8-bit JPEG.\n- Predict once per requested A/AWB combination and cache the resulting tables. Use identical parameters for thumbnails, full-resolution viewing, ranking, and TIFF output.\n- Use full-image spatial coordinates across GPU bands and tiles. Orientation must agree between predictor input and rendering; viewport zoom must never rerun prediction on the cropped view.\n- Reuse memory-budgeted concurrent GPU scheduling. Account for model sessions and rendering buffers, targeting the headless A4000 and an 8 GiB ceiling.\n\n## 3. Recipes, compatibility, and controls\n\n- Replace the Basicadj-only correction payload with a versioned treatment supporting legacy Basicadj recipes and SVDLUT tables, alongside the existing white-balance data.\n- Include checkpoint, preprocessing, kernel revision, source identity, orientation, and AWB treatment in cache identities. Invalidate dependent previews and ranking evidence together.\n- Preserve existing review choices and undo history. Regenerate outdated A artifacts lazily; never interpret legacy parameter bytes as SVDLUT data.\n- Keep Original / A / AWB / A+AWB behavior. AWB still automatically accompanies automatic A activation, with neutral-AWB fallback when preference mapping fails.\n- Surface inference failures without silently presenting classic output as successful SVDLUT development.\n\n## 4. Finish and Lightroom\n\n- Produce an upright, full-resolution **16-bit RGB TIFF with embedded sRGB profile and lossless compression**, named `<stem>-Autocull.tif`, using the selected cached recipe.\n- TIFF pixels include A and, when selected, AWB. Preserve capture metadata and record source/model provenance; avoid embedding adjustments that would apply the development twice.\n- RAW XMP exports the selected AWB only. Remove superseded Autocull-owned classic A settings while preserving unrelated metadata. Do not pretend SVDLUT’s spatial treatment is represented by global Lightroom sliders.\n- Generate TIFFs only during Finish, with progress reporting and memory-bounded work. Decode the source once for that export; do not rerun prediction.\n- Journal TIFF creation alongside existing Finish operations. Support interruption, retry, rollback, source-change checks, and collision-safe naming without overwriting unrelated files.\n- Track generated TIFFs as derivatives so reopening the shoot does not introduce new culling candidates or repeated exports.\n- JPEG-only photos and rejected captures receive no new TIFF. Ordinary Lightroom import can load the TIFF and originals, but automatic stacking requires the deferred plugin.\n\n## Validation\n\n- Check ONNX predictions and WGSL output against the qualified reference, including interpolation boundaries, spatial gradients, portrait orientation, and band seams.\n- Verify all four control combinations, cache invalidation, legacy catalogs, single-decode development, and consistent preview/full-resolution/export recipes.\n- Verify TIFF precision, profile, metadata, orientation, decoded-pixel agreement, and Finish recovery/collision behavior.\n- Measure cold/warm latency and concurrent memory use headlessly on the A4000; label the 8 GiB ceiling separately from physical 8GB hardware testing.\n- Run affected core, engine, renderer, and app tests plus strict workspace Clippy through the existing Windows/mbx build setup.\n- Record qualification evidence and maintain the implementation ExecPlan under `.agents/plans/`.\n"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa256c2fc87d19c2042bdd10f5619",
+          "role": "assistant",
+          "text": "I’ll start with the qualification gate: pin the upstream models, compare the released and corrected kernels, and verify the RAW input convention. I’ll keep classic A active until those checks support the replacement."
+        },
+        {
+          "id": "user:prompt-0779eab6ae67723fd79c4d7210a3be0e",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa315821087d18234d77d819d9522",
+          "role": "assistant",
+          "text": "I’ll continue from the qualification step and apply"
+        },
+        {
+          "id": "user:prompt-c3d8be1d472c943848219ccce0e41221",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa31f851887d1a7a9fb29e35059a0",
+          "role": "assistant",
+          "text": "I’m continuing the SVDLUT qualification work under the updated repository instructions. I’ll first check the interrupted command’s result, then set up the reproducible model and kernel comparison."
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa337ba0887d1afa45b5767fb5ed7",
+          "role": "assistant",
+          "text": "The working tree has changed substantially since the plan was approved: there are staged deletions of AWB and XMP export code, alongside broad application changes. I’ll leave those changes untouched and do the SVDLUT reference work in scratch space while we establish which codebase the integration should target."
+        },
+        {
+          "id": "user:prompt-91dabab088046e6cbdfcd216fa2fc4db",
+          "role": "user",
+          "text": "well fuck, i hope you didn't have unpushed work\n\nare you in the /mnt/c/SSD2/Projects/autocull/ wt or the one nestedin /mnt/c/SSD2/Projects/autocull/.mj"
+        },
+        {
+          "id": "msg_0eefbebb5c226ced016abaa3e4a6d887d1a52a0985aa8476fa",
+          "role": "assistant",
+          "text": "I’m in the nested worktree:\n\n`/mnt/c/SSD2/Projects/autocull/.mj/clones/81b21c67199a48f8cfad7ddc7076683b`\n\nAll completed AWB/XMP work was committed and pushed through `afc6dd3`. I haven’t made any SVDLUT implementation edits yet, so there’s no unpushed work from me to lose. I haven’t touched the staged changes I found."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "well fuck, i hope you didn't have unpushed work\n\nare you in the /mnt/c/SSD2/Projects/autocull/ wt or the one nestedin /mnt/c/SSD2/Projects/autocull/.mj",
+    "assistant_text_tail": "I’m in the nested worktree:\n\n`/mnt/c/SSD2/Projects/autocull/.mj/clones/81b21c67199a48f8cfad7ddc7076683b`\n\nAll completed AWB/XMP work was committed and pushed through `afc6dd3`. I haven’t made any SVDLUT implementation edits yet, so there’s no unpushed work from me to lose. I haven’t touched the staged changes I found.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9300000071525574
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.6100000143051147
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.9100000262260437
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": true,
+    "action": "uncertain",
+    "wrong_actions": []
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "nothing (uncertain)",
+    "judgment": "right",
+    "next": "user's next message arrived 29 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-28T17:29:40.321Z",
+        "kind": "user",
+        "text": "where did the staged deletions come from then? very very strange. i guess just stash or revert them"
+      },
+      {
+        "at": "2026-09-28T17:29:42.697Z",
+        "kind": "agent",
+        "text": "I don’t know what created them; Git’s staging area doesn’t record that. I’ll stash the changes in this nested worktree so they’re preserved, then verify it matches the pushed commit before resuming SV"
+      },
+      {
+        "at": "2026-09-28T17:30:46.041Z",
+        "kind": "agent",
+        "text": "Stashed safely as `stash@{0}` (`edd65d3`). The nested worktree is clean.  I also found a clue: the staged files exactly matched older commit `f7117a8`, while HEAD had moved to `afc6dd3`. The reflog sh"
+      },
+      {
+        "at": "2026-09-28T17:33:31.470Z",
+        "kind": "user",
+        "text": "ok, pls continue w the SVDLUT implementation"
+      },
+      {
+        "at": "2026-09-28T17:33:35.063Z",
+        "kind": "agent",
+        "text": "I’ll resume from the clean worktree, starting with the model and kernel comparisons. I’ll also check the newer commits on `origin/master` so the integration preserves the other agent’s work."
+      },
+      {
+        "at": "2026-09-28T17:33:55.621Z",
+        "kind": "agent",
+        "text": "The current `origin/master` reference also lacks AWB/XMP, so I won’t merge it blindly into this worktree. Our pushed AWB commits remain intact here. I’ll proceed with the isolated qualification toolin"
+      }
+    ]
+  }
+}
