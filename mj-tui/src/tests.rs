@@ -4119,6 +4119,32 @@ fn the_sessions_title_leads_with_the_hidden_count_and_ends_with_the_clear_chip()
     }
 }
 
+/// RCL-2 (2026-09-29): with the Sessions pane minimized, the title still says
+/// a filter is on.
+#[test]
+fn a_minimized_sessions_pane_title_still_shows_the_filter_chip() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for c in "ask".chars() {
+        dashboard.handle_key(key(KeyCode::Char(c)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    assert!(dashboard.sessions_filter.is_some());
+
+    let lines = drawn(&mut dashboard, 80, 40);
+    let pane = dashboard.pane_areas.expect("pane areas")[0];
+    let title = &lines[usize::from(pane.y)];
+    let title = title
+        .chars()
+        .skip(usize::from(pane.x))
+        .take(usize::from(pane.width))
+        .collect::<String>();
+    assert!(title.contains('×'), "{title:?}");
+}
+
 #[test]
 fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
     let mut dashboard = dashboard_with_attention_mix();

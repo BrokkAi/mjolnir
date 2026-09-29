@@ -407,6 +407,50 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
     }
 }
 
+/// RCL-2 (2026-09-29): a minimized Sessions pane swaps its title for the
+/// attention count when the title is narrow. A filter in force must still show
+/// on it: the label gives way first, and the clear chip stays.
+#[test]
+fn a_narrow_sessions_title_with_attention_keeps_the_filter_clear_chip() {
+    use crate::AttentionLevel;
+    use mj_core::config::SymbolSet;
+
+    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+        theme::with_symbols(symbols, || {
+            let badge = Some((AttentionLevel::Waiting, 1));
+            let mut saw_label = false;
+            for width in 14..=60u16 {
+                let title = sessions_title_with_attention("/needle", width, badge, true, true);
+                let text = title.line.to_string();
+                let budget = usize::from(pane_title_content_width(width, true));
+                if text.chars().count() > budget {
+                    // Only the base title may overflow, and it is the one that
+                    // truncates its own label; it still ends with the chip.
+                    assert!(text.contains(close), "{symbols:?} {width}: {text:?}");
+                    continue;
+                }
+                // The full form puts the attention suffix after the chip.
+                assert!(
+                    text.contains(&format!(" {close} ")),
+                    "{symbols:?} {width}: {text:?}"
+                );
+                let chip = usize::from(title.clear_chip.expect("chip has room"));
+                assert!(
+                    text.chars()
+                        .skip(chip)
+                        .collect::<String>()
+                        .starts_with(&format!(" {close} ")),
+                    "{symbols:?} {width}: {text:?}"
+                );
+                saw_label |= text.contains("/n");
+            }
+            assert!(saw_label, "{symbols:?}: some width keeps part of the label");
+            let none = sessions_title_with_attention("", 20, badge, true, false);
+            assert!(!none.line.to_string().contains(close), "no filter, no chip");
+        });
+    }
+}
+
 /// The drawn Sessions pane shows the chip on its title row exactly while a
 /// filter is in force, with the state label and, given the room, the hidden
 /// count before it.

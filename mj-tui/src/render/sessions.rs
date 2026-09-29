@@ -1047,7 +1047,7 @@ pub(crate) fn sessions_title(
 /// Reserve a title suffix for the sessions that want a person. At narrow
 /// widths a compact form keeps that count visible while preserving the
 /// Sessions label; the narrowest form is the most urgent level's own glyph.
-/// The compact forms leave out the filter label, and its clear chip with it.
+/// The compact forms give up the filter label before they give up its clear chip.
 pub(crate) fn sessions_title_with_attention(
     workspace_name: &str,
     width: u16,
@@ -1073,18 +1073,47 @@ pub(crate) fn sessions_title_with_attention(
             clear_chip: base.clear_chip,
         };
     }
-    let compact = Line::styled(format!(" Sessions [{glyph}{count}]"), style);
-    if compact.width() <= budget {
+    // The compact forms lead with the count. A filter still says it is on: the
+    // label follows in whatever room is left, and the clear chip always ends
+    // the title, so the label is what gives way first.
+    let compact_forms = [
+        format!(" Sessions [{glyph}{count}]"),
+        format!(" {glyph}{count}"),
+    ];
+    for form in compact_forms {
+        let lead = Span::styled(form, style);
+        if !clear {
+            if lead.width() <= budget {
+                return SessionsTitle {
+                    line: Line::from(lead),
+                    clear_chip: None,
+                };
+            }
+            continue;
+        }
+        let end = title_end(true);
+        let end_width = Span::raw(end).width();
+        if lead.width() + end_width > budget {
+            continue;
+        }
+        let room = budget - lead.width() - end_width;
+        // A separating space, then at least one cell of label.
+        let label = (room >= 2 && !workspace_name.is_empty()).then(|| {
+            Span::styled(
+                format!(
+                    " {}",
+                    truncate_to_cells(workspace_name, room - 1, Truncate::SUMMARY)
+                ),
+                Style::default().fg(theme::palette().muted),
+            )
+        });
+        let chip_start = lead.width() + label.as_ref().map_or(0, Span::width);
+        let mut spans = vec![lead];
+        spans.extend(label);
+        spans.push(Span::styled(end, theme::muted()));
         return SessionsTitle {
-            line: compact,
-            clear_chip: None,
-        };
-    }
-    let tiny = Line::styled(format!(" {glyph}{count}"), style);
-    if tiny.width() <= budget {
-        return SessionsTitle {
-            line: tiny,
-            clear_chip: None,
+            line: Line::from(spans),
+            clear_chip: u16::try_from(chip_start).ok(),
         };
     }
     base
