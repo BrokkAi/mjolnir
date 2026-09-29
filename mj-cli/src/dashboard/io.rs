@@ -1943,6 +1943,30 @@ mod tests {
         assert!(Config::load_from(&path).unwrap().targets.is_empty());
     }
 
+    /// Launch campaign finding A-3: choosing "Follows the terminal" in Settings
+    /// removes `symbols` from `[advanced]` instead of leaving the old value.
+    #[test]
+    fn setup_save_removes_the_symbols_key_when_it_returns_to_unset() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut original = Config::default();
+        original.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+        original.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("symbols"));
+        let mut edited = original.clone();
+        edited.advanced.symbols = None;
+        save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&edited).unwrap(),
+            &State::default(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("symbols"), "{text}");
+        assert_eq!(Config::load_from(&path).unwrap().advanced.symbols, None);
+    }
+
     #[test]
     fn settings_can_override_an_implicit_local_target_without_a_setup_file() {
         let directory = tempfile::tempdir().unwrap();
