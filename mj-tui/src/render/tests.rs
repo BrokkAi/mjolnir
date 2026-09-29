@@ -377,7 +377,7 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
             assert_eq!(unfiltered.line.to_string(), "Sessions", "{symbols:?}");
             assert_eq!(unfiltered.clear_chip, None, "{symbols:?}");
 
-            for label in ["working", "working · 3 hidden"] {
+            for label in ["working", "3 hidden · working"] {
                 let without = sessions_title(label, 120, true, false);
                 assert_eq!(without.line.to_string(), format!(" Sessions · {label} "));
                 assert_eq!(without.clear_chip, None);

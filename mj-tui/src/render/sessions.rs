@@ -1195,7 +1195,12 @@ pub(crate) fn render_sessions(
     let filter_label = match dashboard.sessions_hidden_count() {
         0 => filter_label,
         hidden => {
-            let counted = format!("{filter_label} · {hidden} hidden");
+            // The count leads, so the label's tail is what a narrow title cuts.
+            let counted = if filter_label.is_empty() {
+                format!("{hidden} hidden")
+            } else {
+                format!("{hidden} hidden · {filter_label}")
+            };
             if label_keeps_full_prefix(&counted, area.width, maximize_enabled, clear) {
                 counted
             } else {
