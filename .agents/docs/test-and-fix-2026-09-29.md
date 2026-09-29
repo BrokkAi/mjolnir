@@ -517,3 +517,7 @@ Confirmed: Grok resume (O4) — two suspend/resume cycles reached `running` in 8
 ### User request (17:20): wizards probing quota fresh
 
 New, Move and Resume appear to query quota live instead of using the daemon's cached report. Fix wave F23 (Sonnet): confirm which call probes, make the wizards read the cached report with its age, and leave probing to the explicit Refresh and the scheduled poll.
+
+### F23 — landed
+
+Confirmed: the wizards read the dashboard's held reports and never probe on open or selection; the probe came when the operation finished — `apply_lifecycle_reloaded` (`mj-cli/src/dashboard/io.rs`) called `request_quota_refresh()` on Created, Resumed and Moved, which batches every enabled profile into the dashboard's poller (`pollers/quota.rs::spawn_quota_refresher` → `QuotaManager::refresh_profiles`). `0a966053` removes the three calls. The web path (`/api/v1/options`, the sub-agent candidate ranking) reads the daemon's `quota_reports`; its only probe is the explicit `RefreshQuota`. Left as designed: explicit Refresh, startup, profile rename, the profile-set-changed check, the utility LLM's stale-profile probe, the quota auto-resume probe. Recorded for the follow-up plan: the daemon's `QuotaManager` polls every ten minutes while each dashboard process runs its own `spawn_quota_refresher` — two pollers for one fact, the cause of the I1-10 disagreement; the dashboard should read the daemon's report. CLI 254 green; clippy and fmt clean.
