@@ -388,3 +388,7 @@ Binaries: `bin-fixed/` built from the validated master tip in one go (host `mj`,
 ### User report (12:10): warnings for a native child's `async_task_*` updates
 
 A Claude session whose native (Task) child started background Bash work showed one warning row per `async_task_spawned`/`async_task_state_update`/`async_task_progress` update from the child: `NativeAgentRouter::route` (`native_agents.rs:138`) decodes a child's notification as a standard ACP `SessionUpdate`, which lacks Claude's task updates, and warns on the decode failure; the parent-level handler (`claude_tasks.rs:89`) is not session-scoped, so the updates must not fall through. Cosmetic. Fix wave F12: recognize the kinds before the decode and ignore them for child sessions, with a test.
+
+### Validation of the fixed master (`060be89c` code, 12:20)
+
+fmt clean; clippy clean; web unit tests 63/63; `cargo test` stopped at its first failing binary: `mj-worker` `acp::verdict_client::tests::continuous_overall_activity_does_not_postpone_or_invalidate_parent_check` (a 200 ms timing test that failed under the full parallel load and passes alone; on the launch campaign's flaky list). Rerun with `--no-fail-fast`; fix wave F13 makes the test deterministic. `bin-fixed` is built with `MJ_BUILD_REVISION=c37a3b45…` so the Linux binaries carry the same stamp as the Darwin worker built on the Mac from that commit (later commits on master are documentation only until F12/F13 land).
