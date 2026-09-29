@@ -2430,3 +2430,93 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
     );
     host.shutdown().await.expect("shutdown the host");
 }
+
+/// RVC-3(c): a daemon restart posted "Turn review was cancelled when Mjolnir
+/// restarted" while the worker's reviewer was still running that review's
+/// prompt. A review the worker still holds should continue under the next
+/// daemon: no cancellation notice, and its verdict when the reviewer answers.
+///
+/// Today the reviewer's prompt survives in the worker but the review does
+/// not: the driver that reads the answer, checks it with the validator and
+/// advances the baseline (captured trees, awaited command ids, phase) lives
+/// only in the daemon's memory. Reattaching needs that state in the worker,
+/// which is issue #1185.
+#[tokio::test]
+#[ignore = "needs the turn-review driver in the worker (issue #1185); the daemon keeps the \
+            driver's state only in memory, so the next daemon cannot finish the review"]
+async fn a_review_the_worker_still_holds_continues_after_a_restart() {
+    let session = session_id("reattachreview");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    // The review prompts its reviewer, which the worker keeps running.
+    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    let command_id = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    // The worker still runs the review's prompt, and its journal then
+    // reports a clean answer that ends it.
+    let answer = agent_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "No findings.",
+    );
+    let completion = completion_event(2, &answer.digest, &command_id);
+    let journal = vec![answer, completion];
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return text;
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    let _ = reply.send(match &action {
+                        ReviewerAction::Status => {
+                            Ok(ReviewerOutcome::Status(Box::new(busy_with(&command_id))))
+                        }
+                        ReviewerAction::Attach { after_ordinal, .. } if *after_ordinal == 0 => {
+                            Ok(ReviewerOutcome::Attached(Box::new(
+                                crate::worker_client::RelayAttachment {
+                                    state: operational(),
+                                    events: journal.clone(),
+                                    through_ordinal: 2,
+                                    through_digest: journal[1].digest.clone(),
+                                },
+                            )))
+                        }
+                        other => answer_for(other),
+                    });
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the next daemon says what became of the review");
+    assert_eq!(notice, "Review complete: no material findings");
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "new",
+        "the finished review moves the baseline as any clean review does"
+    );
+    new.shutdown().await.unwrap();
+}
