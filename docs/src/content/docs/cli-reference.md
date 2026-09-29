@@ -344,7 +344,9 @@ replacement and perform no lifecycle action.
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;
 `--kind branch` pushes the session's work and reports the branch and remote
-instead. `mj transcript` pages by `--after-seq`, so a caller that
+instead. With `--json` and `--out`, `mj export` prints one object with the
+`path`, the `bytes` written, and the `format` (`patch`, `bundle`, or `file`);
+with `--json` and no `--out` the export itself is still the output. `mj transcript` pages by `--after-seq`, so a caller that
 remembers the last `seq` it read sees only what is new.
 
 Each command in this section except `mj events` and `mj respond` takes

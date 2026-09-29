@@ -942,7 +942,7 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 .as_deref()
                 .context("`--kind file` needs --path, relative to the agent's directory")?;
             let bytes = client.read_file(&args.session, path).await?;
-            return write_bytes(&bytes, args.out.as_deref());
+            return write_bytes(&bytes, args.out.as_deref(), args.json, "file");
         }
     };
     let request = ExportRequest {
@@ -963,7 +963,13 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 Ok(())
             }
         },
-        ExportResult::Bytes(bytes) => write_bytes(&bytes, args.out.as_deref()),
+        ExportResult::Bytes(bytes) => {
+            let format = match args.kind {
+                ExportKindArg::Bundle => "bundle",
+                _ => "patch",
+            };
+            write_bytes(&bytes, args.out.as_deref(), args.json, format)
+        }
     }
 }
 
@@ -1353,15 +1359,42 @@ fn read_stdin() -> Result<String> {
 }
 
 /// Write an export to a file, or to standard output when none was named.
-fn write_bytes(bytes: &[u8], out: Option<&std::path::Path>) -> Result<()> {
+/// Writes an export to `out`, or to standard output when no file is named.
+/// With `--json` and a file, the confirmation is one JSON object rather than
+/// a sentence; without a file the bytes are the output and stay unwrapped.
+fn write_bytes(
+    bytes: &[u8],
+    out: Option<&std::path::Path>,
+    json: bool,
+    format: &str,
+) -> Result<()> {
+    write_bytes_to(&mut std::io::stdout().lock(), bytes, out, json, format)
+}
+
+fn write_bytes_to(
+    stdout: &mut impl Write,
+    bytes: &[u8],
+    out: Option<&std::path::Path>,
+    json: bool,
+    format: &str,
+) -> Result<()> {
     match out {
         Some(path) => {
             std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
-            println!("wrote {} bytes to {}", bytes.len(), path.display());
-            Ok(())
+            if json {
+                let report = serde_json::json!({
+                    "path": path,
+                    "bytes": bytes.len(),
+                    "format": format,
+                });
+                writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)
+                    .context("report the export")
+            } else {
+                writeln!(stdout, "wrote {} bytes to {}", bytes.len(), path.display())
+                    .context("report the export")
+            }
         }
         None => {
-            let mut stdout = std::io::stdout().lock();
             stdout.write_all(bytes).context("write the export")?;
             stdout.flush().context("write the export")
         }
@@ -1492,6 +1525,31 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[test]
+    fn export_json_with_out_reports_one_object_and_text_stays_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.patch");
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch").unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(report["bytes"], 4);
+        assert_eq!(report["format"], "patch");
+        assert_eq!(report["path"], path.to_str().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"diff");
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch").unwrap();
+        assert!(
+            String::from_utf8(printed)
+                .unwrap()
+                .starts_with("wrote 4 bytes to ")
+        );
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", None, true, "patch").unwrap();
+        assert_eq!(printed, b"diff");
+    }
 
     fn wait_response(outcome: &str, extra: serde_json::Value) -> WaitResponse {
         let mut body = serde_json::json!({
