@@ -474,17 +474,46 @@ pub fn has_work_in_flight(facts: &ActivityFacts) -> bool {
 /// the session on is [`driver_present`]'s question.
 #[must_use]
 pub fn can_submit(facts: &ActivityFacts) -> bool {
-    facts.execution == RelayExecutionState::Idle
-        && facts.prompt_started_at_ms.is_none()
-        && facts.harness_turn_started_at_ms.is_none()
-        && facts.tools_in_flight.is_empty()
-        && facts.queued_commands == 0
-        && facts.active_user_shells == 0
-        && !facts.checkpoint_barrier
-        && !facts.checkpoint_only
-        && facts.acp_ready != Some(false)
-        && !facts.goal_pending_resume
-        && !facts.goal_decision
+    submit_blockers(facts).is_empty()
+}
+
+/// What keeps [`can_submit`] false, one name per fact that is set, so a
+/// caller that declines to submit can say why. Empty exactly when a prompt
+/// could start.
+#[must_use]
+pub fn submit_blockers(facts: &ActivityFacts) -> Vec<&'static str> {
+    let checks = [
+        (
+            facts.execution != RelayExecutionState::Idle,
+            "execution is not idle",
+        ),
+        (facts.prompt_started_at_ms.is_some(), "a prompt is running"),
+        (
+            facts.harness_turn_started_at_ms.is_some(),
+            "a turn the harness started is open",
+        ),
+        (
+            !facts.tools_in_flight.is_empty(),
+            "a tool call is in flight",
+        ),
+        (facts.queued_commands != 0, "commands are queued"),
+        (facts.active_user_shells != 0, "a user shell is running"),
+        (facts.checkpoint_barrier, "a checkpoint barrier is held"),
+        (
+            facts.checkpoint_only,
+            "the session is held for a checkpoint",
+        ),
+        (
+            facts.acp_ready == Some(false),
+            "the agent connection is not ready",
+        ),
+        (facts.goal_pending_resume, "a goal resume is pending"),
+        (facts.goal_decision, "a goal decision is pending"),
+    ];
+    checks
+        .into_iter()
+        .filter_map(|(blocked, name)| blocked.then_some(name))
+        .collect()
 }
 
 /// Whether something other than Mjolnir will move the session on: a turn, an

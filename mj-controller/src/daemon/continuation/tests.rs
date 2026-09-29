@@ -651,6 +651,71 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
     }
 }
 
+/// F18: a due recovery that the loop declines to submit is never silent. With
+/// a harness turn still open the loop submits nothing, and the decision log
+/// names the fact that refused it, once however many minutes pass.
+#[tokio::test]
+async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
+    let mut remote = spawn_remote_session_manager().unwrap();
+    remote.targets.send_replace(vec![RelaySessionTarget {
+        session_id: "one".into(),
+        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+        worker_recovery: None,
+        project_memory: None,
+    }]);
+    let log_dir = tempfile::tempdir().unwrap();
+    let environment = Environment {
+        log: Some(mj_core::jev::DecisionLog::open(log_dir.path().into()).unwrap()),
+        control: remote.control,
+        allowed: Arc::new(|_| true),
+        live: Arc::new(|| ["one".into()].into()),
+        review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
+        profile: Arc::new(|_| Some("test".into())),
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
+    };
+    let classifier: Classifier =
+        Arc::new(|_, _| Box::pin(async { panic!("durable recovery must not be reclassified") }));
+    let cancellation = CancellationToken::new();
+    let (mut updates, task) = spawn_in(
+        environment,
+        remote.updates,
+        cancellation.clone(),
+        classifier,
+    );
+    let mut stuck = view("one", true);
+    let recovery = recovery_for(&stuck, Some(mj_core::clock::epoch_millis() - 1));
+    let operational = &mut stuck.snapshot.as_mut().unwrap().operational;
+    operational.continuation.quota_recovery = Some(recovery);
+    operational.harness_turn = Some(mj_core::relay::HarnessTurn { started_at_ms: 1 });
+    remote.publisher.publish("one".into(), stuck).await.unwrap();
+    receive(&mut updates).await;
+    // Several ticks pass; nothing is submitted.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1500), remote.requests.recv())
+            .await
+            .is_err()
+    );
+    let page = mj_core::jev::read(log_dir.path(), "one", None).unwrap();
+    assert_eq!(
+        page.decisions.len(),
+        1,
+        "logged once for one set of reasons"
+    );
+    let decision = &page.decisions[0];
+    assert_eq!(decision.kind, "quota-recovery");
+    assert_eq!(decision.status, "deferred");
+    assert!(
+        decision
+            .action
+            .contains("a turn the harness started is open"),
+        "{}",
+        decision.action
+    );
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}
+
 /// The first decision recorded for session "one", with its technical detail,
 /// which a listing leaves out.
 fn technical(dir: &std::path::Path) -> mj_core::jev::Decision {

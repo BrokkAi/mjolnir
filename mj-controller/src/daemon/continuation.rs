@@ -180,21 +180,39 @@ fn eligible(view: &ManagedSessionView) -> bool {
 
 /// Everything a quota recovery needs except the chance to submit a prompt.
 fn quota_allowed(view: &ManagedSessionView) -> bool {
+    quota_unallowed(view).is_empty()
+}
+
+/// What [`quota_allowed`] found missing, by name.
+fn quota_unallowed(view: &ManagedSessionView) -> Vec<&'static str> {
     let Some(s) = &view.snapshot else {
-        return false;
+        return vec!["no session snapshot"];
     };
     let c = &s.operational.continuation;
-    view.connected
-        && s.operational
-            .relay_protocol_version
-            .is_some_and(|v| v >= 20)
-        && !c.quota_suppressed
-        && c.user_command_id.is_some()
-        && !s.operational.goal.budget_limited()
-        && s.materialized.pending_elicitations.is_empty()
-        && ended_turn(s).is_some_and(|t| {
-            c.completed_command_id.as_deref() == Some(t.key) && (unified(s) || t.quota_candidate())
-        })
+    let turn_matches = ended_turn(s).is_some_and(|t| {
+        c.completed_command_id.as_deref() == Some(t.key) && (unified(s) || t.quota_candidate())
+    });
+    [
+        (!view.connected, "session is not connected"),
+        (
+            s.operational.relay_protocol_version.is_none_or(|v| v < 20),
+            "worker is too old for quota recovery",
+        ),
+        (
+            c.quota_suppressed,
+            "quota recovery is suppressed (a user action cancelled it)",
+        ),
+        (c.user_command_id.is_none(), "no user request to continue"),
+        (s.operational.goal.budget_limited(), "goal budget is spent"),
+        (
+            !s.materialized.pending_elicitations.is_empty(),
+            "a question is waiting for the user",
+        ),
+        (!turn_matches, "the blocked turn is no longer the last one"),
+    ]
+    .into_iter()
+    .filter_map(|(blocked, name)| blocked.then_some(name))
+    .collect()
 }
 
 /// A quota recovery may be recorded: a turn, background work or a goal does
@@ -207,16 +225,82 @@ fn quota_schedulable(view: &ManagedSessionView) -> bool {
             .is_some_and(|s| current_rules(s) || legacy_quiet(s))
 }
 
+/// Due quota recoveries the loop declined to submit. A due deadline that
+/// passes with nothing happening looks like a lost recovery, so each refusal
+/// is logged at info once a minute with the facts that refused it, and written
+/// to the decision log whenever the reasons change.
+#[derive(Default)]
+struct QuotaSkips(BTreeMap<String, (std::time::Instant, String)>);
+
+impl QuotaSkips {
+    const EVERY: Duration = Duration::from_secs(60);
+
+    fn note(
+        &mut self,
+        log: Option<&mj_core::jev::DecisionLog>,
+        session: &str,
+        recovery: &mj_core::continuation::QuotaRecovery,
+        reasons: &[&str],
+    ) {
+        let reason = reasons.join("; ");
+        let now = std::time::Instant::now();
+        let previous = self.0.get(session);
+        if previous
+            .is_some_and(|(at, seen)| *seen == reason && now.duration_since(*at) < Self::EVERY)
+        {
+            return;
+        }
+        let changed = previous.is_none_or(|(_, seen)| *seen != reason);
+        tracing::info!(
+            session,
+            retry_at_ms = ?recovery.retry_at_ms,
+            reason = %reason,
+            "a due quota recovery was not submitted"
+        );
+        if changed && let Some(log) = log {
+            let attempt = log.start(
+                session,
+                "quota-recovery",
+                "Can the quota recovery that is due be submitted now?",
+                "Session activity facts and the stored quota recovery.",
+            );
+            attempt.update(
+                Some("Not yet."),
+                serde_json::json!({"retry_at_ms": recovery.retry_at_ms, "refused_by": reasons}),
+            );
+            attempt.finish(
+                "deferred",
+                &format!("The due quota recovery was not submitted: {reason}. It is checked again every minute."),
+            );
+        }
+        self.0.insert(session.to_owned(), (now, reason));
+    }
+
+    fn forget(&mut self, session: &str) {
+        self.0.remove(session);
+    }
+
+    fn retain(&mut self, live: &BTreeSet<String>) {
+        self.0.retain(|id, _| live.contains(id));
+    }
+}
+
 /// A due quota recovery may be submitted now.
 fn quota_resumable(view: &ManagedSessionView) -> bool {
-    quota_allowed(view)
-        && view.snapshot.as_ref().is_some_and(|s| {
-            if current_rules(s) {
-                mj_core::activity::can_submit(&s.operational.facts())
-            } else {
-                legacy_quiet(s)
-            }
-        })
+    quota_resume_blockers(view).is_empty()
+}
+
+/// Why a due quota recovery cannot be submitted now, by name; empty when it can.
+fn quota_resume_blockers(view: &ManagedSessionView) -> Vec<&'static str> {
+    let mut blockers = quota_unallowed(view);
+    if let Some(s) = &view.snapshot {
+        if current_rules(s) {
+            blockers.extend(mj_core::activity::submit_blockers(&s.operational.facts()));
+        } else if !legacy_quiet(s) {
+            blockers.push("the session is not quiet");
+        }
+    }
+    blockers
 }
 
 fn unified(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
@@ -412,6 +496,7 @@ fn spawn_with_gate(
         let mut pending = BTreeMap::<String, Pending>::new();
         let mut latest = BTreeMap::<String, ManagedSessionView>::new();
         let mut retry_after = BTreeMap::<String, std::time::Instant>::new();
+        let mut skips = QuotaSkips::default();
         let mut jobs = JoinSet::new();
         let mut seed_jobs = JoinSet::new();
         let mut seed_after = BTreeMap::<String, std::time::Instant>::new();
@@ -828,11 +913,21 @@ fn spawn_with_gate(
                         let Some(snapshot) = &view.snapshot else { continue; };
                         let Some(recovery) = snapshot.operational.continuation.quota_recovery.as_ref().filter(|r| !r.submitted) else { continue; };
                         let clear = !(environment.allowed)(id) || (environment.profile)(id).as_deref() != Some(&recovery.profile_id);
-                        if !clear && (!quota_resumable(view) || recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis())) { continue; }
-                        if !view.connected { continue; }
+                        if !clear && recovery.retry_at_ms.is_none_or(|t| t > mj_core::clock::epoch_millis()) { continue; }
+                        // Due from here on: every refusal to submit is named, once a minute.
+                        let mut refusal = if clear { Vec::new() } else { quota_resume_blockers(view) };
+                        if clear && !view.connected { refusal.push("session is not connected"); }
+                        if !refusal.is_empty() {
+                            skips.note(environment.log.as_ref(), id, recovery, &refusal);
+                            continue;
+                        }
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
-                        let Ok(upgrade_work) = gate.enter_unless_draining("quota continuation") else { continue };
+                        let Ok(upgrade_work) = gate.enter_unless_draining("quota continuation") else {
+                            skips.note(environment.log.as_ref(), id, recovery, &["the daemon is draining for an upgrade"]);
+                            continue
+                        };
+                        skips.forget(id);
                         let env = environment.clone(); let session = id.clone(); let current = view.clone();
                         let task_work = upgrade_work.clone();
                         let abort = jobs.spawn(async move {
@@ -861,6 +956,7 @@ fn spawn_with_gate(
                     rechecks.retain(|id| live.contains(id));
                     latest.retain(|id, _| live.contains(id));
                     retry_after.retain(|id, _| live.contains(id));
+                    skips.retain(&live);
                     assessed.retain(|id, _| live.contains(id));
                     action_recheck.retain(|id, _| live.contains(id));
                     seed_after.retain(|id, _| live.contains(id));
