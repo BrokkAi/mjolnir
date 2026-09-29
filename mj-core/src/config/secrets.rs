@@ -243,7 +243,13 @@ impl Serialize for Environment {
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let sources = BTreeMap::<String, EnvironmentValue>::deserialize(deserializer)?;
-        Self::from_sources(sources).map_err(|error| de::Error::custom(format!("{error:#}")))
+        Self::from_sources(sources).map_err(|error| {
+            let message = format!("{error:#}");
+            // The TOML parser wraps this in a parse error with a source
+            // excerpt, which buries the message. The loader reads it from here.
+            FAILURE.with(|failure| *failure.borrow_mut() = Some(message.clone()));
+            de::Error::custom(message)
+        })
     }
 }
 
@@ -329,6 +335,7 @@ impl SecretResolver {
 }
 
 thread_local! {
+    static FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<SecretResolver>> = const { RefCell::new(None) };
 }
 
@@ -340,6 +347,14 @@ pub fn with_secret_resolver<T>(resolver: SecretResolver, read: impl FnOnce() -> 
     let value = read();
     ACTIVE.with(|active| *active.borrow_mut() = previous);
     value
+}
+
+/// The message of the last environment reference this thread failed to
+/// resolve, cleared by the call. A caller that reads a configuration takes it
+/// after a failed read, to report the reference instead of the parser's
+/// excerpt of the file.
+pub fn take_environment_failure() -> Option<String> {
+    FAILURE.with(|failure| failure.borrow_mut().take())
 }
 
 fn resolve_active(key: &str, value: &EnvironmentValue) -> Result<String> {

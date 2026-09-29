@@ -39,7 +39,7 @@ use std::fs::{self, File, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -946,9 +946,21 @@ impl Config {
         // `kind` is still accepted.
         // Environment references resolve against the secrets file beside
         // this configuration and the process environment.
-        let config: Self =
-            with_secret_resolver(SecretResolver::beside(path), || toml::from_str(&contents))
-                .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
+        take_environment_failure();
+        let config: Self = match with_secret_resolver(SecretResolver::beside(path), || {
+            toml::from_str(&contents)
+        }) {
+            Ok(config) => config,
+            // An unresolvable reference reads as one line naming the entry
+            // and the file, not as the parser's excerpt of the config.
+            Err(error) => {
+                return Err(match take_environment_failure() {
+                    Some(failure) => anyhow!("{failure} (in Mjolnir config {})", path.display()),
+                    None => anyhow::Error::new(error)
+                        .context(format!("parse Mjolnir config {}", path.display())),
+                });
+            }
+        };
         config.validate()?;
         Ok(config)
     }

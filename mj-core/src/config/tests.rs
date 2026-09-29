@@ -412,6 +412,32 @@ fn environment_references_resolve_from_the_secrets_file_and_survive_a_save() {
     );
 }
 
+/// Test-and-fix C-8: a missing secret was reported as a TOML parse error with
+/// a caret hundreds of columns wide, and the entry and file came last.
+#[test]
+fn a_missing_secret_is_named_in_one_line_without_a_parse_caret() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let padding = "X".repeat(400);
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+             [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\nPAD = \"{padding}\"\n"
+        ),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.starts_with("FAKE_TOKEN = { from_secret = \"FAKE_TOKEN\" } needs "),
+        "{error}"
+    );
+    assert!(error.contains(SECRETS_FILE), "{error}");
+    assert!(error.contains(&path.display().to_string()), "{error}");
+    assert!(!error.contains("TOML parse error"), "{error}");
+    assert!(!error.contains('\n'), "{error}");
+}
+
 #[test]
 fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
     let directory = tempfile::tempdir().unwrap();
