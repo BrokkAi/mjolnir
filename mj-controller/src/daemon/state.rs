@@ -198,9 +198,9 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let registered = self
             .start_create_session(CreateSessionRequest {
-                launch_base: None,
-                launch_branch: None,
-                checkout: None,
+                at: None,
+                branch: None,
+                base: None,
                 expected_runtime_identity: None,
                 create_managed_worktree: None,
                 subagents: None,

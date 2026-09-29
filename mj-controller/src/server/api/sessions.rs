@@ -101,6 +101,12 @@ pub(super) async fn start_session(
             request.effort.as_deref(),
         )?;
     }
+    // `at` checks out the bundle's primary repository, so it needs a bundle.
+    if request.at.is_some() && request.bundle_id.is_none() {
+        return Err(ApiFailure::bad_request(
+            "`at` requires bundle_id: it checks out the bundle's primary repository",
+        ));
+    }
     let bundle_id = match (&request.bundle_id, &request.project_directory) {
         (Some(bundle_id), _) => bundle_id.clone(),
         // Bare directories belong to the selected target. The daemon validates
@@ -114,9 +120,9 @@ pub(super) async fn start_session(
     };
     let mut action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
-        launch_base: request.launch_base.clone(),
-        launch_branch: request.launch_branch.clone(),
-        checkout: request.checkout.clone(),
+        at: request.at.clone(),
+        branch: request.branch.clone(),
+        base: request.base.clone(),
         expected_runtime_identity: request.expected_runtime_identity.clone(),
         subagents: request.subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,

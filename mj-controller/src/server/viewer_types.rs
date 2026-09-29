@@ -173,9 +173,12 @@ impl ViewerSnapshot {
                     .get(&session.id)
                     .map(|children| children.keys().cloned().collect())
                     .unwrap_or_default();
+                let start = session.start_selection();
                 ViewerSession {
                     subagents: session.subagents.clone().unwrap_or_default(),
-                    checkout: session.checkout.clone(),
+                    at: start.at,
+                    branch: start.branch,
+                    base: start.base,
                     expected_runtime_identity: session.expected_runtime_identity.clone(),
                     targeted_turn_control_supported: false,
                     native_subagents: Vec::new(),
@@ -375,8 +378,15 @@ pub struct ViewerSession {
     pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
+    /// Commit the workspace started checked out at, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// Branch created at `at`, or the existing branch checked out without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base the session was started with; `at` unless another was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

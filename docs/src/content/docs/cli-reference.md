@@ -176,7 +176,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
-       [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
+       [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
+       [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|all-models|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -204,12 +205,16 @@ mj models --profile <id> [--model <name>] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 ```
 
-`mj new --branch <name>` selects the branch checked out in a new isolated clone;
-otherwise the clone starts on the remote default branch. `--base <revision>`
-records a separate launch base for `mj diff`; it does not change the selected
-branch. A local clone resolves the base in the source repository, while a
-network clone resolves it from fetched Git history. A base cannot be combined
-with a session that runs directly in the selected directory.
+`mj new --at <sha>` starts the workspace checked out at that full commit ID in
+the bundle's primary repository, before the first prompt. It requires
+`--bundle`. With `--at`, `--branch <name>` creates that new branch at the
+commit; without `--branch`, HEAD is detached. Without `--at`, `--branch <name>`
+selects an existing branch to check out in a new isolated clone; otherwise the
+clone starts on the remote default branch. `--base <revision>` records the diff
+base for `mj diff` when it should not be `--at`; it defaults to `--at` and does
+not move the checkout. A local clone resolves the base in the source
+repository, while a network clone resolves it from fetched Git history. A base
+cannot be combined with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).

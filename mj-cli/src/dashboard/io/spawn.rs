@@ -1327,9 +1327,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        launch_base: None,
-                        launch_branch: None,
-                        checkout: None,
+                        at: None,
+                        branch: None,
+                        base: None,
                         expected_runtime_identity: None,
                         subagents,
                         create_managed_worktree,

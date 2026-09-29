@@ -463,9 +463,12 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 
 pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
-    pub launch_base: Option<String>,
-    pub launch_branch: Option<String>,
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    /// Full commit ID to start the bundle's primary repository at.
+    pub at: Option<String>,
+    /// With `at`, the new branch created there; otherwise an existing branch.
+    pub branch: Option<String>,
+    /// Diff base; defaults to `at`.
+    pub base: Option<String>,
     pub expected_runtime_identity: Option<String>,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub initial_prompt: Option<String>,
@@ -730,9 +733,9 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             create_managed_worktree,
-            launch_base,
-            launch_branch,
-            checkout,
+            at,
+            branch,
+            base,
             expected_runtime_identity,
             subagents,
             initial_prompt,
@@ -745,26 +748,26 @@ impl Controller {
         if let Some(expected) = &expected_runtime_identity {
             mj_core::harness_runtime::validate_expected_identity(expected)?;
         }
-        let launch_base = match launch_base {
+        let launch_base = match base {
             Some(base) => {
                 let base = base.trim();
                 if base.is_empty() {
-                    bail!("launch base must not be empty");
+                    bail!("`base` must not be empty");
                 }
                 Some(base.to_owned())
             }
             None => None,
         };
-        let launch_branch = match launch_branch {
+        let branch = match branch {
             Some(branch) => {
                 let branch = branch.trim();
-                ensure!(!branch.is_empty(), "launch branch must not be empty");
+                ensure!(!branch.is_empty(), "`branch` must not be empty");
                 Some(branch.to_owned())
             }
             None => None,
         };
         if launch_base.is_some() && create_managed_worktree == Some(false) {
-            bail!("a launch base requires a managed worktree or a bundle session");
+            bail!("`base` requires a managed worktree or a bundle session");
         }
         let session_title_override = match session_title_override {
             Some(title) => {
@@ -804,30 +807,27 @@ impl Controller {
         if project_directory.is_none() && bundle.is_none() {
             bail!("unknown bundle {bundle_id:?}");
         }
-        let checkout = checkout
-            .map(|mut checkout| -> Result<_> {
-                checkout.validate()?;
-                let bundle = bundle.context("exact checkout requires a bundle-backed session")?;
-                ensure!(
-                    launch_base.is_none() && launch_branch.is_none(),
-                    "checkout cannot be combined with launch_base or launch_branch"
-                );
+        // `at` becomes an exact checkout of the bundle's primary repository,
+        // which then owns the branch. Without it, the branch is an existing
+        // one to check out.
+        let (checkout, launch_branch) = match at {
+            Some(at) => {
+                let bundle = bundle.context("`at` requires a bundle-backed session")?;
                 ensure!(
                     create_managed_worktree != Some(false),
-                    "checkout requires an isolated workspace"
+                    "`at` requires an isolated workspace"
                 );
-                ensure!(
-                    bundle
-                        .repositories
-                        .iter()
-                        .any(|repo| repo.id == checkout.repository_id),
-                    "checkout repository {:?} is not in bundle {bundle_id:?}",
-                    checkout.repository_id
-                );
+                let mut checkout = mj_core::remote_git::ExactCheckout {
+                    repository_id: bundle.primary_repo.clone(),
+                    commit: at.trim().to_owned(),
+                    branch,
+                };
+                checkout.validate()?;
                 checkout.commit.make_ascii_lowercase();
-                Ok(checkout)
-            })
-            .transpose()?;
+                (Some(checkout), None)
+            }
+            None => (None, branch),
+        };
         if profile.kind == mj_core::config::HarnessKind::Muse
             && (!additional_mounts.is_empty()
                 || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))

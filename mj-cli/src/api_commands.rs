@@ -96,12 +96,15 @@ pub(crate) struct NewArgs {
     /// Existing directory on the selected bare target to run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
-    /// Record this Git revision as the diff base, independently of the branch.
-    #[arg(long, value_name = "REV")]
-    base: Option<String>,
-    /// Branch to check out in the new isolated workspace.
+    /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
+    #[arg(long, value_name = "SHA", requires = "bundle")]
+    at: Option<String>,
+    /// With --at, the new branch to create there; otherwise the existing branch to check out.
     #[arg(long)]
     branch: Option<String>,
+    /// Record this Git revision as the diff base, when it should not be --at.
+    #[arg(long, value_name = "REV")]
+    base: Option<String>,
     /// Workspace id to create the session in. `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
@@ -631,9 +634,9 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         subagents: new_subagent_policy(&args)?,
         create_managed_worktree: None,
-        launch_base: args.base.clone(),
-        launch_branch: args.branch.clone(),
-        checkout: None,
+        at: args.at.clone(),
+        branch: args.branch.clone(),
+        base: args.base.clone(),
         expected_runtime_identity: None,
         workspace_id,
         profile_id: args.profile.clone(),
@@ -659,14 +662,21 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
 
 /// Name the command-line flags where a refused start names the API's fields.
 ///
-/// The API speaks to every client, so its refusals name the request fields
-/// `profile_id` and `target_id`; someone at a shell typed `--profile` and
-/// `--target`, and that is what they need to read (F-9).
+/// The API speaks to every client, so its refusals name request fields such
+/// as `profile_id`, `target_id` and `at`; someone at a shell typed
+/// `--profile`, `--target` and `--at`, and that is what they need to read
+/// (F-9). Refusals quote the one-word fields in backticks, so only field
+/// names are replaced.
 pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
     let message = format!("{error:#}");
     let named = message
         .replace("profile_id", "--profile")
-        .replace("target_id", "--target");
+        .replace("target_id", "--target")
+        .replace("bundle_id", "--bundle")
+        .replace("project_directory", "--project-directory")
+        .replace("`at`", "--at")
+        .replace("`branch`", "--branch")
+        .replace("`base`", "--base");
     if named == message {
         return error;
     }
@@ -1546,6 +1556,56 @@ mod tests {
             panic!("expected the new command");
         };
         assert_eq!(args.base, None);
+    }
+
+    #[test]
+    fn new_at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--workspace", "town"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        let error = parse(&["--at", commit]).expect_err("--at without --bundle is refused");
+        assert!(error.to_string().contains("--bundle"), "{error}");
+
+        let Some(Command::New(args)) = parse(&["--bundle", "product", "--at", commit])
+            .unwrap()
+            .command
+        else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.at.as_deref(), Some(commit));
+        assert_eq!((args.branch, args.base), (None, None));
+
+        let Some(Command::New(args)) = parse(&[
+            "--bundle",
+            "product",
+            "--at",
+            commit,
+            "--branch",
+            "town/run-1",
+            "--base",
+            "v1.0",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.branch.as_deref(), Some("town/run-1"));
+        assert_eq!(args.base.as_deref(), Some("v1.0"));
+    }
+
+    #[test]
+    fn a_refused_start_names_quoted_fields_as_flags() {
+        let error = name_launch_flags(anyhow::anyhow!(
+            "`at` requires bundle_id: it checks out the bundle's primary repository"
+        ));
+        assert_eq!(
+            error.to_string(),
+            "--at requires --bundle: it checks out the bundle's primary repository"
+        );
     }
 
     #[test]

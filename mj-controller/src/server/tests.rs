@@ -3360,9 +3360,9 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
     assert_eq!(
         action.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
@@ -3387,9 +3387,9 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,

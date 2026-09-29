@@ -360,9 +360,9 @@ fn validate_action_against(
             project_directory,
             dirty_ack,
             create_managed_worktree,
-            launch_base: _,
-            launch_branch: _,
-            checkout: _,
+            at: _,
+            branch: _,
+            base: _,
             expected_runtime_identity: _,
             subagents: _,
         } => {
