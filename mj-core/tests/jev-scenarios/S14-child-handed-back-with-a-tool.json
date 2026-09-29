@@ -13,7 +13,8 @@
     "assessed_at": "2026-09-29T03:42:24.711Z",
     "recorded_action": "uncertain",
     "recorded_status": "assessed",
-    "recorded_reason": "assessment_uncertain"
+    "recorded_reason": "assessment_uncertain",
+    "note": "final_tool_calls added from the controller transcript (handback call at 03:42:21Z after the last assistant text); the recorded evidence predates the field."
   },
   "facts_known": true,
   "facts": {
@@ -61,7 +62,13 @@
     "completion": {
       "stop_reason": "EndTurn",
       "diagnostic": null
-    }
+    },
+    "final_tool_calls": [
+      {
+        "name": "mcp__mj-agents__handback",
+        "status": "completed"
+      }
+    ]
   },
   "recorded_verdict": {
     "failure": {

@@ -37,14 +37,20 @@ type TurnEvidenceV4 = TurnEvidenceV2 & { completion?: {
   diagnostic: { message: string; code?: string; http_status?: number; reset_at?: string } | null;
 } };
 
-type TurnEvidenceV6 = TurnEvidenceV4 & { background?: { id: string; command: string; started_s_ago: number }[] };
+type TurnEvidenceV6 = TurnEvidenceV4 & {
+  background?: { id: string; command: string; started_s_ago: number }[];
+  final_tool_calls?: { name: string; status: string }[];
+};
 
 // v6 adds the background commands behind `background_commands`, so Jev can
 // judge whether anyone still depends on them (the `background` question).
 function evidenceV6(value: unknown): value is TurnEvidenceV6 {
   if (!object(value)) return false;
-  const { background, ...ordinary } = value;
+  const { background, final_tool_calls, ...ordinary } = value;
   if (!evidenceV5(ordinary)) return false;
+  if (final_tool_calls !== undefined && !(Array.isArray(final_tool_calls) && final_tool_calls.length <= 16
+    && final_tool_calls.every(item => object(item) && Object.keys(item).length === 2
+      && text(item.name, 128) && text(item.status, 32)))) return false;
   if (background === undefined) return true;
   return Array.isArray(background) && background.length <= 16
     && background.every(item => object(item) && Object.keys(item).length === 3

@@ -306,7 +306,8 @@ test("v6 lists background commands and returns the background judgment", async (
   const state = { ...ordinary, phase: "replied", transcript_summary: "", background_commands: 1,
     assistant_text_tail: "The dev server is up on 8080 for later; the fix is pushed.",
     completion: { stop_reason: "EndTurn", diagnostic: null },
-    background: [{ id: "claude:task-1", command: "npm run dev", started_s_ago: 900 }] };
+    background: [{ id: "claude:task-1", command: "npm run dev", started_s_ago: 900 }],
+    final_tool_calls: [{ name: "mcp__mj-agents__handback", status: "completed" }] };
   const result = { answers: {
     failure: { type: "choice", choice: "none", confidence: 0.97 },
     input: { type: "choice", choice: "none", confidence: 0.96 },
@@ -333,6 +334,7 @@ test("v6 lists background commands and returns the background judgment", async (
   assert.deepEqual(await older.json(), { answers: three });
   // The list is bounded and strictly shaped; v5 does not accept it.
   await expectError(await proxy.fetch(v6({ ...state, background: [{ id: "x", command: "y" }] }), environment()), 400);
+  await expectError(await proxy.fetch(v6({ ...state, final_tool_calls: [{ name: "x" }] }), environment()), 400);
   await expectError(await proxy.fetch(v6({ ...state, background: Array.from({ length: 17 }, (_, i) => ({ id: `t${i}`, command: "sleep 1", started_s_ago: 1 })) }), environment()), 400);
   const v5 = new Request("https://proxy.example/v5/turn-verdict", {
     method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),

@@ -38,10 +38,22 @@ pub struct BackgroundEvidence {
     pub started_s_ago: u64,
 }
 
+/// A tool call the agent made after its last text, by name and outcome only.
+/// A `handback` or `spawn` here says what the reply's silence does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ToolOutcome {
+    pub name: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<crate::assessment::ContextHistory>,
+    /// Tool calls made after the last assistant text of the turn, oldest
+    /// first, at most [`IN_FLIGHT_TOOLS`]. Empty on older workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub final_tool_calls: Vec<ToolOutcome>,
     /// The background commands behind `background_commands`, sent so Jev can
     /// judge whether anyone still depends on them. Empty on older workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -393,6 +393,7 @@ fn ask_once_without_a_classifier() {
         .unwrap();
         let evidence = mj_core::activity::verdict::TurnEvidence {
             background: Vec::new(),
+            final_tool_calls: Vec::new(),
             authorization: None,
             completion: None,
             harness: mj_core::config::HarnessKind::Codex,
