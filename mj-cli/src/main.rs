@@ -816,7 +816,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
             if args.json {
                 print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
             }
-            return Err(error.context("use --prepare to inspect files, --allow-large-transfer to include all eligible data, or --exclude REPOSITORY:PATH to leave selected files at the source"));
+            return Err(with_large_transfer_hint(error));
         }
     }
     let pending = preparation.queued_commands.len();
@@ -824,10 +824,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         (Some(queue), _, _) => Some(queue.into()),
         (None, 0, _) => None,
         (None, _, true) => {
-            let error = anyhow::anyhow!(
-                "{pending} queued command{} require an explicit --queue discard|start with --yes",
-                if pending == 1 { "" } else { "s" }
-            );
+            let error = anyhow::anyhow!(queued_commands_need_choice(pending));
             if args.json {
                 print_move_json(&move_error_outcome(&preparation, error.to_string()))?;
             }
@@ -919,6 +916,24 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Names the flags that resolve a refusal only when the refusal is about
+/// consent to a large transfer; other selection failures are not fixed by them.
+fn with_large_transfer_hint(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<mj_core::move_workspace::LargeTransferConsentRequired>() {
+        error.context("use --prepare to inspect files, --allow-large-transfer to include all eligible data, or --exclude REPOSITORY:PATH to leave selected files at the source")
+    } else {
+        error
+    }
+}
+
+fn queued_commands_need_choice(pending: usize) -> String {
+    format!(
+        "{pending} queued command{} {} an explicit --queue discard|start with --yes",
+        if pending == 1 { "" } else { "s" },
+        if pending == 1 { "requires" } else { "require" }
+    )
 }
 
 async fn prompt_queue_choice(pending: usize) -> Result<ResumeQueueDisposition> {
@@ -1978,6 +1993,41 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use mj_core::state::{SessionRecord, SessionState, State};
+
+    #[test]
+    fn move_error_hint_names_consent_flags_only_for_large_transfer_consent() {
+        use mj_core::move_workspace::{WorkspaceAssessment, WorkspaceSelection};
+        let blocked = WorkspaceAssessment {
+            blockers: vec!["These local targets share the source worker storage.".into()],
+            ..Default::default()
+        };
+        let error = WorkspaceSelection::default()
+            .validate(&blocked)
+            .unwrap_err();
+        let shown = format!("{:#}", with_large_transfer_hint(error));
+        assert!(!shown.contains("--allow-large-transfer"), "{shown}");
+        assert!(shown.contains("share the source worker storage"), "{shown}");
+
+        let large = WorkspaceAssessment {
+            required_bytes: mj_core::move_workspace::LARGE_TRANSFER_BYTES,
+            ..Default::default()
+        };
+        let error = WorkspaceSelection::default().validate(&large).unwrap_err();
+        let shown = format!("{:#}", with_large_transfer_hint(error));
+        assert!(shown.contains("--allow-large-transfer"), "{shown}");
+    }
+
+    #[test]
+    fn queued_command_refusal_agrees_in_number() {
+        assert_eq!(
+            queued_commands_need_choice(1),
+            "1 queued command requires an explicit --queue discard|start with --yes"
+        );
+        assert_eq!(
+            queued_commands_need_choice(2),
+            "2 queued commands require an explicit --queue discard|start with --yes"
+        );
+    }
 
     /// F-16: `--session`, `--json`, and other flags had no description in
     /// `--help`. Every visible argument of every command now says what it is.

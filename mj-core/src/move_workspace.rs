@@ -105,6 +105,24 @@ pub struct WorkspacePath {
     pub path: PathBuf,
 }
 
+/// The selection is valid but the caller has not agreed to a large transfer.
+/// A distinct type lets callers offer the flags that give that consent, and
+/// only for this refusal.
+#[derive(Debug)]
+pub struct LargeTransferConsentRequired(String);
+
+impl std::fmt::Display for LargeTransferConsentRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Move includes {}; review Choose files and acknowledge the large transfer",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for LargeTransferConsentRequired {}
+
 impl WorkspacePath {
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.repository.is_empty(), "Move repository is missing");
@@ -220,11 +238,11 @@ impl WorkspaceSelection {
             );
         }
 
-        ensure!(
-            bytes < LARGE_TRANSFER_BYTES || self.acknowledge_large_transfer,
-            "Move includes {}; review Choose files and acknowledge the large transfer",
-            format_bytes(bytes)
-        );
+        if bytes >= LARGE_TRANSFER_BYTES && !self.acknowledge_large_transfer {
+            return Err(anyhow::Error::new(LargeTransferConsentRequired(
+                format_bytes(bytes),
+            )));
+        }
         Ok(())
     }
 
