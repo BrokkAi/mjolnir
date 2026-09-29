@@ -2218,3 +2218,215 @@ async fn an_answer_to_a_reviewers_question_reaches_that_role() {
     }
     answer.await.unwrap().expect("the answer is delivered");
 }
+
+/// The reviewer's operational state while a prompt with this id runs.
+fn busy_with(command_id: &str) -> RelayOperationalState {
+    let mut state = operational();
+    state.execution = mj_core::relay::RelayExecutionState::Running;
+    state.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+        command_id: command_id.to_owned(),
+        created_at_ms: 0,
+        started_at_ms: 0,
+    });
+    state
+}
+
+/// Answers the host's requests until it records a line in the conversation,
+/// and returns that line.
+async fn next_notice(manager: &mut FakeManager) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return text;
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    let _ = reply.send(answer_for(&action));
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the host records a notice")
+}
+
+/// Finishes a turn while the worker's reviewer is still running a turn
+/// review's prompt that no review in this daemon owns, which is what a
+/// daemon restart leaves behind, and returns the notice the refused review
+/// posts. `journal` is what that reviewer's journal holds.
+async fn refusal_behind_a_leftover_review(test: &str, journal: Vec<RelayEvent>) -> String {
+    let session = session_id(test);
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(
+        "turn-review-reviewer-1",
+    )))));
+    let (role, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Attach { .. }))
+        .await;
+    assert!(
+        role.as_deref()
+            .is_none_or(|role| role == mj_core::review::driver::REVIEWER_ROLE),
+        "the busy role is the one read: {role:?}"
+    );
+    let (through_ordinal, through_digest) = journal.last().map_or_else(
+        || (0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()),
+        |event| (event.ordinal, event.digest.clone()),
+    );
+    let mut state = busy_with("turn-review-reviewer-1");
+    state.latest_ordinal = through_ordinal;
+    state.latest_digest.clone_from(&through_digest);
+    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
+        crate::worker_client::RelayAttachment {
+            state,
+            events: journal,
+            through_ordinal,
+            through_digest,
+        },
+    ))));
+    let notice = next_notice(&mut manager).await;
+    host.shutdown().await.expect("shutdown the host");
+    notice
+}
+
+/// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
+/// on the Fable decline form from the review the restart cut off. Every
+/// later turn's review was refused with "the reviewer is busy with a second
+/// opinion", although no second opinion existed. The refusal now says which
+/// review holds the reviewer and what it is waiting for.
+#[tokio::test]
+async fn a_review_refused_by_a_leftover_review_waiting_on_a_question_says_so() {
+    let message = "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?";
+    let notice = refusal_behind_a_leftover_review(
+        "leftoverform",
+        vec![elicitation_event(
+            1,
+            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+            "decline-1",
+            message,
+        )],
+    )
+    .await;
+    assert!(!notice.contains("second opinion"), "{notice}");
+    assert!(
+        notice.starts_with(
+            "Turn review did not start: the review left running when Mjolnir restarted \
+             is waiting for an answer to a question"
+        ),
+        "{notice}"
+    );
+    assert!(notice.contains(message), "the question is named: {notice}");
+    assert!(
+        notice.ends_with("The next review covers these changes."),
+        "{notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_review_refused_by_a_leftover_review_that_is_still_working_says_so() {
+    let notice = refusal_behind_a_leftover_review("leftoverbusy", Vec::new()).await;
+    assert_eq!(
+        notice,
+        "Turn review did not start: the review left running when Mjolnir restarted \
+         is still running. The next review covers these changes."
+    );
+}
+
+/// The second-opinion wording stays for a real second opinion, which the
+/// terminal runs on the same reviewer.
+#[tokio::test]
+async fn a_review_refused_by_a_second_opinion_still_says_second_opinion() {
+    let session = session_id("secondopinion");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(&format!(
+        "{}critique-1",
+        mj_core::second_opinion::COMMAND_ID_PREFIX
+    ))))));
+    assert_eq!(
+        next_notice(&mut manager).await,
+        "Turn review did not start: the reviewer is busy with a second opinion. \
+         The next review covers these changes."
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// A review asked for while the open one waits on a person names that
+/// question rather than only saying a review is open.
+#[tokio::test]
+async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
+    let session = session_id("openwaiting");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let asked = elicitation_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "decline-1",
+        "Retry with claude-opus-4-8?",
+    );
+    let through_digest = asked.digest.clone();
+    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
+        crate::worker_client::RelayAttachment {
+            state: operational(),
+            events: vec![asked],
+            through_ordinal: 1,
+            through_digest,
+        },
+    ))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host
+            .view(session)
+            .is_none_or(|view| view.questions.is_empty())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the question is published");
+    let refusal = host
+        .start(session, true)
+        .await
+        .expect_err("one review at a time");
+    assert_eq!(
+        refusal.0,
+        "the previous review is waiting for your answer to a question \
+         (\"Retry with claude-opus-4-8?\"); answer or dismiss it"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}

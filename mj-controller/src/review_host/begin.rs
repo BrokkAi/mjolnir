@@ -168,8 +168,17 @@ impl HostState {
 
     /// The gates that need nothing but the host's own state.
     pub(super) fn refuse_start(&self, session_id: &str) -> Option<StartRefusal> {
-        if self.reviews.contains_key(session_id) {
-            return Some(StartRefusal("a review is already open".to_owned()));
+        if let Some(slot) = self.reviews.get(session_id) {
+            // Name what the open review waits for when it waits on a person,
+            // since that is what lets the next one start.
+            return Some(StartRefusal(match slot.questions().next() {
+                Some(question) => format!(
+                    "the previous review is waiting for your answer to a question ({}); \
+                     answer or dismiss it",
+                    quoted_question(&question.request.message)
+                ),
+                None => "a review is already open".to_owned(),
+            }));
         }
         if self.recovery_candidates.contains(session_id)
             || self.recovery_in_flight.contains(session_id)

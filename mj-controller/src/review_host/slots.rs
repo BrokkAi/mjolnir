@@ -1,6 +1,25 @@
 use super::*;
 
 impl ReviewSlot {
+    /// The forms each role's harness is waiting on, read from that role's
+    /// journal. A reviewer's own plan decision is not a question for the
+    /// person: the review pane declines it for them.
+    pub(super) fn questions(&self) -> impl Iterator<Item = ReviewerQuestion> + '_ {
+        self.roles
+            .iter()
+            .filter_map(|(role, transcript)| Some((role, transcript.session.as_ref()?)))
+            .flat_map(|(role, session)| {
+                session
+                    .pending_elicitations
+                    .iter()
+                    .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
+                    .map(|request| ReviewerQuestion {
+                        role: role.clone(),
+                        request: request.clone(),
+                    })
+            })
+    }
+
     pub(super) fn view(&self, session_id: &str) -> RuntimeReviewView {
         let verdict = match self.driver.phase() {
             TurnReviewPhase::Forwarding { synthesis, .. } => Some(VerdictView {
@@ -40,27 +59,9 @@ impl ReviewSlot {
                 },
             }),
         };
-        // The forms each role's harness is waiting on, read from that role's
-        // journal. A reviewer's own plan decision is not a question for the
-        // person: the review pane declines it for them.
-        let questions = self
-            .roles
-            .iter()
-            .filter_map(|(role, transcript)| Some((role, transcript.session.as_ref()?)))
-            .flat_map(|(role, session)| {
-                session
-                    .pending_elicitations
-                    .iter()
-                    .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
-                    .map(|request| ReviewerQuestion {
-                        role: role.clone(),
-                        request: request.clone(),
-                    })
-            })
-            .collect();
         RuntimeReviewView {
             session_id: session_id.to_owned(),
-            questions,
+            questions: self.questions().collect(),
             tier: self.driver.tier(),
             phase: self.driver.phase().clone(),
             roles: self.driver.roles(),

@@ -136,6 +136,10 @@ pub const SUPERVISOR_ROLE: &str = "supervisor";
 /// The extended tier's intent analyst.
 pub const INTENT_ROLE: &str = "intent";
 
+/// How every command a turn review sends a reviewing role begins, so a
+/// reviewer's running prompt says which kind of review it belongs to.
+pub const COMMAND_ID_PREFIX: &str = "turn-review-";
+
 /// Everything about the reviewed turn that is known before the capture lands.
 #[derive(Debug, Clone)]
 pub struct TurnReviewSeed {

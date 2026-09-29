@@ -115,8 +115,8 @@ pub(super) async fn prepare(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
-    // Mutual exclusion with a plan-review second opinion: they share the
-    // default reviewer role, and the running one keeps the slot. Checked
+    // Mutual exclusion on the default reviewer role, which a plan-review
+    // second opinion shares: the running prompt keeps the role. Checked
     // against the worker rather than against any UI's state, because the
     // worker is the only place that knows.
     let handle = control
@@ -124,10 +124,12 @@ pub(super) async fn prepare(
         .await
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
     match handle.reviewer(ReviewerAction::Status).await {
-        Ok(ReviewerOutcome::Status(state)) if state.active_prompt.is_some() => {
-            return Err(StartRefusal(
-                "the reviewer is busy with a second opinion".to_owned(),
-            ));
+        Ok(ReviewerOutcome::Status(state)) => {
+            if let Some(prompt) = &state.active_prompt {
+                return Err(StartRefusal(
+                    busy_reviewer(&handle, session_id, &prompt.command_id).await,
+                ));
+            }
         }
         Ok(_) => {}
         Err(error) => return Err(StartRefusal(format!("{error:#}"))),
@@ -285,6 +287,97 @@ pub(super) async fn prepare_recovery(
         resume_forward: Some(pending),
         captured: None,
     }))
+}
+
+/// Why the default reviewing role cannot take a new review, from the id of
+/// the prompt the worker says it is running.
+async fn busy_reviewer(
+    handle: &ManagedSessionHandle,
+    session_id: &str,
+    command_id: &str,
+) -> String {
+    if command_id.starts_with(mj_core::second_opinion::COMMAND_ID_PREFIX) {
+        return "the reviewer is busy with a second opinion".to_owned();
+    }
+    if !command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX) {
+        return "the reviewer is busy".to_owned();
+    }
+    // Preparation runs only while this host holds no review for the session,
+    // so a turn review's prompt here belongs to a review an earlier daemon
+    // started. The worker kept that reviewer running across the restart; the
+    // review that would read its answer did not survive.
+    const LEFTOVER: &str = "the review left running when Mjolnir restarted";
+    match reviewer_questions(handle, session_id).await {
+        Ok(questions) => match questions.first() {
+            Some(question) => format!(
+                "{LEFTOVER} is waiting for an answer to a question ({}) that Mjolnir \
+                 can no longer show",
+                quoted_question(&question.message)
+            ),
+            None => format!("{LEFTOVER} is still running"),
+        },
+        Err(error) => {
+            tracing::debug!(%session_id, %error, "could not read the leftover reviewer's journal");
+            format!("{LEFTOVER} is still running")
+        }
+    }
+}
+
+/// The forms the default reviewing role's harness is waiting on, read from
+/// that role's journal in the worker.
+async fn reviewer_questions(
+    handle: &ManagedSessionHandle,
+    session_id: &str,
+) -> Result<Vec<mj_core::elicitation::ElicitationRequest>, String> {
+    // Bounds the pages read; a reviewer's journal is one review long.
+    const MAX_PAGES: usize = 64;
+    let mut transcript = RoleTranscript::default();
+    let relay_session = role_session_id(session_id, mj_core::review::driver::REVIEWER_ROLE);
+    for _ in 0..MAX_PAGES {
+        let after_digest = if transcript.cursor_digest.is_empty() {
+            mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            transcript.cursor_digest.clone()
+        };
+        let attachment = match handle
+            .reviewer(ReviewerAction::Attach {
+                after_ordinal: transcript.cursor_ordinal,
+                after_digest,
+            })
+            .await
+            .map_err(|error| format!("{error:#}"))?
+        {
+            ReviewerOutcome::Attached(attachment) => attachment,
+            other => return Err(unexpected(Ok(other))),
+        };
+        let done = attachment.events.is_empty()
+            || attachment.through_ordinal >= attachment.state.latest_ordinal;
+        transcript.apply(&relay_session, &attachment.events);
+        if done {
+            break;
+        }
+    }
+    Ok(transcript
+        .session
+        .map(|session| {
+            session
+                .pending_elicitations
+                .into_iter()
+                .filter(|request| !mj_core::acp::is_plan_review_id(&request.id))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// A question's first line, quoted and kept short enough for a notice.
+pub(super) fn quoted_question(message: &str) -> String {
+    const LIMIT: usize = 160;
+    let line = message.lines().next().unwrap_or_default().trim();
+    if line.chars().count() > LIMIT {
+        format!("\"{}…\"", line.chars().take(LIMIT).collect::<String>())
+    } else {
+        format!("\"{line}\"")
+    }
 }
 
 /// How long a review waits for other work holding its session, such as the

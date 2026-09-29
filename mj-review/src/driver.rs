@@ -267,7 +267,7 @@ impl TurnReviewDriver {
 
     fn next_command_id(&mut self, purpose: &str) -> String {
         self.sequence += 1;
-        format!("turn-review-{purpose}-{}", self.sequence)
+        format!("{COMMAND_ID_PREFIX}{purpose}-{}", self.sequence)
     }
 
     fn job(&self) -> ReviewJob {
