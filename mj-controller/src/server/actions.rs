@@ -100,7 +100,7 @@ pub enum ControllerAction {
     /// authenticated request so changing the destination cannot be smuggled
     /// into a confirmation from an older browser form.
     Move {
-        request: MoveSessionRequest,
+        request: Box<MoveSessionRequest>,
     },
     Open {
         session_id: String,

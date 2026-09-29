@@ -3728,7 +3728,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     assert_eq!(
         validate_action(
             &ControllerAction::Move {
-                request: request(Some(ResumeQueueDisposition::Discard), false),
+                request: Box::new(request(Some(ResumeQueueDisposition::Discard), false)),
             },
             &snapshot,
         )
@@ -3739,7 +3739,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     assert_eq!(
         validate_action(
             &ControllerAction::Move {
-                request: request(None, true),
+                request: Box::new(request(None, true)),
             },
             &snapshot,
         )
@@ -3749,7 +3749,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     );
     validate_action(
         &ControllerAction::Move {
-            request: request(Some(ResumeQueueDisposition::Discard), true),
+            request: Box::new(request(Some(ResumeQueueDisposition::Discard), true)),
         },
         &snapshot,
     )

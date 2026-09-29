@@ -313,7 +313,7 @@ pub(super) async fn apply_phone_action(
             .await
             .map(|_| ()),
         ControllerAction::Move { request } => {
-            let outcome = services.daemon_runtime.move_session(request).await?;
+            let outcome = services.daemon_runtime.move_session(*request).await?;
             match outcome.outcome.as_str() {
                 "completed" | "unchanged" | "interrupted" => Ok(()),
                 "cancelled" | "failed" => {
