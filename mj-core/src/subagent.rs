@@ -118,6 +118,9 @@ impl SubagentOptions {
         let SubagentPolicy::SingleModel { model, effort } = policy else {
             return Ok(());
         };
+        if model.is_empty() {
+            return Err(format!("Choose a subagent model. {PROFILE_HELP}"));
+        }
         if !self.models.iter().any(|choice| &choice.value == model) {
             return Err(format!(
                 "Selected subagent model {model:?} is unavailable. {PROFILE_HELP}"
@@ -1032,6 +1035,16 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn single_model_without_a_model_asks_for_one_instead_of_quoting_nothing() {
+        let policy = SubagentPolicy::SingleModel {
+            model: String::new(),
+            effort: None,
+        };
+        let message = SubagentOptions::default().validate(&policy).unwrap_err();
+        assert!(message.starts_with("Choose a subagent model."), "{message}");
+        assert!(!message.contains("\"\""), "{message}");
+    }
     #[test]
     fn policies_preserve_legacy_records_but_public_policy_rejects_booleans() {
         #[derive(Deserialize)]
