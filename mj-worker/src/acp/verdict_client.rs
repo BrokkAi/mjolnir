@@ -232,7 +232,7 @@ impl VerdictClient {
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v5", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v6", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -521,7 +521,7 @@ mod tests {
         let record = &page.decisions[0];
         assert_eq!(record.status, "applied");
         let technical = record.technical.as_ref().unwrap();
-        assert_eq!(technical["contract"], "turn-verdict-v5");
+        assert_eq!(technical["contract"], "turn-verdict-v6");
         assert_eq!(
             technical["confidence_threshold"],
             serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)

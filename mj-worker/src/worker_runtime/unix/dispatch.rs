@@ -537,13 +537,6 @@ pub(crate) fn record_runtime_event(
                 },
             )?;
         }
-        RuntimeEvent::ContinuationExpected {
-            since_ms,
-            note,
-            generation,
-        } => {
-            relay.expect_continuation(since_ms, note, generation)?;
-        }
         RuntimeEvent::ConfigApplied {
             request_id,
             key,

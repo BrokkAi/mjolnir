@@ -153,11 +153,11 @@ The per-worker decision logs on Jonathan's host hold 502 decisions across 22 ses
 ## Known gaps
 
 - Quiet is not unified (above).
-- `Continue` maps to `KeepCurrent` in the activity inference, so the documented "continuation waits for background work and re-checks when Jev judges it idle" cannot happen for protocol-25 workers: a confident `authorized_unfinished` with tasks listed leaves the tasks counted as Background and the continuation blocked. Only a `Finished` verdict lifts them, and `Finished` produces no continuation.
+- (Closed 2026-09-29.) `Continue` maps to `KeepCurrent` in the activity inference, so a confident `authorized_unfinished` with tasks listed used to leave the continuation blocked behind them for good. The `background` judgment now discharges unneeded tasks: `driver_present` goes false, and the worker's admission check (`relay/commands.rs`, which already tested `driver_present`) lets the continuation through. A worker test pins it.
 - The worker records `Continue` as `Deferred` whether or not `[continuation]` is enabled and whether or not the session is a child; nothing consumes it in those cases, and `mj wait` treats `Deferred` as not finished.
 - Provider-retry submission requires `is_quiet`, so a leftover background command blocks an armed retry.
-- Dead code: `RuntimeEvent::ContinuationExpected` and `TurnVerdict::should_retry_server_error` are used only by tests.
-- The proxy runbook lists routes up to v4 while the worker calls `/v5/turn-verdict`; live logs show v5 answers, so v5 is deployed, but the runbook does not record it.
+- (Closed 2026-09-29.) The dead `RuntimeEvent::ContinuationExpected` and `TurnVerdict::should_retry_server_error` are removed.
+- The proxy runbook now records v5 and v6; v6 is not deployed as of 2026-09-29 and must be before a worker that calls it ships.
 - Turn-imminent detection: Mjolnir cannot see a harness turn that has started but produced no output. For Claude, the settle signal (`async_task_state_update`) is available and unused for this purpose. For Codex exec cards, Kimi tasks, and the other harnesses, whether an equivalent signal exists is unchecked.
 - The uncertain rate is high; there is no measurement of why (evidence missing, question wording, or genuinely ambiguous cases).
 - Real-scenario tests: existing tests pin mechanics with fixed fake probabilities; model behavior is checked only by small synthetic runs and two one-off replays. Nothing replays a live-log scenario end to end.

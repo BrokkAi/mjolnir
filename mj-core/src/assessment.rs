@@ -390,6 +390,138 @@ mod tests {
             background: None,
         }
     }
+    fn scored(failure: (Failure, f32), input: (Input, f32), work: (Work, f32)) -> Verdict {
+        Verdict {
+            failure: Judgment {
+                choice: failure.0,
+                confidence: failure.1,
+            },
+            input: Judgment {
+                choice: input.0,
+                confidence: input.1,
+            },
+            work: Judgment {
+                choice: work.0,
+                confidence: work.1,
+            },
+            background: None,
+        }
+    }
+
+    #[test]
+    fn finished_and_wait_need_the_activity_bar_and_a_confident_absence_of_failure() {
+        let none = (Failure::None, 0.95);
+        assert_eq!(
+            scored(none, (Input::None, 0.85), (Work::Finished, 0.85)).action(false),
+            Action::Finished
+        );
+        assert_eq!(
+            scored(none, (Input::None, 0.85), (Work::Waiting, 0.85)).action(false),
+            Action::Wait
+        );
+        // One hundredth under either bar is uncertain.
+        assert_eq!(
+            scored(none, (Input::None, 0.84), (Work::Finished, 0.99)).action(false),
+            Action::Uncertain
+        );
+        assert_eq!(
+            scored(none, (Input::None, 0.99), (Work::Waiting, 0.84)).action(false),
+            Action::Uncertain
+        );
+        // Redundant permission is not "no input" for idle inference.
+        assert_eq!(
+            scored(
+                none,
+                (Input::RedundantRequest, 0.99),
+                (Work::Finished, 0.99)
+            )
+            .action(false),
+            Action::Uncertain
+        );
+        // An unsure failure axis blocks idle, waiting, and continuation alike.
+        for failure in [
+            (Failure::None, 0.89),
+            (Failure::Unclear, 0.5),
+            (Failure::Other, 0.6),
+        ] {
+            assert_eq!(
+                scored(failure, (Input::None, 0.99), (Work::Finished, 0.99)).action(true),
+                Action::Uncertain,
+                "{failure:?}"
+            );
+            assert_eq!(
+                scored(
+                    failure,
+                    (Input::None, 0.99),
+                    (Work::AuthorizedUnfinished, 0.99)
+                )
+                .action(true),
+                Action::Uncertain,
+                "{failure:?}"
+            );
+        }
+        // Continuation needs the automation bar on both axes, not the activity bar.
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.90),
+                (Work::AuthorizedUnfinished, 0.90)
+            )
+            .action(true),
+            Action::Continue
+        );
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.89),
+                (Work::AuthorizedUnfinished, 0.99)
+            )
+            .action(true),
+            Action::Uncertain
+        );
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.99),
+                (Work::AuthorizedUnfinished, 0.89)
+            )
+            .action(true),
+            Action::Uncertain
+        );
+        // A required-input answer wins even against a confident provider failure.
+        assert_eq!(
+            scored(
+                (Failure::TransientProvider, 0.99),
+                (Input::Required, 0.85),
+                (Work::Unclear, 0.1)
+            )
+            .action(true),
+            Action::AwaitInput
+        );
+    }
+
+    #[test]
+    fn a_missing_background_answer_parses_and_a_bad_one_fails() {
+        let mut answers = serde_json::json!({"answers": {
+            "failure": {"type": "choice", "choice": "none", "confidence": 0.99},
+            "input": {"type": "choice", "choice": "none", "confidence": 0.99},
+            "work": {"type": "choice", "choice": "finished", "confidence": 0.99},
+        }});
+        assert!(Verdict::parse(&answers).unwrap().background.is_none());
+        answers["answers"]["background"] =
+            serde_json::json!({"type": "choice", "choice": "unneeded", "confidence": 0.9});
+        assert_eq!(
+            Verdict::parse(&answers)
+                .unwrap()
+                .background
+                .map(|j| j.choice),
+            Some(Background::Unneeded)
+        );
+        answers["answers"]["background"] =
+            serde_json::json!({"type": "choice", "choice": "maybe", "confidence": 0.9});
+        assert!(Verdict::parse(&answers).is_err());
+    }
+
     #[test]
     fn provider_recovery_is_independent_of_uncertain_remaining_work() {
         let mut v = verdict(Failure::TransientProvider, Input::Unclear, Work::Unclear);

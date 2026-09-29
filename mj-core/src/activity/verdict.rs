@@ -182,11 +182,6 @@ impl TurnVerdict {
             },
         })
     }
-
-    pub fn should_retry_server_error(&self) -> bool {
-        self.retryable_server_error
-            .is_some_and(|score| score >= SERVER_RETRY_CONFIDENCE)
-    }
 }
 
 fn probability(value: &Value) -> Result<f32> {
@@ -321,28 +316,6 @@ mod tests {
             }
         }
         assert!(TurnVerdict::parse(&json!({})).is_err());
-    }
-
-    #[test]
-    fn server_retry_requires_a_confident_valid_probability() {
-        let mut response = json!({"answers": {
-            "work_state":{"type":"choice","choice":"unclear","confidence":0.5},
-            "needs_user_input":{"type":"noul","noul":0.01},
-            "retryable_server_error":{"type":"noul","noul":0.90}
-        }});
-        assert!(
-            TurnVerdict::parse(&response)
-                .unwrap()
-                .should_retry_server_error()
-        );
-        response["answers"]["retryable_server_error"]["noul"] = json!(0.89);
-        assert!(
-            !TurnVerdict::parse(&response)
-                .unwrap()
-                .should_retry_server_error()
-        );
-        response["answers"]["retryable_server_error"]["noul"] = json!(1.1);
-        assert!(TurnVerdict::parse(&response).is_err());
     }
 
     #[test]

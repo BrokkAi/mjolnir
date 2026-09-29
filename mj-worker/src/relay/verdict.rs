@@ -423,6 +423,8 @@ impl DurableRelay {
         Ok("applied")
     }
 
+    /// Test helper: apply an expected-continuation decision directly.
+    #[cfg(test)]
     pub fn expect_continuation(
         &mut self,
         since_ms: i64,
@@ -639,6 +641,83 @@ mod settled_task_tests {
             .unwrap();
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
         assert!(relay.activity_facts().harness_turn_started_at_ms.is_some());
+    }
+
+    #[test]
+    fn a_confident_unneeded_judgment_releases_the_leftover_tasks_until_the_evidence_moves() {
+        use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        // A configured harness session; otherwise nothing is ever quiet.
+        relay.acp_ready = true;
+        relay
+            .claude_background_tasks_changed(vec![task("srv")])
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        relay
+            .record_session_update(
+                serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Done; the dev server stays up for you."}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
+        assert_eq!(
+            evidence.background.len(),
+            1,
+            "the leftover task is named in the evidence"
+        );
+        assert!(evidence.background[0].command.contains("srv"));
+        let before = relay.activity_facts();
+        assert!(mj_core::activity::driver_present(&before));
+        assert_eq!(
+            relay.operational_state().quiet().reason(),
+            "background work"
+        );
+
+        let judged = |background| Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+            },
+            work: Judgment {
+                choice: Work::Finished,
+                confidence: 0.99,
+            },
+            background: Some(Judgment {
+                choice: background,
+                confidence: 0.95,
+            }),
+        };
+        relay
+            .apply_turn_assessment(generation, judged(Background::Unneeded))
+            .unwrap();
+        let after = relay.activity_facts();
+        assert_eq!(after.background_needed, Some(false));
+        assert_eq!(
+            after.background_commands, 1,
+            "the task list itself is untouched"
+        );
+        assert!(!mj_core::activity::driver_present(&after));
+        let quiet = relay.operational_state().quiet();
+        assert!(quiet.is_yes(), "{}", quiet.reason());
+        assert_eq!(relay.operational_state().background_needed, Some(false));
+
+        // New foreground work invalidates the judgment with the rest of the inference.
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
+            .unwrap();
+        assert!(relay.activity_facts().background_needed.is_none());
     }
 
     #[test]
