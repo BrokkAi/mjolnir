@@ -36,7 +36,7 @@ semver = "1"
 mj-review = { path = "mj-review", package = "brokk-mj-review", version = "2.23.2" }
 mj-transcript = { path = "mj-transcript", package = "brokk-mj-transcript", version = "2.23.2" }
 mj-checkpoint = { path = "mj-checkpoint", package = "brokk-mj-checkpoint", version = "2.23.2" }
-anvil-client = { package = "brokk-anvil-client", version = "0.28.5", git = "https://github.com/BrokkAi/anvil.git", rev = "8248f521c0f99b456b4c48353b7e4993675e137e" }
+anvil-client = { package = "brokk-anvil-client", version = "0.28.6" }
 mj-core = { path = "mj-core", package = "brokk-mj-core", version = "2.23.2", default-features = false }
 mj-worker = { path = "mj-worker", package = "brokk-mj-worker", version = "2.23.2" }
 mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.23.2" }

@@ -574,8 +574,9 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "brokk-anvil-client"
-version = "0.28.5"
-source = "git+https://github.com/BrokkAi/anvil.git?rev=8248f521c0f99b456b4c48353b7e4993675e137e#8248f521c0f99b456b4c48353b7e4993675e137e"
+version = "0.28.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dde281941a74de41536aca89e4e2ede4e1548603ea538b6a30e229de5396384"
 dependencies = [
  "anyhow",
  "base64",
@@ -586,7 +587,6 @@ dependencies = [
  "futures",
  "http",
  "jsonschema",
- "libc",
  "oauth2",
  "rand 0.10.2",
  "reqwest",
