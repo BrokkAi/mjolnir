@@ -1110,3 +1110,22 @@ test('a request answered without content still reads the empty body to its end',
   const { read } = await run(401);
   assert.ok(read, 'a 401 body was left unread');
 });
+
+// I1-7: the daemon omits `roles` from a review that has no agents yet or ended
+// with nothing to review. The card threw on `review.roles.length`, the stream
+// handler stopped applying snapshots, and the composer stayed locked.
+test('a review published without roles renders and clears when it ends', () => {
+  const harness = turnReviewHarness();
+  const preparing = {
+    id: 'session-a',
+    turn_review: { tier: 'quick', status: 'Preparing reviewer' },
+  };
+  harness.setActive(preparing);
+  assert.doesNotThrow(() => harness.renderTurnReview(preparing));
+  assert.equal(harness.reviewHost.children.length, 1, 'the card was not drawn');
+
+  const ended = { id: 'session-a', turn_review: null };
+  harness.setActive(ended);
+  harness.renderTurnReview(ended);
+  assert.equal(harness.reviewHost.children.length, 0, 'the card stayed after the review ended');
+});

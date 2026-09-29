@@ -4803,9 +4803,10 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', `Reviewing this turn (${review.tier})`));
-  if (review.roles.length) {
+  const roles = review.roles || [];
+  if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');
-    strip.textContent = review.roles
+    strip.textContent = roles
       .map(role => `${role.label}: ${role.state}`)
       .join('  ·  ');
     card.append(strip);
