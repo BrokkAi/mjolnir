@@ -1925,3 +1925,37 @@ fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
     controller.reload().unwrap();
     assert!(!controller.state.sessions.contains_key(&session.id));
 }
+
+/// Test-and-fix C-8: a running daemon whose configuration file gained a
+/// `from_secret` entry with no secret answered `mj new` with an opaque 500.
+/// The reason is the person's to fix, so it must travel as a refusal.
+#[test]
+fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
+    const MARKER: &str = "MJ_TEST_UNLOADABLE_CONFIG_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            format!(
+                "version = {}\n\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+                 [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        run_registration_child(
+            MARKER,
+            "a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure",
+            directory.path(),
+        );
+        return;
+    }
+    let error = Controller::load().err().expect("the config cannot load");
+    let refusal = mj_core::refusal::Refusal::of(&error).expect("the failure is a refusal");
+    assert!(
+        refusal.message().starts_with("FAKE_TOKEN = { from_secret"),
+        "{}",
+        refusal.message()
+    );
+    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+}
