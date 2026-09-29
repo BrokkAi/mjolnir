@@ -1055,12 +1055,18 @@ pub(crate) const LATCH_RELAY_ANSWER_PROMPTS: &str = "MJ_TEST_LATCH_ANSWER_PROMPT
 #[cfg(unix)]
 pub(crate) const LATCH_RELAY_ANSWER: &str = "answered by the stand-in harness";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
-/// Journal one observation of the worker's own just before accepting a
-/// Close, and complete the Close once the barrier it seals has ended, the way
-/// a live worker does. See
-/// [`a_suspend_seals_when_the_worker_journals_after_the_close_cut`].
+/// Have the worker write something of its own just before it reads a Close,
+/// and complete the Close once the barrier it seals has ended, the way a live
+/// worker does. The value names the write: [`LATE_HARNESS_NOTIFICATION`] or
+/// [`LATE_HARNESS_QUESTION`].
 #[cfg(unix)]
 const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
+/// A harness notification that changes no work, which waits behind the cut.
+#[cfg(unix)]
+const LATE_HARNESS_NOTIFICATION: &str = "notification";
+/// A question for a person, which cannot wait and spoils the cut.
+#[cfg(unix)]
+const LATE_HARNESS_QUESTION: &str = "question";
 #[cfg(unix)]
 const CLOSE_CUT_TEST_CHILD: &str = "MJ_TEST_CLOSE_CUT_CHILD";
 pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
@@ -1160,7 +1166,9 @@ fn latch_relay_child_serves_stdio() {
         );
     let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
     #[cfg(unix)]
-    let journals_before_close = std::env::var_os(LATCH_RELAY_JOURNALS_BEFORE_CLOSE).is_some();
+    let late_write = std::env::var(LATCH_RELAY_JOURNALS_BEFORE_CLOSE).ok();
+    #[cfg(unix)]
+    let journals_before_close = late_write.is_some();
     #[cfg(unix)]
     let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
     #[cfg(unix)]
@@ -1215,29 +1223,47 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
-        // A live worker keeps journaling while a checkpoint barrier holds:
-        // the barrier freezes command dispatch, not the completed-turn
-        // classifier's answer or the harness's own notifications. This lands
-        // one such write after the daemon's last look and before its Close.
+        // The harness keeps talking while a checkpoint barrier holds: this
+        // lands one write of its own after the daemon's last look and before
+        // its Close, through the same relay calls the worker runtime uses.
         #[cfg(unix)]
-        if journals_before_close
-            && matches!(
-                &request.request,
-                mj_core::relay::RelayRequest::Submit {
-                    command: RelayCommand::Close { .. },
-                    ..
+        if matches!(
+            &request.request,
+            mj_core::relay::RelayRequest::Submit {
+                command: RelayCommand::Close { .. },
+                ..
+            }
+        ) {
+            match late_write.as_deref() {
+                Some(LATE_HARNESS_NOTIFICATION) => {
+                    relay
+                        .record_session_update(
+                            serde_json::from_value(serde_json::json!({
+                                "sessionUpdate": "session_info_update",
+                                "title": "A title the harness chose after the turn"
+                            }))
+                            .unwrap(),
+                        )
+                        .expect("record a harness notification");
                 }
-            )
-        {
-            relay
-                .record_session_update(
-                    serde_json::from_value(serde_json::json!({
-                        "sessionUpdate": "session_info_update",
-                        "title": "A title the harness chose after the turn"
-                    }))
-                    .unwrap(),
-                )
-                .expect("journal a worker-owned observation");
+                Some(LATE_HARNESS_QUESTION) => {
+                    relay
+                        .record_observation(
+                            mj_core::relay::RelayObservation::ElicitationRequested {
+                                request: mj_core::elicitation::ElicitationRequest {
+                                    id: "late-question".into(),
+                                    message: "May I continue?".into(),
+                                    title: None,
+                                    description: None,
+                                    fields: Vec::new(),
+                                },
+                            },
+                        )
+                        .expect("record a harness question");
+                }
+                Some(other) => panic!("unknown late write {other:?}"),
+                None => {}
+            }
         }
         let response = if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
@@ -3106,10 +3132,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
 }
 
 /// Run `test_name` in its own process with its own store, behind a scripted
-/// worker that journals one observation of its own just before it reads the
-/// Close. Returns true in that child, where the caller runs its body.
+/// worker that makes `late_write` just before it reads the Close. Returns
+/// true in that child, where the caller runs its body.
 #[cfg(unix)]
-fn in_close_cut_child(test_name: &str) -> bool {
+fn in_close_cut_child(test_name: &str, late_write: &str) -> bool {
     if std::env::var_os(CLOSE_CUT_TEST_CHILD).is_some() {
         return true;
     }
@@ -3121,9 +3147,8 @@ fn in_close_cut_child(test_name: &str) -> bool {
             .unwrap_or(module_path!())
     );
     IsolatedTest::new(test_name)
-        .include_ignored()
         .env(CLOSE_CUT_TEST_CHILD, "1")
-        .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, "1")
+        .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, late_write)
         .env("MJ_DATA_DIR", directory.path())
         .run();
     false
@@ -3261,29 +3286,24 @@ async fn close_cut_controller(
 /// I2-3 (test-and-fix campaign 2026-09-29): a suspend issued right after a
 /// turn ended failed with "close does not match the current checkpoint cut".
 ///
-/// Two parties write the relay journal while a close holds its checkpoint
-/// barrier. The daemon decides the cut it seals: the barrier's ready cursor,
-/// which it latches, archives, and revalidates, and whose revalidation
-/// deliberately accepts a frontier that moved past the cursor. The worker
-/// keeps journaling its own observations under that barrier, because the
-/// barrier freezes command dispatch only: the completed-turn classifier's
-/// answer (`TurnAssessmentUpdated`) and the harness's notifications land
-/// whenever they arrive. The worker's Close then requires the frontier to be
-/// exactly the cursor, so one such write between the daemon's last look and
-/// its Close makes the worker refuse, and the suspend fails.
+/// The daemon took the cut from the barrier's ready cursor, but the worker
+/// kept journaling its own output under that barrier (the completed-turn
+/// classifier's answer, the harness's notifications), and its Close requires
+/// the frontier to equal the cut exactly. One such write between the daemon's
+/// last look and its Close made the worker refuse.
 ///
-/// Here the stand-in worker journals one harness notification just before it
-/// reads the Close, which is the window the real session hit about half a
-/// second after its first turn ended.
-///
-/// Ignored until the owner of the close cut is decided. Every fix found
-/// changes the worker relay or the relay protocol (see the I2-3 report), which
-/// the campaign rules send to the user first.
+/// The worker now owns the cut: while a barrier is ready, output that changes
+/// no work waits, and a relay sealed at the cut drops it. The stand-in worker
+/// here makes that write through the real relay just before it reads the
+/// Close, the window the real session hit about half a second after its first
+/// turn ended, and the suspend seals and stops the session.
 #[cfg(unix)]
 #[tokio::test]
-#[ignore = "I2-3: the close cut has two writers; the fix changes the worker relay or protocol"]
 async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
-    if !in_close_cut_child("a_suspend_seals_when_the_worker_journals_after_the_close_cut") {
+    if !in_close_cut_child(
+        "a_suspend_seals_when_the_worker_journals_after_the_close_cut",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -3317,13 +3337,16 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
 /// before sealing does. Recording an interrupted close instead left I2-3's
 /// session `suspending` with an error until someone suspended it again.
 ///
-/// This goes through the daemon's route: its suspend marks the record
-/// `Closing` first and then recovers that close.
+/// The refusal comes from a question the harness asks between the cut and the
+/// Close: a question cannot wait behind the cut, so it spoils it. This goes
+/// through the daemon's route: its suspend marks the record `Closing` first
+/// and then recovers that close.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier() {
     if !in_close_cut_child(
         "a_refused_close_returns_the_session_to_running_and_releases_its_barrier",
+        LATE_HARNESS_QUESTION,
     ) {
         return;
     }

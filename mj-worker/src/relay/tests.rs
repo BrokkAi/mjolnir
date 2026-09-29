@@ -4492,6 +4492,9 @@ fn close_requires_exact_checkpoint_cut_and_survives_controller_disconnect() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     let stale_cut = ready_checkpoint(&mut relay, "stale-close-barrier");
+    // Output that changes no work waits behind the cut; drift comes from
+    // something that ended that hold, such as the agent starting work.
+    relay.end_checkpoint_hold().unwrap();
     relay
         .record_observation(RelayObservation::Warning {
             message: "post-cut drift".into(),

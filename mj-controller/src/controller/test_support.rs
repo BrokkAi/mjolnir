@@ -541,13 +541,6 @@ impl IsolatedTest {
         self
     }
 
-    /// Run the child half of an `#[ignore]`d test too. Without this, running
-    /// the parent with `--ignored` passes without running the child at all.
-    pub(crate) fn include_ignored(mut self) -> Self {
-        self.command.arg("--include-ignored");
-        self
-    }
-
     /// Give the child its own configuration and data directories under `root`.
     pub(crate) fn isolated_store(self, root: &Path) -> Self {
         self.env("MJ_DATA_DIR", root.join("data"))

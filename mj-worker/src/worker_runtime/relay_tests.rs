@@ -6590,3 +6590,180 @@ async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
 fn no_prompt_loop() -> mpsc::Sender<CommandRequest> {
     mpsc::channel(1).0
 }
+
+/// Start a coordinator whose session has a ready checkpoint barrier, fed by a
+/// runtime event channel of `capacity`. Returns the cut the barrier holds.
+async fn coordinator_behind_a_ready_barrier(
+    temp: &tempfile::TempDir,
+    capacity: usize,
+) -> (
+    Arc<Mutex<DurableRelay>>,
+    mpsc::Sender<RuntimeEvent>,
+    mpsc::Sender<()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    mj_core::relay::RelayCursor,
+) {
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(
+        &mut durable,
+        "checkpoint-barrier",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = mpsc::channel(capacity);
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, _command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .await
+        .unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .checkpoint_ready
+                .is_some()
+        },
+        "the checkpoint barrier never became ready",
+    )
+    .await;
+    let cut = relay
+        .lock()
+        .unwrap()
+        .operational_state()
+        .checkpoint_ready
+        .unwrap();
+    (relay, event_tx, wake_tx, coordinator, cut)
+}
+
+fn journaled_notices(relay: &Arc<Mutex<DurableRelay>>) -> Vec<String> {
+    relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.observation {
+            RelayObservation::Notice { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Holding the worker's writes behind a ready barrier must not stop the
+/// coordinator reading runtime events: a full bounded channel parks the ACP
+/// runtime, and a parked runtime cannot act on anything, including the reply
+/// to a question sent through the command channel. The coordinator keeps
+/// draining; the relay keeps what can wait in memory and journals it, in
+/// order, when the barrier ends.
+#[tokio::test]
+async fn a_ready_barrier_keeps_draining_runtime_events_past_the_channel_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let (relay, event_tx, wake_tx, coordinator, cut) =
+        coordinator_behind_a_ready_barrier(&temp, 4).await;
+
+    let sent: Vec<String> = (0..64)
+        .map(|index| format!("held notice {index}"))
+        .collect();
+    for message in &sent {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            event_tx.send(RuntimeEvent::Notice {
+                message: message.clone(),
+            }),
+        )
+        .await
+        .expect("the coordinator stopped draining runtime events behind the barrier")
+        .unwrap();
+    }
+    wait_until(
+        || event_tx.capacity() == 4,
+        "the coordinator never drained the channel",
+    )
+    .await;
+    assert_eq!(
+        relay.lock().unwrap().operational_state().latest_ordinal,
+        cut.ordinal
+    );
+    assert!(journaled_notices(&relay).is_empty());
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "checkpoint-release",
+        RelayCommand::ReleaseCheckpoint {
+            barrier_command_id: "checkpoint-barrier".into(),
+        },
+    );
+    assert_eq!(journaled_notices(&relay), sent);
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+/// A question the harness asks while a barrier holds its cut is journaled at
+/// once, so a person can see and answer it; the cut is spoiled, as any sign of
+/// the agent at work spoils it. The answer travels to the runtime through the
+/// command channel, which the hold never touches.
+#[tokio::test]
+async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (relay, event_tx, wake_tx, coordinator, cut) =
+        coordinator_behind_a_ready_barrier(&temp, 16).await;
+    event_tx
+        .send(RuntimeEvent::Notice {
+            message: "before the question".into(),
+        })
+        .await
+        .unwrap();
+    event_tx
+        .send(RuntimeEvent::ElicitationRequested {
+            request: mj_core::elicitation::ElicitationRequest {
+                id: "question-1".into(),
+                message: "May I continue?".into(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let asked = || {
+        relay
+            .lock()
+            .unwrap()
+            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+            .unwrap()
+            .into_iter()
+            .find_map(|event| match event.observation {
+                RelayObservation::ElicitationRequested { request }
+                    if request.id == "question-1" =>
+                {
+                    Some(event.ordinal)
+                }
+                _ => None,
+            })
+    };
+    wait_until(
+        || asked().is_some(),
+        "the question never reached the journal",
+    )
+    .await;
+    assert!(asked().unwrap() > cut.ordinal);
+    assert_eq!(journaled_notices(&relay), vec!["before the question"]);
+    assert!(!relay.lock().unwrap().worker_writes_held());
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
