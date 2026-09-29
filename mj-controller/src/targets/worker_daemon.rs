@@ -139,10 +139,15 @@ hel_snapshot_tree() {
 hel_tree_running() {
     [ -n "$hel_tree" ] || return 1
     hel_processes=$(hel_ps -eo pid=,stat=) || return 2
-    printf '%s\n' "$hel_processes" | awk -v tree="$hel_tree" '
-        BEGIN { n = split(tree, lines, "\n"); for (i = 1; i <= n; i++) { split(lines[i], f, " "); want[f[1]] = 1 } }
-        ($1 in want) && $2 !~ /^Z/ {found=1}
-        END {exit !found}'
+    hel_tree_pids=" $(printf '%s\n' "$hel_tree" | while read -r hel_tpid hel_tgroup; do printf '%s ' "$hel_tpid"; done)"
+    while read -r hel_ppid hel_pstat; do
+        [ -n "$hel_ppid" ] || continue
+        case "$hel_pstat" in Z*) continue ;; esac
+        case "$hel_tree_pids" in *" $hel_ppid "*) return 0 ;; esac
+    done <<MJ_TREE
+$hel_processes
+MJ_TREE
+    return 1
 }
 hel_running() {
     hel_group_running "$1"
@@ -503,5 +508,44 @@ mod tests {
             state.is_empty() || state.starts_with('Z'),
             "harness survived: {state}"
         );
+    }
+
+    /// The script runs through the target's own shell and awk. macOS awk
+    /// rejects a newline inside a `-v` value, and `/bin/sh` may be dash,
+    /// busybox or bash, so the script must be plain POSIX sh with no
+    /// multi-line `-v` assignment.
+    #[test]
+    fn stop_script_is_posix_sh_and_passes_no_multiline_value_to_awk() {
+        let script = stop_worker_daemon_script("/tmp/mj-worker-root");
+        let mut assignments = 0;
+        for (i, _) in script.match_indices(" -v ") {
+            assignments += 1;
+            let assignment = script[i + 4..].split_whitespace().next().unwrap();
+            let (_, value) = assignment.split_once('=').expect("-v name=value");
+            assert!(
+                matches!(value, "\"$1\"" | "\"$$\""),
+                "awk -v value may span lines: {assignment}"
+            );
+            assert!(!assignment.contains('\n'));
+        }
+        assert!(assignments > 0, "the check found no awk -v assignments");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("stop.sh");
+        std::fs::write(&file, &script).unwrap();
+        for shell in ["sh", "dash", "busybox"] {
+            let mut cmd = std::process::Command::new(shell);
+            if shell == "busybox" {
+                cmd.arg("sh");
+            }
+            match cmd.arg("-n").arg(&file).output() {
+                Ok(out) => assert!(
+                    out.status.success(),
+                    "{shell} -n: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(_) if shell != "sh" => {}
+                Err(e) => panic!("{shell}: {e}"),
+            }
+        }
     }
 }
