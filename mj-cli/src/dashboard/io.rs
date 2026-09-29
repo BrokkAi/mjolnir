@@ -207,6 +207,13 @@ pub(crate) enum DashboardIoUpdate {
         request_id: u64,
         result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
+    /// The daemon's answer to a Sessions filter search of conversation text.
+    /// The request id is the dashboard's; an answer for an older one is
+    /// dropped there.
+    SessionTextMatches {
+        request_id: u64,
+        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+    },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
         wiki_id: String,
@@ -1078,6 +1085,9 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Archive search failed: {error}")),
             },
+            DashboardIoUpdate::SessionTextMatches { request_id, result } => {
+                self.dashboard.apply_sessions_text(request_id, result);
+            }
             DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
                 Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
                 Err(error) => self

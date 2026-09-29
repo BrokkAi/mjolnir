@@ -1260,7 +1260,9 @@ pub(crate) fn render_sessions(
         .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
     if drawn.is_empty() && rows_area.height > 0 {
-        let lines = if dashboard.sessions_filter.is_some() {
+        let lines = if dashboard.sessions_text.is_pending() {
+            vec![Line::raw("Searching conversations…")]
+        } else if dashboard.sessions_filter.is_some() {
             vec![Line::raw("No sessions match · Esc clears the filter")]
         } else {
             vec![

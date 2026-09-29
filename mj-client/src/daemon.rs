@@ -118,6 +118,24 @@ pub struct WikiStatus {
     pub topping_up: bool,
 }
 
+/// Where in a session's conversation a text search matched. A match in a
+/// user message ranks ahead of one in an agent message; a match only in tool
+/// output is not a match at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTextMatchKind {
+    User,
+    Agent,
+}
+
+/// One live session whose conversation contains a search query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTextMatch {
+    pub session_id: String,
+    pub kind: SessionTextMatchKind,
+}
+
 /// One page of search results with the state of the index behind them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -526,6 +544,11 @@ pub enum DaemonAction {
         query: String,
         limit: usize,
     },
+    /// The live sessions whose user or agent messages contain a query,
+    /// ignoring case. Tool calls and tool output do not count.
+    SessionTextSearch {
+        query: String,
+    },
     /// The markdown briefing for one indexed session.
     WikiBrief {
         wiki_id: String,
@@ -747,6 +770,7 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    SessionTextMatches(Vec<SessionTextMatch>),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
@@ -1546,6 +1570,19 @@ impl DaemonClient {
         {
             DaemonReply::WikiRows(page) => Ok(page),
             reply => bail!("unexpected SessionWiki search reply {reply:?}"),
+        }
+    }
+
+    /// The live sessions whose user or agent messages contain `query`, and
+    /// which of the two matched. Answers from the SessionWiki index, so a very
+    /// new message can be missing until the next sync.
+    pub async fn session_text_search(&mut self, query: String) -> Result<Vec<SessionTextMatch>> {
+        match self
+            .request(DaemonAction::SessionTextSearch { query })
+            .await?
+        {
+            DaemonReply::SessionTextMatches(matches) => Ok(matches),
+            reply => bail!("unexpected session text search reply {reply:?}"),
         }
     }
 

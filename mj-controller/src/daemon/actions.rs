@@ -235,6 +235,9 @@ pub(super) async fn handle_action(
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
         )),
+        DaemonAction::SessionTextSearch { query } => Ok(DaemonReply::SessionTextMatches(
+            state.session_text_search(query).await?,
+        )),
         DaemonAction::WikiBrief { wiki_id, max_chars } => {
             let markdown = state
                 .wiki_brief(wiki_id.clone(), max_chars)

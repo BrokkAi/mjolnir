@@ -1101,4 +1101,92 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Char('x')));
         assert_eq!(dashboard.sessions_hidden_count(), 1);
     }
+
+    fn titled(id: &str, title: &str) -> mj_core::state::SessionRecord {
+        let mut session = running_session();
+        session.id = id.into();
+        session.title = title.into();
+        session.session_title_override = Some(title.into());
+        session
+    }
+
+    fn found(
+        id: &str,
+        kind: mj_client::daemon::SessionTextMatchKind,
+    ) -> mj_client::daemon::SessionTextMatch {
+        mj_client::daemon::SessionTextMatch {
+            session_id: id.into(),
+            kind,
+        }
+    }
+
+    /// User request 2026-09-29: the Filter searches user and agent messages
+    /// as well as the name and branch, and lists name matches first, then
+    /// user-message matches, then agent-message matches. A session whose only
+    /// match is in tool output is not listed. The list keeps its own order
+    /// inside each group.
+    #[test]
+    fn filter_lists_name_matches_then_user_then_agent_messages() {
+        use mj_client::daemon::SessionTextMatchKind::{Agent, User};
+
+        let mut dashboard = dashboard_with_session(titled("a-agent", "agent talks"));
+        for session in [
+            titled("b-user", "user talks"),
+            titled("c-name", "the Zebra project"),
+            titled("d-tool", "tool only"),
+            titled("e-name", "zebra again"),
+            titled("f-user", "second user"),
+        ] {
+            dashboard.state.sessions.insert(session.id.clone(), session);
+        }
+        dashboard.select_active_session("c-name");
+        dashboard.focus_sessions();
+        let ids = |dashboard: &DashboardState| {
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let baseline = ids(&dashboard);
+        assert_eq!(baseline.len(), 6, "{baseline:?}");
+
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "zebra".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        // The daemon is asked once for the text, and the list says so until
+        // it answers. Meanwhile the name matches are already there.
+        let (request_id, query) = dashboard.next_sessions_text_search().expect("a search");
+        assert_eq!(query, "zebra");
+        assert_eq!(dashboard.next_sessions_text_search(), None);
+        assert!(dashboard.sessions_filter_label().contains("searching"));
+        assert_eq!(ids(&dashboard), ["c-name", "e-name"]);
+        assert_eq!(dashboard.sessions_hidden_count(), 4);
+
+        // An answer to an older search changes nothing.
+        dashboard.apply_sessions_text(request_id + 9, Ok(vec![found("a-agent", Agent)]));
+        assert!(dashboard.sessions_filter_label().contains("searching"));
+
+        dashboard.apply_sessions_text(
+            request_id,
+            Ok(vec![
+                found("a-agent", Agent),
+                found("f-user", User),
+                found("b-user", User),
+            ]),
+        );
+        assert!(!dashboard.sessions_filter_label().contains("searching"));
+        assert_eq!(
+            ids(&dashboard),
+            ["c-name", "e-name", "b-user", "f-user", "a-agent"]
+        );
+        // Only the tool-only session is held back, and the title says so.
+        assert_eq!(dashboard.sessions_hidden_count(), 1);
+
+        // Clearing the filter restores the list and forgets the matches.
+        dashboard.clear_sessions_filter();
+        assert_eq!(dashboard.next_sessions_text_search(), None);
+        assert_eq!(ids(&dashboard), baseline);
+    }
 }

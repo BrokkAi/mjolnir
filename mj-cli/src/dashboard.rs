@@ -404,6 +404,9 @@ pub(crate) struct DashboardContext {
     /// reads it when it wakes and gives up when a later keystroke has since
     /// replaced it.
     pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
+    /// The newest conversation search the Sessions filter asked for, read by
+    /// its debounced task the same way.
+    sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
     help_search: help_search::HelpSearch,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
@@ -617,6 +620,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     loop {
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
+            context.start_sessions_text_search();
         }
         // A hint that reaches the bar needs the frame that draws it, whatever
         // this wakeup was otherwise going to do.
@@ -1666,6 +1670,7 @@ impl DashboardContext {
             aws_options: Feed::new(aws_resource_options_rx),
             resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             help_search: help_search::HelpSearch::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),

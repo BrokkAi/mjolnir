@@ -1458,6 +1458,41 @@ pub(crate) fn spawn_wiki_search(
     });
 }
 
+/// Search the conversations of the live sessions for the Sessions filter's
+/// text, after the typing pause.
+///
+/// The wait and the daemon call are in a task, so the render loop never waits
+/// on the index. A task whose request id is no longer the newest when it wakes
+/// stops without asking the daemon, and the dashboard drops an answer that
+/// names an older request.
+pub(crate) fn spawn_sessions_text_search(
+    request_id: u64,
+    query: String,
+    newest_request: Arc<AtomicU64>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    newest_request.store(request_id, Ordering::Release);
+    tokio::spawn(async move {
+        tokio::time::sleep(WIKI_SEARCH_DEBOUNCE).await;
+        if newest_request.load(Ordering::Acquire) != request_id {
+            return;
+        }
+        let result = async {
+            daemon::connect_or_start()
+                .await?
+                .session_text_search(query)
+                .await
+        }
+        .await
+        .map_err(|error| format!("{error:#}"));
+        report(
+            "searching session conversations",
+            &updates,
+            DashboardIoUpdate::SessionTextMatches { request_id, result },
+        );
+    });
+}
+
 /// How long the dialog waits after a keystroke before asking the index.
 pub(crate) const WIKI_SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 

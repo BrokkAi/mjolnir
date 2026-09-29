@@ -122,6 +122,12 @@ impl RuntimeState {
         })
     }
 
+    /// The live sessions whose user or agent messages contain `query`.
+    pub async fn session_text_search(&self, query: String) -> Result<Vec<SessionTextMatch>> {
+        let live = self.live_session_ids();
+        blocking(move || crate::sessionwiki::session_text_matches(&query, &live)).await
+    }
+
     /// The markdown briefing for one indexed session, or `None` when the index
     /// holds no session with that id.
     pub async fn wiki_brief(&self, wiki_id: String, max_chars: usize) -> Result<Option<String>> {

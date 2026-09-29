@@ -2,6 +2,7 @@ use super::*;
 
 use ratatui::style::Style;
 
+use mj_client::daemon::SessionTextMatchKind;
 use mj_client::quota::API_LABEL;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
@@ -144,6 +145,29 @@ pub(crate) fn attention_level(
     }
 }
 
+/// The daemon's answer to the Sessions filter's text: which sessions have it
+/// in a user or agent message. The text itself stays in [`SessionsFilter`];
+/// this holds only what a background search found for it.
+#[derive(Debug, Default)]
+pub(crate) struct SessionsTextSearch {
+    /// Bumped for every search asked for, and for a filter that no longer has
+    /// text, so an answer to an older search is recognised and dropped.
+    request_id: u64,
+    /// The text last asked about. `matches` answers it, or an earlier prefix
+    /// of it while the newer search is out.
+    asked: String,
+    /// A search is out and has not answered.
+    pending: bool,
+    matches: BTreeMap<String, SessionTextMatchKind>,
+}
+
+impl SessionsTextSearch {
+    /// Whether a conversation search is out and has not answered.
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending
+    }
+}
+
 impl DashboardState {
     pub(crate) fn command_session_id(&self) -> Option<&str> {
         self.command_session_override
@@ -197,7 +221,8 @@ impl DashboardState {
                 .insert(source.key);
         }
         let numbered = self.project_keys().len() > 1;
-        let grouped = self.config.advanced.session_order == SessionOrder::Project;
+        let grouped = self.config.advanced.session_order == SessionOrder::Project
+            && !self.sessions_ranked_by_match();
         let mut rows = Vec::new();
         let mut previous = None;
         let mut number = 0;
@@ -255,13 +280,19 @@ impl DashboardState {
         let Some(filter) = self.sessions_filter.as_ref() else {
             return sessions;
         };
-        sessions
+        let mut kept = sessions
             .into_iter()
             .filter(|session| {
                 Some(session.id.as_str()) == selected
                     || self.session_matches_filter(session, filter)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let query = filter.query.trim().to_lowercase();
+        if !query.is_empty() {
+            // A stable sort keeps the list's own order inside each group.
+            kept.sort_by_key(|session| self.sessions_filter_rank(session, &query));
+        }
+        kept
     }
 
     pub(crate) fn session_outside_filter(&self, session: &SessionRecord) -> bool {
@@ -285,6 +316,13 @@ impl DashboardState {
         if query.is_empty() {
             return true;
         }
+        self.session_matches_metadata(session, &query)
+            || self.sessions_text.matches.contains_key(&session.id)
+    }
+
+    /// Whether the lower-cased `query` is in the session's name, id, project,
+    /// profile, target, or branch.
+    fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {
         let source = self.project_source(session);
         let branch = session
             .managed_worktree
@@ -295,6 +333,7 @@ impl DashboardState {
             .to_lowercase();
         [
             session.display_title().to_lowercase(),
+            session.listed_title().to_lowercase(),
             branch,
             session.id.to_lowercase(),
             source.short.to_lowercase(),
@@ -303,7 +342,91 @@ impl DashboardState {
             session.target_template_id.to_lowercase(),
         ]
         .iter()
-        .any(|field| field.contains(&query))
+        .any(|field| field.contains(query))
+    }
+
+    /// Where a filtered session sorts: name and branch matches, then user
+    /// message matches, then agent message matches. A session held in the list
+    /// only because it is selected stays first.
+    fn sessions_filter_rank(&self, session: &SessionRecord, query: &str) -> u8 {
+        if self.session_matches_metadata(session, query) || self.session_outside_filter(session) {
+            return 0;
+        }
+        match self.sessions_text.matches.get(&session.id) {
+            Some(SessionTextMatchKind::User) => 1,
+            _ => 2,
+        }
+    }
+
+    /// Whether the filter's text puts the list in match order, which drops the
+    /// project headings: a match list is not grouped by project.
+    pub(crate) fn sessions_ranked_by_match(&self) -> bool {
+        self.sessions_filter
+            .as_ref()
+            .is_some_and(|filter| !filter.query.trim().is_empty())
+    }
+
+    /// The search the daemon should run for the filter's text, with its
+    /// request id, or `None` when the newest text was already asked about. The
+    /// caller runs it in the background and hands the answer to
+    /// [`Self::apply_sessions_text`]; the render loop never waits for it.
+    pub fn next_sessions_text_search(&mut self) -> Option<(u64, String)> {
+        let query = self
+            .sessions_filter
+            .as_ref()
+            .map(|filter| filter.query.trim().to_owned())
+            .unwrap_or_default();
+        let search = &mut self.sessions_text;
+        if query == search.asked {
+            return None;
+        }
+        search.request_id = search.request_id.wrapping_add(1);
+        if query.is_empty() {
+            *search = SessionsTextSearch {
+                request_id: search.request_id,
+                ..SessionsTextSearch::default()
+            };
+            self.clamp_selections();
+            return None;
+        }
+        // Matches for what was typed so far still hold for a longer text
+        // among the rows they name; for any other text they do not.
+        if !query
+            .to_lowercase()
+            .starts_with(&search.asked.to_lowercase())
+        {
+            search.matches.clear();
+        }
+        search.asked.clone_from(&query);
+        search.pending = true;
+        Some((search.request_id, query))
+    }
+
+    /// Takes the daemon's answer to the search
+    /// [`Self::next_sessions_text_search`] handed out. An answer to an older
+    /// search is dropped.
+    pub fn apply_sessions_text(
+        &mut self,
+        request_id: u64,
+        result: Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+    ) {
+        if request_id != self.sessions_text.request_id {
+            return;
+        }
+        self.sessions_text.pending = false;
+        match result {
+            Ok(matches) => {
+                self.sessions_text.matches = matches
+                    .into_iter()
+                    .map(|found| (found.session_id, found.kind))
+                    .collect();
+                self.settle_sessions_filter();
+            }
+            Err(error) => {
+                self.sessions_text.matches.clear();
+                self.set_notice(format!("Conversation search failed: {error}"));
+            }
+        }
     }
 
     /// Opens the Sessions filter for typing, keeping any state filter that
@@ -327,6 +450,9 @@ impl DashboardState {
         }
         if let Some(state) = filter.state {
             parts.push(state.label().to_owned());
+        }
+        if self.sessions_text.pending {
+            parts.push("searching…".to_owned());
         }
         parts.join(" · ")
     }

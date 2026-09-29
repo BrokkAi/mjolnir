@@ -883,6 +883,8 @@ pub struct DashboardState {
     pub(crate) session_menu_ids: Vec<String>,
     /// The Sessions pane's search and state filter, when one is open.
     pub(crate) sessions_filter: Option<SessionsFilter>,
+    /// What the daemon said about the Sessions filter's text in conversations.
+    pub(crate) sessions_text: dashboard_sessions::SessionsTextSearch,
     /// The commands run lately, newest first, for the palette's Recent group.
     pub(crate) recent_commands: std::collections::VecDeque<CommandId>,
     /// The rows the open resume dialog shows, derived from the records, the
@@ -1122,6 +1124,7 @@ impl DashboardState {
             session_action_focus: None,
             session_menu_ids: Vec::new(),
             sessions_filter: None,
+            sessions_text: Default::default(),
             recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
             resume_hit_counts: [0; crate::resume::ResumeTab::COUNT],
