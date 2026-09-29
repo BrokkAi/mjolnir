@@ -176,12 +176,15 @@ impl WorkerBinaryRequirement {
 }
 
 impl WorkerBinarySourceSnapshot {
+    /// Resolve and pin every source the daemon may use.
+    ///
+    /// Resolution runs per source on its own thread, and each distinct local
+    /// file is pinned on its own thread, so one slow disk read does not queue
+    /// the others behind it. `resolve` may therefore be called concurrently.
     pub(super) fn capture<F>(cache_root: &Path, resolve: F) -> Self
     where
-        F: Fn(&str, WorkerBinaryRequirement) -> Result<WorkerBinaryAvailability>,
+        F: Fn(&str, WorkerBinaryRequirement) -> Result<WorkerBinaryAvailability> + Sync,
     {
-        let mut entries = HashMap::new();
-        let mut local_cache = HashMap::<PathBuf, PathBuf>::new();
         let architectures = [
             (std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost),
             ("x86_64", WorkerBinaryRequirement::PortableLinux),
@@ -189,15 +192,78 @@ impl WorkerBinarySourceSnapshot {
             ("x86_64", WorkerBinaryRequirement::Darwin),
             ("aarch64", WorkerBinaryRequirement::Darwin),
         ];
+        let resolved: Vec<_> = std::thread::scope(|scope| {
+            let resolve = &resolve;
+            let handles: Vec<_> = architectures
+                .iter()
+                .map(|&(arch, requirement)| {
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        (resolve(arch, requirement), started.elapsed())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .zip(architectures)
+                .map(|(handle, (arch, requirement))| {
+                    handle.join().unwrap_or_else(|_| {
+                        (
+                            Err(anyhow::anyhow!(
+                                "resolving the worker source for {arch} ({requirement:?}) panicked"
+                            )),
+                            Duration::ZERO,
+                        )
+                    })
+                })
+                .collect()
+        });
 
-        for (arch, requirement) in architectures {
-            let pinned = match resolve(arch, requirement) {
-                Ok(WorkerBinaryAvailability::Local { path, source }) => {
-                    match local_cache.get(&path).cloned().map(Ok).unwrap_or_else(|| {
-                        copy_worker_source_to_cache(&path, cache_root).inspect(|cached| {
-                            local_cache.insert(path.clone(), cached.clone());
+        let mut unique_paths: Vec<&Path> = Vec::new();
+        for (result, _) in &resolved {
+            if let Ok(WorkerBinaryAvailability::Local { path, .. }) = result
+                && !unique_paths.contains(&path.as_path())
+            {
+                unique_paths.push(path);
+            }
+        }
+        let pinned_paths: HashMap<PathBuf, (Result<PathBuf>, Duration)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = unique_paths
+                    .iter()
+                    .map(|&path| {
+                        scope.spawn(move || {
+                            let started = Instant::now();
+                            (
+                                copy_worker_source_to_cache(path, cache_root),
+                                started.elapsed(),
+                            )
                         })
-                    }) {
+                    })
+                    .collect();
+                unique_paths
+                    .iter()
+                    .zip(handles)
+                    .map(|(&path, handle)| {
+                        let outcome = handle.join().unwrap_or_else(|_| {
+                            (
+                                Err(anyhow::anyhow!("pinning {} panicked", path.display())),
+                                Duration::ZERO,
+                            )
+                        });
+                        (path.to_path_buf(), outcome)
+                    })
+                    .collect()
+            });
+
+        let mut entries = HashMap::new();
+        for ((arch, requirement), (result, resolve_elapsed)) in
+            architectures.into_iter().zip(resolved)
+        {
+            let pinned = match result {
+                Ok(WorkerBinaryAvailability::Local { path, source }) => {
+                    let (outcome, pin_elapsed) = &pinned_paths[&path];
+                    match outcome {
                         Ok(cached) => {
                             tracing::info!(
                                 triple = requirement.triple(arch),
@@ -205,10 +271,12 @@ impl WorkerBinarySourceSnapshot {
                                 path = %path.display(),
                                 pinned = %cached.display(),
                                 build = BUILD_ID,
+                                resolve_ms = resolve_elapsed.as_millis(),
+                                pin_ms = pin_elapsed.as_millis(),
                                 "worker source selected"
                             );
                             Ok(WorkerBinaryAvailability::Local {
-                                path: cached,
+                                path: cached.clone(),
                                 source,
                             })
                         }
@@ -295,7 +363,13 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     let cache_root = data_dir().join("workers").join("pinned");
     let started = std::time::Instant::now();
     let snapshot = WorkerBinarySourceSnapshot::capture(&cache_root, |arch, requirement| {
-        worker_binary_prerequisite_for_current(arch, requirement, &current, &|path| path.is_file())
+        worker_binary_prerequisite_with_verifier(
+            arch,
+            requirement,
+            &current,
+            &|path| path.is_file(),
+            &|path| verify_worker_build_indexed(&cache_root, path),
+        )
     });
     tracing::info!(
         elapsed_ms = started.elapsed().as_millis(),
@@ -307,7 +381,88 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     Ok(())
 }
 
+/// Cached record of a source file this daemon already verified and pinned.
+///
+/// The key covers the build id and the source's path, size, mtime, inode and
+/// ctime, so a rebuilt or replaced file misses. The value is the digest of the
+/// pinned copy. The index only saves work: deleting it makes the next start
+/// read, verify and hash every source again.
+fn index_entry_path(cache_root: &Path, source: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::metadata(source).ok()?;
+    let mut key = Sha256::new();
+    key.update(BUILD_ID.as_bytes());
+    key.update([0]);
+    key.update(source.as_os_str().as_encoded_bytes());
+    key.update(metadata.len().to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for value in [
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ] {
+            key.update(value.to_le_bytes());
+        }
+        key.update(metadata.ino().to_le_bytes());
+    }
+    #[cfg(not(unix))]
+    {
+        let modified = metadata.modified().ok()?;
+        key.update(format!("{modified:?}").as_bytes());
+    }
+    Some(cache_root.join("index").join(lower_hex(key.finalize())))
+}
+
+/// The pinned copy of `source` if the index says this exact file was already
+/// pinned and the copy is still present with the same length.
+fn indexed_pinned_worker(cache_root: &Path, source: &Path) -> Option<PathBuf> {
+    let entry = index_entry_path(cache_root, source)?;
+    let digest = std::fs::read_to_string(entry).ok()?;
+    let digest = digest.trim();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let pinned = cache_root.join(digest).join("hel");
+    let source_len = std::fs::metadata(source).ok()?.len();
+    (std::fs::metadata(&pinned).ok()?.len() == source_len).then_some(pinned)
+}
+
+fn record_indexed_pin(cache_root: &Path, source: &Path, digest: &str) {
+    let Some(entry) = index_entry_path(cache_root, source) else {
+        return;
+    };
+    // Best effort: a missing entry only costs a re-hash on the next start.
+    let write = || -> std::io::Result<()> {
+        let directory = entry.parent().expect("index entries have a parent");
+        std::fs::create_dir_all(directory)?;
+        let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+        staged.write_all(digest.as_bytes())?;
+        staged
+            .persist(&entry)
+            .map(drop)
+            .map_err(|error| error.error)
+    };
+    if let Err(error) = write() {
+        tracing::debug!(source = %source.display(), %error, "could not index a pinned worker");
+    }
+}
+
+/// `verify_worker_build`, skipped for a file the index already knows: the same
+/// path, size, mtime, inode and ctime were verified against this build and
+/// pinned before. Anything else is read and checked in full.
+pub(super) fn verify_worker_build_indexed(cache_root: &Path, path: &Path) -> Result<()> {
+    if indexed_pinned_worker(cache_root, path).is_some() {
+        return Ok(());
+    }
+    verify_worker_build(path)
+}
+
 pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> Result<PathBuf> {
+    if let Some(pinned) = indexed_pinned_worker(cache_root, source) {
+        return Ok(pinned);
+    }
     std::fs::create_dir_all(cache_root)
         .with_context(|| format!("create pinned worker cache {}", cache_root.display()))?;
     let mut input =
@@ -338,7 +493,9 @@ pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> R
     std::fs::set_permissions(temporary.path(), metadata.permissions())
         .with_context(|| format!("preserve permissions for {}", source.display()))?;
     let digest = lower_hex(digest.finalize());
-    publish_cached_worker(temporary, cache_root, &digest)
+    let pinned = publish_cached_worker(temporary, cache_root, &digest)?;
+    record_indexed_pin(cache_root, source, &digest);
+    Ok(pinned)
 }
 
 /// Publish one immutable cache artifact. persist_noclobber makes the final
@@ -490,13 +647,32 @@ pub(super) fn worker_binary_prerequisite_for_current(
     current: &Path,
     is_file: &dyn Fn(&Path) -> bool,
 ) -> Result<WorkerBinaryAvailability> {
+    worker_binary_prerequisite_with_verifier(
+        arch,
+        requirement,
+        current,
+        is_file,
+        &verify_worker_build,
+    )
+}
+
+/// The lookup with the build-stamp check passed in. Startup pinning passes a
+/// check that skips files it already verified; every other caller reads the
+/// file.
+pub(super) fn worker_binary_prerequisite_with_verifier(
+    arch: &str,
+    requirement: WorkerBinaryRequirement,
+    current: &Path,
+    is_file: &dyn Fn(&Path) -> bool,
+    verify: &dyn Fn(&Path) -> Result<()>,
+) -> Result<WorkerBinaryAvailability> {
     let triple = requirement.triple(arch);
     let rejected = std::cell::RefCell::new(Vec::new());
     let matches_build = |path: &Path| {
         if !is_file(path) {
             return false;
         }
-        match verify_worker_build(path) {
+        match verify(path) {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(path = %path.display(), error = %error, "skipping incompatible worker source");
@@ -511,7 +687,7 @@ pub(super) fn worker_binary_prerequisite_for_current(
         }
         // An explicit override names the one worker to use. Installing a
         // different one instead would hide the mismatch.
-        verify_worker_build(&path).context(
+        verify(&path).context(
             "MJ_WORKER_BINARY does not match the running mj; rebuild it from the same commit or unset MJ_WORKER_BINARY",
         )?;
         return Ok(WorkerBinaryAvailability::Local {

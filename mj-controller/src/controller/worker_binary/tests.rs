@@ -664,16 +664,16 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
             .is_ok()
     );
 
-    let remote_url = std::cell::RefCell::new("https://old.example/{target}".to_owned());
+    let remote_url = std::sync::Mutex::new("https://old.example/{target}".to_owned());
     let remote_snapshot =
         WorkerBinarySourceSnapshot::capture(&directory.path().join("remote-cache"), |arch, _| {
             Ok(WorkerBinaryAvailability::Remote {
-                url: remote_url.borrow().replace("{target}", arch),
+                url: remote_url.lock().unwrap().replace("{target}", arch),
                 sha256: "a".repeat(64),
                 triple: format!("{arch}-unknown-linux-musl"),
             })
         });
-    *remote_url.borrow_mut() = "https://new.example/{target}".into();
+    *remote_url.lock().unwrap() = "https://new.example/{target}".into();
     let WorkerBinaryAvailability::Remote { url, .. } = remote_snapshot
         .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
         .unwrap()
@@ -5805,55 +5805,83 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     }
 }
 
-/// The admission check names the worker a bare SSH host lacks, and only that
-/// one: a host that runs a platform the daemon can serve, or that does not
-/// answer, is not a worker-source problem (RVE-2).
+/// RCL-3: a restart re-hashed and re-copied every unchanged worker, which took
+/// 30 s for one debug build on a busy disk. An unchanged source is now
+/// recognised from its path, size, mtime, inode and ctime.
 #[test]
-fn worker_source_problem_names_the_platform_a_bare_ssh_host_lacks() {
-    const CHILD: &str = "MJ_WORKER_SOURCE_PROBLEM_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("mj-worker-x86_64-unknown-linux-musl"),
-            stamped_worker(b"linux x86_64"),
-        )
-        .unwrap();
-        IsolatedTest::new(test_name(
-            module_path!(),
-            "worker_source_problem_names_the_platform_a_bare_ssh_host_lacks",
-        ))
-        .isolated_store(directory.path())
-        .env("MJ_INSTANCE", "worker-source-problem")
-        .env(CHILD, "1")
-        .env("MJ_WORKER_DIR", directory.path())
-        .run();
-        return;
-    }
-    struct Platform(Option<&'static str>);
-    impl CommandExecutor for Platform {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.purpose, "detect target platform");
-            match self.0 {
-                Some(uname) => Ok(CommandOutput {
-                    status: 0,
-                    stdout: uname.as_bytes().to_vec(),
-                    stderr: Vec::new(),
-                }),
-                None => bail!("connection timed out"),
-            }
-        }
-    }
-    let template = mj_core::config::TargetTemplate::SshBare {
-        ssh: ssh_connection(),
-        permissions: mj_core::config::PermissionMode::Yolo,
-        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("worker");
+    std::fs::write(&source, stamped_worker(&vec![7_u8; 4 << 20])).unwrap();
+    let cache = directory.path().join("cache");
+
+    let first = copy_worker_source_to_cache(&source, &cache).unwrap();
+    verify_worker_build_indexed(&cache, &source).unwrap();
+
+    // Damage the pinned copy without changing its length. A pin that read
+    // the source or re-hashed the copy would notice; the indexed one does not.
+    std::fs::write(
+        &first,
+        vec![0_u8; std::fs::metadata(&source).unwrap().len() as usize],
+    )
+    .unwrap();
+    assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
+    verify_worker_build_indexed(&cache, &source).unwrap();
+
+    // A rewritten source (new size or mtime) is read and checked in full.
+    std::fs::write(&source, b"legacy worker").unwrap();
+    assert!(verify_worker_build_indexed(&cache, &source).is_err());
+    assert!(copy_worker_source_to_cache(&source, &cache).is_err());
+}
+
+#[test]
+fn a_missing_pinned_copy_or_index_falls_back_to_a_full_pin() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("worker");
+    std::fs::write(&source, stamped_worker(b"bytes")).unwrap();
+    let cache = directory.path().join("cache");
+    let first = copy_worker_source_to_cache(&source, &cache).unwrap();
+    std::fs::remove_file(&first).unwrap();
+    assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
+    verify_worker_build(&first).unwrap();
+    std::fs::remove_dir_all(cache.join("index")).unwrap();
+    assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
+}
+
+#[test]
+fn distinct_sources_are_pinned_and_a_shared_path_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let linux = directory.path().join("linux");
+    let darwin = directory.path().join("darwin");
+    std::fs::write(&linux, stamped_worker(b"linux")).unwrap();
+    std::fs::write(&darwin, stamped_worker(b"darwin")).unwrap();
+    let cache = directory.path().join("cache");
+    let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |_, requirement| {
+        let path = if requirement == WorkerBinaryRequirement::Darwin {
+            &darwin
+        } else {
+            &linux
+        };
+        Ok(WorkerBinaryAvailability::Local {
+            path: path.clone(),
+            source: "fixture".into(),
+        })
+    });
+    let pinned = |arch, requirement| match snapshot.resolve(arch, requirement).unwrap() {
+        WorkerBinaryAvailability::Local { path, .. } => path,
+        WorkerBinaryAvailability::Remote { .. } => panic!("local"),
     };
     assert_eq!(
-        worker_source_problem(&template, &Platform(Some("Linux x86_64"))),
-        None
+        pinned("x86_64", WorkerBinaryRequirement::PortableLinux),
+        pinned("aarch64", WorkerBinaryRequirement::PortableLinux)
     );
-    let problem = worker_source_problem(&template, &Platform(Some("Darwin arm64")))
-        .expect("no Darwin worker is installed");
-    assert!(problem.contains("aarch64-apple-darwin"), "{problem}");
-    assert_eq!(worker_source_problem(&template, &Platform(None)), None);
+    assert_ne!(
+        pinned("x86_64", WorkerBinaryRequirement::PortableLinux),
+        pinned("aarch64", WorkerBinaryRequirement::Darwin)
+    );
+    let copies = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_name() != "index")
+        .count();
+    assert_eq!(copies, 2);
 }

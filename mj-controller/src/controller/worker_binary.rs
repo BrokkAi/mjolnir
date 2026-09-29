@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
