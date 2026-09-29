@@ -133,6 +133,57 @@ fn stale_pins_are_re_resolved() {
     assert!(path.starts_with(data_dir().join("workers/pinned")));
 }
 
+/// Test-and-fix M-4: the daemon log named neither the worker it chose for a
+/// target nor where it came from.
+#[test]
+fn pinning_logs_each_selected_worker_with_its_source_and_build() {
+    // Other tests install subscribers that make tracing cache "no interest"
+    // in this event, so it is checked alone, in a child with a global one.
+    const CHILD: &str = "MJ_PINNING_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "pinning_logs_each_selected_worker_with_its_source_and_build",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let worker = directory.path().join("worker");
+    std::fs::write(&worker, stamped_worker(b"logged bytes")).unwrap();
+    let cache = directory.path().join("cache");
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    WorkerBinarySourceSnapshot::capture(&cache, |arch, requirement| {
+        if arch == "x86_64" && requirement == WorkerBinaryRequirement::PortableLinux {
+            Ok(WorkerBinaryAvailability::Local {
+                path: worker.clone(),
+                source: "beside the mj binary".into(),
+            })
+        } else {
+            bail!("no worker")
+        }
+    });
+    let selected: Vec<String> = log
+        .at_or_above(tracing::Level::INFO)
+        .into_iter()
+        .filter(|event| event.contains("worker source selected"))
+        .collect();
+    assert_eq!(selected.len(), 1, "{selected:#?}");
+    let line = &selected[0];
+    for expected in [
+        "beside the mj binary",
+        "x86_64-unknown-linux-musl",
+        &worker.display().to_string(),
+        BUILD_ID,
+    ] {
+        assert!(line.contains(expected), "missing {expected:?} in {line}");
+    }
+}
+
 #[test]
 fn pinning_rejects_stale_sources_before_publication() {
     let directory = tempfile::tempdir().unwrap();
