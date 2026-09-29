@@ -217,6 +217,7 @@ fn incomplete_move() -> MoveOperation {
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: false,
             session_id: "session-1".into(),

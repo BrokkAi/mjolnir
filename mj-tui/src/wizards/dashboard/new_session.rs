@@ -159,7 +159,7 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
-        if wizard.subagent_choice_applies(&self.config) && wizard.subagent_error().is_some() {
+        if wizard.subagent_choice_applies(&self.config) && wizard.subagents.error().is_some() {
             self.mode = Mode::New(wizard);
             return DashboardAction::None;
         }
@@ -196,6 +196,9 @@ impl DashboardState {
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
         if let Some(action) = self.take_subagent_discovery() {
+            return Some(action);
+        }
+        if let Some(action) = self.take_stale_move_preparation() {
             return Some(action);
         }
         // Checks start on the first step so they are usually done by the time
@@ -261,7 +264,7 @@ impl DashboardState {
         DashboardAction::CreateSession {
             subagents: wizard
                 .subagent_choice_applies(&self.config)
-                .then(|| (*wizard.subagents).clone()),
+                .then(|| wizard.subagents.policy.clone()),
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree

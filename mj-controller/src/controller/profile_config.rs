@@ -26,6 +26,31 @@ pub async fn subagent_options(
     .await
 }
 
+/// Refuses a top-level session policy its profile cannot run. Only Claude and
+/// Codex take Mjolnir's delegation tools, and a single-model policy must name
+/// a model and effort that discovery offers now.
+pub async fn validate_session_subagent_policy(
+    config: &Config,
+    profile_id: &str,
+    policy: &mj_core::subagent::SubagentPolicy,
+) -> Result<()> {
+    let kind = config
+        .enabled_profile(profile_id)
+        .context("parent profile unavailable")?
+        .kind;
+    ensure!(
+        kind.supports_delegation_tools() || *policy == mj_core::subagent::SubagentPolicy::Native,
+        "subagent policies are supported only by Claude and Codex"
+    );
+    if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = policy {
+        subagent_options(profile_id.to_owned(), Some(model.clone()))
+            .await?
+            .validate(policy)
+            .map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
 async fn subagent_options_with<F, Fut>(
     config: &Config,
     parent: &str,

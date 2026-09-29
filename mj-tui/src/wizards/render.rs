@@ -10,6 +10,86 @@ fn resource_help(dashboard: &DashboardState) -> String {
     }
 }
 
+/// Whether the target step sets a size for `target`: containers get CPU and
+/// memory, EC2 an instance type. Other targets run with what the host has.
+fn target_is_sized(target: &TargetTemplate) -> bool {
+    mj_core::config::is_container_target(target) || matches!(target, TargetTemplate::AwsEc2 { .. })
+}
+
+/// The target step's table and the help lines under it, shared by New session
+/// and Resume/Move so their rows match. A row carries a short status; the full
+/// reason a target is unavailable goes under the table, where it wraps
+/// instead of being cut off.
+fn target_step_choices<W: WizardDraft>(
+    dashboard: &DashboardState,
+    wizard: &W,
+    sizing_error: Option<&str>,
+) -> (Vec<PickerChoice>, Vec<Line<'static>>) {
+    let warning = Style::default().fg(theme::palette().warning);
+    let mut help = Vec::new();
+    let mut selected_sized = false;
+    let rows = dashboard
+        .config
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, (id, target))| {
+            let selected = index == wizard.target();
+            let rejection = wizard.target_rejection(dashboard, id);
+            let checking = rejection
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("checking"));
+            let size = match wizard.resource_allocation() {
+                Some(allocation) if selected && target_is_sized(target) => {
+                    resource_allocation_description(Some(allocation))
+                }
+                _ => String::new(),
+            };
+            let status = match &rejection {
+                None if selected && sizing_error.is_some() => {
+                    PickerCell::styled("sizing failed", warning)
+                }
+                None => PickerCell::blank(),
+                Some(_) if checking => PickerCell::styled("checking…", theme::muted()),
+                Some(_) => PickerCell::styled("unavailable", warning),
+            };
+            // Unavailable rows cannot be selected, so each one's reason is
+            // listed under the table rather than only the selected row's.
+            if let Some(reason) = rejection.as_deref().filter(|_| !checking) {
+                let reason = reason.strip_prefix("unavailable: ").unwrap_or(reason);
+                help.push(Line::styled(format!("{id}: {reason}"), warning));
+            }
+            if selected {
+                selected_sized = target_is_sized(target);
+                if let Some(error) = sizing_error.filter(|_| rejection.is_none()) {
+                    help.push(Line::styled(format!("Sizing: {error}"), warning));
+                }
+            }
+            let row = PickerChoice::table(vec![
+                PickerCell::blank(),
+                PickerCell::text(id.as_str()),
+                PickerCell::text(target_label(target)),
+                PickerCell::text(size),
+                status,
+            ]);
+            if rejection.is_some() {
+                row.into_disabled()
+            } else {
+                row
+            }
+        })
+        .collect();
+    help.push(picker_help(&if selected_sized {
+        resource_help(dashboard)
+    } else {
+        match dashboard.first_key_label(crate::CommandId::Refresh) {
+            Some(key) => format!("↑/↓ select · {key} recheck availability"),
+            None => "↑/↓ select · Tab moves focus · Enter activates".to_owned(),
+        }
+    }));
+    (target_table(rows), help)
+}
+
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
     match step {
         WizardStep::Profile => WizardControl::ProfileList,
@@ -90,7 +170,7 @@ pub(crate) fn render_new_wizard(
             ReviewWizardView {
                 subagents: wizard
                     .subagent_choice_applies(&dashboard.config)
-                    .then_some(wizard),
+                    .then_some(&*wizard.subagents),
                 // Isolated targets always provide the workspace, so the choice
                 // only exists for a bare project directory.
                 worktree: raw_project.then(|| {
@@ -135,10 +215,11 @@ pub(crate) fn render_new_wizard(
                         .is_some()
                     || wizard.remote_preflight_error.is_some())
                     && (!wizard.subagent_choice_applies(&dashboard.config)
-                        || wizard.subagent_error().is_none()),
+                        || wizard.subagents.error().is_none()),
                 active_interruption: false,
                 in_place_move: false,
                 source_unavailable: false,
+                stopped_subagents: 0,
                 clear_resource_allocation: false,
                 queue: None,
                 queued_entries: &[],
@@ -327,6 +408,7 @@ pub(crate) fn render_new_wizard(
         form.end_frame(initial);
         return;
     }
+    let mut target_help = Vec::new();
     let (title, choices, selected): (_, Vec<PickerChoice>, _) = match wizard.step {
         WizardStep::Profile => (
             format!(
@@ -377,48 +459,34 @@ pub(crate) fn render_new_wizard(
                 .collect(),
             wizard.bundle,
         ),
-        WizardStep::Target => (
-            format!(
-                " New session · {} target ",
-                step_counter(2, 4, target_hidden)
-            ),
-            dashboard
-                .config
-                .targets
-                .iter()
-                .map(|(id, target)| {
-                    let size = if id == &nth_key(&dashboard.config.targets, wizard.target) {
-                        resource_allocation_label(
-                            wizard.resource_allocation.as_ref(),
-                            wizard.sizing_error.as_deref(),
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let label = format!("{id}  {}{size}", target_label(target));
-                    match dashboard.target_readiness_rejection(id) {
-                        Some(reason) => PickerChoice::disabled(format!("{label} · {reason}")),
-                        None => PickerChoice::text(label),
-                    }
-                })
-                .collect(),
-            wizard.target,
-        ),
+        WizardStep::Target => {
+            let (rows, lines) =
+                target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
+            target_help = lines;
+            (
+                format!(
+                    " New session · {} target ",
+                    step_counter(2, 4, target_hidden)
+                ),
+                rows,
+                wizard.target,
+            )
+        }
         WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
         WizardStep::Review => unreachable!("review was rendered above"),
         WizardStep::Mounts => unreachable!("mount input was rendered above"),
         WizardStep::NewBundle => unreachable!("bundle input was rendered above"),
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
-    let mut help = vec![if wizard.step == WizardStep::Target {
-        picker_help(&resource_help(dashboard))
+    let mut help = if wizard.step == WizardStep::Target {
+        target_help
     } else {
-        picker_help(if wizard.step == WizardStep::Bundle {
+        vec![picker_help(if wizard.step == WizardStep::Bundle {
             "Choose saved project files, or browse GitHub and folders for another."
         } else {
             "↑/↓ select · Tab moves focus · Enter activates"
-        })
-    }];
+        })]
+    };
     if wizard.step == WizardStep::Profile
         && dashboard
             .config
@@ -486,7 +554,7 @@ pub(crate) fn render_new_wizard(
 pub(crate) struct ReviewWizardView<'a> {
     worktree: Option<(bool, bool)>,
     /// Only new Claude/Codex sessions display the delegation controls.
-    subagents: Option<&'a NewWizard>,
+    subagents: Option<&'a subagents::SubagentDraft>,
     pub(crate) profile_id: &'a str,
     pub(crate) project_label: &'a str,
     pub(crate) project: &'a str,
@@ -505,6 +573,8 @@ pub(crate) struct ReviewWizardView<'a> {
     /// harness and profile, so the review must not promise a fresh environment.
     in_place_move: bool,
     source_unavailable: bool,
+    /// Sub-agents the Move stops, as a suspend would.
+    stopped_subagents: usize,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
     queued_entries: &'a [mj_core::relay::QueuedPrompt],
@@ -545,6 +615,7 @@ pub(crate) fn render_review_wizard(
         active_interruption,
         in_place_move,
         source_unavailable,
+        stopped_subagents,
         clear_resource_allocation,
         queue,
         queued_entries,
@@ -597,6 +668,15 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::styled(
             "Only the harness and profile are replaced; the environment and workspace are kept.",
             theme::muted(),
+        ));
+    }
+    if moving && stopped_subagents > 0 {
+        lines.push(Line::styled(
+            format!(
+                "{} will be stopped; the session is told which when it resumes.",
+                crate::widgets::counted(stopped_subagents, "sub-agent", "sub-agents")
+            ),
+            Style::default().fg(theme::palette().warning),
         ));
     }
     if moving && active_interruption {
@@ -692,7 +772,7 @@ pub(crate) fn render_review_wizard(
         let row = lines.len() as u16;
         lines.push(Line::raw(""));
         if matches!(
-            *wizard.subagents,
+            wizard.policy,
             mj_core::subagent::SubagentPolicy::SingleModel { .. }
         ) {
             let height = 1;
@@ -713,10 +793,10 @@ pub(crate) fn render_review_wizard(
                 "profiles in Settings → Sub-agents. Your own profile is always eligible.",
                 theme::muted(),
             ));
-            if let Some(error) = wizard.subagent_error() {
+            if let Some(error) = wizard.error() {
                 lines.push(Line::raw(error));
             }
-            if let Some(options) = wizard.subagent_options() {
+            if let Some(options) = wizard.options() {
                 for error in &options.unavailable {
                     lines.push(Line::raw(error.clone()));
                 }
@@ -843,7 +923,7 @@ pub(crate) fn render_review_wizard(
                 .iter()
                 .map(|label| (*label).to_owned())
                 .collect::<Vec<_>>(),
-            wizard.subagents.index(),
+            wizard.policy.index(),
             true,
         )];
         if let Some((row, _)) = subagent_model_row {
@@ -851,9 +931,9 @@ pub(crate) fn render_review_wizard(
                 WizardControl::SubagentModel,
                 "Model",
                 row,
-                wizard.subagent_models(),
-                wizard.subagent_model_index(),
-                wizard.subagent_options().is_some(),
+                wizard.models(),
+                wizard.model_index(),
+                wizard.options().is_some(),
             ));
         }
         if let Some((row, _)) = subagent_effort_row {
@@ -861,9 +941,9 @@ pub(crate) fn render_review_wizard(
                 WizardControl::SubagentEffort,
                 "Effort",
                 row,
-                wizard.subagent_efforts(),
-                wizard.subagent_effort_index(),
-                wizard.subagent_options().is_some(),
+                wizard.efforts(),
+                wizard.effort_index(),
+                wizard.options().is_some(),
             ));
         }
         for (id, label, row, values, committed, enabled) in selectors {
@@ -879,7 +959,7 @@ pub(crate) fn render_review_wizard(
                 area.width - label_width,
                 area.height,
             );
-            let selected = wizard.subagent_combo.selection(id, committed);
+            let selected = wizard.combo.selection(id, committed);
             let value = values.get(selected).cloned().unwrap_or_default();
             let options = values.into_iter().map(Line::raw).collect::<Vec<_>>();
             ComboBox::render(
@@ -896,7 +976,7 @@ pub(crate) fn render_review_wizard(
                 form,
                 id,
             );
-            if wizard.subagent_combo.is_open(id) {
+            if wizard.combo.is_open(id) {
                 expanded_subagent_combo = Some((id, field, value, options, selected, enabled));
             }
         }
@@ -1450,7 +1530,9 @@ pub(crate) fn render_resume_wizard(
             dashboard,
             ReviewWizardView {
                 worktree: None,
-                subagents: None,
+                subagents: wizard
+                    .subagent_choice_applies(dashboard)
+                    .then_some(&*wizard.subagents),
                 profile_id,
                 project_label,
                 project,
@@ -1471,13 +1553,20 @@ pub(crate) fn render_resume_wizard(
                 moving: wizard.moving,
                 preparing: wizard.preparing,
                 preparation_error: wizard.preparation_error.as_deref(),
-                submit_enabled: !wizard.moving
+                submit_enabled: (!wizard.moving
                     || wizard.preparation.is_some()
-                    || wizard.preparation_error.is_some(),
+                    || wizard.preparation_error.is_some())
+                    && (!wizard.subagent_choice_applies(dashboard)
+                        || wizard.subagents.error().is_none()),
                 source_unavailable: wizard
                     .preparation
                     .as_ref()
                     .is_some_and(|p| p.source_unavailable),
+                stopped_subagents: if wizard.moving {
+                    dashboard.managed_active_child_ids(&wizard.session_id).len()
+                } else {
+                    0
+                },
                 active_interruption: wizard
                     .preparation
                     .as_ref()
@@ -1613,36 +1702,17 @@ pub(crate) fn render_resume_wizard(
                 help,
             )
         }
-        WizardStep::Target => (
-            {
-                let step = format!("{} new target", step_counter(2, 3, target_hidden));
-                resume_wizard_title(wizard, &step, &step)
-            },
-            dashboard
-                .config
-                .targets
-                .iter()
-                .map(|(id, target)| {
-                    let size = if id == &nth_key(&dashboard.config.targets, wizard.target) {
-                        resource_allocation_label(
-                            wizard.resource_allocation.as_ref(),
-                            wizard.sizing_error.as_deref(),
-                        )
-                    } else {
-                        String::new()
-                    };
-                    match dashboard.resume_target_rejection(&wizard.session_id, id) {
-                        Some(reason) => PickerChoice::disabled(format!(
-                            "{id}  {}  · {reason}",
-                            target_label(target)
-                        )),
-                        None => PickerChoice::text(format!("{id}  {}{size}", target_label(target))),
-                    }
-                })
-                .collect(),
-            wizard.target,
-            vec![picker_help(&resource_help(dashboard))],
-        ),
+        WizardStep::Target => {
+            let (rows, help) =
+                target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
+            let step = format!("{} new target", step_counter(2, 3, target_hidden));
+            (
+                resume_wizard_title(wizard, &step, &step),
+                rows,
+                wizard.target,
+                help,
+            )
+        }
         WizardStep::Bundle => unreachable!("resume does not select a bundle"),
         WizardStep::Review => unreachable!("review was rendered above"),
         WizardStep::MoveFiles => unreachable!("Move files were rendered above"),

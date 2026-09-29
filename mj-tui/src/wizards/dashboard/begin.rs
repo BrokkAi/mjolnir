@@ -50,9 +50,9 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
-            subagents: Box::new(self.state.last_subagent_policy.clone()),
-            subagent_combo: Box::default(),
-            subagent_discovery: None,
+            subagents: Box::new(subagents::SubagentDraft::new(
+                self.state.last_subagent_policy.clone(),
+            )),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 
@@ -139,6 +139,7 @@ impl DashboardState {
             aws_options: BTreeMap::new(),
             sizing_error: None,
             discard_queue: false,
+            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
@@ -202,6 +203,7 @@ impl DashboardState {
             aws_options: BTreeMap::new(),
             sizing_error: None,
             discard_queue: false,
+            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
@@ -265,6 +267,9 @@ impl DashboardState {
             // Move's safe default is to leave pending work idle. The review
             // checkbox can explicitly opt into starting it after readiness.
             discard_queue: true,
+            subagents: Box::new(subagents::SubagentDraft::new(
+                session.subagents.clone().unwrap_or_default(),
+            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
@@ -345,6 +350,14 @@ impl DashboardState {
             aws_options: BTreeMap::new(),
             sizing_error: None,
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
+            subagents: Box::new(subagents::SubagentDraft::new(
+                operation
+                    .selection
+                    .subagents
+                    .clone()
+                    .or_else(|| session.subagents.clone())
+                    .unwrap_or_default(),
+            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
     }

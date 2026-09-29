@@ -629,7 +629,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         checkout: _,
         expected_runtime_identity: _,
         publication: _,
-        subagents: _,
+        // A Move can change it along with the profile the session runs on.
+        subagents,
         additional_mounts: _,
         container_cpus: _,
         container_memory: _,
@@ -662,7 +663,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              project_directory = ?12,
              managed_worktree = ?13,
              build_cache_json = ?14,
-             target_runtime_json = ?15
+             target_runtime_json = ?15,
+             subagents = ?16
          WHERE session_id = ?1",
         params![
             id,
@@ -694,6 +696,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            subagents.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     if changed != 1 {

@@ -204,6 +204,7 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: true,
             session_id: "session-1".into(),

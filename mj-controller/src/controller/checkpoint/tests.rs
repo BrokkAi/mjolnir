@@ -2939,6 +2939,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     };
 
     let selection = mj_core::state::MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: LATCH_RELAY_SESSION.into(),

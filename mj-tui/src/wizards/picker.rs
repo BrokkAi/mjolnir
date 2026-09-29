@@ -82,11 +82,11 @@ impl PickerChoice {
         }
     }
 
-    /// A greyed row that keeps its place in the list but refuses Enter.
-    pub(crate) fn disabled(text: impl Into<String>) -> Self {
+    /// Greys out a row that keeps its place in the list but refuses Enter.
+    pub(crate) fn into_disabled(self) -> Self {
         Self {
             disabled: true,
-            ..Self::text(text)
+            ..self
         }
     }
 
@@ -168,6 +168,23 @@ pub(crate) fn profile_headings() -> PickerChoice {
     ])
 }
 
+/// The target tables of the new-session and resume wizards: the column
+/// headings followed by `rows`. The blank first column indents the table as
+/// the profile table's marker column does.
+pub(crate) fn target_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
+    let style = theme::muted().add_modifier(Modifier::BOLD);
+    let mut table = Vec::with_capacity(rows.len() + 1);
+    table.push(PickerChoice::heading(vec![
+        PickerCell::blank(),
+        PickerCell::styled("TARGET", style),
+        PickerCell::styled("KIND", style),
+        PickerCell::styled("SIZE", style),
+        PickerCell::styled("STATUS", style),
+    ]));
+    table.extend(rows);
+    table
+}
+
 /// Profiles whose harness cannot guard risky actions carry a warning triangle
 /// in the table and the footnote `guardian_footnote` draws below it.
 pub(crate) fn needs_guardian_warning(harness: HarnessKind) -> bool {
@@ -227,17 +244,28 @@ pub(crate) fn render_picker(
     surfaces: &mut FrameSurfaces,
 ) {
     let width_percent = if area.width < 64 { 100 } else { 68 };
+    // Help lines wrap rather than run off the dialog's edge. The height is
+    // sized from the width the dialog will roughly have; the lines are
+    // wrapped again to the exact width once it is placed.
+    let wrap_help = |width: usize| {
+        help.iter()
+            .flat_map(|line| mj_chat::chat::wrap_styled_line(line.clone(), width.max(1), 2))
+            .collect::<Vec<_>>()
+    };
+    let estimated_width = usize::from(area.width) * usize::from(width_percent) / 100;
+    let help_rows = wrap_help(estimated_width.saturating_sub(4)).len();
     let popup = centered_modal(
         frame,
         surfaces,
         width_percent,
-        (choices.len() as u16 + help.len() as u16 + 6).clamp(9, 19),
+        (choices.len() as u16 + help_rows as u16 + 6).clamp(9, 24),
         area,
     );
     let content = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
     });
+    let help = wrap_help(usize::from(content.width));
     let list_height = u16::try_from(choices.len())
         .unwrap_or(u16::MAX)
         .max(u16::from(

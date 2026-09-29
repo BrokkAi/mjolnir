@@ -3691,6 +3691,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let selection = MoveSelection {
+        subagents: None,
         workspace: Default::default(),
         clear_resource_allocation: false,
         session_id: "session-1".into(),
@@ -5006,5 +5007,42 @@ if (!moveFileIncluded(draft, assessment.files[1].location)) throw Error('excludi
 if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'other',path:'.agents/build/large'}})) throw Error('selection crossed repositories');
 "#
         ),
+    );
+}
+
+#[test]
+fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
+    let source = format!(
+        "{}\n{}",
+        viewer_source("function subagentChoiceApplies(", "const SUBAGENT_MODES"),
+        viewer_source(
+            "function moveSubagentChange(",
+            "function moveQueueItemText("
+        ),
+    );
+    let setup = r#"
+let newDraft = null;
+const snapshot = { profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }] };
+const sessions = {
+  parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
+  parked: { id: "parked", lifecycle: "live" },
+  running: { id: "running", lifecycle: "live" },
+  gone: { id: "gone", lifecycle: "suspended" },
+};
+function sessionById(id) { return sessions[id]; }
+"#;
+    let checks = r#"
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
+assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
+draft.subagents = { mode: "all_models" };
+assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"all_models"}', "a changed policy must be sent");
+draft.profileId = "kimi";
+assert(moveSubagentChange(draft) === null, "a harness without delegation tools sends no policy");
+assert(moveStoppedChildren(sessions.parent) === 2, "live and parked children are stopped");
+"#;
+    run_viewer_script(
+        "viewer-move-subagents",
+        &format!("{setup}\n{source}\n{checks}"),
     );
 }

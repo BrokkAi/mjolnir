@@ -1343,6 +1343,7 @@ pub(crate) async fn apply_dashboard_action(
 /// Begin read-only preparation from either wizard input or an attachment reply.
 pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: DashboardAction) {
     let DashboardAction::MoveSession {
+        subagents,
         workspace_selection,
         session_id,
         profile_id,
@@ -1362,6 +1363,7 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             let mut daemon = daemon::connect_or_start().await?;
             daemon
                 .prepare_move_session(MoveSelection {
+                    subagents,
                     workspace: workspace_selection,
                     session_id: session_id.clone(),
                     profile_id: Some(profile_id),

@@ -756,6 +756,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         }
     };
     let selection = MoveSelection {
+        subagents: None,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: args
                 .exclusions

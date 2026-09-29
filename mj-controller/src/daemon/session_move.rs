@@ -107,27 +107,43 @@ impl RuntimeState {
                 move_operation_id: Some(operation_id.clone()),
             },
             move |state, session_id, cancelled| async move {
-                blocking(move || {
-                    let _reservation = reserve_recovery_or_cancel(
-                        &state.recovery_observer,
-                        &session_id,
-                        &cancelled,
-                    )?;
-                    let mut controller = Controller::load()?;
-                    let executor = DaemonStageReportingExecutor::new(
-                        CancellableProcessExecutor::new(cancelled),
-                        state.clone(),
-                        session_id,
-                    );
-                    let outcome =
-                        mj_core::runtime::block_on(controller.move_session_managed_controlled(
-                            request,
-                            &executor,
-                            &state.session_manager,
-                        ))??;
-                    Ok(DaemonLifecycleResult::Move(outcome))
+                // A sub-agent borrows its parent's environment, which Move
+                // replaces, so its children stop exactly as they do when the
+                // parent is suspended. The destination's resume tells the
+                // model which ones stopped.
+                state.stop_subagents_for_suspend(&session_id).await?;
+                let result = blocking({
+                    let state = state.clone();
+                    let session_id = session_id.clone();
+                    move || {
+                        let _reservation = reserve_recovery_or_cancel(
+                            &state.recovery_observer,
+                            &session_id,
+                            &cancelled,
+                        )?;
+                        let mut controller = Controller::load()?;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled),
+                            state.clone(),
+                            session_id,
+                        );
+                        let outcome = mj_core::runtime::block_on(
+                            controller.move_session_managed_controlled(
+                                request,
+                                &executor,
+                                &state.session_manager,
+                            ),
+                        )??;
+                        Ok(DaemonLifecycleResult::Move(outcome))
+                    }
                 })
-                .await
+                .await;
+                if result.is_err() {
+                    state
+                        .tell_live_parent_about_stopped_subagents(&session_id)
+                        .await;
+                }
+                result
             },
         )?;
         self.set_lifecycle_resume_destination(

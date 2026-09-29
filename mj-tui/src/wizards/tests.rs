@@ -2439,6 +2439,7 @@ fn move_preparation() -> mj_core::state::MovePreparation {
         source_unavailable: false,
         conversion: None,
         selection: mj_core::state::MoveSelection {
+            subagents: None,
             workspace: Default::default(),
             session_id: "session-1".into(),
             profile_id: Some("codex-1".into()),
@@ -3553,8 +3554,14 @@ fn stale_move_preparation_is_ignored_after_back_and_reentering_review() {
     let preparation = move_preparation();
 
     // Submit is disabled while loading; Tab reaches Back from the form's
-    // fallback focus. Returning to the target picker invalidates the request.
-    ready_key(&mut dashboard, key(KeyCode::Tab));
+    // fallback focus, past the delegation choice a Codex destination offers.
+    // Returning to the target picker invalidates the request.
+    for _ in 0..8 {
+        if resume_wizard(&dashboard).form.borrow().focused() == Some(WizardControl::Back) {
+            break;
+        }
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+    }
     assert_eq!(
         resume_wizard(&dashboard).form.borrow().focused(),
         Some(WizardControl::Back)
@@ -4379,7 +4386,10 @@ fn new_session_wizard_shows_subagent_choices_only_for_claude_and_codex() {
         wizard.profile = profile;
         wizard.step = WizardStep::Review;
         wizard.project_directory = "/work/main".into();
-        assert_eq!(*wizard.subagents, mj_core::subagent::SubagentPolicy::Native);
+        assert_eq!(
+            wizard.subagents.policy,
+            mj_core::subagent::SubagentPolicy::Native
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal
@@ -4619,9 +4629,10 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("unavailable: service is stopped"), "{text}");
-    // Launch finding C-10: a reason too long for the row ends in an ellipsis
-    // rather than stopping mid-word at the border.
+    assert!(text.contains("unavailable"), "{text}");
+    assert!(text.contains("podman: service is stopped"), "{text}");
+    // Launch finding C-10 (#1175): a reason too long for the row is not cut
+    // off; it sits under the table and wraps.
     dashboard.apply_target_readiness(
         generation,
         "podman".into(),
@@ -4636,12 +4647,22 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let lines = buffer_lines(terminal.backend().buffer());
-    let row = lines
-        .iter()
-        .find(|line| line.contains("unavailable: Cannot"))
-        .unwrap_or_else(|| panic!("{lines:#?}"));
-    assert!(row.contains('…'), "{row}");
-    assert!(!row.contains("daemon running?"), "{row}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("podman: Cannot connect")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("daemon running?")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("podman") && line.contains('…')),
+        "{lines:#?}"
+    );
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
     chord(&mut dashboard, crate::CommandId::Refresh);
@@ -5764,7 +5785,7 @@ fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("wizard");
     };
-    assert_eq!(*wizard.subagents, fixed);
+    assert_eq!(wizard.subagents.policy, fixed);
     wizard.step = WizardStep::Review;
     let Some(DashboardAction::DiscoverSubagentOptions { id, model, .. }) =
         dashboard.take_subagent_discovery()
@@ -5790,16 +5811,16 @@ fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
     let Mode::New(wizard) = &mut dashboard.mode else {
         panic!("wizard");
     };
-    assert!(wizard.subagent_error().is_none());
-    wizard.select_subagent_model(2);
+    assert!(wizard.subagents.error().is_none());
+    wizard.subagents.select_model(2);
     assert_eq!(
-        *wizard.subagents,
+        wizard.subagents.policy,
         SubagentPolicy::SingleModel {
             model: "next".into(),
             effort: None
         }
     );
-    assert!(wizard.subagent_error().is_some());
+    assert!(wizard.subagents.error().is_some());
     let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
         dashboard.take_subagent_discovery()
     else {
@@ -5810,7 +5831,7 @@ fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
         panic!("wizard");
     };
     assert!(
-        wizard.subagent_options().is_none(),
+        wizard.subagents.options().is_none(),
         "old reply cannot finish the new request"
     );
     dashboard.apply_subagent_options(next, Ok(options));
@@ -5818,17 +5839,20 @@ fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
         panic!("wizard");
     };
     assert!(
-        wizard.subagent_error().is_some(),
+        wizard.subagents.error().is_some(),
         "new model requires a matching effort"
     );
-    wizard.select_subagent_effort(1);
-    assert!(wizard.subagent_error().is_none());
+    wizard.subagents.select_effort(1);
+    assert!(wizard.subagents.error().is_none());
     dashboard.mode = Mode::Dashboard;
     dashboard.begin_new();
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("wizard");
     };
-    assert_eq!(*wizard.subagents, fixed, "canceling does not save edits");
+    assert_eq!(
+        wizard.subagents.policy, fixed,
+        "canceling does not save edits"
+    );
 }
 
 #[test]
@@ -5854,8 +5878,8 @@ fn subagent_combobox_previews_cancel_and_commit_without_leaving_review() {
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("wizard")
     };
-    assert_eq!(*wizard.subagents, SubagentPolicy::Native);
-    assert!(wizard.subagent_combo.is_open(WizardControl::Subagents));
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
+    assert!(wizard.subagents.combo.is_open(WizardControl::Subagents));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
@@ -5866,16 +5890,16 @@ fn subagent_combobox_previews_cancel_and_commit_without_leaving_review() {
         panic!("Escape must only close the popup")
     };
     assert_eq!(wizard.step, WizardStep::Review);
-    assert_eq!(*wizard.subagents, SubagentPolicy::Native);
-    assert!(!wizard.subagent_combo.is_open(WizardControl::Subagents));
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
+    assert!(!wizard.subagents.combo.is_open(WizardControl::Subagents));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Tab));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("wizard")
     };
-    assert_eq!(*wizard.subagents, SubagentPolicy::AllModels);
-    assert!(!wizard.subagent_combo.is_open(WizardControl::Subagents));
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::AllModels);
+    assert!(!wizard.subagents.combo.is_open(WizardControl::Subagents));
 }
 
 #[test]
@@ -5924,7 +5948,7 @@ fn subagent_model_combobox_discovers_only_after_a_changed_model_is_committed() {
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("wizard")
     };
-    assert_eq!(*wizard.subagents, fixed);
+    assert_eq!(wizard.subagents.policy, fixed);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(
@@ -5938,7 +5962,7 @@ fn subagent_model_combobox_discovers_only_after_a_changed_model_is_committed() {
         panic!("wizard")
     };
     assert_eq!(
-        *wizard.subagents,
+        wizard.subagents.policy,
         SubagentPolicy::SingleModel {
             model: "next".into(),
             effort: None
@@ -5988,4 +6012,88 @@ fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
         rendered.contains(".agents/qualification/java-b/staged"),
         "{rendered}"
     );
+}
+
+#[test]
+fn move_review_offers_the_delegation_choice_and_prepares_again_on_a_change() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut dashboard = dashboard_with_session(running_session());
+    let request_id = open_move_review(&mut dashboard);
+    assert!(dashboard.apply_move_preparation(request_id, move_preparation()));
+    assert_eq!(
+        resume_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Native,
+        "the draft starts on the session's own policy"
+    );
+    assert_eq!(resume_wizard(&dashboard).subagent_change(&dashboard), None);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(rendered.contains("Subagents"), "{rendered}");
+
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("move wizard")
+    };
+    wizard.form.get_mut().focus(WizardControl::Subagents);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    let wizard = resume_wizard(&dashboard);
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::AllModels);
+    assert!(
+        wizard.preparation.is_none(),
+        "a new policy discards the prepared Move"
+    );
+
+    let Some(DashboardAction::MoveSession {
+        subagents,
+        preparation_request_id: Some(_),
+        ..
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the review prepares the Move again");
+    };
+    assert_eq!(subagents, Some(SubagentPolicy::AllModels));
+    assert!(resume_wizard(&dashboard).preparing);
+}
+
+/// #1175: the target step is a table like the profile step, and the resize
+/// keys are offered only for a target that is sized.
+#[test]
+fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
+    let mut configuration = config();
+    configuration
+        .targets
+        .insert("bare".into(), TargetTemplate::LocalBare);
+    let index = |id: &str| {
+        configuration
+            .targets
+            .keys()
+            .position(|key| key == id)
+            .unwrap()
+    };
+    let (bare, podman) = (index("bare"), index("podman"));
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    let draw = |dashboard: &mut DashboardState, target: usize| {
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new session wizard")
+        };
+        wizard.step = WizardStep::Target;
+        wizard.target = target;
+        let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        buffer_lines(terminal.backend().buffer()).join("\n")
+    };
+
+    let raw = draw(&mut dashboard, bare);
+    assert!(raw.contains("TARGET") && raw.contains("STATUS"), "{raw}");
+    assert!(!raw.contains("+ double"), "{raw}");
+    assert!(!raw.contains("fixed/default resources"), "{raw}");
+
+    let sized = draw(&mut dashboard, podman);
+    assert!(sized.contains("+ double"), "{sized}");
 }

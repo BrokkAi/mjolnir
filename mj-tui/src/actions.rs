@@ -2366,6 +2366,7 @@ mod tests {
             source_unavailable: false,
             conversion: None,
             selection: mj_core::state::MoveSelection {
+                subagents: None,
                 workspace: Default::default(),
                 session_id: "session-1".into(),
                 profile_id: Some("codex-1".into()),

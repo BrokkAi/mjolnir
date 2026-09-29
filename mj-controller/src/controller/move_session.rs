@@ -496,17 +496,6 @@ impl Controller {
             !self.state.subagents.contains_key(&source.id),
             "sub-agent sessions cannot move independently of their parent"
         );
-        ensure!(
-            !self.state.subagents.values().any(|child| {
-                child.parent_session_id == source.id
-                    && self
-                        .state
-                        .sessions
-                        .get(&child.child_session_id)
-                        .is_some_and(|session| session.state.is_active())
-            }),
-            "stop active sub-agents before moving their parent session"
-        );
         let previous = crate::database::load_move_operation(&source.id)?;
         let retry = previous.as_ref().is_some_and(|op| {
             !matches!(op.phase, MovePhase::Completed)
@@ -572,6 +561,14 @@ impl Controller {
             profile.enabled,
             "destination profile {profile_id:?} is disabled"
         );
+        if let Some(policy) = &selection.subagents {
+            super::profile_config::validate_session_subagent_policy(
+                &self.config,
+                profile_id,
+                policy,
+            )
+            .await?;
+        }
         let target = self
             .config
             .targets
@@ -1183,6 +1180,14 @@ impl Controller {
             crate::database::save_move_operation(operation)?;
             executor.reserve_move_destination();
             executor.notify_notice("Preparing destination");
+            // The destination worker reads its delegation policy from the
+            // record at launch. `recovery_session` above keeps the old one
+            // for a rollback.
+            if let Some(policy) = &operation.selection.subagents {
+                let session = self.state.sessions.get_mut(&id).unwrap();
+                session.subagents = Some(policy.clone());
+                crate::database::save_resumed_session(session, None)?;
+            }
             if operation.in_place {
                 // The environment is kept, so there is nothing to provision and
                 // no allocation to clear: eligibility already required the
