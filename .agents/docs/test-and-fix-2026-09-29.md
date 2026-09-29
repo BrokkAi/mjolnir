@@ -549,3 +549,5 @@ One day, one coordinator (Fable), Sonnet test workers, Sonnet and Opus fix agent
 - Verify and fix (F24): `retry_assessment` cleared by `BeginCheckpoint` (`apply.rs:297-306`, the sibling of F18: the durable record of a provider-capacity refusal from which the automatic server retry is scheduled), RVE-2, RVD-1, RVA-2, O6's 200 ms timing test.
 - Investigate and fix (F25): RCL-3 (48.9 s pinning worker sources at daemon start; the Darwin pin 30 s) and B-5 (a Codex-kind session whose adapter was killed never becomes worker-replaceable).
 - Master pushed at `9b53cbf6` (origin's `8b3a7286` and `1a89e9b2` merged); the previous red CI runs failed on the `large_enum_variant` error fixed by `ca1c94f4`; the run on `9b53cbf6` is being watched. All 29 agent worktrees removed.
+
+Final local validation (`989b6269`, everything through F21 before the last origin merge): fmt clean, clippy clean, `cargo test --no-fail-fast` 42 binaries with 0 failures, web unit tests 67/67. The merged and pushed `9b53cbf6` differs from it only by origin's `8b3a7286` and `1a89e9b2`; its CI run is the check for that.
