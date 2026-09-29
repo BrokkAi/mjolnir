@@ -1640,7 +1640,9 @@ impl DashboardContext {
                 }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", name));
-                self.request_quota_refresh();
+                // No quota probe here. Creating, resuming or moving a session
+                // reads the quota already held; only the explicit Refresh and
+                // the scheduled poll ask the usage endpoint.
             }
             Ok(LifecycleSuccess::Resumed {
                 profile_id,
@@ -1657,7 +1659,6 @@ impl DashboardContext {
                 }
                 self.dashboard
                     .set_notice(format!("Resumed {} with {profile_id} on {target_id}", name));
-                self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
                 if focus_session && owns_chat {
@@ -1677,7 +1678,6 @@ impl DashboardContext {
                             name, outcome.operation_id
                         )
                     });
-                self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Closed) => {
                 self.dashboard.set_notice(format!("Suspended {}", name));
