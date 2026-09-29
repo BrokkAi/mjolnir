@@ -116,12 +116,11 @@ fn copy_workspace(
         "--partial".into(),
         "--partial-dir=.move-partial".into(),
     ];
-    let wrapper;
     let base = targets::locator_command(backend, vec!["rsync".into()]);
     let lease = base.open_ssh_session(executor)?;
-    if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+    let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
         args.extend([source, destination]);
-        wrapper = None;
+        None
     } else {
         let directory = rsync_shell(lease.command())?;
         let path = directory.path().join("move-rsync-shell");
@@ -131,8 +130,8 @@ fn copy_workspace(
         } else {
             [format!("move:{source}"), destination]
         });
-        wrapper = Some(directory);
-    }
+        Some(directory)
+    };
     let result = super::super::execute_checked(
         executor,
         CommandSpec::new("rsync", args).purpose("transfer Move workspace with resumable files"),
@@ -841,6 +840,8 @@ impl Controller {
 mod tests {
     use super::*;
 
+    // Needs a POSIX shell.
+    #[cfg(unix)]
     #[test]
     fn concurrent_move_helper_uploads_publish_complete_files_without_shared_staging() {
         let directory = tempfile::tempdir().unwrap();
@@ -922,6 +923,8 @@ mod tests {
         assert!(assessment.selection_problem(&selection).is_none());
     }
 
+    // Needs a POSIX shell and rsync.
+    #[cfg(unix)]
     #[test]
     fn interrupted_copy_retries_and_exclusions_retain_only_the_source() {
         use crate::controller::test_support::{
@@ -1063,6 +1066,8 @@ mod tests {
         );
     }
 
+    // Needs a POSIX shell and rsync.
+    #[cfg(unix)]
     #[test]
     fn rsync_namespace_adapter_streams_large_files_with_spaces_in_paths() {
         let directory = tempfile::tempdir().unwrap();
@@ -1102,6 +1107,8 @@ mod tests {
         );
     }
 
+    // Needs a POSIX shell and rsync.
+    #[cfg(unix)]
     #[test]
     fn resumable_local_copy_preserves_large_payloads_and_repairs_partial_files() {
         let directory = tempfile::tempdir().unwrap();

@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -22,14 +23,13 @@ use mj_core::config::{Config, HarnessKind, HarnessProfile};
 #[cfg(unix)]
 use mj_core::state::{
     CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
-    TargetLocator,
 };
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 
 use mj_core::state::{
     MaterializedExecutionState, MaterializedQueuedPrompt, MaterializedSession, QueuedCommandKind,
-    SessionResourceAllocation, SessionState, State,
+    SessionResourceAllocation, SessionState, State, TargetLocator,
 };
 
 use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
