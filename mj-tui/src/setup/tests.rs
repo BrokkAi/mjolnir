@@ -952,6 +952,42 @@ fn stopped_session_visibility_is_only_editable_under_advanced() {
     assert!(!saved.show_stopped_sessions);
 }
 
+/// Launch campaign finding A-3: once `ascii` was chosen, the popup offered no
+/// way back to "Follows the terminal", and saving that choice must remove the
+/// key rather than write a third value.
+#[test]
+fn symbols_can_return_to_the_unset_state_and_saving_removes_the_key() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    dashboard.set_config(config);
+    dashboard.begin_setup();
+    choose(&mut dashboard, "advanced");
+    choose(&mut dashboard, "symbols");
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let popup = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(popup.contains("Follows the terminal"), "{popup}");
+    assert!(popup.contains("unicode") && popup.contains("ascii"), "{popup}");
+
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["advanced"]["symbols"],
+        Value::Null
+    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    let DashboardAction::SaveSetup { updated, .. } = action else {
+        panic!("expected Settings save, got {action:?}")
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    assert_eq!(saved.advanced.symbols, None);
+    assert!(!updated.contains("symbols"), "{updated}");
+}
+
 #[test]
 fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft() {
     let mut dashboard = dashboard_with_session(stopped_session());
