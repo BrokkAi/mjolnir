@@ -4092,6 +4092,8 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 kind: "local-docker".into(),
                 requires_project_directory: false,
                 runtime_missing: false,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
                 recent_project_directories: Vec::new(),
             });
             snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
@@ -4150,6 +4152,8 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             kind: "local-docker".into(),
             requires_project_directory: false,
             runtime_missing: true,
+            availability: crate::server::api::LaunchAvailability::Unknown,
+            unavailable_reason: None,
             recent_project_directories: Vec::new(),
         });
         snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
@@ -4197,6 +4201,8 @@ async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
                 kind: "local-docker".into(),
                 requires_project_directory: false,
                 runtime_missing: true,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
                 recent_project_directories: Vec::new(),
             });
         });

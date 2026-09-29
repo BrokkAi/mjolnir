@@ -1368,6 +1368,16 @@ function launchableTargets(targets) {
   return (targets || []).filter(target => !target.runtime_missing);
 }
 
+// What to say beside a target whose host did not answer its last check. The
+// target stays selectable: the check may be out of date, and only the daemon
+// knows whether a launch would work. A missing runtime is filtered out before
+// this is asked, and `unknown` (nobody has checked yet) says nothing.
+function targetStatus(target) {
+  return target?.availability === 'unavailable' && !target.runtime_missing
+    ? 'did not answer its last check'
+    : '';
+}
+
 // Whether a target id may be offered: unknown ids pass, because the server
 // answers for those.
 function targetLaunchable(id) {
@@ -1568,7 +1578,7 @@ function renderNewForm() {
   const signature = JSON.stringify({
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
-    targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind]) : null,
+    targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t)]) : null,
     project: step.key === 'project' ? [
       newDraft.targetId, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
       newDraft.projectMultiple, newDraft.bundleSources,
@@ -1742,7 +1752,7 @@ function renderNewForm() {
 function pickerField(label, id, items, value, onChange) {
   const field = choiceControl({
     label,
-    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: item.kind || item.harness_kind })),
+    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: [item.kind || item.harness_kind, targetStatus(item)].filter(Boolean).join(' · ') })),
     values: [value],
     onChange: () => onChange(field.querySelector('input:checked')?.value || ''),
   });
@@ -2590,8 +2600,9 @@ function resumeChoiceField(label, id, items, value, onChange) {
   const field = el('label', 'field resume-choice');
   field.id = id;
   field.append(el('span', '', label));
+  const named = item => `${item.label ?? item.id}${item.status ? ` (${item.status})` : ''}`;
   if (items.length === 1 && items[0].id === value) {
-    field.append(el('span', 'field-value', items[0].label ?? items[0].id));
+    field.append(el('span', 'field-value', named(items[0])));
     return field;
   }
   if (!items.length) {
@@ -2606,7 +2617,7 @@ function resumeChoiceField(label, id, items, value, onChange) {
   empty.selected = !value || !items.some(item => String(item.id) === String(value));
   select.append(empty);
   for (const item of items) {
-    const option = el('option', '', item.label ?? item.id);
+    const option = el('option', '', named(item));
     option.value = item.id;
     option.selected = String(item.id) === String(value);
     select.append(option);
@@ -2943,6 +2954,7 @@ function renderWikiDetail(wikiId) {
   const targetItems = launchableTargets(snapshot?.targets).map(target => ({
     id: target.id,
     label: target.label || target.name || target.id,
+    status: targetStatus(target),
   }));
   if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
   if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
@@ -3105,6 +3117,7 @@ function resumeCardSignature(session) {
     draft.conversion?.detail || '',
     draft.conversion?.preview || null,
     (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
+    resumeTargetItems(session).map(item => item.status),
     session.move_recovery,
     session.profile_id,
     session.target_id,
@@ -3126,7 +3139,7 @@ function resumeCardSignature(session) {
 function resumeTargetItems(session) {
   return (session.compatible_resume_targets || []).filter(targetLaunchable).map(id => {
     const target = (snapshot.targets || []).find(item => item.id === id);
-    return { id, label: target?.label || target?.name || id };
+    return { id, label: target?.label || target?.name || id, status: targetStatus(target) };
   });
 }
 

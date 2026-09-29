@@ -728,6 +728,13 @@ pub(super) fn viewer_snapshot_selected(
         session.capabilities.open = session.conversation_available && !session.transitioning;
     }
     snapshot.capacity = capacity.to_vec();
+    // The same classifier `/api/v1/options` uses, so a picker can say which
+    // host did not answer its last check. The engine probe is not run here.
+    for target in &mut snapshot.targets {
+        let status = crate::server::api::target_availability(target, capacity, None);
+        target.availability = status.availability;
+        target.unavailable_reason = status.unavailable_reason;
+    }
     snapshot
 }
 

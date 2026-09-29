@@ -20,7 +20,7 @@ const snapshot = {
   profiles: [{ id: 'codex' }],
   targets: [
     { id: 'docker', kind: 'local-docker', runtime_missing: true },
-    { id: 'macbook', kind: 'ssh-bare' },
+    { id: 'macbook', kind: 'ssh-bare', availability: 'unavailable', unavailable_reason: 'the host "macbook" did not answer its last check' },
     { id: 'podman', kind: 'local-podman' },
   ],
 };
@@ -85,4 +85,54 @@ test('move preselects the session current target when it is offered, not the fir
     compatible_resume_targets: ['macbook', 'podman'],
   };
   assert.equal(vm.runInContext('freshMoveDraft(session).targetId', context), 'podman');
+});
+
+// A minimal element: enough for `el`, `pickerField` and `resumeChoiceField`.
+function fakeNode(tag) {
+  return {
+    tag, children: [], dataset: {}, className: '', textContent: '', value: '', selected: false,
+    append(...nodes) { this.children.push(...nodes); },
+    setAttribute() {},
+    querySelector() { return null; },
+  };
+}
+
+function rendering() {
+  const context = loaded();
+  context.document = { createElement: fakeNode };
+  context.choiceControl = options => ({ ...fakeNode('field'), choice: options });
+  vm.runInContext(sourceBetween('function el(', '\n}\n') + '\n}\n', context);
+  vm.runInContext(sourceBetween('function pickerField(', '\n}\n') + '\n}\n', context);
+  vm.runInContext(sourceBetween('function resumeChoiceField(', '\n}\n') + '\n}\n', context);
+  return context;
+}
+
+test('a host that did not answer is listed with a status and stays selectable', () => {
+  const context = rendering();
+  assert.equal(vm.runInContext('targetStatus(snapshot.targets[1])', context), 'did not answer its last check');
+  // No reading yet, a ready host and a missing runtime say nothing here.
+  assert.equal(vm.runInContext("targetStatus({ id: 'a', availability: 'unknown' })", context), '');
+  assert.equal(vm.runInContext("targetStatus({ id: 'a', availability: 'ready' })", context), '');
+  assert.equal(vm.runInContext('targetStatus(snapshot.targets[2])', context), '');
+
+  // New and Move: the picker option carries the status and is not disabled.
+  const field = vm.runInContext('pickerField("Where to run", "new-target", launchableTargets(snapshot.targets), "macbook", () => {})', context);
+  const options = field.choice.options;
+  assert.deepEqual(options.map(option => option.value), ['macbook', 'podman']);
+  assert.equal(options[0].description, 'ssh-bare · did not answer its last check');
+  assert.equal(options[1].description, 'local-podman');
+  assert.ok(options.every(option => !option.disabled));
+});
+
+test('resume shows the status beside the target and keeps it selectable', () => {
+  const context = rendering();
+  context.session = { id: 's1', compatible_resume_targets: ['docker', 'macbook', 'podman'] };
+  const items = vm.runInContext('resumeTargetItems(session)', context);
+  assert.deepEqual(items.map(item => [item.id, item.status]), [['macbook', 'did not answer its last check'], ['podman', '']]);
+  context.items = items;
+  const field = vm.runInContext('resumeChoiceField("Target", "resume-target-s1", items, "podman", () => {})', context);
+  const select = field.children.find(child => child.tag === 'select');
+  const options = select.children.filter(child => child.tag === 'option' && child.value);
+  assert.deepEqual(options.map(option => option.textContent), ['macbook (did not answer its last check)', 'podman']);
+  assert.ok(options.every(option => !option.disabled));
 });

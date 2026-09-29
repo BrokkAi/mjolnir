@@ -310,6 +310,8 @@ impl ViewerSnapshot {
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
                 runtime_missing: false,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
                 recent_project_directories: project_history_host(target)
                     .map(|host| {
                         state
@@ -892,6 +894,10 @@ pub struct ViewerTargetCapacity {
     pub has_error: bool,
 }
 
+fn unknown_availability() -> crate::server::api::LaunchAvailability {
+    crate::server::api::LaunchAvailability::Unknown
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerTarget {
@@ -904,6 +910,13 @@ pub struct ViewerTarget {
     /// that merely did not answer is not this; it stays listed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_missing: bool,
+    /// Whether the host's last check answered, from the same classifier as
+    /// `/api/v1/options`. `Unknown` until the capacity poller has run.
+    #[serde(default = "unknown_availability")]
+    pub availability: crate::server::api::LaunchAvailability,
+    /// A short sentence for a person when `availability` is `Unavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
     /// Recent raw project directories for this target's physical host. Managed
     /// targets intentionally publish an empty list because they select a
     /// configured bundle rather than a host checkout.

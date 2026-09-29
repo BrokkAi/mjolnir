@@ -737,6 +737,72 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
     }
 }
 
+/// The web pickers read a target's status from the snapshot, so it carries
+/// the same availability and reason `/api/v1/options` gives: a host that did
+/// not answer is unavailable with a sentence, a host that did is ready, and a
+/// target no reading covers is unknown.
+#[test]
+fn snapshot_targets_carry_the_availability_the_options_report() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    for id in ["answering", "silent", "unread"] {
+        controller
+            .config
+            .targets
+            .insert(id.into(), TargetTemplate::LocalBare);
+    }
+    let reading = |id: &str, has_error: bool| crate::server::ViewerTargetCapacity {
+        id: id.into(),
+        label: id.into(),
+        target_ids: vec![id.into()],
+        cpu_percent: None,
+        memory_used_bytes: None,
+        memory_total_bytes: None,
+        logical_cores: None,
+        disk_total_bytes: None,
+        virtual_machines: None,
+        sampled_at_epoch_seconds: Some(1),
+        refreshing: false,
+        stale: false,
+        has_error,
+    };
+    let capacity = [reading("answering", false), reading("silent", true)];
+    let sources = PhoneProjectSources::default();
+    let snapshot = viewer_snapshot(
+        &controller,
+        &[],
+        &Default::default(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &sources,
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &capacity,
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        1,
+    );
+    use crate::server::api::LaunchAvailability::{Ready, Unavailable, Unknown};
+    let target = |id: &str| snapshot.targets.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(target("answering").availability, Ready);
+    assert_eq!(target("answering").unavailable_reason, None);
+    assert_eq!(target("silent").availability, Unavailable);
+    assert_eq!(
+        target("silent").unavailable_reason.as_deref(),
+        Some("the host \"silent\" did not answer its last check")
+    );
+    assert_eq!(target("unread").availability, Unknown);
+    let json = serde_json::to_value(target("silent")).unwrap();
+    assert_eq!(json["availability"], "unavailable");
+}
+
 fn snapshot_with_project_sources(
     controller: &Controller,
     sources: &PhoneProjectSources,
