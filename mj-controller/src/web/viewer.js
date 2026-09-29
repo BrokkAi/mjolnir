@@ -6622,11 +6622,12 @@ function renderConversationHeader(session) {
   const native = session?.native_subagents || [];
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
-  subagentsButton.textContent = `Subagents · ${working} working`;
-  subagentsButton.title = `${children.length + native.length} retained agents`;
+  const total = children.length + native.length;
+  subagentsButton.textContent = `Subagents · ${working}/${total}`;
+  subagentsButton.title = `${total} retained agents`;
   subagentsButton.classList.toggle(
     'hidden',
-    children.length + native.length === 0 || Boolean(route.subagentParentId),
+    total === 0 || Boolean(route.subagentParentId),
   );
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);

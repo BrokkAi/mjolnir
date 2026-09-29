@@ -551,14 +551,15 @@ pub(crate) fn render_composer_band(
     let subagents_ready = chat.subagent_count() > 0;
     let subagent_label = if subagents_ready {
         Some(format!(
-            " Subagents{}{} working {} ",
+            " Subagents{}{}/{} {} ",
             theme::footer_separator(),
             chat.subagent_working_count,
+            chat.subagent_count(),
             theme::glyphs().navigate
         ))
     } else {
         chat.subagents_enabled
-            .then(|| format!(" Subagents{}none yet ", theme::footer_separator()))
+            .then(|| format!(" Subagents{}0 ", theme::footer_separator()))
     };
     let command_hints = (prompt_focused && prompt_area.width >= 56).then(|| {
         // A standby composer cannot send, so the hint says what Enter does

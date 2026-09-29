@@ -746,7 +746,7 @@ mod tests {
                     let body = drawn_transcript(&mut chat, 100, 24).join("\n");
                     assert!(body.contains("Luna v"), "{body}");
                     assert!(body.contains("x Luna"), "{body}");
-                    assert!(body.contains("Subagents - 0 working >"), "{body}");
+                    assert!(body.contains("Subagents - 0/1 >"), "{body}");
                     assert!(!body.contains('▾'));
                     assert!(!body.contains('›'));
                 })

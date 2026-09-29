@@ -717,12 +717,12 @@ fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child(
 
     chat.set_subagents_enabled(true);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · none yet"), "{screen}");
+    assert!(screen.contains("Subagents · 0 "), "{screen}");
     // Launch finding R1-3: the ASCII symbol set draws no middle dot.
     let ascii = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
         drawn_transcript(&mut chat, 100, 24).join("\n")
     });
-    assert!(ascii.contains("Subagents - none yet"), "{ascii}");
+    assert!(ascii.contains("Subagents - 0 "), "{ascii}");
     assert!(!ascii.contains('·'), "{ascii}");
     assert!(
         chat.subagent_control_area.is_none(),
@@ -731,7 +731,7 @@ fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child(
 
     chat.set_subagent_count(1);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 working"), "{screen}");
+    assert!(screen.contains("Subagents · 0/1"), "{screen}");
     assert!(chat.subagent_control_area.is_some());
 }
 
@@ -742,7 +742,7 @@ fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
     chat.set_subagent_count(2);
 
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0 working"), "{screen}");
+    assert!(screen.contains("Subagents · 0/2"), "{screen}");
     let area = chat
         .subagent_control_area
         .expect("sub-agent control hitbox");

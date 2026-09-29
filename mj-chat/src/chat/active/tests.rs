@@ -2309,7 +2309,7 @@ fn subagents_use_navigation_glyph_and_neutral_surface_until_focused() {
             let label = (area.x..area.right())
                 .map(|x| buffer[(x, area.y)].symbol())
                 .collect::<String>();
-            assert_eq!(label, " Subagents · 0 working › ");
+            assert_eq!(label, " Subagents · 0/2 › ");
             assert!((area.x..area.right()).all(|x| {
                 let cell = &buffer[(x, area.y)];
                 cell.bg == theme::palette().selection && cell.fg == theme::palette().text

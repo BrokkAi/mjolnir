@@ -841,7 +841,7 @@ test('sub-agent workspace hides children from the normal list and closes back to
   await expect(card(page, 'child-one')).toHaveCount(0);
   await card(page, 'parent').click();
   await expect(page).toHaveURL(/#conversation\/parent$/);
-  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0/2');
   await page.locator('#subagents-button').click();
 
   await expect(page).toHaveURL(/#subagents\/parent$/);
@@ -904,10 +904,10 @@ test('a moved parent keeps 23 native histories without claiming any are working'
   }));
   const state = await mount(page, [parent]);
   await card(page, 'native-parent').click();
-  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0/23');
   parent.profile_id = 'another-profile';
   await reconnect(page, state);
-  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0 working');
+  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0/23');
   await page.locator('#subagents-button').click();
   await expect(page.getByRole('button', { name: 'View history' })).toHaveCount(23);
   await expect(page.getByRole('heading', { name: 'History and availability unknown' })).toBeVisible();
