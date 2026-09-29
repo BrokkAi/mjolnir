@@ -311,3 +311,7 @@ Runbook errors: the Mac worker root is `~/.local/share/hel/workers/<id>` (legacy
 ### User-reported (10:50): unavailable runtime targets listed in pickers
 
 The Move target step on the user's own dashboard lists `docker  local Docker  unavailable` ("Docker is not installed on this host") beside targets that only did not answer their last check. Decision: a target whose runtime is not present on this host is not offered in New, Resume or Move (a host that did not answer stays listed with its status); the CLI still refuses it by name. Fix wave F9, which also checks whether first-run setup writes a docker target on a host without Docker.
+
+### User request (10:55): the "Suspend stopped N sub-agents" notice lists idle children
+
+The transcript row named eight children, all "(had handed back)". Decision: name only children that had not handed back; summarize idle ones as a count; the same on the CLI warning, the TUI and web confirmations (no confirmation when every child is idle), and Move's variant; the hidden resume note to the model keeps the full list. Fix wave F10.
