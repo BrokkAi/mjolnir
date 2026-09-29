@@ -307,3 +307,7 @@ Findings, with verdicts:
 - **M-8** (superseded): the wizard's target step is a plain list with no capacity for `macbook`; `8a2884fe`'s TARGET/KIND/SIZE/STATUS table landed after the campaign commit. Re-verify with `bin-fixed`.
 
 Runbook errors: the Mac worker root is `~/.local/share/hel/workers/<id>` (legacy name) and the clone is under the project's `.mj/clones`, not `workspace_prefix`; a Move check to another profile needs that profile in the instance config; after a daemon restart the dashboard loses its open conversation (reopen with `prefix+g`); `mj sessions` shows `running` for an idle session. Cleanup complete on both hosts; the fixture deleted; empty `~/.local/share/hel/{profiles,workers}` left on the Mac.
+
+### User-reported (10:50): unavailable runtime targets listed in pickers
+
+The Move target step on the user's own dashboard lists `docker  local Docker  unavailable` ("Docker is not installed on this host") beside targets that only did not answer their last check. Decision: a target whose runtime is not present on this host is not offered in New, Resume or Move (a host that did not answer stays listed with its status); the CLI still refuses it by name. Fix wave F9, which also checks whether first-run setup writes a docker target on a host without Docker.
