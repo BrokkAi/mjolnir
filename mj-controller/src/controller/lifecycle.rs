@@ -327,8 +327,34 @@ impl Controller {
                 .await
         };
         if let Err(error) = close_result {
-            self.record_interrupted_close(session_id, &error)?;
-            return Err(error.context("seal verified checkpoint for close"));
+            let error = error.context("seal verified checkpoint for close");
+            if !close_was_refused(&error) {
+                // The Close may have been accepted before the answer was
+                // lost, so only the interrupted-close recovery may decide.
+                self.record_interrupted_close(session_id, &error)?;
+                return Err(error);
+            }
+            // The worker answered and did not accept the Close, so its relay
+            // is not sealed and the session is still live. Nothing about this
+            // close can be resumed: release the barrier and return the
+            // session to work, keeping the checkpoint it just verified.
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cancel:#}"),
+                    "could not release the checkpoint barrier of a refused close"
+                );
+            }
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = state_after_unsealed_close(&previous);
+            record.last_error = Some(format!("{error:#}"));
+            record.updated_at = now();
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "restore a session whose worker refused its close",
+            )?;
+            return Err(error);
         }
         let close_result = {
             let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
@@ -1230,6 +1256,17 @@ fn apply_close_checkpoint_failure(
 /// relay. `Closing` there is only the intent of this close, or of one
 /// interrupted before it sealed the relay, and the relay is still open, so the
 /// session is running.
+/// Whether the worker answered a Close with a definite refusal. A validation
+/// rejection means the relay never accepted the command; a lost or retryable
+/// answer does not say that, so it is not a refusal.
+fn close_was_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::worker_client::RelayRejected>()
+            .is_some_and(|rejected| !rejected.is_retryable())
+    })
+}
+
 fn state_after_unsealed_close(previous: &SessionRecord) -> SessionState {
     if previous.state == SessionState::Closing {
         SessionState::Running

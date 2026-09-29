@@ -3105,81 +3105,70 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     );
 }
 
-/// I2-3 (test-and-fix campaign 2026-09-29): a suspend issued right after a
-/// turn ended failed with "close does not match the current checkpoint cut"
-/// and left the session `suspending` with an error.
-///
-/// Two parties write the relay journal while a close holds its checkpoint
-/// barrier. The daemon decides the cut it seals: the barrier's ready cursor,
-/// which it latches, archives, and revalidates, and whose revalidation
-/// deliberately accepts a frontier that moved past the cursor. The worker
-/// keeps journaling its own observations under that barrier, because the
-/// barrier freezes command dispatch only: the completed-turn classifier's
-/// answer (`TurnAssessmentUpdated`) and the harness's notifications land
-/// whenever they arrive. The worker's Close then requires the frontier to be
-/// exactly the cursor, so one such write between the daemon's last look and
-/// its Close makes the worker refuse, and the daemon records an interrupted
-/// close instead of returning the live session to `Running`.
-///
-/// Here the stand-in worker journals one harness notification just before it
-/// reads the Close, which is the window the real session hit about half a
-/// second after its first turn ended.
-///
-/// Ignored until the owner of the close cut is decided. Every fix found
-/// changes the worker relay or the relay protocol (see the I2-3 report), which
-/// the campaign rules send to the user first.
+/// Run `test_name` in its own process with its own store, behind a scripted
+/// worker that journals one observation of its own just before it reads the
+/// Close. Returns true in that child, where the caller runs its body.
 #[cfg(unix)]
-#[tokio::test]
-#[ignore = "I2-3: the close cut has two writers; the fix changes the worker relay or protocol"]
-async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
-    if std::env::var_os(CLOSE_CUT_TEST_CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let test_name = format!(
-            "{}::a_suspend_seals_when_the_worker_journals_after_the_close_cut",
-            module_path!()
-                .strip_prefix("mj_controller::")
-                .unwrap_or(module_path!())
-        );
-        IsolatedTest::new(test_name)
-            .include_ignored()
-            .env(CLOSE_CUT_TEST_CHILD, "1")
-            .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, "1")
-            .env("MJ_DATA_DIR", directory.path())
-            .run();
-        return;
+fn in_close_cut_child(test_name: &str) -> bool {
+    if std::env::var_os(CLOSE_CUT_TEST_CHILD).is_some() {
+        return true;
     }
-    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let test_name = format!(
+        "{}::{test_name}",
+        module_path!()
+            .strip_prefix("mj_controller::")
+            .unwrap_or(module_path!())
+    );
+    IsolatedTest::new(test_name)
+        .include_ignored()
+        .env(CLOSE_CUT_TEST_CHILD, "1")
+        .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .run();
+    false
+}
+
+/// Every target command succeeds. A close behind [`close_cut_controller`]
+/// reuses the installed archive, so the only commands are the local target's
+/// teardown.
+#[cfg(unix)]
+struct SucceedingExecutor;
+
+#[cfg(unix)]
+impl CommandExecutor for SucceedingExecutor {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        _input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        anyhow::bail!("unexpected streamed command {:?}", command.purpose)
+    }
+}
+
+/// A live session behind the scripted relay, in `state`, whose installed
+/// archive holds exactly what that relay journals at startup, so a close
+/// reuses the archive and nothing but the scripted write moves the cut.
+#[cfg(unix)]
+async fn close_cut_controller(
+    state: SessionState,
+) -> (
+    Controller,
+    crate::session_manager::SessionManagerChannels,
+    ManagedSessionHandle,
+) {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(120));
         eprintln!("the suspend never finished");
         std::process::exit(101);
     });
-
-    /// Every target command succeeds. The close reuses the installed archive,
-    /// so the only commands are the local target's teardown.
-    #[derive(Default)]
-    struct SucceedingExecutor {
-        purposes: std::sync::Mutex<Vec<String>>,
-    }
-    impl CommandExecutor for SucceedingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.purposes.lock().unwrap().push(command.purpose.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-        fn execute_with_stdin(
-            &self,
-            command: &CommandSpec,
-            _input: &mut (dyn std::io::Read + Send),
-        ) -> Result<CommandOutput> {
-            self.purposes.lock().unwrap().push(command.purpose.clone());
-            anyhow::bail!("unexpected streamed command {:?}", command.purpose)
-        }
-    }
-
     let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
     let relay_root = data_directory.join("relay");
     let profile_home = data_directory.join("profile");
@@ -3187,8 +3176,6 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     for directory in [&relay_root, &profile_home, &archive_directory] {
         std::fs::create_dir_all(directory).unwrap();
     }
-    // The installed archive holds exactly what the live relay journals at
-    // startup, so the close reuses it and nothing else moves the cut.
     let mut input = crate::controller::test_support::checkpoint_archive_input(
         LATCH_RELAY_SESSION,
         2,
@@ -3209,12 +3196,13 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     );
 
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.state = state;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
     session.target = Some(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
     });
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(checkpoint);
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
@@ -3242,7 +3230,7 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             }],
         },
     );
-    let mut controller = Controller {
+    let controller = Controller {
         config,
         state: State {
             sessions: [(LATCH_RELAY_SESSION.into(), session)]
@@ -3262,17 +3250,48 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
             false,
         )])
         .unwrap();
-    channels
+    let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
+    (controller, channels, handle)
+}
 
-    let executor = SucceedingExecutor::default();
+/// I2-3 (test-and-fix campaign 2026-09-29): a suspend issued right after a
+/// turn ended failed with "close does not match the current checkpoint cut".
+///
+/// Two parties write the relay journal while a close holds its checkpoint
+/// barrier. The daemon decides the cut it seals: the barrier's ready cursor,
+/// which it latches, archives, and revalidates, and whose revalidation
+/// deliberately accepts a frontier that moved past the cursor. The worker
+/// keeps journaling its own observations under that barrier, because the
+/// barrier freezes command dispatch only: the completed-turn classifier's
+/// answer (`TurnAssessmentUpdated`) and the harness's notifications land
+/// whenever they arrive. The worker's Close then requires the frontier to be
+/// exactly the cursor, so one such write between the daemon's last look and
+/// its Close makes the worker refuse, and the suspend fails.
+///
+/// Here the stand-in worker journals one harness notification just before it
+/// reads the Close, which is the window the real session hit about half a
+/// second after its first turn ended.
+///
+/// Ignored until the owner of the close cut is decided. Every fix found
+/// changes the worker relay or the relay protocol (see the I2-3 report), which
+/// the campaign rules send to the user first.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "I2-3: the close cut has two writers; the fix changes the worker relay or protocol"]
+async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
+    if !in_close_cut_child("a_suspend_seals_when_the_worker_journals_after_the_close_cut") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, _handle) = close_cut_controller(SessionState::Running).await;
     let suspended = controller
         .suspend_session_managed_controlled(
             LATCH_RELAY_SESSION,
-            &executor,
+            &SucceedingExecutor,
             &channels.control,
             true,
             None,
@@ -3289,6 +3308,76 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
+}
+
+/// A worker that answers a Close with a refusal did not seal its relay: the
+/// session is still live, and nothing about the refused close can be resumed.
+/// The suspend therefore releases its barrier and returns the session to
+/// `Running` with the refusal as its visible error, the way a close that stops
+/// before sealing does. Recording an interrupted close instead left I2-3's
+/// session `suspending` with an error until someone suspended it again.
+///
+/// This goes through the daemon's route: its suspend marks the record
+/// `Closing` first and then recovers that close.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier() {
+    if !in_close_cut_child(
+        "a_refused_close_returns_the_session_to_running_and_releases_its_barrier",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, handle) = close_cut_controller(SessionState::Closing).await;
+    let suspended = controller
+        .recover_interrupted_close_managed(
+            LATCH_RELAY_SESSION,
+            &SucceedingExecutor,
+            &channels.control,
+            true,
+            None,
+        )
+        .await;
+
+    let error = suspended.expect_err("the scripted worker refuses the Close");
+    assert!(
+        format!("{error:#}").contains("close does not match the current checkpoint cut"),
+        "{error:#}"
+    );
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(
+        record.state,
+        SessionState::Running,
+        "{:?}",
+        record.last_error
+    );
+    assert!(
+        record
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("close does not match the current checkpoint cut")),
+        "{:?}",
+        record.last_error
+    );
+    let persisted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(persisted.state, SessionState::Running);
+
+    // The barrier is gone and the relay was never sealed, so the session can
+    // take work again.
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut lease = handle.lease_connection().await.unwrap();
+    let snapshot = lease.connection_mut().sync().await.unwrap();
+    lease.release();
+    assert_eq!(snapshot.operational.checkpoint_barrier, None);
+    assert!(
+        !matches!(
+            snapshot.operational.execution,
+            RelayExecutionState::Closing | RelayExecutionState::Closed
+        ),
+        "{:?}",
+        snapshot.operational.execution
+    );
+    channels.shutdown.shutdown().await.unwrap();
 }
 /// A direct `mj checkpoint` runs the controller's checkpoint futures inside
 /// the daemon's connection task, on a 2 MiB Tokio worker stack. In a debug
