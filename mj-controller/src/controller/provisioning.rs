@@ -17,7 +17,7 @@ use crate::targets::{
 };
 
 use super::backend::{
-    ContainerOverrides, TargetCheck, backend_bundle, backend_locator, backend_target,
+    ContainerOverrides, TargetCheck, backend_locator, backend_session_bundle, backend_target,
     configure_github_token_environment, controller_github_token, preflight_target,
     use_github_https_urls,
 };
@@ -502,13 +502,7 @@ impl Controller {
             } else if failure_disposition == ProvisioningFailureDisposition::Preserve {
                 Some(super::network_git::checkpoint_bundle(&session)?)
             } else {
-                Some(backend_bundle(
-                    self.config
-                        .bundles
-                        .get(&session.bundle_id)
-                        .context("session bundle is missing")?,
-                    executor,
-                )?)
+                Some(backend_session_bundle(&session, &self.config, executor)?)
             };
             let container_github_token =
                 github_token.filter(|_| configure_github_token_environment(&mut target));

@@ -15,7 +15,7 @@ use mj_core::state::{
 use crate::targets::{
     self, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
 };
-pub(super) use mj_client::target::managed_worktree_target;
+pub(crate) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
 use super::{BranchDisposition, Controller, execute_checked, now};
@@ -136,6 +136,9 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        if session.project.is_some() {
+            return Ok(session.project_source(&self.config));
+        }
         let Some(directory) = session.project_directory.as_deref() else {
             return Ok(session.project_source(&self.config));
         };
@@ -200,10 +203,8 @@ impl Controller {
         target_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<WorkspaceToRawConversion> {
-        let bundle = self
-            .config
-            .bundles
-            .get(&session.bundle_id)
+        let bundle = session
+            .project_bundle(&self.config)
             .context("session bundle is missing")?;
         let [repository] = bundle.repositories.as_slice() else {
             bail!("a checkout holds exactly one repository");
@@ -427,9 +428,9 @@ impl Controller {
 }
 
 /// Reuse the same Git configuration resolver on a remote bare host.
-struct RemoteGitExecutor<'a, E> {
-    executor: &'a E,
-    ssh: SshTarget,
+pub(crate) struct RemoteGitExecutor<'a, E> {
+    pub(crate) executor: &'a E,
+    pub(crate) ssh: SshTarget,
 }
 
 impl<E: CommandExecutor> CommandExecutor for RemoteGitExecutor<'_, E> {
@@ -588,7 +589,7 @@ fn managed_target_ssh(target: &ManagedWorktreeTarget) -> Option<SshTarget> {
     }
 }
 
-fn managed_target_command(
+pub(super) fn managed_target_command(
     target: &ManagedWorktreeTarget,
     program: &str,
     args: impl IntoIterator<Item = impl AsRef<str>>,

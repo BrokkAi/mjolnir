@@ -222,6 +222,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             (
                 (*session_id).to_owned(),
                 SessionRecord {
+                    project: None,
                     target_runtime: None,
                     launch_base: None,
                     launch_branch: None,

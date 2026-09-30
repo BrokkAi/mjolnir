@@ -162,6 +162,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: [(
             "session-1".into(),
             SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,

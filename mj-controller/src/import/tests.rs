@@ -424,9 +424,14 @@ fn synthesized_bundles_keep_one_repository_per_shared_origin() {
 
     assert_eq!(bundle.repositories.len(), 1);
     assert_eq!(bundle.primary_repo, "app");
+    assert!(bundle.repositories[0].github.is_none());
     assert_eq!(
-        bundle.repositories[0].github.as_deref(),
-        Some("example/app")
+        bundle.repositories[0].local.as_deref(),
+        Some(app.canonicalize().unwrap().as_path())
+    );
+    assert_eq!(
+        super::bundles::configured_repository_identity(&bundle.repositories[0]).unwrap(),
+        Some(RepositoryIdentity::Github("example".into(), "app".into()))
     );
 }
 

@@ -25,7 +25,9 @@ pub(super) fn project_memory_launch(
     // For an isolated parent that is the parent's own clone, not the project,
     // so the child takes the parent's checkout for its identity and shares
     // the parent's memory (R10-4).
-    let identity = if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
+    let identity = if let Some(project) = &session.project {
+        project.memory_identity()?
+    } else if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
         ProjectMemoryIdentity::Repository {
             repository: RepositoryMemoryIdentity::Local {
                 canonical_root: std::fs::canonicalize(&worktree.source_repository)
@@ -142,7 +144,9 @@ pub(super) fn stage_memory_replica(
     target_profile_home: &Path,
     profile_stage: &Path,
 ) -> Result<()> {
-    let canonical = canonical_memory_root(&memory.project_key);
+    let canonical = mj_core::project_memory::resolve_canonical_root(&canonical_memory_root(
+        &memory.project_key,
+    ))?;
     std::fs::create_dir_all(&canonical)?;
     let replica = memory.root.strip_prefix(target_profile_home)?;
     let baseline = memory.baseline_root.strip_prefix(target_profile_home)?;

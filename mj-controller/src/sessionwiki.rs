@@ -2423,6 +2423,7 @@ mod tests {
         live: BTreeMap<String, i64>,
     ) -> MjolnirAdapter {
         let record = SessionRecord {
+            project: None,
             id: session_id.into(),
             ..record_template()
         };
@@ -2439,6 +2440,7 @@ mod tests {
 
     fn record_template() -> SessionRecord {
         SessionRecord {
+            project: None,
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
@@ -2931,6 +2933,7 @@ mod tests {
         updated_at: &str,
     ) -> SessionRecord {
         SessionRecord {
+            project: None,
             id: session_id.into(),
             state,
             updated_at: updated_at.into(),
@@ -3039,6 +3042,7 @@ mod tests {
             }
         }
         SessionRecord {
+            project: None,
             checkpoint: Some(mj_core::state::CheckpointMetadata {
                 archive_path,
                 sha256: "0".repeat(64),
@@ -3063,6 +3067,7 @@ mod tests {
             // A record whose checkpoint file is already gone counts as zero
             // rather than failing the whole estimate.
             SessionRecord {
+                project: None,
                 checkpoint: Some(mj_core::state::CheckpointMetadata {
                     archive_path: root.join("missing.hel.zip"),
                     sha256: "0".repeat(64),
@@ -3652,6 +3657,7 @@ mod tests {
             (
                 id.to_owned(),
                 SessionRecord {
+                    project: None,
                     id: id.into(),
                     ..record_template()
                 },

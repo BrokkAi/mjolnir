@@ -169,10 +169,20 @@ impl Controller {
                     .profiles
                     .get(&profile_id)
                     .with_context(|| format!("unknown profile {profile_id:?}"))?;
-                self.config
-                    .bundles
-                    .get(&bundle_id)
-                    .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
+                let (bundle_id, project) =
+                    if let Some(saved) = crate::database::saved_project(&bundle_id)? {
+                        saved
+                    } else {
+                        let bundle = self
+                            .config
+                            .bundles
+                            .get(&bundle_id)
+                            .with_context(|| format!("unknown project {bundle_id:?}"))?;
+                        (
+                            bundle_id,
+                            crate::project_catalog::snapshot(bundle, executor, false)?,
+                        )
+                    };
                 let workspace_id = resolve_recovery_workspace_id(
                     candidate
                         .ownership
@@ -202,6 +212,7 @@ impl Controller {
                 record.target_runtime =
                     Some(record.target_runtime_settings(&self.config)?.into_owned());
                 record.container_workspace = container_workspace;
+                record.project = Some(project);
                 (record, true)
             }
         };
@@ -510,6 +521,7 @@ fn adopted_session_record(
 ) -> SessionRecord {
     let now = now();
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

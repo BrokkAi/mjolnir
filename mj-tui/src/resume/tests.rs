@@ -2706,6 +2706,7 @@ fn session_dialog_uses_action_labels_without_navigation_boilerplate() {
 fn sub_agents_are_never_offered_for_resume() {
     let owner = stopped_session();
     let managed_child = SessionRecord {
+        project: None,
         id: "child-1".into(),
         acp_session_title: Some("Managed lane".into()),
         native_session_id: Some("native-child".into()),

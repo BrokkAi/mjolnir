@@ -143,6 +143,7 @@ fn populated_dashboard() -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,
@@ -1542,6 +1543,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

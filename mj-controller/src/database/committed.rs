@@ -53,6 +53,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("subagent_sessions", "relation", "child_session_id"),
         ("subagent_preference", "preference", "singleton"),
         ("mount_history", "mount_history", "host"),
+        ("project_locations", "mount_history", "host"),
         ("host_container_sizes", "container_size", "host"),
         ("session_moves", "move", "session_id"),
         ("native_agents", "native_agent", "owner"),
@@ -75,7 +76,9 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
             let calls = references
                 .iter()
                 .map(|reference| {
-                    let key = if kind == "native_agent" {
+                    let key = if table == "project_locations" {
+                        format!("'project:' || CAST({reference}.host AS TEXT)")
+                    } else if kind == "native_agent" {
                         format!("json_array({reference}.owner, {reference}.child)")
                     } else {
                         format!("CAST({reference}.{key} AS TEXT)")
@@ -280,11 +283,9 @@ pub(super) fn finish_operation(
                 }
             }
             "mount_history" => {
-                let mut statement = transaction
-                    .prepare("SELECT source FROM mount_history WHERE host=?1 ORDER BY ordinal")?;
-                let paths = statement
-                    .query_map([key], |row| Ok(blob_to_path(row.get_ref(0)?.as_blob()?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let paths = state_io::read_mount_history(&transaction)?
+                    .remove(key)
+                    .unwrap_or_default();
                 let paths = (!paths.is_empty()).then_some(paths);
                 if state.mount_history.get(key) != paths.as_ref() {
                     match paths {

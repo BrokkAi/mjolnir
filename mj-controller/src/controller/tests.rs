@@ -457,6 +457,82 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
+    let checkout = super::test_support::committed_repository();
+    let worktree_parent = tempfile::tempdir().unwrap();
+    let worktree = worktree_parent.path().join("linked");
+    let git = |path: &Path, args: &[&str]| {
+        let mut command = CommandSpec::new("git", args.iter().copied());
+        command.cwd = Some(path.to_owned());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(
+        checkout.path(),
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    git(
+        checkout.path(),
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "git@github.com:main-owner/app.git",
+        ],
+    );
+    git(
+        checkout.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    git(
+        checkout.path(),
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.pushurl",
+            "git@github.com:feature-owner/app.git",
+        ],
+    );
+    let mut config = Config::default();
+    let main_id =
+        create_quick_bundle_in_config(&mut config, checkout.path().to_str().unwrap()).unwrap();
+    let linked_id =
+        create_quick_bundle_in_config(&mut config, worktree.join("nested").to_str().unwrap())
+            .unwrap();
+    assert_eq!(linked_id, main_id);
+    assert_eq!(config.bundles.len(), 1);
+    let source = config.bundles[&linked_id].primary().unwrap();
+    assert_eq!(
+        source.local.as_deref(),
+        Some(worktree.canonicalize().unwrap().as_path())
+    );
+    let resolved = mj_core::remote_git::resolve_repository(source, &ProcessExecutor).unwrap();
+    assert_eq!(resolved.fetch_url, "https://github.com/acme/app.git");
+    assert!(
+        resolved
+            .push_urls
+            .contains(&"git@github.com:feature-owner/app.git".to_owned())
+    );
+}
+
+#[test]
 fn bundle_creation_rejects_duplicate_normalized_sources_atomically() {
     let mut config = Config::default();
     let before = config.clone();
@@ -818,13 +894,13 @@ fn registration_saves_the_initial_task_before_provisioning() {
 const UNPERSISTABLE_SESSION_CHILD: &str = "MJ_TEST_UNPERSISTABLE_SESSION_CHILD";
 
 #[test]
-fn missing_bundle_does_not_block_controller_or_other_sessions() {
+fn removing_a_saved_project_keeps_accepted_session_definitions() {
     const CHILD: &str = "MJ_TEST_MISSING_BUNDLE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             CHILD,
-            "missing_bundle_does_not_block_controller_or_other_sessions",
+            "removing_a_saved_project_keeps_accepted_session_definitions",
             directory.path(),
         );
         return;
@@ -868,8 +944,20 @@ fn missing_bundle_does_not_block_controller_or_other_sessions() {
             .is_none()
     );
     let issue = loaded.reconnect_command(&affected).unwrap_err().to_string();
-    assert!(issue.contains("missing bundle"), "{issue}");
-    assert!(issue.contains("config.toml"), "{issue}");
+    assert!(issue.contains("session has no target"), "{issue}");
+    assert!(
+        loaded.state.sessions[&affected]
+            .configuration_issue(&loaded.config)
+            .is_none()
+    );
+    assert_eq!(
+        loaded.state.sessions[&affected]
+            .project
+            .as_ref()
+            .unwrap()
+            .bundle,
+        bundle
+    );
     // Loading must not turn a configuration problem into a persisted lifecycle failure.
     assert_eq!(
         loaded.state.sessions[&affected],

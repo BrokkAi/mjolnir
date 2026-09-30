@@ -1201,6 +1201,7 @@ fn new_action() -> ControllerAction {
 
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

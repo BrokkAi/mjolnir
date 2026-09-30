@@ -198,9 +198,17 @@ pub(crate) enum DashboardIoUpdate {
         /// engine's command not installed.
         absent_engine: Option<mj_core::config::TargetTemplate>,
     },
-    MountHistory(
-        std::result::Result<std::collections::BTreeMap<String, Vec<std::path::PathBuf>>, String>,
-    ),
+    ProjectCatalog {
+        context: Option<String>,
+        result: std::result::Result<mj_core::project_catalog::ProjectCatalogView, String>,
+    },
+    MountHistory {
+        context: Option<String>,
+        result: std::result::Result<
+            std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
+            String,
+        >,
+    },
     TargetTest {
         target_id: String,
         result: std::result::Result<(), String>,
@@ -550,6 +558,16 @@ impl DashboardContext {
 
     /// Folds one finished background job into dashboard and controller state.
     pub(super) fn apply_dashboard_io_update(&mut self, update: DashboardIoUpdate) {
+        let project_context = match &update {
+            DashboardIoUpdate::ProjectCatalog { context, .. }
+            | DashboardIoUpdate::MountHistory { context, .. } => Some(context),
+            _ => None,
+        };
+        if project_context
+            .is_some_and(|context| *context != self.dashboard.project_catalog_context())
+        {
+            return;
+        }
         if update.awaiting_runtime(&self.controller) {
             self.dashboard
                 .set_notice("Saved; waiting for the runtime view…");
@@ -1055,7 +1073,41 @@ impl DashboardContext {
                     self.session_notice_name(&session_id)
                 )),
             },
-            DashboardIoUpdate::MountHistory(result) => match result {
+            DashboardIoUpdate::ProjectCatalog { result, .. } => match result {
+                Ok(view) => {
+                    let mut history = self.controller.state.mount_history.clone();
+                    for location in view.locations {
+                        let paths = history
+                            .entry(format!("project:{}", location.host))
+                            .or_default();
+                        if !paths.contains(&location.checkout_root) {
+                            paths.push(location.checkout_root);
+                        }
+                    }
+                    self.controller.state.mount_history = history.clone();
+                    self.dashboard.apply_mount_history(history);
+                    self.dashboard
+                        .apply_project_catalog_status(view.status.clone());
+                    if let mj_core::project_catalog::ProjectCatalogStatus::Failed { errors } =
+                        view.status
+                    {
+                        self.dashboard
+                            .set_notice(format!("Project discovery: {}", errors.join("; ")));
+                    } else {
+                        self.dashboard.set_notice("Recent projects refreshed.");
+                    }
+                }
+                Err(error) => {
+                    self.dashboard.apply_project_catalog_status(
+                        mj_core::project_catalog::ProjectCatalogStatus::Failed {
+                            errors: vec![error.clone()],
+                        },
+                    );
+                    self.dashboard
+                        .set_notice(format!("Project discovery failed: {error}"));
+                }
+            },
+            DashboardIoUpdate::MountHistory { result, .. } => match result {
                 Ok(history) => {
                     // The controller copy is what later `set_state` calls
                     // publish, so it has to carry the fresh history too.
@@ -2480,6 +2532,7 @@ mod tests {
 
     fn lifecycle_session(id: &str, workspace_id: &str, state: SessionState) -> SessionRecord {
         SessionRecord {
+            project: None,
             target_runtime: None,
             launch_base: None,
             launch_branch: None,

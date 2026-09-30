@@ -70,6 +70,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       state.completions.push(body);
       return json(await state.complete(body));
     }
+    if (pathname === '/api/projects') return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
     if (pathname === '/api/projects/discover') {
       const body = route.request().postDataJSON();
       state.discoveries.push(body);

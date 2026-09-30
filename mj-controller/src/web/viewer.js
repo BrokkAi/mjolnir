@@ -1426,6 +1426,9 @@ function freshDraft() {
     projectPicker: freshProjectPicker(),
     projectPickers: {},
     projectDirectories: {},
+    catalogStep: false,
+    catalogController: null,
+    catalogStatus: null,
   };
 }
 
@@ -1466,6 +1469,10 @@ function renderNewForm() {
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
+  if (step.key === 'project' && !newDraft.catalogStep) {
+    newDraft.catalogStep = true;
+    refreshProjectCatalog(newDraft);
+  } else if (step.key !== 'project') newDraft.catalogStep = false;
   // A snapshot often only changes another session. Keep the actual controls
   // mounted so it cannot interrupt a touch gesture or dismiss a native picker.
   const signature = JSON.stringify({
@@ -1473,7 +1480,7 @@ function renderNewForm() {
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
     targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t)]) : null,
     project: step.key === 'project' ? [
-      newDraft.targetId, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
+      newDraft.targetId, newDraft.catalogStatus, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
       newDraft.projectMultiple, newDraft.bundleSources,
       targetIsBare(newDraft.targetId)
         ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
@@ -1525,6 +1532,11 @@ function renderNewForm() {
       break;
     }
     case 'project': {
+      if (newDraft.catalogStatus?.state === 'refreshing') body.append(el('p', 'dim', 'Refreshing recent projects…'));
+      if (newDraft.catalogStatus?.state === 'failed') {
+        body.append(el('p', 'error', newDraft.catalogStatus.errors.join('; ')));
+        body.append(projectButton('Retry discovery', () => refreshProjectCatalog(newDraft, true), 'retry-project-catalog'));
+      }
       if (targetIsBare(newDraft.targetId)) {
         body.append(el('p', 'dim', 'Choose an existing directory. Review whether to create an isolated clone before launching.'));
         const recents = snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories || [];
@@ -1665,10 +1677,33 @@ function cancelProjectDiscovery(picker) {
   picker.revision++;
 }
 
+async function refreshProjectCatalog(draft, retry = false) {
+  draft.catalogController?.abort();
+  const controller = new AbortController();
+  draft.catalogController = controller;
+  draft.catalogStatus = { state: 'refreshing' };
+  try {
+    let view = await request(`/api/projects${retry ? '?retry=true' : ''}`, { method: 'POST', signal: controller.signal });
+    while (view.status.state === 'refreshing') {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (controller.signal.aborted) return;
+      view = await request('/api/projects', { signal: controller.signal });
+    }
+    if (newDraft !== draft || controller.signal.aborted) return;
+    draft.catalogStatus = view.status;
+    renderNewForm();
+  } catch (error) {
+    if (controller.signal.aborted || newDraft !== draft) return;
+    draft.catalogStatus = { state: 'failed', errors: [error.message] };
+    renderNewForm();
+  }
+}
+
 function cancelProjectRequests() {
   if (newDraft?.projectPicker.loading) newDraft.projectPicker.error = 'Loading cancelled.';
   cancelProjectDiscovery(newDraft?.projectPicker);
   newDraft?.projectCreateController?.abort();
+  newDraft?.catalogController?.abort();
   if (newDraft) {
     newDraft.projectCreateController = null;
     newDraft.creatingBundle = false;

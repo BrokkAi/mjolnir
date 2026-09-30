@@ -512,7 +512,10 @@ fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
         Some(WizardControl::ProjectGithub)
     );
     assert!(!wizard.project_picker.multiple);
-    assert_eq!(dashboard.take_project_discovery(), None);
+    assert_eq!(
+        dashboard.take_project_discovery(),
+        Some(DashboardAction::LoadMountHistory)
+    );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
     assert!(text.contains("Choose a project"), "{text}");
@@ -5625,6 +5628,53 @@ fn opening_the_new_wizard_refreshes_recent_projects() {
         wizard.project_history,
         vec![PathBuf::from("/work/used-this-run")]
     );
+}
+
+#[test]
+fn recent_projects_update_an_open_picker_and_failed_discovery_has_an_explicit_retry() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    let Mode::New(mut wizard) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("new wizard");
+    };
+    wizard.open_projects(&dashboard);
+    dashboard.mode = Mode::New(wizard);
+    assert_eq!(
+        dashboard.take_project_discovery(),
+        Some(DashboardAction::LoadMountHistory)
+    );
+    let mut history = State::default();
+    history.remember_project_directory("local", std::path::Path::new("/work/discovered"));
+    dashboard.apply_mount_history(history.mount_history);
+    dashboard.apply_project_catalog_status(
+        mj_core::project_catalog::ProjectCatalogStatus::Failed {
+            errors: vec!["missing native project".into()],
+        },
+    );
+    let Mode::New(wizard) = &dashboard.mode else {
+        panic!("new wizard")
+    };
+    assert!(
+        wizard
+            .project_picker
+            .entries
+            .iter()
+            .any(|entry| entry.source == "/work/discovered")
+    );
+    assert!(
+        wizard
+            .project_picker
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("missing")
+    );
+    activate_project_control(&mut dashboard, WizardControl::ProjectRetry);
+    assert_eq!(
+        dashboard.take_project_discovery(),
+        Some(DashboardAction::RefreshProjects { retry: true })
+    );
+    assert_eq!(dashboard.take_project_discovery(), None);
 }
 
 /// Tab moves keyboard focus onto the recent directories, so each one has to

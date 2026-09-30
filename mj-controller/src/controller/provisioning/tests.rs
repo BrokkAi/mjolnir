@@ -522,6 +522,7 @@ fn mounts_without_an_overlay_are_not_probed() {
 fn failed_new_session_provisioning_retains_error_record() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -938,7 +939,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
         state: State::default(),
     };
     let session_id = controller
-        .register_session_with_resources(
+        .register_session_with_executor(
             "codex",
             "project",
             "docker",
@@ -956,6 +957,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 project_directory: Some("/srv/project".into()),
                 session_title_override: None,
             },
+            &RawRegistrationExecutor,
         )
         .unwrap();
     assert!(
@@ -996,6 +998,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
         ).unwrap()).into()),
@@ -1134,7 +1137,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
         state: State::default(),
     };
     let session_id = controller
-        .register_session_with_resources(
+        .register_session_with_executor(
             "codex",
             "project",
             "remote",
@@ -1152,6 +1155,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
                 project_directory: Some("/srv/project".into()),
                 session_title_override: None,
             },
+            &RawRegistrationExecutor,
         )
         .unwrap();
     // Provisioning has finished: the record names its target, and the worker
@@ -1749,4 +1753,20 @@ fn only_a_worker_that_never_started_is_retried() {
         !subagent_start_is_retryable(&cancelled),
         "a cancelled operation was not asked to keep going"
     );
+}
+
+struct RawRegistrationExecutor;
+impl CommandExecutor for RawRegistrationExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let stdout = match command.purpose.as_str() {
+            "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
+            "list project remotes" => "",
+            purpose => panic!("unexpected registration probe: {purpose}"),
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
 }

@@ -1103,3 +1103,47 @@ pub(super) async fn events(
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ProjectCatalogQuery {
+    #[serde(default)]
+    retry: bool,
+}
+
+pub(super) async fn read_projects(
+    State(state): State<ServerState>,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    catalog_response(state, false, false).await
+}
+
+pub(super) async fn refresh_projects(
+    State(state): State<ServerState>,
+    Query(query): Query<ProjectCatalogQuery>,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    catalog_response(state, true, query.retry).await
+}
+
+async fn catalog_response(
+    state: ServerState,
+    refresh: bool,
+    retry: bool,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .preflight_tx
+        .send(PreflightRequest::ProjectCatalog {
+            refresh,
+            retry,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(|error| {
+            tracing::warn!(%error,"project catalog read failed");
+            ApiError::controller_unavailable()
+        })
+}

@@ -18,7 +18,7 @@ Create, Open/Sessions, and Move should have one blank terminal cell inside the t
 - [x] (2026-09-30) Skip single-profile selection and single usable raw-target selection; bypass Confirm when both selectors were skipped.
 - [x] (2026-09-30) Validate and commit the profile settings and navigation extension on hel3; full dev-profile Cargo tests, Clippy, formatting, and diff checks passed.
 - [x] (2026-09-30) Integrate upstream db8c9ce3 and validate daemon-owned discovery of unsaved profile drafts; full Cargo tests, Clippy, formatting, and diff checks passed.
-- [ ] Integrate upstream's subsequent project-catalog changes, validate the combined wizard behavior, and push the resulting merge to origin/master as requested.
+- [x] (2026-09-30) Integrate upstream's subsequent project-catalog changes, validate the combined wizard behavior, and prepare the resulting merge for the authorized push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -94,3 +94,11 @@ Decision: the daemon discovers both saved and draft profiles, using the submitte
 Revision note: record the authorized merge/push and the integration fix required by upstream daemon-owned model discovery.
 
 Merge checkpoint: integration with db8c9ce3 passed the full dev-profile suite, including 2069 controller, 583 core, 903 TUI, 693 worker, 254 CLI, and 11 PTY tests. Clippy, formatting, and diff checks passed. Upstream advanced to f9bced67 during validation, adding project identity and incremental discovery across the Create flow; integrate that committed work next before pushing, without changing the other worktrees.
+
+The f9bced67 project-catalog extension also uses daemon protocol 47. Its wizard changes merge with the padding, controls, and skipped-step behavior without conflict. Resolve the protocol comment and management transcript conflicts by preserving upstream's protocol-47 transcript and advancing the combined protocol to 48, with a matching management fixture. This ensures ordinary startup replaces either protocol-47 build before serving the two features together. Repeat the dev-profile Cargo suite and Clippy because the newly published catalog changes controller, core, and TUI behavior.
+
+Revision note: preserve the subsequent project-catalog feature and distinguish the combined wire protocol from both independent protocol-47 builds.
+
+Final integration outcome: the combined f9bced67 tree with protocol 48 passed the full dev-profile Cargo suite, including 2076 controller, 589 core, 904 TUI, 693 worker, 254 CLI, and 11 PTY tests. Clippy with warnings denied, formatting, and diff checks passed. The only compile mismatch was the new catalog test's profile constructor; it now supplies the Native default. The current branch is ready for the requested commit and push to origin/master. The separate local master worktree and its ongoing edits remain untouched.
+
+Revision note: record passing final integration validation and readiness for the user-authorized publication.

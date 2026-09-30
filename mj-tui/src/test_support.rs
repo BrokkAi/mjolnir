@@ -318,6 +318,7 @@ pub(crate) fn config() -> Config {
 
 pub(crate) fn stopped_session() -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -366,6 +367,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
 /// actually on the dashboard.
 pub(crate) fn running_session() -> SessionRecord {
     SessionRecord {
+        project: None,
         state: SessionState::Running,
         ..stopped_session()
     }

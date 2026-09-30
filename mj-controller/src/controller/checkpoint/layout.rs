@@ -63,10 +63,8 @@ impl Controller {
                     }],
                 )
             } else {
-                let bundle = self
-                    .config
-                    .bundles
-                    .get(&session.bundle_id)
+                let bundle = session
+                    .project_bundle(&self.config)
                     .context("session bundle is missing")?;
                 let workspace_root = crate::controller::network_git::workspace_root(
                     &backend,

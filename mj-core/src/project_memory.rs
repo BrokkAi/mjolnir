@@ -45,6 +45,9 @@ pub struct MemoryReconciliation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RepositoryMemoryIdentity {
+    Network {
+        url: String,
+    },
     Github {
         owner: String,
         repository: String,
@@ -61,6 +64,9 @@ pub enum RepositoryMemoryIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectMemoryIdentity {
+    Project {
+        key: String,
+    },
     Repository {
         repository: RepositoryMemoryIdentity,
     },
@@ -83,7 +89,48 @@ impl ProjectMemoryIdentity {
     ) -> Self {
         members.sort_by_key(identity_sort_key);
         members.dedup();
+        if members.len() == 1 {
+            return Self::Repository {
+                repository: primary,
+            };
+        }
         Self::Bundle { primary, members }
+    }
+}
+
+impl From<&crate::repository::RepositoryIdentity> for RepositoryMemoryIdentity {
+    fn from(identity: &crate::repository::RepositoryIdentity) -> Self {
+        use crate::repository::RepositoryIdentity;
+        match identity {
+            RepositoryIdentity::Github(owner, repository) => Self::Github {
+                owner: owner.clone(),
+                repository: repository.clone(),
+            },
+            RepositoryIdentity::Network(url) => Self::Network { url: url.clone() },
+            RepositoryIdentity::Local(root) => Self::Local {
+                canonical_root: root.clone(),
+            },
+            RepositoryIdentity::RemoteDirectory { host, root } => Self::Remote {
+                target: host.clone(),
+                canonical_root: root.clone(),
+            },
+        }
+    }
+}
+
+impl crate::repository::ProjectBundleSnapshot {
+    pub fn memory_identity(&self) -> Result<ProjectMemoryIdentity> {
+        if self.bundle.repositories.len() == 1 {
+            Ok(ProjectMemoryIdentity::Repository {
+                repository: self
+                    .identities
+                    .get(&self.bundle.primary_repo)
+                    .context("project primary identity is missing")?
+                    .into(),
+            })
+        } else {
+            Ok(ProjectMemoryIdentity::Project { key: self.key()? })
+        }
     }
 }
 
@@ -406,6 +453,81 @@ pub fn reconcile_snapshots(
     }
 }
 
+static MEMORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// Redirects are published while holding both store locks and the decision
+/// registry. A stale sync cannot decide to write the old store during a merge.
+pub fn resolve_canonical_root(root: &Path) -> Result<PathBuf> {
+    let mut root = root.to_owned();
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        ensure_memory_alias_unique(&mut visited, &root)?;
+        let alias = root
+            .parent()
+            .context("memory store has no project directory")?
+            .join("memory-redirect.json");
+        match fs::read(&alias) {
+            Ok(bytes) => {
+                root = serde_json::from_slice(&bytes).context("decode project memory redirect")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(root),
+            Err(error) => return Err(error).context("read project memory redirect"),
+        }
+    }
+}
+
+fn ensure_memory_alias_unique(
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    root: &Path,
+) -> Result<()> {
+    if !visited.insert(root.to_owned()) {
+        bail!("project memory redirect cycle at {}", root.display());
+    }
+    Ok(())
+}
+
+pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
+    let mut locks = MEMORY_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("project memory lock registry poisoned");
+    let old = resolve_canonical_root(old)?;
+    let new = resolve_canonical_root(new)?;
+    if old == new {
+        return Ok(Vec::new());
+    }
+    let old_lock = locks
+        .entry(old.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let new_lock = locks
+        .entry(new.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _old_guard = old_lock.lock().expect("project memory lock poisoned");
+    let _new_guard = new_lock.lock().expect("project memory lock poisoned");
+    let old_snapshot = ProjectMemoryStore::new(&old).snapshot()?;
+    let new_store = ProjectMemoryStore::new(&new);
+    let current = new_store.snapshot()?;
+    let merged = reconcile_snapshots(
+        &ProjectMemorySnapshot::default(),
+        &current,
+        &old_snapshot,
+        "project-merge",
+    );
+    new_store.install_snapshot(&merged.merged)?;
+    let parent = old
+        .parent()
+        .context("old memory project directory is missing")?;
+    fs::create_dir_all(parent)?;
+    crate::config::atomic_write(
+        &parent.join("memory-redirect.json"),
+        &serde_json::to_vec(&new)?,
+    )?;
+    drop(locks);
+    Ok(merged.conflicts)
+}
+
 /// Atomically reconcile one replica with the controller copy relative to its
 /// session baseline. The per-project lock prevents two session actors from
 /// reading the same canonical generation and then overwriting one another.
@@ -415,19 +537,18 @@ pub fn reconcile_into_canonical(
     replica: &ProjectMemorySnapshot,
     session_id: &str,
 ) -> Result<MemoryReconciliation> {
-    static LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-    let lock = {
-        let mut locks = LOCKS
-            .get_or_init(Default::default)
-            .lock()
-            .expect("project memory lock registry poisoned");
-        locks
-            .entry(canonical_root.to_path_buf())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    };
+    let mut locks = MEMORY_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("project memory lock registry poisoned");
+    let canonical_root = resolve_canonical_root(canonical_root)?;
+    let lock = locks
+        .entry(canonical_root.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
     let _guard = lock.lock().expect("project memory lock poisoned");
-    let store = ProjectMemoryStore::new(canonical_root);
+    drop(locks);
+    let store = ProjectMemoryStore::new(&canonical_root);
     let canonical = store.snapshot()?;
     let reconciliation = reconcile_snapshots(baseline, &canonical, replica, session_id);
     if reconciliation.merged != canonical {
@@ -1067,5 +1188,53 @@ mod tests {
             })
             .unwrap();
         assert!(!changed, "an identical snapshot must not rewrite its files");
+    }
+    #[test]
+    fn project_merge_redirects_stale_syncs_and_preserves_conflicting_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old/memory");
+        let new = directory.path().join("new/memory");
+        let snapshot = |text: &str| ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), text.into())]),
+        };
+        ProjectMemoryStore::new(&old)
+            .install_snapshot(&snapshot("old project facts"))
+            .unwrap();
+        ProjectMemoryStore::new(&new)
+            .install_snapshot(&snapshot("new project facts"))
+            .unwrap();
+        let conflicts = merge_canonical_stores(&old, &new).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(resolve_canonical_root(&old).unwrap(), new);
+        assert!(merge_canonical_stores(&old, &new).unwrap().is_empty());
+        let stale_baseline = snapshot("old project facts");
+        let stale_replica = ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "old project facts".into()),
+                ("/late.md".into(), "accepted by old worker".into()),
+            ]),
+        };
+        reconcile_into_canonical(&old, &stale_baseline, &stale_replica, "old-worker").unwrap();
+        let result = ProjectMemoryStore::new(&new).snapshot().unwrap();
+        assert_eq!(result.files["/late.md"], "accepted by old worker");
+        assert!(
+            result
+                .files
+                .values()
+                .any(|content| content.contains("old project facts"))
+        );
+        assert!(
+            result
+                .files
+                .values()
+                .any(|content| content.contains("new project facts"))
+        );
+        assert!(
+            !ProjectMemoryStore::new(&old)
+                .snapshot()
+                .unwrap()
+                .files
+                .contains_key("/late.md")
+        );
     }
 }

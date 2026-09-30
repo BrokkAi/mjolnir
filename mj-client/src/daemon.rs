@@ -542,6 +542,13 @@ pub enum DaemonAction {
     },
     /// Search the user's SessionWiki index. An empty query lists the most
     /// recent sessions.
+    ProjectCatalog {
+        refresh: bool,
+        retry: bool,
+    },
+    CreateProject {
+        sources: Vec<String>,
+    },
     WikiSearch {
         query: String,
         limit: usize,
@@ -794,6 +801,8 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
+    ProjectCreated(mj_core::project_catalog::SavedProject),
     SessionTextMatches(Vec<SessionTextMatch>),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
@@ -1634,6 +1643,33 @@ impl DaemonClient {
     /// empty and best match first otherwise. The reply carries the state of
     /// the index as well as the rows, so a caller can say the first build is
     /// still running.
+    pub async fn project_catalog(
+        &mut self,
+        refresh: bool,
+        retry: bool,
+    ) -> Result<mj_core::project_catalog::ProjectCatalogView> {
+        match self
+            .request(DaemonAction::ProjectCatalog { refresh, retry })
+            .await?
+        {
+            DaemonReply::ProjectCatalog(view) => Ok(view),
+            other => bail!("unexpected project catalog reply: {other:?}"),
+        }
+    }
+
+    pub async fn create_project(
+        &mut self,
+        sources: Vec<String>,
+    ) -> Result<mj_core::project_catalog::SavedProject> {
+        match self
+            .request(DaemonAction::CreateProject { sources })
+            .await?
+        {
+            DaemonReply::ProjectCreated(project) => Ok(project),
+            other => bail!("unexpected project creation reply: {other:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })
@@ -2199,8 +2235,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Subagent discovery accepts unsaved profile drafts in the cache-owning daemon.
-pub const PROTOCOL_VERSION: u32 = 47;
+// The daemon serves the project catalog and unsaved profile discovery together.
+pub const PROTOCOL_VERSION: u32 = 48;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
