@@ -4059,6 +4059,8 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
+    let log = crate::test_log::CapturedLog::default();
+    let _log = tracing::subscriber::set_default(log.clone());
     let workspace = crate::database::create_workspace("Suspend restart").unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut session = runtime_test_session("restart-suspend", &workspace.id, SessionState::Running);
@@ -4091,6 +4093,26 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
             .starts_with(mj_core::state::CLOSE_FAILURE_PREFIX)
     );
     assert!(!restarted.close_is_requested(&session.id));
+    let diagnostic = log.at(tracing::Level::WARN);
+    assert!(
+        diagnostic
+            .iter()
+            .any(|line| line.contains("suspension failure worker diagnostic")
+                && line.contains("worker_pids=[]")
+                && line.contains("recorded no startup step")),
+        "{diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .iter()
+            .any(|line| line.contains("phase=\"lease worker connection\"")
+                || line.contains("phase=\"wait for session actor\"")),
+        "{diagnostic:?}"
+    );
+    assert!(
+        !root.path().join(&session.id).exists(),
+        "diagnosis must not create worker state"
+    );
 }
 
 /// #1191: `mj destroy` is answered "accepted" before the destroy finishes,

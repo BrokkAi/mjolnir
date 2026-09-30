@@ -181,6 +181,20 @@ synchronized, and `null` when the worker does not report this capability. `tasks
 contains known task records (`id`, `started_at_ms`, `command`, `can_stop`). The
 whole field is omitted when no connected snapshot is available.
 
+All session responses also include `background_tasks` from the daemon's current
+projection. Each record has `id`, `command`, `started_at_ms`, and `can_stop`.
+Treat IDs as opaque when requesting a stop.
+
+```text
+POST /api/v1/sessions/{session_id}/background-tasks/stop
+```
+
+Send `{"background_task_id":"<opaque task id>"}`. The daemon validates that
+the task is still present and stoppable, then waits for the worker's
+acknowledgement and answers **202** with no body. A task that has ended or cannot
+be stopped returns **409**; an unavailable worker returns **503**; a provider
+stop failure returns **500**. Inspect the session again to confirm task exit.
+
 A finished prompt or idle chat phase does not prove background tasks have ended.
 For Kimi, a routine checkpoint requires `known: true` and an empty task list,
 in addition to the normal checkpoint prerequisites. A deferred bundle export
@@ -743,9 +757,11 @@ Preconditions, all answering `409` with the reason:
 | `mj resume --session <id>` | `POST /sessions/{id}/resume` |
 | `mj destroy --session <id> [--delete-branch]` | `POST /sessions/{id}/destroy` |
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
+| `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 
-Every one of them takes `--json` and then prints the route's response unchanged,
-which is the quickest way to see a shape before you write a client for it.
+These commands accept `--json`. `mj stop-task` prints its aggregate report of
+accepted, skipped, and failed task IDs; the other commands print the route's
+response unchanged.
 
 ## A whole run
 

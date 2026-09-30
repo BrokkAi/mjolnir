@@ -464,11 +464,45 @@ impl Controller {
             state == SessionState::Closing,
             "session {session_id} has no relay close to recover"
         );
-        let handle = manager
-            .wait_for_session(session_id, Duration::from_secs(5))
-            .await?;
-        let mut lease = handle.lease_connection().await?;
-        let execution = lease.connection_mut().sync().await?.operational.execution;
+        let started = std::time::Instant::now();
+        let mut phase = "wait for session actor";
+        tracing::info!(
+            session_id,
+            ?state,
+            checkpoint_frontier = ?verified.as_ref().map(|checkpoint| checkpoint.event_frontier),
+            "recovering suspension: asking the worker whether its relay was sealed"
+        );
+        let connection = async {
+            let handle = manager
+                .wait_for_session(session_id, Duration::from_secs(5))
+                .await?;
+            phase = "lease worker connection";
+            let mut lease = handle.lease_connection().await?;
+            phase = "read worker execution state";
+            let execution = lease.connection_mut().sync().await?.operational.execution;
+            anyhow::Ok((lease, execution))
+        }
+        .await;
+        let (mut lease, execution) = match connection {
+            Ok(connected) => connected,
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    phase,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = format!("{error:#}"),
+                    "suspension could not query its worker; retaining target and checkpoint"
+                );
+                self.diagnose_suspension_worker(session_id, phase).await;
+                return Err(error.context(format!("{phase} while recovering suspension")));
+            }
+        };
+        tracing::info!(
+            session_id,
+            ?execution,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "suspension recovery read the worker's execution state"
+        );
         match execution {
             RelayExecutionState::Closed => {}
             RelayExecutionState::Closing => {
@@ -498,6 +532,41 @@ impl Controller {
             before_close.await?;
         }
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
+    }
+
+    /// A missing socket does not establish worker death or a safe checkpoint
+    /// cut. Gather its own records and process state without changing either.
+    async fn diagnose_suspension_worker(&self, session_id: &str, phase: &str) {
+        let placement = self.worker_placement(session_id);
+        let probe = match placement {
+            Ok((backend, worker_root)) => tokio::task::spawn_blocking(move || {
+                super::worker_binary::probe_worker(
+                    &targets::BoundedProcessExecutor::new(Duration::from_secs(5)),
+                    &backend,
+                    &worker_root,
+                )
+            })
+            .await
+            .context("join the suspension worker diagnostic probe")
+            .and_then(std::convert::identity),
+            Err(error) => Err(error.context("resolve the retained suspension worker")),
+        };
+        match probe {
+            Ok(probe) => tracing::warn!(
+                session_id,
+                phase,
+                worker_pids = ?probe.pids,
+                worker_startup_step = ?probe.step(),
+                worker_state = %probe,
+                "suspension failure worker diagnostic; no recovery mutation was attempted"
+            ),
+            Err(error) => tracing::warn!(
+                session_id,
+                phase,
+                error = format!("{error:#}"),
+                "suspension failure worker diagnostic was unavailable; worker state remains unknown"
+            ),
+        }
     }
 
     /// Record that an in-flight lifecycle state has no operation left to

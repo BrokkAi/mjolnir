@@ -48,6 +48,7 @@ impl CredentialSyncCoordinator {
             // reconciled twice at once.
             let mut busy = BTreeSet::<String>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
+            let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
@@ -57,7 +58,17 @@ impl CredentialSyncCoordinator {
                     }
                     changed = targets_rx.changed() => {
                         if changed.is_err() { break; }
-                        for profile_id in profiles_with_targets(&targets_rx.borrow()) {
+                        // Compare the publication we consume, not its order.
+                        // Removed sessions have nothing left to reconcile.
+                        let targets = targets_rx.borrow_and_update();
+                        let changed_profiles: BTreeSet<_> = targets.iter()
+                            .filter(|target| previous_targets.get(&target.session_id) != Some(target))
+                            .map(|target| target.profile_id.clone())
+                            .collect();
+                        previous_targets = targets.iter()
+                            .map(|target| (target.session_id.clone(), target.clone()))
+                            .collect();
+                        for profile_id in changed_profiles {
                             enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
                         }
                     }

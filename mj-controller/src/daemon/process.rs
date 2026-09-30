@@ -1,3 +1,4 @@
+use super::diagnostics::ServingPhase;
 use super::*;
 
 /// PID of the process this daemon must not outlive, if one was requested.
@@ -45,6 +46,7 @@ pub(super) async fn run_daemon_runtime(
     epilogue_started: &AtomicBool,
     owner_pid: Option<u32>,
 ) -> Result<()> {
+    let progress = super::diagnostics::DaemonProgressMonitor::start()?;
     // Before this daemon can start a checkpoint, so every checkpoint file older
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
@@ -292,6 +294,8 @@ pub(super) async fn run_daemon_runtime(
     // reads in-memory state rather than the store.
     let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
     readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
+    progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut interrupted_close_tasks = Vec::new();
     for session_id in interrupted_suspend_session_ids(&controller) {
@@ -465,9 +469,12 @@ pub(super) async fn run_daemon_runtime(
         reach_test_hook("daemon_metadata_before_listening").await?;
         drop(startup_work);
         loop {
+            progress.serving_tick();
             tokio::select! {
                 _ = cancellation.cancelled() => break,
+                _ = progress_tick.tick() => {},
                 changed = prepared_targets.changed(), if phone_targets.is_some() => {
+                    progress.phase(ServingPhase::Targets);
                     changed.context("daemon worker target publication stopped")?;
                     if let Some(targets) = &phone_targets {
                         targets.send_replace(prepared_targets.borrow_and_update().clone());
@@ -482,12 +489,14 @@ pub(super) async fn run_daemon_runtime(
                     anyhow::bail!("delegation coordinator stopped unexpectedly");
                 }
                 _ = idle_tick.tick(), if exit_when_idle && state.ever_attached.load(Ordering::Acquire) => {
+                    progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
                         break;
                     }
                 }
                 _ = owner_tick.tick(), if owner_pid.is_some() => {
+                    progress.phase(ServingPhase::OwnerCheck);
                     if let Some(owner) = owner_pid
                         && !process_is_alive(owner)
                     {
@@ -496,6 +505,7 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 _ = recovery_tick.tick() => {
+                    progress.phase(ServingPhase::Recovery);
                     while let Some(result) = recovery.try_result() {
                         if let Err(error) = &result.outcome {
                             // A deferred copy found the agent working. That is
@@ -519,9 +529,11 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 _ = background_policy_tick.tick() => {
+                    progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
                 }
                 _ = readiness_tick.tick() => {
+                    progress.phase(ServingPhase::Readiness);
                     // A live session whose harness never advertised itself
                     // takes no prompt and reports no failure, so nothing else
                     // ever ends its wait (#1090). The store write runs off
@@ -534,6 +546,7 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 completed = interrupted_close_rx.recv() => {
+                    progress.phase(ServingPhase::SuspensionRecovery);
                     if let Some(completed) = completed {
                         let recovered = completed.result.is_ok();
                         if let Err(error) = completed.result {
@@ -552,6 +565,7 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 accepted = listener.accept() => {
+                    progress.phase(ServingPhase::Client);
                     let (stream, peer) = accepted.context("accept Mjolnir daemon client")?;
                     if !peer.ip().is_loopback() {
                         tracing::warn!(%peer, "rejected non-loopback daemon client");
@@ -572,6 +586,7 @@ pub(super) async fn run_daemon_runtime(
                     }
                 }
                 update = manager_updates.recv() => {
+                    progress.phase(ServingPhase::SessionUpdate);
                     let Some(update) = update else {
                         bail!("controller daemon session manager stopped");
                     };
@@ -610,6 +625,7 @@ pub(super) async fn run_daemon_runtime(
     }
     .await;
 
+    progress.phase(ServingPhase::Shutdown);
     epilogue_started.store(true, Ordering::Release);
     spawn_shutdown_watchdog();
     // Idle exit and fallible loop exits do not arrive through the termination

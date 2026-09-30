@@ -738,6 +738,72 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
 }
 
 #[tokio::test]
+async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
+    let profile = tempfile::tempdir().unwrap();
+    let target = |session: &str, profile_id: &str| CredentialSyncTarget {
+        session_id: session.into(),
+        profile_id: profile_id.into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        profile_home: profile.path().to_path_buf(),
+        authenticates_with_api_key: false,
+        sync_github_token: false,
+        spec: CommandSpec::new("sh", ["-c", "exit 1"]),
+    };
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    let work = target("work-session", "work");
+    let other = target("other-session", "other");
+    handle.set_targets(vec![work.clone(), other.clone()]);
+    let mut initial = BTreeSet::new();
+    for _ in 0..2 {
+        initial.insert(
+            tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+                .await
+                .unwrap()
+                .unwrap()
+                .profile_id,
+        );
+    }
+    assert_eq!(initial, BTreeSet::from(["other".into(), "work".into()]));
+
+    let mut child = target("child-session", "work");
+    for changed_spec in [false, true] {
+        if changed_spec {
+            child.spec = CommandSpec::new("sh", ["-c", "exit 2"]);
+        }
+        // Reverse the existing targets as well: ordering isn't a change.
+        handle.set_targets(vec![other.clone(), child.clone(), work.clone()]);
+        let changed = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.profile_id, "work");
+        assert!(changed.trigger.is_none());
+        assert_eq!(changed.outcomes.len(), 2);
+
+        // This explicit pass is a completion barrier for the other profile.
+        // Its per-profile serialization means any unintended automatic pass
+        // must complete before this one, regardless of subprocess timing.
+        handle.sync_profile_now(
+            "other",
+            Some(mj_core::credentials::CredentialSyncCause {
+                session_id: other.session_id.clone(),
+                reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            }),
+        );
+        let explicit = tokio::time::timeout(Duration::from_secs(5), coordinator.result())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit.profile_id, "other");
+        assert!(
+            explicit.trigger.is_some(),
+            "unrelated profile was reconciled"
+        );
+    }
+}
+
+#[tokio::test]
 async fn response_frame_limit_is_enforced_before_newline() {
     let (mut writer, reader) = tokio::io::duplex(32);
     let write = tokio::spawn(async move {

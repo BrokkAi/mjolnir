@@ -3102,6 +3102,61 @@ fn saved_config(dialog: &mut SetupDialog) -> Config {
     }
 }
 
+#[test]
+fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
+    const CHILD: &str = "MJ_TEST_SETTINGS_INSTANCE_CHILD";
+    const INSTANCE: &str = "settings-1153";
+    if std::env::var_os(CHILD).is_none() {
+        // Instance selection is process-wide: exercise a named instance in
+        // its own process rather than changing the other tests' environment.
+        let output = mj_core::subprocess::run_with_input(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "setup::tests::named_instance_settings_preserve_the_default_and_explicit_web_listener",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("MJ_INSTANCE", INSTANCE),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let default = mj_core::config::default_phone_bind_for(Some(INSTANCE));
+    for bind in [&default, &"127.0.0.1:39777".to_owned()] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.phone = mj_core::config::PhoneConfig::default();
+        dashboard.config.phone.bind.clone_from(bind);
+        if bind == &default {
+            assert!(
+                serde_json::to_value(&dashboard.config)
+                    .unwrap()
+                    .get("phone")
+                    .is_none()
+            );
+        }
+        dashboard.begin_setup();
+        let rendered = drawn(&mut dashboard, 140, 48).join("\n");
+        assert!(rendered.contains(&format!("On · {bind}")), "{rendered}");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            !dialog.is_dirty(),
+            "opening Settings must preserve defaults"
+        );
+        dialog.draft["keys"]["prefix"] = json!("ctrl+]");
+        let saved = saved_config(dialog);
+        assert_eq!(&saved.phone.bind, bind);
+        assert_eq!(saved.keys.prefix, "ctrl+]");
+    }
+}
+
 /// The numeric settings are edited as text but saved as numbers, "Use
 /// default" puts the default back, and text that is not a number is refused
 /// under the field without losing the draft. Launch campaign finding C-23.
