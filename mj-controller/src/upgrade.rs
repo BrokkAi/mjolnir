@@ -322,14 +322,18 @@ mod tests {
     fn a_handoff_waits_for_a_destroy_until_the_bound_and_then_abandons_it_with_a_warning() {
         let log = crate::test_log::CapturedLog::default();
         let _guard = tracing::subscriber::set_default(log.clone());
-        let gate = Gate::with_destroy_wait_bound(Duration::from_millis(200));
+        // The bound is long and the wait is backdated rather than slept, so
+        // machine load cannot make the first assertions run past the bound.
+        let bound = Duration::from_secs(60);
+        let gate = Gate::with_destroy_wait_bound(bound);
         let destroy = gate.enter_destroy("aaaa1111").unwrap();
         assert_eq!(gate.active_labels(), vec![DESTROY_LABEL.to_owned()]);
         assert!(!gate.try_close(), "a destroy in flight holds the handoff");
         assert!(gate.is_draining());
         assert!(gate.destroys_hold_the_stop());
         assert!(log.at(tracing::Level::WARN).is_empty());
-        std::thread::sleep(Duration::from_millis(250));
+        let started = gate.lock().destroy_wait_started.expect("the wait began");
+        gate.lock().destroy_wait_started = Some(started - bound - Duration::from_secs(1));
         assert!(!gate.destroys_hold_the_stop());
         assert!(gate.try_close(), "past the bound the gate proceeds");
         let warnings = log.at(tracing::Level::WARN);
