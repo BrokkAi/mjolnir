@@ -437,13 +437,14 @@ pub(crate) async fn apply_dashboard_action(
             spawn_daemon_restart(context);
         }
         DashboardAction::DiscoverSubagentOptions { id, profile, model } => {
-            crate::dashboard::spawn_io(
+            super::io::spawn_background_async(
                 "discovering subagent models",
                 context.dashboard_io_tx.clone(),
-                move || {
-                    mj_core::runtime::block_on(
-                        mj_controller::controller::profile_config::subagent_options(profile, model),
-                    )?
+                // Each profile can need two probes, each with a 300s deadline.
+                std::time::Duration::from_secs(660),
+                async move {
+                    let mut client = daemon::connect_existing().await?;
+                    client.subagent_options(profile, model).await
                 },
                 move |result| DashboardIoUpdate::SubagentOptions { id, result },
             );

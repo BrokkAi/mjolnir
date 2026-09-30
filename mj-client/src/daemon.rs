@@ -604,6 +604,11 @@ pub enum DaemonAction {
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
     RefreshQuota,
+    /// Discover eligible subagent models in the daemon, which owns the cache.
+    SubagentOptions {
+        profile: String,
+        model: Option<String>,
+    },
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -767,6 +772,7 @@ pub enum DaemonReply {
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
     WebListeners(Vec<crate::web::WebListenerProcess>),
+    SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
@@ -1262,6 +1268,20 @@ impl DaemonClient {
         match self.request(DaemonAction::WebViewerAccess).await? {
             DaemonReply::WebViewerAccess(access) => Ok(access),
             reply => bail!("unexpected web viewer reply {reply:?}"),
+        }
+    }
+
+    pub async fn subagent_options(
+        &mut self,
+        profile: String,
+        model: Option<String>,
+    ) -> Result<mj_core::subagent::SubagentOptions> {
+        match self
+            .request(DaemonAction::SubagentOptions { profile, model })
+            .await?
+        {
+            DaemonReply::SubagentOptions(options) => Ok(options),
+            reply => bail!("unexpected subagent options reply {reply:?}"),
         }
     }
 
@@ -2173,8 +2193,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Session creation names its starting selection `at`, `branch` and `base`.
-pub const PROTOCOL_VERSION: u32 = 44;
+// Subagent model discovery runs in the daemon that owns the profile cache.
+pub const PROTOCOL_VERSION: u32 = 45;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2281,6 +2301,61 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
+    }
+
+    #[tokio::test]
+    async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "subagent-discovery-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let options: mj_core::subagent::SubagentOptions =
+            serde_json::from_value(serde_json::json!({
+                "models": [{"value": "gpt-6-luna", "name": "Luna", "description": null}],
+                "efforts": [{"value": "high", "name": "High", "description": null}],
+                "unavailable": ["another-profile: authentication failed"]
+            }))
+            .unwrap();
+        let expected = serde_json::to_value(&options).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for model in [None, Some("gpt-6-luna".to_owned())] {
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert_eq!(request.token, "subagent-discovery-test");
+                assert!(matches!(request.action,
+                    DaemonAction::SubagentOptions { profile, model: requested }
+                        if profile == "codex" && requested == model
+                ));
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: if model.is_none() {
+                            Ok(DaemonReply::SubagentOptions(options.clone()))
+                        } else {
+                            Err("profile discovery cancelled".into())
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let discovered = client.subagent_options("codex".into(), None).await.unwrap();
+        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
+        let error = client
+            .subagent_options("codex".into(), Some("gpt-6-luna".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "profile discovery cancelled");
+        server.await.unwrap();
     }
 
     #[tokio::test]
