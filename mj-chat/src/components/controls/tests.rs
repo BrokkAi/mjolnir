@@ -635,3 +635,92 @@ fn idle_buttons_are_neutral_but_focus_and_primary_actions_stay_distinct() {
         });
     }
 }
+
+/// Draws a combobox popup of `rows` options with `selected` highlighted and
+/// returns the symbols in the popup's rightmost inner column, one per row.
+fn popup_track_column(selected: usize, rows: usize) -> Vec<String> {
+    let options = (0..rows)
+        .map(|n| Line::raw(format!("model-{n:02}")))
+        .collect::<Vec<_>>();
+    let mut terminal = Terminal::new(TestBackend::new(30, 14)).expect("terminal");
+    let mut outer = Rect::default();
+    terminal
+        .draw(|frame| {
+            let mut form = Form::new();
+            form.begin_frame();
+            let popup = ComboBox::render(
+                frame,
+                frame.area(),
+                Rect::new(0, 0, 12, 1),
+                "model",
+                &options,
+                selected,
+                true,
+                true,
+                " choices ",
+                PopupSide::Below,
+                &mut form,
+                1,
+            );
+            outer = popup.expect("popup").0;
+            form.end_frame(1);
+        })
+        .expect("draw popup");
+    let x = outer.right() - 2;
+    (outer.y + 1..outer.bottom() - 1)
+        .map(|y| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+        .collect()
+}
+
+fn thumb_start(column: &[String], thumb: &str) -> usize {
+    column.iter().position(|s| s == thumb).expect("thumb drawn")
+}
+
+#[test]
+fn combobox_popup_draws_a_scrollbar_that_follows_the_selection() {
+    let glyphs = crate::theme::glyphs();
+    let top = popup_track_column(0, 20);
+    let middle = popup_track_column(10, 20);
+    let bottom = popup_track_column(19, 20);
+    for column in [&top, &middle, &bottom] {
+        assert_eq!(column.len(), 8);
+        assert!(
+            column.iter().any(|s| s == glyphs.scroll_track),
+            "{column:?}"
+        );
+    }
+    let (t, m, b) = (
+        thumb_start(&top, glyphs.scroll_thumb),
+        thumb_start(&middle, glyphs.scroll_thumb),
+        thumb_start(&bottom, glyphs.scroll_thumb),
+    );
+    assert_eq!(t, 0);
+    assert!(t < m && m < b, "{t} {m} {b}");
+    assert_eq!(bottom.last().map(String::as_str), Some(glyphs.scroll_thumb));
+}
+
+#[test]
+fn combobox_popup_scrollbar_is_ascii_under_the_ascii_glyph_set() {
+    crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        let top = popup_track_column(0, 20);
+        let bottom = popup_track_column(19, 20);
+        for column in [&top, &bottom] {
+            assert!(column.iter().any(|s| s == "|"), "{column:?}");
+            assert!(column.iter().any(|s| s == "#"), "{column:?}");
+            assert!(column.iter().all(|s| s.is_ascii()), "{column:?}");
+        }
+        assert!(thumb_start(&top, "#") < thumb_start(&bottom, "#"));
+    });
+}
+
+#[test]
+fn combobox_popup_without_overflow_draws_no_scrollbar() {
+    let glyphs = crate::theme::glyphs();
+    let column = popup_track_column(2, 5);
+    assert!(
+        column
+            .iter()
+            .all(|s| s != glyphs.scroll_track && s != glyphs.scroll_thumb),
+        "{column:?}"
+    );
+}

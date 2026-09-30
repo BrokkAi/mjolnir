@@ -8,6 +8,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::scrollbar::{render_scrollbar, scrollbar_geometry};
 use super::text_layout::multiline_rows;
 use super::{AutocompletePopup, ControlKind, Form, Interaction, PopupSide};
 use crate::text_input::TextInput;
@@ -842,16 +843,31 @@ impl ComboBox {
                 .collect::<Vec<_>>();
             let mut state = ListState::default();
             state.select((!options.is_empty()).then_some(selected));
+            let overflow = options.len() > usize::from(inner.height) && inner.width > 1;
+            // Keep the last column for the scrollbar so it never covers row text.
+            let list_area = if overflow {
+                Rect::new(inner.x, inner.y, inner.width - 1, inner.height)
+            } else {
+                inner
+            };
             frame.render_stateful_widget(
                 List::new(items).highlight_style(if form.is_focused(id) {
                     theme::selection(true)
                 } else {
                     theme::selection(false)
                 }),
-                inner,
+                list_area,
                 &mut state,
             );
             let offset = state.offset();
+            if overflow {
+                let track = Rect::new(inner.right() - 1, inner.y, 1, inner.height);
+                if let Some(geometry) =
+                    scrollbar_geometry(track, options.len(), offset, usize::from(inner.height))
+                {
+                    render_scrollbar(frame, geometry);
+                }
+            }
             let mut popup_row_map = vec![None; usize::from(outer.height)];
             for (row, option) in popup_row_map
                 .iter_mut()
