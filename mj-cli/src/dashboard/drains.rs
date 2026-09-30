@@ -174,24 +174,19 @@ impl DashboardContext {
     }
 
     pub(crate) fn drain_quota_updates(&mut self) {
-        while let Some(update) = self.quota.next_ready() {
-            match update {
-                QuotaUpdate::Refreshing { profile_ids } => {
-                    self.dashboard.begin_quota_refresh(profile_ids)
-                }
-                QuotaUpdate::Report(outcome) => {
-                    self.dashboard.apply_quota(outcome.report);
-                }
-                QuotaUpdate::Finished { generation } => {
-                    if complete_manual_quota_refresh(
-                        &mut self.manual_quota_refresh_generation,
-                        generation,
-                    ) {
-                        self.dashboard
-                            .replace_notice_if(QUOTA_REFRESH_NOTICE, QUOTA_REFRESHED_NOTICE);
-                    }
-                }
-            }
+        let mut latest = None;
+        while let Some(snapshot) = self.quota.next_ready() {
+            latest = Some(snapshot);
+        }
+        let Some(snapshot) = latest else {
+            return;
+        };
+        let cycles = snapshot.cycles;
+        self.quota_cycles = cycles;
+        self.dashboard.set_quota_snapshot(snapshot);
+        if complete_manual_quota_refresh(&mut self.manual_quota_refresh_cycles, cycles) {
+            self.dashboard
+                .replace_notice_if(QUOTA_REFRESH_NOTICE, QUOTA_REFRESHED_NOTICE);
         }
     }
 
@@ -436,7 +431,8 @@ impl DashboardContext {
         self.dashboard.set_config(config);
         self.refresh_chat_context();
         self.refresh_poll_targets();
-        self.refresh_quotas_if_profiles_changed();
+        // A profile added or changed here is probed once by the daemon, which
+        // reloads the same configuration; this process asks no provider.
         // Config and session records have one owner: the runtime feed.
         // Reloading a Controller from disk here could roll back a newer feed.
     }

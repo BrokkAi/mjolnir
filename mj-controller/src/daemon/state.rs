@@ -85,6 +85,7 @@ impl RuntimeState {
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
+            quota: Mutex::new(QuotaBoard::default()),
             review_config,
             review_host,
             wiki: crate::sessionwiki::WikiIndexer::spawn(),

@@ -423,7 +423,7 @@ pub(crate) async fn apply_dashboard_action(
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {
-            context.manual_quota_refresh_generation = Some(context.request_quota_refresh());
+            context.request_quota_refresh();
             context.request_capacity_refresh();
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);
         }

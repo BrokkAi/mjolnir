@@ -924,10 +924,13 @@ impl DashboardState {
         self.clamp_selections();
     }
 
-    pub fn begin_quota_refresh(&mut self, profile_ids: impl IntoIterator<Item = String>) {
-        for profile_id in profile_ids {
-            self.quota_refreshing.insert(profile_id);
-        }
+    /// Show what the daemon says about quota. The daemon is the only process
+    /// that probes, so this replaces what was held rather than merging into
+    /// it: the reports, and which profiles it is asking a provider about now.
+    pub fn set_quota_snapshot(&mut self, snapshot: mj_client::quota::QuotaSnapshot) {
+        self.quotas = snapshot.reports;
+        self.quota_refreshing = snapshot.probing;
+        self.clamp_selections();
     }
 
     pub fn apply_quota(&mut self, quota: ProfileQuota) {

@@ -202,6 +202,9 @@ pub(crate) enum DashboardIoUpdate {
         what: String,
         result: std::result::Result<DashboardMetadata, String>,
     },
+    /// The daemon's answer to a Refresh: it accepted the request, or it could
+    /// not be reached.
+    QuotaRefreshRequested(std::result::Result<(), String>),
     WebAccess {
         generation: u64,
         access: WebViewerAccess,
@@ -1063,13 +1066,20 @@ impl DashboardContext {
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
                     self.refresh_poll_targets();
-                    self.request_quota_refresh();
+                    // The daemon renamed the profile, saw the profile set
+                    // change and probes the new id once; nothing to ask here.
                     self.dashboard.set_notice(format!("Renamed {what}."));
                 }
                 Err(error) => self
                     .dashboard
                     .set_notice(format!("Could not rename {what}: {error}")),
             },
+            DashboardIoUpdate::QuotaRefreshRequested(Ok(())) => {}
+            DashboardIoUpdate::QuotaRefreshRequested(Err(error)) => {
+                self.manual_quota_refresh_cycles = None;
+                self.dashboard
+                    .set_notice(format!("Could not refresh quota: {error}"));
+            }
             DashboardIoUpdate::WebAccess { generation, access } => {
                 if generation == self.web_request_generation {
                     self.dashboard.apply_web_access(access);

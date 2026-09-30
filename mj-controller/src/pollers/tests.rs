@@ -457,13 +457,18 @@ async fn quota_refresh_completion_keeps_its_generation() {
         received.recv().await,
         Some(QuotaUpdate::Finished { generation: 42 })
     ));
-
-    let mut pending = Some(43);
-    assert!(!complete_manual_quota_refresh(&mut pending, 42));
-    assert_eq!(pending, Some(43));
-    assert!(complete_manual_quota_refresh(&mut pending, 43));
-    assert_eq!(pending, None);
     quotas.shutdown().await;
+}
+
+#[test]
+fn a_manual_quota_refresh_completes_when_the_daemon_finishes_a_later_cycle() {
+    // The surface remembers the daemon's cycle count when it asks.
+    let mut pending = Some(7);
+    assert!(!complete_manual_quota_refresh(&mut pending, 7));
+    assert_eq!(pending, Some(7));
+    assert!(complete_manual_quota_refresh(&mut pending, 8));
+    assert_eq!(pending, None);
+    assert!(!complete_manual_quota_refresh(&mut pending, 9));
 }
 
 #[test]

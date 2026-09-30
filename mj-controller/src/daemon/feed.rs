@@ -159,6 +159,12 @@ impl RuntimeState {
             .iter()
             .cloned()
             .collect();
+        next.metadata.quotas = self
+            .quota
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot
+            .clone();
         history.publish(next)?;
         history.native_owners = native_owners;
         Ok(history.cursor())

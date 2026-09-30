@@ -107,6 +107,12 @@ struct Attachment {
     pid: u32,
 }
 
+#[derive(Default)]
+struct QuotaBoard {
+    snapshot: mj_client::quota::QuotaSnapshot,
+    refresh: Option<tokio::sync::mpsc::Sender<()>>,
+}
+
 pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
@@ -142,6 +148,10 @@ pub struct RuntimeState {
     /// Bounded: a surface that never attaches must not make this grow.
     notices: Mutex<VecDeque<RuntimeNotice>>,
     next_notice_id: AtomicU64,
+    /// What the quota poller last published, and how to wake it. The poller
+    /// is the only process that asks a provider for quota; everything else
+    /// reads this.
+    quota: Mutex<QuotaBoard>,
     /// What `[review]` last said, republished by the target refresher.
     review_config: Arc<Mutex<mj_core::config::ReviewConfig>>,
     /// Turn review runs here, in the process that owns every session, so a

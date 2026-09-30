@@ -1,3 +1,4 @@
+use super::io::spawn_quota_refresh_request;
 use super::*;
 use mj_core::state::{SessionState, State};
 
@@ -380,62 +381,15 @@ impl DashboardContext {
         }
     }
 
-    /// Asks the poller for fresh quotas and reports the refresh in the UI.
-    /// Returns the generation, so a manual refresh can recognize its own
-    /// completion.
-    pub(crate) fn request_quota_refresh(&mut self) -> u64 {
-        let profiles = quota_refresh_profiles(&self.controller);
-        self.dashboard
-            .begin_quota_refresh(profiles.iter().map(|profile| profile.profile_id.clone()));
-        let generation = self
-            .quota_profiles_tx
-            .borrow()
-            .generation
-            .wrapping_add(1)
-            .max(1);
-        self.quota_profiles_tx.send_replace(QuotaRefreshBatch {
-            generation,
-            profiles,
-        });
-        generation
+    /// Asks the daemon to probe quota now. The daemon is the only process that
+    /// asks a provider; the reports and the refreshing marks come back through
+    /// the runtime feed, and a refusal or a missing daemon comes back as a
+    /// notice. Returns nothing to wait for: the notice completes when the
+    /// daemon finishes a later cycle.
+    pub(crate) fn request_quota_refresh(&mut self) {
+        self.manual_quota_refresh_cycles = Some(self.quota_cycles);
+        spawn_quota_refresh_request(self.dashboard_io_tx.clone());
     }
-
-    /// Asks for fresh quotas only when the configured profiles are not the
-    /// ones the last refresh asked about.
-    ///
-    /// A configuration reload can bring back a profile that an earlier,
-    /// staler configuration had dropped from the refresh. That profile then
-    /// had no report and no refresh on the way, and its row read
-    /// "refreshing…" until something else asked again (launch finding
-    /// R13-8).
-    pub(crate) fn refresh_quotas_if_profiles_changed(&mut self) {
-        let wanted = quota_refresh_profiles(&self.controller);
-        if !quota_batch_asks_about(&self.quota_profiles_tx.borrow().profiles, &wanted) {
-            self.request_quota_refresh();
-        }
-    }
-}
-
-/// Whether a quota batch already sent asks about exactly the profiles
-/// `wanted` names, with the same harness, home and environment.
-pub(crate) fn quota_batch_asks_about(
-    sent: &[mj_controller::quota::QuotaRefreshRequest],
-    wanted: &[mj_controller::quota::QuotaRefreshRequest],
-) -> bool {
-    let key = |request: &mj_controller::quota::QuotaRefreshRequest| {
-        (
-            request.profile_id.clone(),
-            request.harness,
-            request.source_home.clone(),
-            request.environment.clone(),
-        )
-    };
-    sent.len() == wanted.len()
-        && sent
-            .iter()
-            .map(key)
-            .collect::<std::collections::BTreeSet<_>>()
-            == wanted.iter().map(key).collect()
 }
 
 impl DashboardContext {

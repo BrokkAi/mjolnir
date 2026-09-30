@@ -30,6 +30,10 @@ pub(super) struct Policy {
     pub refresh_rx: mpsc::Receiver<()>,
     batch: QuotaRefreshBatch,
     published: BTreeMap<String, mj_core::config::HarnessProfile>,
+    /// Profiles the poller is asking a provider about right now.
+    probing: std::collections::BTreeSet<String>,
+    /// Poll cycles the poller has finished.
+    cycles: u64,
     credentials: CredentialSyncCoordinator,
     signals: CredentialSyncSignalTracker,
     notices: CredentialSyncNotices,
@@ -58,6 +62,8 @@ impl Policy {
         );
         let (quotas_tx, quotas) = watch::channel(BTreeMap::new());
         let (refresh, refresh_rx) = mpsc::channel(1);
+        // A surface's Refresh reaches this poller through the daemon.
+        state.attach_quota_refresh(refresh.clone());
         let (profiles_tx, quota_rx) = spawn_quota_refresher();
         let credentials = CredentialSyncCoordinator::spawn_guarded(state.worker_background_gate());
         let mut policy = Self {
@@ -76,6 +82,8 @@ impl Policy {
             refresh_rx,
             batch: QuotaRefreshBatch::default(),
             published: BTreeMap::new(),
+            probing: Default::default(),
+            cycles: 0,
             credentials,
             signals: CredentialSyncSignalTracker::default(),
             notices: CredentialSyncNotices::default(),
@@ -104,7 +112,20 @@ impl Policy {
             let mut reports = self.reports.lock().expect("quota reports poisoned");
             reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
             self.quotas_tx.send_replace(reports.clone());
+            drop(reports);
+            self.probing
+                .retain(|id| controller.config.enabled_profile(id).is_some());
+            self.publish_quotas();
         }
+    }
+    /// Tell every attached surface what the daemon knows about quota.
+    fn publish_quotas(&self) {
+        let reports = self.reports.lock().expect("quota reports poisoned").clone();
+        self.state.publish_quotas(mj_client::quota::QuotaSnapshot {
+            reports,
+            probing: self.probing.clone(),
+            cycles: self.cycles,
+        });
     }
     pub fn observe(&mut self, id: &str, observation: &DelegationObservation) {
         if let Some(signal) = &observation.credential_signal
@@ -115,16 +136,25 @@ impl Policy {
         }
     }
     pub fn quota(&mut self, update: QuotaUpdate) {
-        if let QuotaUpdate::Report(outcome) = update {
-            if outcome.credentials_changed {
-                self.credentials
-                    .handle()
-                    .sync_profile_now(&outcome.report.profile_id, None);
+        match update {
+            QuotaUpdate::Refreshing { profile_ids } => self.probing.extend(profile_ids),
+            QuotaUpdate::Report(outcome) => {
+                if outcome.credentials_changed {
+                    self.credentials
+                        .handle()
+                        .sync_profile_now(&outcome.report.profile_id, None);
+                }
+                self.probing.remove(&outcome.report.profile_id);
+                let mut reports = self.reports.lock().expect("quota reports poisoned");
+                reports.insert(outcome.report.profile_id.clone(), outcome.report);
+                self.quotas_tx.send_replace(reports.clone());
             }
-            let mut reports = self.reports.lock().expect("quota reports poisoned");
-            reports.insert(outcome.report.profile_id.clone(), outcome.report);
-            self.quotas_tx.send_replace(reports.clone());
+            QuotaUpdate::Finished { .. } => {
+                self.probing.clear();
+                self.cycles += 1;
+            }
         }
+        self.publish_quotas();
     }
     pub fn tick(&mut self) {
         schedule_due_credential_syncs(

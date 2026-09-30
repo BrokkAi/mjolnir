@@ -1,5 +1,7 @@
 //! Quota data and display helpers shared by Mjolnir's control surfaces.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use mj_core::config::HarnessKind;
@@ -17,6 +19,20 @@ pub struct QuotaWindow {
     pub resets: Option<String>,
     #[serde(default)]
     pub resets_at_epoch_seconds: Option<i64>,
+}
+
+/// What the daemon publishes about quota. The daemon is the only process that
+/// asks a provider for quota; every surface reads this instead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotaSnapshot {
+    /// The latest report for each enabled profile.
+    pub reports: BTreeMap<String, ProfileQuota>,
+    /// Profiles the daemon is asking a provider about right now.
+    pub probing: BTreeSet<String>,
+    /// Probe cycles the daemon has finished. A surface that asked for a
+    /// refresh remembers the value it saw and knows the refresh is over when
+    /// this grows.
+    pub cycles: u64,
 }
 
 /// The quota report shown for one harness profile.
@@ -308,6 +324,31 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_and_an_absent_one_decodes_as_empty() {
+        let snapshot = QuotaSnapshot {
+            reports: BTreeMap::from([(
+                "claude".to_owned(),
+                ProfileQuota {
+                    banked_resets: None,
+                    profile_id: "claude".into(),
+                    harness: HarnessKind::Claude,
+                    windows: Vec::new(),
+                    extra: None,
+                    error: None,
+                    refreshed_at_epoch_seconds: 7,
+                },
+            )]),
+            probing: BTreeSet::from(["claude".to_owned()]),
+            cycles: 3,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuotaSnapshot>(&json).unwrap(),
+            snapshot
+        );
     }
 
     #[test]

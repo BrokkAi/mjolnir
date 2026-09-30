@@ -66,11 +66,10 @@ use crate::import::{
     PendingDashboardImport, spawn_dashboard_import,
 };
 use crate::pollers::{
-    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, QuotaRefreshBatch, QuotaUpdate,
-    ResourcePollTarget, ResourcePollUpdate, RuntimeStateUpdate, WorkerDiagnosisTracker,
-    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
-    quota_refresh_profiles, refresh_dashboard_poll_targets, session_target_is_pollable,
-    spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller, spawn_quota_refresher,
+    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, ResourcePollTarget, ResourcePollUpdate,
+    RuntimeStateUpdate, WorkerDiagnosisTracker, apply_worker_poll_update,
+    complete_manual_quota_refresh, projected_queued_prompts, refresh_dashboard_poll_targets,
+    session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
     spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
@@ -319,9 +318,14 @@ pub(crate) struct DashboardContext {
     /// a daemon that goes away stays away until the user asks for it back.
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
 
-    quota_profiles_tx: watch::Sender<QuotaRefreshBatch>,
-    quota: Feed<Receiver<QuotaUpdate>>,
-    pub(crate) manual_quota_refresh_generation: Option<u64>,
+    /// What the daemon says about quota. The daemon is the only prober; this
+    /// process never asks a provider.
+    quota: Feed<watch::Receiver<mj_client::quota::QuotaSnapshot>>,
+    /// The daemon's finished-cycle count when the person last pressed
+    /// Refresh, until a later cycle ends.
+    pub(crate) manual_quota_refresh_cycles: Option<u64>,
+    /// The daemon's finished-cycle count in the latest snapshot.
+    pub(crate) quota_cycles: u64,
     pub(crate) target_test_cancel: Option<Arc<AtomicBool>>,
     /// Local container targets whose engine is not installed, answered
     /// without a check until their configuration or the engine changes.
@@ -1532,7 +1536,6 @@ impl DashboardContext {
             dashboard.begin_setup();
         }
 
-        let (quota_profiles_tx, quota_updates_rx) = spawn_quota_refresher();
         let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.to_owned())?;
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
@@ -1557,6 +1560,8 @@ impl DashboardContext {
             .iter()
             .map(|notice| notice.id)
             .max();
+        let quota_rx = remote_worker.quotas;
+        dashboard.set_quota_snapshot(quota_rx.borrow().clone());
         let runtime_config_rx = remote_worker.config;
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
             tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
@@ -1627,9 +1632,9 @@ impl DashboardContext {
             critical_operations,
             critical_operations_changed,
             daemon_presence,
-            quota_profiles_tx,
-            quota: Feed::new(quota_updates_rx),
-            manual_quota_refresh_generation: None,
+            quota: Feed::new(quota_rx),
+            manual_quota_refresh_cycles: None,
+            quota_cycles: 0,
             target_test_cancel: None,
             absent_engines: absent_engines::AbsentEngines::default(),
             path_input_job: None,
@@ -1695,7 +1700,6 @@ impl DashboardContext {
         };
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();
-        context.request_quota_refresh();
         // Without an agent profile the dashboard opens on the Get started
         // panel, which says what a look at this machine found.
         if context

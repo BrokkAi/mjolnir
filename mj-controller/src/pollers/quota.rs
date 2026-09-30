@@ -409,13 +409,18 @@ pub(super) fn run_refresh_command(
     Ok(())
 }
 
+/// Whether a refresh the person asked for is over. `pending_cycles` is the
+/// daemon's finished-cycle count at the moment of the request, and
+/// `finished_cycles` is its count now. A cycle already running when the
+/// request arrived can end first and complete the notice a few seconds early;
+/// the report itself is what the row shows, so that is harmless.
 pub fn complete_manual_quota_refresh(
-    pending_generation: &mut Option<u64>,
-    completed_generation: u64,
+    pending_cycles: &mut Option<u64>,
+    finished_cycles: u64,
 ) -> bool {
-    if *pending_generation != Some(completed_generation) {
+    if !pending_cycles.is_some_and(|pending| finished_cycles > pending) {
         return false;
     }
-    *pending_generation = None;
+    *pending_cycles = None;
     true
 }

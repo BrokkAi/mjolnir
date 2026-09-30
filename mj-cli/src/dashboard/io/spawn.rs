@@ -1023,6 +1023,19 @@ pub(crate) fn spawn_config_rename(
     );
 }
 
+/// Asks the daemon, the only process that probes quota, to probe now. The
+/// request returns once the daemon has accepted it; the reports arrive through
+/// the runtime feed.
+pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUpdate>) {
+    spawn_background_async(
+        "asking the daemon to refresh quota",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move { daemon::connect_existing().await?.refresh_quota().await },
+        DashboardIoUpdate::QuotaRefreshRequested,
+    );
+}
+
 /// What the container editor asks the controller to persist.
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,

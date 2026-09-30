@@ -40,6 +40,9 @@ pub struct RuntimeMetadata {
     pub lifecycles: Vec<RuntimeLifecycleView>,
     pub reviews: Vec<RuntimeReviewView>,
     pub notices: Vec<RuntimeNotice>,
+    /// The daemon's quota reports. The daemon is the only prober.
+    #[serde(default)]
+    pub quotas: crate::quota::QuotaSnapshot,
 }
 
 pub type KeyChanges<T> = Vec<(String, Option<T>)>;
@@ -206,6 +209,8 @@ impl From<RuntimeSnapshot> for RuntimeProjection {
                 lifecycles: snapshot.lifecycles,
                 reviews: snapshot.reviews,
                 notices: snapshot.notices,
+                // The one-shot snapshot predates the daemon's quota feed.
+                quotas: Default::default(),
             },
         }
     }
@@ -266,6 +271,26 @@ mod tests {
         };
         replica.apply(change).unwrap();
         assert!(replica.projection.sessions["new"].connected);
+    }
+
+    #[test]
+    fn metadata_from_a_daemon_that_published_no_quota_decodes_with_an_empty_snapshot() {
+        let mut value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
+        value.as_object_mut().unwrap().remove("quotas");
+        let metadata: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(metadata.quotas, crate::quota::QuotaSnapshot::default());
+    }
+
+    #[test]
+    fn a_quota_change_travels_as_a_metadata_delta() {
+        let first = RuntimeProjection::default();
+        let mut next = first.clone();
+        next.metadata.quotas.cycles = 1;
+        let delta = RuntimeDelta::between(&first, &next);
+        assert!(!delta.is_empty());
+        let mut applied = first;
+        delta.apply(&mut applied);
+        assert_eq!(applied.metadata.quotas.cycles, 1);
     }
 
     #[test]

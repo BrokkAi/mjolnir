@@ -2799,6 +2799,51 @@ fn a_short_portrait_terminal_keeps_the_list_and_support_summaries() {
 }
 
 #[test]
+fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older() {
+    let mut dashboard = dashboard_with_session(running_session());
+    minimize_all_panes(&mut dashboard);
+    let profiles_row = |dashboard: &mut DashboardState| {
+        drawn(dashboard, 120, 44)
+            .into_iter()
+            .find(|line| line.contains("─ Profiles ──"))
+            .expect("the minimized Profiles row")
+    };
+
+    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+        reports: BTreeMap::from([
+            ("claude-1".to_owned(), weekly_quota("claude-1", 63)),
+            ("codex-1".to_owned(), weekly_quota("codex-1", 10)),
+        ]),
+        probing: std::collections::BTreeSet::new(),
+        cycles: 1,
+    });
+    let row = profiles_row(&mut dashboard);
+    assert!(row.contains("claude-1 63%, codex-1 10%"), "{row:?}");
+
+    // The daemon is asking about one profile: only that row says so.
+    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+        reports: BTreeMap::from([
+            ("claude-1".to_owned(), weekly_quota("claude-1", 63)),
+            ("codex-1".to_owned(), weekly_quota("codex-1", 10)),
+        ]),
+        probing: ["codex-1".to_owned()].into(),
+        cycles: 1,
+    });
+    let row = profiles_row(&mut dashboard);
+    assert!(row.contains("claude-1 63%"), "{row:?}");
+    assert!(row.contains("codex-1 refreshing"), "{row:?}");
+
+    // The snapshot replaces what the dashboard held; it does not add to it.
+    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+        reports: BTreeMap::from([("codex-1".to_owned(), weekly_quota("codex-1", 12))]),
+        ..Default::default()
+    });
+    let row = profiles_row(&mut dashboard);
+    assert!(!row.contains("63%"), "{row:?}");
+    assert!(row.contains("codex-1 12%"), "{row:?}");
+}
+
+#[test]
 fn the_minimized_rows_report_cpu_and_weekly_percent_used() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);

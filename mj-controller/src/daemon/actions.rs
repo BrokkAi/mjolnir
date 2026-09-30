@@ -343,6 +343,10 @@ pub(super) async fn handle_action(
         DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
             state.runtime_changes(cursor, wait).await?,
         ))),
+        DaemonAction::RefreshQuota => {
+            state.request_quota_refresh()?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RenameProfile { old_id, new_id } => {
             let _config_mutation = state.config_mutation.lock().await;
             ensure_no_active_lifecycle(state)?;

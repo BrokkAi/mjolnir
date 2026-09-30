@@ -370,6 +370,42 @@ impl RuntimeState {
         self.publish_revision();
     }
 
+    /// Connect the quota poller's wake-up channel. The poller is the daemon's
+    /// only prober; a surface that wants a fresh reading asks the daemon, and
+    /// this is how the ask reaches the poller.
+    pub(crate) fn attach_quota_refresh(&self, refresh: tokio::sync::mpsc::Sender<()>) {
+        self.quota
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .refresh = Some(refresh);
+    }
+
+    /// Ask the quota poller to probe now. Requests that arrive while one is
+    /// already waiting are one request.
+    pub(crate) fn request_quota_refresh(&self) -> Result<()> {
+        let quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        let refresh = quota
+            .refresh
+            .as_ref()
+            .context("the daemon's quota service is not running")?;
+        // A full channel means a refresh is already queued.
+        let _ = refresh.try_send(());
+        Ok(())
+    }
+
+    /// Replace what the daemon says about quota, and wake every attached
+    /// surface when it changed.
+    pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {
+        {
+            let mut quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+            if quota.snapshot == snapshot {
+                return;
+            }
+            quota.snapshot = snapshot;
+        }
+        self.publish_revision();
+    }
+
     pub(super) fn reserve_move_destination(&self, session_id: &str, operation_id: &str) {
         let mut owner = self.owner();
         if let Some(active) = owner.lifecycle.get_mut(session_id)

@@ -325,6 +325,56 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
 }
 
 #[tokio::test]
+async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one() {
+    let state = test_runtime_state();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
+        .await
+        .expect_err("no quota poller is attached, so nothing can probe");
+
+    let (wake, mut woken) = tokio::sync::mpsc::channel(1);
+    state.attach_quota_refresh(wake);
+    for _ in 0..3 {
+        // A request that arrives while one is pending is one request.
+        handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
+            .await
+            .expect("refresh quota");
+    }
+    woken.try_recv().expect("the poller was woken");
+    assert!(woken.try_recv().is_err(), "requests coalesce");
+}
+
+#[tokio::test]
+async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
+    use mj_client::quota::QuotaSnapshot;
+    let state = test_runtime_state();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert_eq!(replica.projection.metadata.quotas, QuotaSnapshot::default());
+
+    let snapshot = QuotaSnapshot {
+        probing: ["claude".to_owned()].into(),
+        cycles: 4,
+        ..Default::default()
+    };
+    state.publish_quotas(snapshot.clone());
+    let frame = state
+        .runtime_changes(replica.cursor.clone(), true)
+        .await
+        .unwrap();
+    replica.apply(frame).unwrap();
+    assert_eq!(replica.projection.metadata.quotas, snapshot);
+
+    // Publishing what is already published wakes nobody.
+    let before = state.revisions().borrow().to_owned();
+    state.publish_quotas(snapshot);
+    assert_eq!(*state.revisions().borrow(), before);
+}
+
+#[tokio::test]
 async fn workspace_deletion_guard_ignores_global_client_presence() {
     let state = test_runtime_state();
     state.attachments().insert(

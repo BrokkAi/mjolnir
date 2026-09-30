@@ -600,6 +600,10 @@ pub enum DaemonAction {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     },
+    /// Ask the daemon's quota poller to probe now. The daemon is the only
+    /// process that probes; the result arrives in the runtime feed. Added in
+    /// protocol 43.
+    RefreshQuota,
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -1271,6 +1275,15 @@ impl DaemonClient {
         match self.request(DaemonAction::ListWorkspaces).await? {
             DaemonReply::Workspaces(workspaces) => Ok(workspaces),
             reply => bail!("unexpected daemon workspace reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to probe every profile that is not on hold. Returns when
+    /// the daemon has accepted the request, not when the probes finish.
+    pub async fn refresh_quota(&mut self) -> Result<()> {
+        match self.request(DaemonAction::RefreshQuota).await? {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected refresh-quota reply {reply:?}"),
         }
     }
 
@@ -2132,7 +2145,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
     )
 }
 // Session creation names its starting selection `at`, `branch` and `base`.
-pub const PROTOCOL_VERSION: u32 = 42;
+pub const PROTOCOL_VERSION: u32 = 43;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
