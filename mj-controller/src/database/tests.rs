@@ -5620,6 +5620,23 @@ fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
 /// does not know as a broken store, so it must refuse this one.
 #[test]
 fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
+    // Other tests install subscribers that make tracing cache "no interest"
+    // in the migration event, so the log is checked alone, in a child with a
+    // global subscriber (the same shape as the worker-source pinning test).
+    const CHILD: &str = "MJ_PARKED_MIGRATION_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "the_parked_state_migration_keeps_every_session_and_refuses_older_builds",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("parked-migration.sqlite3");
     let mut old = session("old-session", "project-1");
@@ -5650,11 +5667,13 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     schema::forget_verified_schema(&database);
 
     let log = crate::test_log::CapturedLog::default();
-    let connection = {
-        let _default = tracing::subscriber::set_default(log.clone());
-        open(&database).unwrap()
-    };
-    let logged = log.at_or_above(tracing::Level::INFO);
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    let connection = open(&database).unwrap();
+    let logged: Vec<String> = log
+        .at_or_above(tracing::Level::INFO)
+        .into_iter()
+        .filter(|event| event.contains("database migrations applied"))
+        .collect();
     assert_eq!(logged.len(), 1, "{logged:#?}");
     assert!(
         logged[0].contains("database migrations applied")
