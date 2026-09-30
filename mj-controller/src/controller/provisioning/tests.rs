@@ -817,6 +817,96 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
     }
 }
 
+/// #1192: a launch whose readiness wait failed leaves no worker running on the
+/// target, keeps the worker's state directory for diagnosis, and says both.
+#[test]
+fn a_failed_readiness_wait_stops_the_worker_and_keeps_its_directory() {
+    if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test = "a_failed_readiness_wait_stops_the_worker_and_keeps_its_directory";
+        IsolatedTest::new(test_name(module_path!(), test))
+            .env(SSH_DOCKER_FAILURE_CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .env("MJ_CONFIG_DIR", directory.path())
+            .run();
+        return;
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let config = ssh_docker_registration_config();
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let session_id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "docker",
+            "worker that never becomes ready",
+            SessionLaunchOptions {
+                at: None,
+                branch: None,
+                base: None,
+                expected_runtime_identity: None,
+                subagents: None,
+                create_managed_worktree: None,
+                initial_prompt: None,
+                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+                project_directory: None,
+                session_title_override: None,
+            },
+        )
+        .unwrap();
+    let worker_root = format!("/tmp/mj-test-workers/{session_id}");
+    let worker_root = worker_root.as_str();
+    let backend = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.into(),
+    };
+
+    // Starting the worker fails, which is the readiness wait failing before
+    // any connection: the same arm a wait that times out reaches.
+    let executor = RecordingExecutor::failing("start detached Mjolnir worker");
+    let error = futures::executor::block_on(controller.connect_and_start_worker(
+        &session_id,
+        &executor,
+        &backend,
+        worker_root,
+        false,
+    ))
+    .unwrap_err();
+
+    let commands = executor.commands();
+    let stop = commands
+        .iter()
+        .position(|argv| argv.iter().any(|arg| arg.contains("worker process tree")))
+        .unwrap_or_else(|| panic!("no worker stop ran: {commands:?}"));
+    let diagnosis = commands
+        .iter()
+        .position(|argv| argv.iter().any(|arg| arg.contains("worker-startup.json")))
+        .unwrap_or_else(|| panic!("no diagnosis ran: {commands:?}"));
+    assert!(
+        diagnosis < stop,
+        "the worker must be read before it is stopped: {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .flatten()
+            .any(|arg| arg.contains("rm -rf") && arg.contains(worker_root)),
+        "the state directory must be kept: {commands:?}"
+    );
+    let reported = format!("{error:#}");
+    assert!(
+        reported.contains("the worker was stopped after the failed launch")
+            && reported.contains(worker_root),
+        "{reported}"
+    );
+}
+
 #[test]
 fn failed_node_preflight_retains_error_before_provisioning() {
     if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {

@@ -800,12 +800,46 @@ impl Controller {
         .await;
         match readiness {
             Ok(native_session_id) => Ok(native_session_id),
-            Err(error) => Err(worker_probe_diagnosis(
-                executor,
-                backend,
+            Err(error) => {
+                // The diagnosis reads the worker's state, so it runs before the
+                // worker is stopped.
+                let error = worker_probe_diagnosis(executor, backend, worker_root, error);
+                Err(stop_worker_of_failed_launch(
+                    executor,
+                    backend,
+                    worker_root,
+                    error,
+                ))
+            }
+        }
+    }
+}
+
+/// A launch that is declared failed must not leave its worker running: each
+/// one would keep a harness and its load on the target, and retries would pile
+/// up. Stop it through the same process-tree stop every other teardown uses.
+/// The worker root stays, because the failure is diagnosed from it, and the
+/// failure says what was done so the record is true about the target (#1192).
+fn stop_worker_of_failed_launch(
+    executor: &impl CommandExecutor,
+    backend: &targets::TargetLocator,
+    worker_root: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match super::worker_binary::stop_worker(executor, backend, worker_root) {
+        Ok(()) => error.context(format!(
+            "the worker was stopped after the failed launch; its state directory \
+             {worker_root} was kept for diagnosis"
+        )),
+        Err(stop_error) => {
+            tracing::warn!(
                 worker_root,
-                error,
-            )),
+                error = format!("{stop_error:#}"),
+                "the worker of a failed launch could not be stopped"
+            );
+            error.context(format!(
+                "the worker could not be stopped after the failed launch: {stop_error:#}"
+            ))
         }
     }
 }
