@@ -777,10 +777,6 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
     server.abort();
 }
 
-/// macOS reads the quota from Claude Code itself and never opens the
-/// credentials file, so the expiry this asserts is not a state it can reach.
-/// Running it there would also spawn the real `claude` binary.
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
     let now = chrono::Utc
@@ -863,6 +859,10 @@ fn a_rate_limit_keeps_the_last_good_report_and_its_age() {
     assert_eq!(held.rate_limited_until_epoch_seconds, Some(1400));
 }
 
+/// macOS reads the quota from Claude Code itself and never opens the
+/// credentials file, so the expiry this asserts is not a state it can reach.
+/// Running it there would also spawn the real `claude` binary.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn expired_claude_credentials_report_login_expired() {
     let directory = tempfile::tempdir().unwrap();
