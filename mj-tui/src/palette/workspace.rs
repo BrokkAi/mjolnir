@@ -15,7 +15,6 @@ use ratatui::widgets::Clear;
 
 use super::{CommandPalette, PaletteControl};
 use crate::actions::CommandId;
-use crate::dialogs::{ConfirmDialog, Confirmation};
 use crate::{DashboardAction, DashboardState, Mode};
 
 /// The workspace list open on the "Change workspace" row.
@@ -195,7 +194,8 @@ impl DashboardState {
         DashboardAction::None
     }
 
-    /// Asks before moving the session; picking its own workspace only says so.
+    /// Moves the session at once (it is reversible); picking its own
+    /// workspace only says so.
     fn commit_workspace_choice(&mut self, index: usize) -> DashboardAction {
         let Mode::Palette(palette) = &mut self.mode else {
             return DashboardAction::None;
@@ -221,15 +221,11 @@ impl DashboardState {
             ));
             return DashboardAction::None;
         }
-        self.mode = Mode::Confirm(
-            ConfirmDialog::new(Confirmation::ChangeWorkspace {
-                session_id: popup.session_id,
-                workspace_id,
-                workspace_name,
-            })
-            .naming_session(&name),
-        );
-        DashboardAction::None
+        DashboardAction::ChangeWorkspace {
+            session_id: popup.session_id,
+            workspace_id,
+            workspace_name,
+        }
     }
 }
 
@@ -385,39 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_workspace_asks_first_and_enter_moves() {
+    fn choosing_a_workspace_moves_at_once() {
         let mut dashboard = dashboard_with_workspaces();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
         drawn(&mut dashboard, 120, 40);
         dashboard.handle_key(key(KeyCode::Down));
         drawn(&mut dashboard, 120, 40);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        let Mode::Confirm(dialog) = &dashboard.mode else {
-            panic!("a chosen workspace is confirmed first");
-        };
-        assert_eq!(
-            dialog.confirmation,
-            Confirmation::ChangeWorkspace {
-                session_id: "session-1".into(),
-                workspace_id: "other".into(),
-                workspace_name: "Other".into(),
-            }
-        );
-        let joined = drawn(&mut dashboard, 120, 40).join("\n");
-        assert!(
-            joined.contains("Move session \"ACP pretty name\" to workspace \"Other\"?"),
-            "{joined}"
-        );
-        assert!(joined.contains("The session keeps running. Its sub-agents move with it."));
-        assert!(
-            joined.contains("Cancel") && joined.contains("Move"),
-            "{joined}"
-        );
-
-        // Move is focused, so Enter confirms.
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Enter)),
             DashboardAction::ChangeWorkspace {
@@ -427,6 +396,8 @@ mod tests {
             }
         );
         assert!(matches!(dashboard.mode, Mode::Dashboard));
+        let joined = drawn(&mut dashboard, 120, 40).join("\n");
+        assert!(!joined.contains("Change workspace?"), "{joined}");
     }
 
     /// A session titled by the prompt it started with: a long handoff, over
@@ -449,38 +420,6 @@ mod tests {
         dashboard.order_workspaces(&["default".into(), "other".into()]);
         dashboard.focus_sessions();
         dashboard
-    }
-
-    #[test]
-    fn a_long_initial_prompt_title_is_one_truncated_line_in_the_confirmation() {
-        for width in [140, 80] {
-            let mut dashboard = dashboard_with_handoff_title();
-            dashboard.dispatch_command(CommandId::ChangeWorkspace);
-            drawn(&mut dashboard, width, 40);
-            dashboard.handle_key(key(KeyCode::Down));
-            drawn(&mut dashboard, width, 40);
-            dashboard.handle_key(key(KeyCode::Enter));
-            assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-            let lines = drawn(&mut dashboard, width, 40);
-            let joined = lines.join("\n");
-            let at = row(&lines, "Move session \"");
-            let line = &lines[at];
-            assert!(
-                line.contains("Move session \"Continue the ")
-                    && line.contains(mj_chat::theme::glyphs().ellipsis)
-                    && line.contains("\" to workspace \"Other\"?"),
-                "{line}"
-            );
-            // The next row is the blank line before the note: nothing wrapped.
-            assert!(
-                lines[at + 2].contains("The session keeps running."),
-                "{joined}"
-            );
-            assert!(
-                joined.contains("The session keeps running. Its sub-agents move with it."),
-                "{joined}"
-            );
-        }
     }
 
     #[test]
@@ -515,27 +454,6 @@ mod tests {
         assert!(joined.contains("Change Workspace ›"), "{joined}");
         dashboard.handle_key(key(KeyCode::Esc));
         assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
-    #[test]
-    fn escape_cancels_the_confirmation_and_the_session_stays() {
-        let mut dashboard = dashboard_with_workspaces();
-        dashboard.dispatch_command(CommandId::ChangeWorkspace);
-        drawn(&mut dashboard, 120, 40);
-        dashboard.handle_key(key(KeyCode::Down));
-        drawn(&mut dashboard, 120, 40);
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-        drawn(&mut dashboard, 120, 40);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-        assert_eq!(
-            dashboard.state.sessions["session-1"].workspace_id,
-            "default"
-        );
     }
 
     #[test]

@@ -321,12 +321,6 @@ pub(crate) enum Confirmation {
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
     InterruptWork { session_id: String, restart: bool },
-    /// The last step of Change Workspace: the session moves only on Move.
-    ChangeWorkspace {
-        session_id: String,
-        workspace_id: String,
-        workspace_name: String,
-    },
     /// Interrupt all, with what was running when it opened. The targets are
     /// found again on confirm, since turns end while the dialog is open.
     InterruptAll {
@@ -534,7 +528,6 @@ impl Confirmation {
             | Self::DiscardSinceCheckpoint { session_id, .. }
             | Self::InterruptWork { session_id, .. }
             | Self::InterruptAll { session_id, .. }
-            | Self::ChangeWorkspace { session_id, .. }
             | Self::ForceDestroy { session_id, .. }
             | Self::DestroyStopped { session_id, .. }
             | Self::RecoverFailed { session_id, .. } => Some(session_id),
@@ -1689,25 +1682,6 @@ impl DashboardState {
                         session_id,
                         acknowledge_unpublished_work: true,
                     }
-                }
-            }
-            (
-                Confirmation::ChangeWorkspace {
-                    session_id,
-                    workspace_id,
-                    workspace_name,
-                },
-                1,
-            ) => {
-                self.cancel_modal();
-                if !self.state.sessions.contains_key(&session_id) {
-                    self.set_notice("This session is no longer available.");
-                    return DashboardAction::None;
-                }
-                DashboardAction::ChangeWorkspace {
-                    session_id,
-                    workspace_id,
-                    workspace_name,
                 }
             }
             (Confirmation::InterruptAll { session_id, .. }, 1) => {

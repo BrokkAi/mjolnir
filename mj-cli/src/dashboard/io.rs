@@ -993,12 +993,14 @@ impl DashboardContext {
                 result,
             } => match result {
                 Ok(()) => self.dashboard.set_notice(format!(
-                    "Moved {} to workspace \"{workspace_name}\".",
-                    self.session_notice_name(&session_id)
+                    "Moved {} to workspace \"{}\".",
+                    self.session_notice_name(&session_id),
+                    mj_tui::fit_session_name(&workspace_name, mj_tui::NOTICE_NAME_CELLS)
                 )),
                 Err(error) => self.dashboard.set_failure_notice(format!(
-                    "Could not move {} to workspace \"{workspace_name}\": {error}",
-                    self.session_notice_name(&session_id)
+                    "Could not move {} to workspace \"{}\": {error}",
+                    self.session_notice_name(&session_id),
+                    mj_tui::fit_session_name(&workspace_name, mj_tui::NOTICE_NAME_CELLS)
                 )),
             },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {

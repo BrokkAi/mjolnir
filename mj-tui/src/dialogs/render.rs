@@ -43,7 +43,6 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
         Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
-        Confirmation::ChangeWorkspace { .. } => &["Cancel", "Move"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
@@ -1301,31 +1300,6 @@ pub(crate) fn confirmation_body(
                 ],
             )
         }
-        Confirmation::ChangeWorkspace {
-            session_id,
-            workspace_name,
-            ..
-        } => {
-            let name = session_name
-                .filter(|name| !name.is_empty())
-                .unwrap_or(session_id);
-            // One line: the session's name gives way to the rest of the
-            // sentence, and a workspace name never takes more than half of it.
-            let workspace_name = fit_session_name(workspace_name, width / 2);
-            let fixed = "Move session \"\" to workspace \"\"?".len()
-                + Line::raw(workspace_name.as_str()).width();
-            let name = fit_session_name(name, width.saturating_sub(fixed));
-            (
-                " Change workspace? ",
-                vec![
-                    Line::raw(format!(
-                        "Move session \"{name}\" to workspace \"{workspace_name}\"?"
-                    )),
-                    Line::raw(""),
-                    Line::raw("The session keeps running. Its sub-agents move with it."),
-                ],
-            )
-        }
         Confirmation::SuspendSession {
             session_id,
             children_not_handed_back,
@@ -1493,7 +1467,6 @@ pub(crate) fn render_confirmation(
         Confirmation::SuspendSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
         Confirmation::InterruptAll { .. } => 10,
-        Confirmation::ChangeWorkspace { .. } => 9,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,
