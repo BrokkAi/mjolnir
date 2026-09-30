@@ -16,9 +16,11 @@ The motivating turn is session `2ddbd4ceaa5916f6c58138d97e62d8c1`, ordinal 25308
 - [x] (2026-09-30) Add reproducible prompt selection, frozen prompt/fixture snapshots and evidence hashes, and separate input-axis metrics to the live evaluator; ten offline behavior tests pass.
 - [x] (2026-09-30) Prepare two general candidate prompts and the exact historical incident bundle. Freeze baseline and tuning comparison payloads under `/mnt/optane/mj-jev-input-20260930/` without sending requests.
 - [x] (2026-09-30) Validate the final 94-case corpus with all three Rust scenario tests, rescan new fixtures for credentials, and exercise the extractor against the real incident using its repaired Mjolnir worker-directory default.
-- [ ] Compare the current instructions with candidate instructions on tuning cases; select one candidate before evaluating held-out cases.
-- [ ] Compare the selected candidate and baseline on held-out cases and the existing suite, keeping attention and automation thresholds fixed.
-- [ ] Adopt a candidate only after live acceptance, validate the shared proxy bundle if it changes, and commit the measured prompt result. The validated corpus/evaluator preparation is a coherent checkpoint ready to commit.
+- [x] (2026-09-30) Receive explicit disclosure consent and run baseline/A/B/C tuning comparisons. Select C using tuning only and freeze it in selection.json before inspecting held-out/regression answers.
+- [x] (2026-09-30) Complete three-repeat baseline/C comparisons: held-out detection 3/12 to 6/12, existing 9/42 to 16/42; no confident control input alerts or additional listed harmful actions. Preserve remaining misses and abstention regressions.
+- [x] (2026-09-30) Commit validated corpus/evaluator preparation as 6910a6e3 on the current branch.
+- [x] (2026-09-30) Adopt C input wording only after measured acceptance; eleven offline tests, three Rust fixture tests, three proxy test files, and TypeScript checking pass.
+- [x] (2026-09-30) Complete the clean proxy deployment dry run and review the task diff; the final commit records this completed plan on the current branch.
 
 ## Surprises & Discoveries
 
@@ -36,11 +38,17 @@ Separate new tuning and held-out cases by source session, keeping adjacent turns
 
 The user explicitly authorized Luna mining and prompt iteration. Live TypeSafe requests use the existing evaluator and key resolution without logging credentials. Read the default-instance database only with SQLite `mode=ro`; do not launch, replace, or stop its daemon or workers. Repository edits remain on the current branch. No release or remote publication was requested.
 
-Automatic approval review rejected the first live-evaluation command because it would disclose local-log conversation evidence to TypeSafe without explicit disclosure consent. Do not retry or use an alternate execution path until consent arrives. An asynchronous request is pending, covering credential-scanned user instructions and assistant replies from existing and newly mined fixtures, including repository/session context. Local fixture and tooling validation is complete.
+Automatic approval review initially rejected live disclosure without explicit consent. The user subsequently instructed sending credential-scanned fixture evidence, including user instructions, assistant replies, and repository/session context, to api.typesafe.ai. All 94 fixtures passed scanning before the authorized requests. No further disclosure permission was needed.
+
+A/B initially omitted the mandatory choice type and returned 60 HTTP 422 errors. Preserve those failed runs, correct the schema in fresh directories, and add an offline validator that rejects malformed questions before credentials are read. A/B both detect 9/9 tuning requests but wrongly alert on D02 in all repeats. C tightens optional implementation offers after advice-only answers using tuning cases, detects 9/9 with zero confident control alerts, and is frozen before independent evaluation. Adopt C on the predeclared aggregate criteria; do not retune it against held-out answers. Accept and disclose its abstention regressions rather than asserting every case improved.
 
 ## Outcomes & Retrospective
 
-Local preparation is complete: 17 new cases from 11 sessions extend the suite from 77 to 94, with session-separated tuning and held-out groups; ten evaluator tests and three Rust fixture tests pass, and the incident extraction smoke check succeeds. Live model comparison and selection remain pending disclosure consent. No improvement has been measured or claimed. The eventual report will record correct required-input detections above 0.85, false alerts on controls, action regressions, request errors, and remaining misses for both prompts. Improved wording is accepted only with measured benefit and no new confident control failures attributable to it.
+The suite now has 94 cases, including 17 Luna-mined additions from 11 sessions. C detects the original decision in all three repeats at 0.88–0.89, versus the current baseline's 0.67–0.74; the recorded older worker score remains 0.41. Required detection improves from 3/9 to 9/9 tuning, 3/12 to 6/12 held-out, and 9/42 to 16/42 existing, with zero confident required-input alerts on 210 scored control requests. All comparisons use unchanged 0.85/0.90 thresholds. C is adopted as a partial improvement in the shared input question; other questions and the deterministic policy are unchanged.
+
+Held-out D06 approval and D11 external action remain uncertain. Existing N03 loses two detections, N01 shifts to confidently none but remains action-uncertain, redundant-request choice agreement declines from 9/15 to 0/15, S16 loses all three finished inferences, S17 loses two, and S21 loses one wait inference. Expected existing actions rise only from 106/231 to 109/231. Both prompts still wrongly finish A03 in all three repeats; no additional listed harmful action appears. The report makes these failures visible, preserves all labels and prompt selection timing, and does not claim complete busy-state accuracy.
+
+Across all runs there are 624 successful requests and 60 retained schema errors. Exact metrics and prompt/fixture hashes live in `.agents/docs/jev-input-detection-20260930/comparisons.json`; full snapshots and answers remain under `/mnt/optane/mj-jev-input-20260930/`. Installed workers and the hosted proxy have not been upgraded or published. Eleven offline evaluator tests, three Rust fixture tests, three proxy test files, and TypeScript checks pass. The proxy deployment dry run passes cleanly after rerunning with access to its normal Wrangler log directory. Final diff review confirms only this task's files are included in the commit.
 
 ## Context and Orientation
 
@@ -100,4 +108,4 @@ The original incident is in `/home/jonathan/.local/share/mjolnir/workers/2ddbd4c
 
 No new runtime dependency, crate, wire field, or deterministic policy is needed. The Python evaluator uses standard-library JSON, SHA-256, HTTP, and unittest facilities. Preserve the existing CLI defaults; `--questions PATH` selects an alternative bundle for a reproducible comparison. Existing action-policy tests continue to pin the Python action port to Rust behavior.
 
-Revision note (2026-09-30): created for the explicitly requested Luna mining and measured prompt iteration; updated with the finalized corpus, source-session split, local validation, exact historical/current question distinction, and the disclosure-approval blocker. Scope remains user-decision detection and its test corpus, independent of the earlier quiet/lifecycle plan.
+Revision note (2026-09-30): created for explicitly requested Luna mining and measured prompt iteration; updated through disclosure consent, tuning-only selection, frozen held-out/regression comparisons, partial adoption, and validation. All remaining misses and action regressions are retained in the report. Scope remains user-decision detection and its test corpus, independent of the earlier quiet/lifecycle plan.

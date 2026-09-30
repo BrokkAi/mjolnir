@@ -25,6 +25,21 @@ def verdict(failure=("none", 0.95), input_=("none", 0.95), work=("finished", 0.9
 
 
 class Experiments(unittest.TestCase):
+    def test_malformed_prompt_is_rejected_before_credentials_or_requests(self):
+        def forbidden_credentials():
+            self.fail("malformed prompts must not resolve credentials")
+
+        original = module.api_key
+        module.api_key = forbidden_credentials
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "questions.json"
+                path.write_text(json.dumps({axis: {"instructions": "Decide", "criteria": {"none": {"what": "No request"}}} for axis in ("failure", "input", "work")}))
+                with self.assertRaisesRegex(ValueError, "question type must be choice"):
+                    module.run(SimpleNamespace(questions=path))
+        finally:
+            module.api_key = original
+
     @staticmethod
     def fixture(identity="D01", input_="required"):
         return {

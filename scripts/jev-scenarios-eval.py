@@ -185,8 +185,9 @@ def ask(key, questions, evidence):
 
 
 def run(args):
-    key = api_key()
     questions = json.loads(args.questions.read_text())
+    validate_questions(questions)
+    key = api_key()
     fixtures = load_fixtures(args.only)
     if not fixtures:
         raise ValueError("no fixtures selected")
@@ -212,6 +213,23 @@ def run(args):
             summary = record.get("action") or record.get("error")
             print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
     report(args)
+
+
+def validate_questions(questions):
+    """Reject malformed choice prompts before reading credentials or sending evidence."""
+    if not isinstance(questions, dict) or not {"failure", "input", "work"} <= questions.keys():
+        raise ValueError("questions must include failure, input, and work")
+    for axis, question in questions.items():
+        if not isinstance(question, dict) or question.get("type") != "choice":
+            raise ValueError(f"{axis}: question type must be choice")
+        if not isinstance(question.get("instructions"), str) or not question["instructions"].strip():
+            raise ValueError(f"{axis}: missing question instructions")
+        criteria = question.get("criteria")
+        if not isinstance(criteria, dict) or not criteria or any(
+            not isinstance(item, dict) or not isinstance(item.get("what"), str) or not item["what"].strip()
+            for item in criteria.values()
+        ):
+            raise ValueError(f"{axis}: missing choice criteria")
 
 
 def digest(value):
