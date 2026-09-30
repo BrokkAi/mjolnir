@@ -124,10 +124,10 @@
   },
   "expected": {
     "failure": "none",
-    "input": "required",
-    "work": "waiting",
+    "input": "unclear",
+    "work": "unclear",
     "quiet": true,
-    "action": "await_input",
+    "action": "uncertain",
     "wrong_actions": [
       "continue"
     ]
@@ -170,6 +170,21 @@
         "kind": "agent",
         "text": "The harness and ExecPlan are now in the repository. It uses one persistent MCP session, stores complete JSONL responses and separate profile calls, applies fresh unique edits, and restores the local c"
       }
-    ]
+    ],
+    "label_review": {
+      "date": "2026-09-30",
+      "reason": "The captured evidence contains an executable plan but no explicit approval request or planning-mode marker. Later context records leaving planning mode and implementation approval; that future context was not available to Jev. The evidence cannot distinguish a plan awaiting approval from an authorized plan announcement, so this is unscored rather than a definite required-input example.",
+      "previous_expected": {
+        "failure": "none",
+        "input": "required",
+        "work": "waiting",
+        "quiet": true,
+        "action": "await_input",
+        "wrong_actions": [
+          "continue"
+        ]
+      }
+    },
+    "strict_input_scoring": false
   }
 }

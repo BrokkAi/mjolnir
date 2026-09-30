@@ -25,6 +25,52 @@ def verdict(failure=("none", 0.95), input_=("none", 0.95), work=("finished", 0.9
 
 
 class Experiments(unittest.TestCase):
+    def test_account_failure_stops_admission_and_reports_incomplete_run(self):
+        originals = module.api_key, module.load_fixtures, module.ask
+        try:
+            for status in (401, 402):
+                with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                    calls = []
+
+                    def denied(key, questions, evidence):
+                        calls.append(evidence)
+                        return {"error": f"HTTP {status}", "http_status": status}
+
+                    module.api_key = lambda: "offline-test"
+                    module.load_fixtures = lambda only: [self.fixture(f"case-{i}") for i in range(20)]
+                    module.ask = denied
+                    output = Path(directory)
+                    with self.assertRaisesRegex(SystemExit, f"stopped after HTTP {status}"):
+                        module.run(SimpleNamespace(questions=module.QUESTIONS, only=None, repeats=3, output=output))
+                    records = [json.loads(line) for line in (output / "results.jsonl").read_text().splitlines()]
+                    self.assertGreater(len(calls), 0)
+                    self.assertLessEqual(len(calls), 2)
+                    self.assertEqual(len(records), len(calls))
+                    self.assertTrue(all(record["http_status"] == status for record in records))
+                    self.assertEqual(json.loads((output / "stopped.json").read_text())["requested_jobs"], 60)
+                    self.assertIn("Incomplete run:", (output / "report.md").read_text())
+                    with self.assertRaisesRegex(ValueError, "new output directory"):
+                        module.run(SimpleNamespace(questions=module.QUESTIONS, only=None, repeats=3, output=output))
+        finally:
+            module.api_key, module.load_fixtures, module.ask = originals
+
+    def test_bounded_admission_completes_all_successful_repeats(self):
+        originals = module.api_key, module.load_fixtures, module.ask
+        try:
+            module.api_key = lambda: "offline-test"
+            module.load_fixtures = lambda only: [self.fixture("one"), self.fixture("two")]
+            module.ask = lambda key, questions, evidence: {"verdict": verdict(input_=("required", 0.95))}
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                module.run(SimpleNamespace(questions=module.QUESTIONS, only=None, repeats=3, output=output))
+                records = [json.loads(line) for line in (output / "results.jsonl").read_text().splitlines()]
+                self.assertEqual({(r["id"], r["repeat"]) for r in records}, {(i, r) for i in ("one", "two") for r in range(3)})
+                self.assertEqual(len(records), 6)
+                self.assertTrue(all(r["action"] == "await_input" for r in records))
+                self.assertFalse((output / "stopped.json").exists())
+        finally:
+            module.api_key, module.load_fixtures, module.ask = originals
+
     def test_malformed_prompt_is_rejected_before_credentials_or_requests(self):
         def forbidden_credentials():
             self.fail("malformed prompts must not resolve credentials")

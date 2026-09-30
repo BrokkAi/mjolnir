@@ -168,7 +168,7 @@ def ask(key, questions, evidence):
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read(MAX_BODY_BYTES + 1))
     except urllib.error.HTTPError as error:
-        return {"error": f"HTTP {error.code}", "latency_s": round(time.monotonic() - started, 3)}
+        return {"error": f"HTTP {error.code}", "http_status": error.code, "latency_s": round(time.monotonic() - started, 3)}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         return {"error": str(error), "latency_s": round(time.monotonic() - started, 3)}
     try:
@@ -187,6 +187,8 @@ def ask(key, questions, evidence):
 def run(args):
     questions = json.loads(args.questions.read_text())
     validate_questions(questions)
+    if (args.output / "stopped.json").exists():
+        raise ValueError("run stopped on an account-wide failure; preserve it and use a new output directory")
     key = api_key()
     fixtures = load_fixtures(args.only)
     if not fixtures:
@@ -200,19 +202,39 @@ def run(args):
             done.add((record["id"], record["repeat"]))
     jobs = [(f, r) for f in fixtures for r in range(args.repeats) if (f["id"], r) not in done]
     print(f"{len(fixtures)} fixtures, {len(jobs)} requests to send ({len(done)} already recorded)", flush=True)
+    remaining = iter(jobs)
+    stopped = None
     with results_path.open("a") as out, concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {pool.submit(ask, key, questions, f["evidence"]): (f, r) for f, r in jobs}
-        for future in concurrent.futures.as_completed(futures):
-            fixture, repeat = futures[future]
-            answer = future.result()
-            record = {"id": fixture["id"], "repeat": repeat, **answer}
-            if "verdict" in answer:
-                record["action"] = action(answer["verdict"], authorization_complete(fit_to_wire(fixture["evidence"])))
-            out.write(json.dumps(record) + "\n")
-            out.flush()
-            summary = record.get("action") or record.get("error")
-            print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
+        futures = {}
+        while True:
+            # Admit at most two requests, so an account-wide failure cannot
+            # leave the rest of the corpus queued for needless submission.
+            while not stopped and len(futures) < 2:
+                job = next(remaining, None)
+                if job is None:
+                    break
+                fixture, repeat = job
+                futures[pool.submit(ask, key, questions, fixture["evidence"])] = job
+            if not futures:
+                break
+            completed, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in completed:
+                fixture, repeat = futures.pop(future)
+                answer = future.result()
+                record = {"id": fixture["id"], "repeat": repeat, **answer}
+                if "verdict" in answer:
+                    record["action"] = action(answer["verdict"], authorization_complete(fit_to_wire(fixture["evidence"])))
+                out.write(json.dumps(record) + "\n")
+                out.flush()
+                summary = record.get("action") or record.get("error")
+                print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
+                if answer.get("http_status") in (401, 402):
+                    stopped = answer["error"]
+    if stopped:
+        (args.output / "stopped.json").write_text(json.dumps({"reason": stopped, "requested_jobs": len(jobs), "note": "Account-wide failure; remaining requests were not sent. Preserve this run and retry in a new directory after restoring access."}, indent=2) + "\n")
     report(args)
+    if stopped:
+        raise SystemExit(f"stopped after {stopped}; remaining requests were not sent; see stopped.json")
 
 
 def validate_questions(questions):
@@ -316,6 +338,9 @@ def report(args):
                     agree = False
             rows.append((identity, fixture["category"], record["repeat"], cells, act, expected["action"], "agree" if agree else "differ", "WRONG" if wrong else ""))
     lines = ["# Jev scenario replay", "", f"Results: `{args.output / 'results.jsonl'}`", ""]
+    if (args.output / "stopped.json").exists():
+        stopped = json.loads((args.output / "stopped.json").read_text())
+        lines += [f"Incomplete run: {stopped['reason']}. Counts below cover recorded requests only; remaining requests were not sent.", ""]
     lines += [
         "Input is scored independently of failure and work. Detection uses the UI's 0.85 threshold. Errors are reported separately and count as unsuccessful requests.",
         f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.", "",

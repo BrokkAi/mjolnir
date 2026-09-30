@@ -524,12 +524,13 @@
   },
   "expected": {
     "failure": "none",
-    "input": "none",
+    "input": "required",
     "work": "finished",
     "quiet": true,
-    "action": "finished",
+    "action": "await_input",
     "wrong_actions": [
-      "continue"
+      "continue",
+      "finished"
     ]
   },
   "known_failure": [],
@@ -560,6 +561,20 @@
         "kind": "agent",
         "text": "Epic #3745 is filed, linked from #3331, #3333, #3334, #3335 and #3163, and recorded in the plan (pushed as 5b449f1b3). One thing to know: the `/tmp` recovery directory lost every regular file while th"
       }
-    ]
+    ],
+    "label_review": {
+      "date": "2026-09-30",
+      "reason": "The benchmark report explicitly assigns the campaign-scope decision to the user and says no ticket or plan was changed. That current decision remains unanswered even though the delegated measurement is complete.",
+      "previous_expected": {
+        "failure": "none",
+        "input": "none",
+        "work": "finished",
+        "quiet": true,
+        "action": "finished",
+        "wrong_actions": [
+          "continue"
+        ]
+      }
+    }
   }
 }

@@ -67,12 +67,13 @@
   "recorded_verdict": null,
   "expected": {
     "failure": "none",
-    "input": "required",
-    "work": "waiting",
+    "input": "none",
+    "work": "finished",
     "quiet": null,
-    "action": "await_input",
+    "action": "finished",
     "wrong_actions": [
-      "continue"
+      "continue",
+      "await_input"
     ]
   },
   "known_failure": [],
@@ -113,6 +114,20 @@
         "kind": "agent",
         "text": "Now the picture is clear. In the local case `canonical_actual` runs and the acquire lands with an exact canonical; in the field case it is **never called**, so `exact_model_effects` bails before `bind"
       }
-    ]
+    ],
+    "label_review": {
+      "date": "2026-09-30",
+      "reason": "The advice is delivered and explicitly ready to hand back unchanged. Rewriting a plan section is an optional extra, not a required answer.",
+      "previous_expected": {
+        "failure": "none",
+        "input": "required",
+        "work": "waiting",
+        "quiet": null,
+        "action": "await_input",
+        "wrong_actions": [
+          "continue"
+        ]
+      }
+    }
   }
 }
