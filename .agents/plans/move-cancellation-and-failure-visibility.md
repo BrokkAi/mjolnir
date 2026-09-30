@@ -18,7 +18,8 @@ Private paths and credentials must not enter the public error for a live session
 - [x] (2026-09-30) Publish safe move failures from the operation owner, atomically with its result.
 - [x] (2026-09-30) Prove cancellation acknowledgements cannot admit a checkpoint early.
 - [x] (2026-09-30) Focused tests passed: two outcome tests, one ACP/relay cancellation test, and both controller Close regressions.
-- [ ] Commit separately, integrate upstream, run full dev tests and Clippy, and push.
+- [x] (2026-09-30) Commit the fix separately as 4cd9c35e; integrate upstream in e9022119.
+- [x] (2026-09-30) Complete full dev tests and all-targets Clippy before publication; formatting, docs, and all 70 browser unit tests also pass.
 
 ## Surprises & Discoveries
 
@@ -56,7 +57,13 @@ durable result; a failed message write rolls both records back. The real ACP
 adapter and relay regression confirms cancellation acknowledgement and an SDK
 result cannot admit a checkpoint while the prompt response is outstanding.
 No production sessions have been moved or interrupted during this investigation.
-Full validation and push remain.
+Full validation passed on integration commit e9022119. The controller reports
+2,076 passed and 9 ignored; the TUI reports 901 passed and 2 ignored; the worker
+reports 694 passed and 10 ignored. CLI unit and integration tests also pass.
+All-targets Clippy with warnings denied completed successfully. Publication uses
+the configured upstream `origin/master`; #1137 can be closed after that push.
+The last plan-recording commit changes only this document and reuses validation
+of the identical Rust source tree.
 
 ## Context and Orientation
 
@@ -144,6 +151,14 @@ Mac validation used `/Users/jonathan/Projects/mjolnir-tf-2026-09-29` at 4a5ba374
 which contains the Linux-only cache fix ed937e10, with `MJ_INSTANCE=tier1180`.
 Its `test-1180-cache-host.log` reports 41 passed, 0 failed.
 
+Local evidence is retained in `/tmp/mj-1137-worker-focused.log`,
+`/tmp/mj-1137-controller-focused.log`, `/tmp/mj-1137-close-cut.log`,
+`/tmp/mj-1137-close-refusal.log`, `/tmp/mj-1137-full-tests.log`, and
+`/tmp/mj-1137-clippy.log`. Docs report zero errors/warnings/hints in
+`/tmp/mj-1137-docs-check.log`. Browser unit checks report 70 passed, zero failed
+in `/tmp/mj-1137-web-tests.log`; run these outside the sandbox because the
+sandboxed Playwright subprocess returned an empty listing.
+
 ## Interfaces and Dependencies
 
 Use existing rusqlite transactions and the shared database writer; add no crate
@@ -159,3 +174,6 @@ Revision note (2026-09-30): focused validation completed. Corrected the new
 test's RefusingExecutor tuple fixture after compilation caught its missing
 argument. Upstream gained f9bced67 during testing; merge it into the current
 branch after the separate fix commit and validate the combined result.
+
+Revision note (2026-09-30): record passing combined validation and the separate
+implementation commit. Only the two original timing edits remain uncommitted.
