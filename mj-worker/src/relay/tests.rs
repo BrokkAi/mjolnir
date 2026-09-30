@@ -5640,3 +5640,55 @@ fn durable_archive_context_retry_after_consumption_does_not_reinstall_it() {
         "retry reinstalled consumed context"
     );
 }
+
+/// B-5: after the adapter restarts, the relay forgets the goal and execution
+/// state, so a Codex session is not replaceable until the adapter reports them
+/// again on the reopened session. The fake adapter of the reliability lab does.
+#[test]
+fn a_codex_session_is_replaceable_again_once_the_restarted_adapter_reports() {
+    use mj_core::config::HarnessKind;
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+    relay.set_harness_turn_policy(HarnessTurnPolicy::CodexAdapter);
+    let report = |relay: &mut DurableRelay| {
+        let update = serde_json::from_value::<SessionUpdate>(serde_json::json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"goal": null, "execution": {"version": 1, "status": "idle"}}
+        }))
+        .unwrap();
+        relay.record_session_update(update).unwrap();
+    };
+    let configure = |relay: &mut DurableRelay| {
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+    };
+    configure(&mut relay);
+    report(&mut relay);
+    assert!(
+        relay
+            .operational_state()
+            .safe_to_replace(HarnessKind::Codex)
+    );
+
+    relay
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    let state = relay.operational_state();
+    assert!(!state.safe_to_replace(HarnessKind::Codex));
+    assert!(
+        mj_core::activity::replacement_blockers(&state.facts(), HarnessKind::Codex)
+            .iter()
+            .any(|reason| reason.contains("has not reported goal and execution state"))
+    );
+
+    configure(&mut relay);
+    report(&mut relay);
+    assert!(
+        relay
+            .operational_state()
+            .safe_to_replace(HarnessKind::Codex)
+    );
+}

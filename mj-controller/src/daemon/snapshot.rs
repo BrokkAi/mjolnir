@@ -7,6 +7,9 @@ pub(super) struct BackgroundPolicyState {
     checkpoint_wait: Option<mj_core::activity::CheckpointWait>,
     latest_completed_turn_ordinal: Option<u64>,
     worker_build: Option<String>,
+    /// Why the worker is not replaceable while the session is otherwise idle;
+    /// empty otherwise. Kept to log a change once, not on every view.
+    idle_replacement_blockers: Vec<&'static str>,
 }
 
 impl RuntimeState {
@@ -240,7 +243,35 @@ impl RuntimeState {
                 && let Some(session) = controller.state.sessions.get(&session_id)
                 && session.state.has_live_worker()
             {
+                let facts = snapshot.operational.facts();
+                // A busy session is not replaced, and that needs no comment.
+                // An idle one that is still not replaceable would otherwise
+                // be skipped without a trace (B-5).
+                let idle_replacement_blockers = if mj_core::activity::can_submit(&facts)
+                    && !mj_core::activity::safe_to_replace(&facts, session.harness_kind)
+                {
+                    mj_core::activity::replacement_blockers(&facts, session.harness_kind)
+                } else {
+                    Vec::new()
+                };
+                if !idle_replacement_blockers.is_empty()
+                    && owner
+                        .background_policies
+                        .get(&session_id)
+                        .is_none_or(|previous| {
+                            previous.idle_replacement_blockers != idle_replacement_blockers
+                        })
+                {
+                    tracing::info!(
+                        %session_id,
+                        harness = ?session.harness_kind,
+                        worker_build = ?snapshot.worker_build,
+                        reasons = ?idle_replacement_blockers,
+                        "an idle worker is not replaced"
+                    );
+                }
                 let policy = BackgroundPolicyState {
+                    idle_replacement_blockers,
                     quiet: snapshot.operational.safe_to_replace(session.harness_kind),
                     checkpoint_wait: snapshot
                         .operational

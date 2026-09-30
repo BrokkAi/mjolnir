@@ -546,6 +546,42 @@ pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
         && (harness != HarnessKind::Kimi || facts.background_work_known == Some(true))
 }
 
+/// What keeps [`safe_to_replace`] false, one name per cause, so a caller that
+/// declines to replace a worker can say why. Empty exactly when
+/// [`safe_to_replace`] is true.
+#[must_use]
+pub fn replacement_blockers(facts: &ActivityFacts, harness: HarnessKind) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    if facts.checkpoint_barrier {
+        blockers.push("a checkpoint barrier is held");
+    }
+    if has_work_in_flight(facts) {
+        let before = blockers.len();
+        blockers.extend(submit_blockers(facts));
+        if facts.background_commands > 0 {
+            blockers.push("background commands are running");
+        }
+        if facts.active_agent_terminals > 0 {
+            blockers.push("an agent terminal is open");
+        }
+        if facts.background_work_known == Some(false) {
+            blockers.push("background work is not known to be settled");
+        }
+        if blockers.len() == before {
+            blockers.push("work is in flight");
+        }
+    }
+    if harness == HarnessKind::Codex && !facts.goal_synchronized {
+        blockers.push(
+            "the Codex adapter has not reported goal and execution state since the worker or adapter last restarted",
+        );
+    }
+    if harness == HarnessKind::Kimi && facts.background_work_known != Some(true) {
+        blockers.push("Kimi background-agent state is not synchronized");
+    }
+    blockers
+}
+
 /// Why provider-owned work rules out a routine checkpoint cut, or `None`.
 ///
 /// This asks only about provider-owned work, which is a different question

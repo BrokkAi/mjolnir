@@ -219,6 +219,75 @@ fn a_lost_worker_is_still_recovered() {
     assert_eq!(checkpoint_blocker(&facts, HarnessKind::Kimi), None);
 }
 
+/// B-5: a Codex adapter that restarted (or a restarted worker) is not
+/// replaceable until the adapter reports goal and execution state again. The
+/// blockers say so, and agree with `safe_to_replace` in every case.
+#[test]
+fn a_restarted_codex_adapter_blocks_replacement_until_it_reports_again() {
+    let restarted = ActivityFacts {
+        goal_synchronized: false,
+        ..ActivityFacts::default()
+    };
+    assert!(!safe_to_replace(&restarted, HarnessKind::Codex));
+    let blockers = replacement_blockers(&restarted, HarnessKind::Codex);
+    assert_eq!(blockers.len(), 1);
+    assert!(blockers[0].contains("has not reported goal and execution state"));
+    // The same facts do not block a harness that has no goal state.
+    assert!(safe_to_replace(&restarted, HarnessKind::Claude));
+
+    let reported = ActivityFacts {
+        goal_synchronized: true,
+        ..restarted
+    };
+    assert!(safe_to_replace(&reported, HarnessKind::Codex));
+    assert!(replacement_blockers(&reported, HarnessKind::Codex).is_empty());
+}
+
+#[test]
+fn replacement_blockers_agree_with_safe_to_replace() {
+    let busy_facts = [
+        ActivityFacts::default(),
+        ActivityFacts {
+            goal_synchronized: true,
+            background_work_known: Some(true),
+            ..ActivityFacts::default()
+        },
+        ActivityFacts {
+            prompt_started_at_ms: Some(NOW),
+            goal_synchronized: true,
+            ..ActivityFacts::default()
+        },
+        ActivityFacts {
+            queued_commands: 2,
+            ..ActivityFacts::default()
+        },
+        ActivityFacts {
+            checkpoint_barrier: true,
+            goal_synchronized: true,
+            ..ActivityFacts::default()
+        },
+        ActivityFacts {
+            background_commands: 1,
+            goal_synchronized: true,
+            ..ActivityFacts::default()
+        },
+        ActivityFacts {
+            execution: RelayExecutionState::Running,
+            goal_synchronized: true,
+            ..ActivityFacts::default()
+        },
+    ];
+    for facts in &busy_facts {
+        for harness in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Claude] {
+            assert_eq!(
+                replacement_blockers(facts, harness).is_empty(),
+                safe_to_replace(facts, harness),
+                "{harness:?} {facts:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_way_of_being_busy_is_work_in_flight() {
     let quiet = ActivityFacts {
