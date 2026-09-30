@@ -8,7 +8,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
-            json!({"enabled":true,"bind":"127.0.0.1:3765","tailscale_detect":true,"tls_cert":null,"tls_key":null})
+            json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
             json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project","symbols":null})
