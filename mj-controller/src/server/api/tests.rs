@@ -3010,6 +3010,7 @@ fn a_running_session_publishes_safe_lifecycle_failures_from_current_and_older_re
     let (config, mut state) = sample_config_state();
     for prefix in [
         mj_core::state::CLOSE_FAILURE_PREFIX,
+        mj_core::state::MOVE_FAILURE_PREFIX,
         mj_core::state::DESTRUCTION_FAILURE_PREFIX,
         "the close did not finish",
     ] {

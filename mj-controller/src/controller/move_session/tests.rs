@@ -1135,6 +1135,91 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
 
 #[cfg(unix)]
 #[test]
+fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry() {
+    let name =
+        test_name("move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry");
+    if !isolated_test_child(&name, "MJ_MOVE_OUTCOME_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    let mut operation = source_recovery_operation(&session);
+    let outcome = controller
+        .finish_move_result(
+            &mut operation,
+            Err(anyhow::anyhow!("private-token at /private/worker")),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    assert_eq!(outcome.outcome, "failed");
+    assert_eq!(operation.error, outcome.error);
+    let reopened = crate::database::load_state().unwrap();
+    let record = &reopened.sessions[&session.id];
+    assert_eq!(record.state, SessionState::Running);
+    let snapshot =
+        crate::server::ViewerSnapshot::from_config_state(&controller.config, &reopened, 1);
+    let public = crate::server::api::ApiSession::from(&snapshot.sessions[0]);
+    assert!(public.has_error);
+    let message = public.error.unwrap();
+    assert!(message.contains("checkpointing and suspending the source"));
+    assert!(message.contains(&operation.operation_id));
+    assert!(message.contains(outcome.recovery.as_deref().unwrap()));
+    assert!(!message.contains("private-token"));
+    assert!(!message.contains("/private/worker"));
+    assert_eq!(
+        controller.state.sessions[&session.id].last_error,
+        record.last_error
+    );
+    controller
+        .finish_move_result(
+            &mut operation,
+            Ok(()),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    let reopened = crate::database::load_state().unwrap();
+    assert_eq!(reopened.sessions[&session.id].last_error, None);
+    assert_eq!(
+        crate::database::load_move_operation(&session.id)
+            .unwrap()
+            .unwrap()
+            .error,
+        None
+    );
+
+    // Completing a Move must not clear another operation's error.
+    controller
+        .state
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .last_error = Some("another failure".into());
+    controller
+        .finish_move_result(
+            &mut operation,
+            Ok(()),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&session.id]
+            .last_error
+            .as_deref(),
+        Some("another failure")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode() {
     let name = test_name(
         "move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode",
