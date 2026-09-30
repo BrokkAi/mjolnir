@@ -564,6 +564,7 @@ mod support;
 mod views;
 use support::*;
 pub(crate) mod delegation;
+mod diagnostics;
 mod process;
 pub use process::*;
 mod serve;

@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{HarnessKind, ImagePullPolicy};
 
+mod diagnostics;
+pub use diagnostics::{BlockingOperation, BlockingOperationSnapshot, active_blocking_operations};
+
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
 pub const SESSION_TAG: &str = "dev.mj.session";
@@ -222,6 +225,13 @@ impl CommandSpec {
                 lease: None,
             });
         };
+        let _waiting = BlockingOperation::start(
+            &format!(
+                "lease SSH connection to {} for {}",
+                ssh.destination, self.purpose
+            ),
+            "ssh",
+        );
         let lease = if self.ssh_session_probe {
             SshSessions::lease_probe(ssh)
         } else {
@@ -684,6 +694,7 @@ impl ProcessExecutor {
 
 impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let _running = BlockingOperation::command(command);
         with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
     }
 
@@ -692,6 +703,7 @@ impl CommandExecutor for ProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        let _running = BlockingOperation::command(command);
         // A caller's stream cannot be replayed, so this path takes a session
         // and a permit but never retries.
         let session = command.open_ssh_session(self)?;
@@ -1142,6 +1154,7 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let _running = BlockingOperation::command(command);
         with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
             self.run_once(command)
         })
@@ -1152,6 +1165,7 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        let _running = BlockingOperation::command(command);
         // A caller's stream cannot be replayed, so this path takes a session
         // and a permit but never retries.
         let session = command.open_ssh_session(self)?;
