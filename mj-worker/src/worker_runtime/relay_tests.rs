@@ -6628,6 +6628,25 @@ async fn control_socket_appears(root: &Path, within: std::time::Duration) -> boo
     .is_ok()
 }
 
+/// Whether the worker's startup record already names `step`.
+///
+/// The record outlives the worker, which makes it the reliable witness for a
+/// step whose visible effect can vanish first: a worker whose harness exits at
+/// once removes `control.sock` again during teardown.
+fn startup_step_recorded(root: &Path, step: &str) -> bool {
+    let Some(record) = std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return false;
+    };
+    record["steps"].as_array().is_some_and(|steps| {
+        steps
+            .iter()
+            .any(|recorded| recorded["step"].as_str() == Some(step))
+    })
+}
+
 /// A session that no review can run for must do no working-tree capture at
 /// startup. This is the #1065 failure: the capture is proportional to the
 /// working tree, so a session in a large tree never reached its control
@@ -6647,7 +6666,23 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
-    let appeared = control_socket_appears(&root, std::time::Duration::from_secs(30)).await;
+    let appeared = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            // `control.sock` alone is a momentary witness: the fake harness
+            // exits at once, so the worker can bind, serve, and remove the
+            // socket between two polls. `serving` is recorded only after the
+            // bind succeeded, and that record survives the worker.
+            if root.join("control.sock").exists() || startup_step_recorded(&root, "serving") {
+                break true;
+            }
+            if daemon.is_finished() {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
     // The startup record names the step a slow start stalled in.
     let steps =
         std::fs::read_to_string(root.join(mj_core::relay::WORKER_STARTUP_FILE)).unwrap_or_default();
