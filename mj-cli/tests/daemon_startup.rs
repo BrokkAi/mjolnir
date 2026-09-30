@@ -412,7 +412,7 @@ fn upgrade_from_a_daemon_counting_open_requests_does_not_wait_for_them() {
 }
 
 #[test]
-fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
+fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
     use std::time::{Duration, Instant};
     // Same protocol, changed protocol, and a development build whose version
     // did not change: all must converge without a restart command or stdin.
@@ -423,6 +423,14 @@ fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
             env!("CARGO_PKG_VERSION"),
             mj_client::daemon::PROTOCOL_VERSION,
             true,
+        ),
+        // Different executable, identical release, wire protocol and schema.
+        // The fixture is a separate executable, just like a previous build.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        (
+            env!("CARGO_PKG_VERSION"),
+            mj_client::daemon::PROTOCOL_VERSION,
+            false,
         ),
         ("2.9.0", mj_client::daemon::PROTOCOL_VERSION, false),
     ] {
@@ -480,6 +488,56 @@ fn concurrent_upgrade_clients_replace_the_old_daemon_once_and_migrate() {
             serde_json::from_slice(&fs::read(metadata_path).unwrap()).unwrap();
         assert_eq!(reused.pid, metadata.pid, "a ready daemon must be reused");
     }
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn a_different_same_version_build_cannot_replace_an_incompatible_store_owner() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    let path = current_store(&storage);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "UPDATE schema_compatibility SET minimum_compatible_version = 900;
+         INSERT INTO schema_migrations VALUES (900, 'test');
+         PRAGMA user_version = 900;",
+    )
+    .unwrap();
+    drop(db);
+    let mut old = OldDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            .env("MJ_TEST_OLD_DAEMON_VERSION", env!("CARGO_PKG_VERSION"))
+            .env(
+                "MJ_TEST_OLD_PROTOCOL",
+                mj_client::daemon::PROTOCOL_VERSION.to_string(),
+            )
+            .env("MJ_INSTANCE", "upgrade-test")
+            .env("MJ_DATA_DIR", storage.path().join("data"))
+            .env("MJ_CONFIG_DIR", storage.path().join("config"))
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let metadata_path = storage.path().join("data/daemon.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !metadata_path.exists() {
+        assert!(old.0.try_wait().unwrap().is_none(), "fixture exited");
+        assert!(Instant::now() < deadline, "fixture did not become ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (status, log) = run_client_with_deadline(
+        &mut upgrade_command(&storage),
+        &storage.path().join("refusal.log"),
+    );
+    assert!(!status.success(), "{log}");
+    assert!(log.contains("schema 900"), "{log}");
+    assert!(old.0.try_wait().unwrap().is_none(), "owner was stopped");
+    let retained: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(metadata_path).unwrap()).unwrap();
+    assert_eq!(retained.pid, old.0.id());
+    // Release the fixture owner before DaemonStorage tries a real stop command.
+    drop(old);
 }
 
 #[test]

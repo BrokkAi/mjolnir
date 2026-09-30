@@ -287,6 +287,20 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
         replace_daemon(&metadata).await?;
         return Ok(None);
     }
+    if release_order.is_eq() {
+        let pid = metadata.pid;
+        let same_build = tokio::task::spawn_blocking(move || process_runs_this_executable(pid))
+            .await
+            .context("inspect daemon executable task failed")??;
+        if same_build == Some(false) {
+            eprintln!(
+                "Mjolnir daemon {} is running a different build of {}; replacing it.",
+                metadata.pid, metadata.build_version
+            );
+            replace_daemon(&metadata).await?;
+            return Ok(None);
+        }
+    }
     Ok(Some(client))
 }
 
