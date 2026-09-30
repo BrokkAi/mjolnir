@@ -604,3 +604,7 @@ CI after the push: `fbb85556` failed only on macOS (`expired_claude_credentials_
 ### F29 — landed
 
 `e70bf8b6`: the Sessions filter's query is the shared `mj_chat::text_input::TextInput` (PathInput, the help overlay and the composer use it): Left/Right, Home/End, Ctrl-A/E, Ctrl-B/F, Alt-B/F, Ctrl-W/U/K, Delete, Backspace/Ctrl-H; Enter keeps and leaves, Esc clears and leaves, Up/Down go to the pane; the caret is a `focus_control` cell at the cursor and the field scrolls horizontally (new `TextField::caret_window`); the input's own `×`/`x` and its click handler are gone, the title chip stays. Tests: `the_filter_input_takes_readline_keys`, `the_filter_caret_follows_the_cursor_and_the_field_scrolls`, `typing_in_the_filter_input_filters_and_esc_clears`. tui 893, chat 642 green; clippy and fmt clean. Paste into the input is not handled.
+
+### F31 — landed
+
+`9985398a`: the shared `ComboBox` popup draws a scrollbar in its last inner column when the list overflows (the existing `scrollbar_geometry`/`render_scrollbar`, the conversation pane's glyphs: `│`/`▐`, ASCII `|`/`#`); the popup height is unchanged and the selection keeps the thumb in view. Tests: `combobox_popup_draws_a_scrollbar_that_follows_the_selection`, `combobox_popup_scrollbar_is_ascii_under_the_ascii_glyph_set`, `combobox_popup_without_overflow_draws_no_scrollbar`. chat 645, tui 889 green; clippy and fmt clean.
