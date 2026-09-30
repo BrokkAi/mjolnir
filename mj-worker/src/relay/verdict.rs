@@ -13,6 +13,10 @@ pub(super) struct RepliedVerdictState {
     /// Jev's confident answer to whether the listed background commands are
     /// still needed, with the evidence generation it was judged at.
     background: Mutex<Option<(u64, bool)>>,
+    /// The turn (`turn_id`, completed ordinal) this process last asked Jev
+    /// about. The background judgment dies with the process, so a restarted
+    /// worker asks once more about a turn it has not asked about itself.
+    asked_turn: Option<(String, u64)>,
 }
 
 fn blocked(facts: &ActivityFacts) -> Option<&'static str> {
@@ -124,6 +128,7 @@ impl DurableRelay {
                 self.store_assessment(a)?;
             }
         }
+        self.reask_background_after_restart()?;
         let Some(mut a) = self
             .snapshot
             .assessment
@@ -199,6 +204,39 @@ impl DurableRelay {
             evidence.transcript_summary.clear();
         }
         a.evidence = Some(evidence);
+        self.store_assessment(a)
+    }
+
+    /// Jev's judgment of leftover processes lives only in this process
+    /// (#1202). After a worker restart, an assessed turn whose processes are
+    /// reported again has none, and the session would stay busy for good.
+    /// Ask again, once per process per turn: `asked_turn` records the ask, so
+    /// an answer without a confident judgment is not asked a second time.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn reask_background_after_restart(&mut self) -> Result<()> {
+        if self.verdict_harness.is_none() || self.background_commands().is_empty() {
+            return Ok(());
+        }
+        let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+            a.current()
+                && a.status == mj_core::assessment::Status::Assessed
+                && self.replied_verdict.asked_turn.as_ref()
+                    != Some(&(a.turn_id.clone(), a.completed_ordinal))
+        }) else {
+            return Ok(());
+        };
+        let facts = self.activity_facts();
+        if blocked(&facts).is_some() || facts.background_needed.is_some() {
+            return Ok(());
+        }
+        tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
+            revision = a.revision, phase = "replied",
+            "asking Jev again about leftover processes after a worker restart");
+        a.revision = self.snapshot.latest_ordinal + 1;
+        a.status = mj_core::assessment::Status::Pending;
+        a.evidence = None;
+        a.action = None;
+        a.verdict = None;
         self.store_assessment(a)
     }
 
@@ -344,6 +382,7 @@ impl DurableRelay {
         }
         let evidence = a.evidence.clone()?;
         self.replied_verdict.last_generation = Some(a.revision);
+        self.replied_verdict.asked_turn = Some((a.turn_id.clone(), a.completed_ordinal));
         Some((
             a.revision,
             evidence,
@@ -735,6 +774,109 @@ mod settled_task_tests {
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
             .unwrap();
         assert!(relay.activity_facts().background_needed.is_none());
+    }
+
+    /// #1202: the background judgment is process-local, so a restarted
+    /// worker holds none. When the new harness reports leftover processes
+    /// again (Kimi re-reads its task journal on attach), the worker asks Jev
+    /// once more instead of leaving the session busy for good.
+    #[test]
+    fn a_restarted_worker_asks_again_about_leftover_processes_once() {
+        use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
+        let judged = |background| Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+            },
+            work: Judgment {
+                choice: Work::Finished,
+                confidence: 0.99,
+            },
+            background: Some(Judgment {
+                choice: background,
+                confidence: 0.95,
+            }),
+        };
+        let restart = |root: &Path| {
+            // What the worker records when it starts on an existing root.
+            let mut relay = claude_relay(root);
+            relay
+                .record_observation(RelayObservation::SessionRestarted)
+                .unwrap();
+            relay.acp_ready = true;
+            relay
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.acp_ready = true;
+        relay
+            .claude_background_tasks_changed(vec![task("srv")])
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        relay
+            .record_session_update(
+                serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Done; the dev server stays up for you."}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay
+            .apply_turn_assessment(revision, judged(Background::Unneeded))
+            .unwrap();
+        assert!(relay.operational_state().quiet().is_yes());
+        // The answer was applied by this process: nothing more to ask.
+        relay.prepare_pending_assessment().unwrap();
+        assert!(relay.pending_replied_verdict().is_none());
+        drop(relay);
+
+        let mut relay = restart(dir.path());
+        relay
+            .claude_background_tasks_changed(vec![task("srv")])
+            .unwrap();
+        assert!(relay.activity_facts().background_needed.is_none());
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, evidence, _) = relay
+            .pending_replied_verdict()
+            .expect("the restarted worker asks about the leftover process");
+        assert_eq!(evidence.background.len(), 1);
+        assert!(evidence.background[0].command.contains("srv"));
+        // One request per restart: an unclear answer is not asked again.
+        let mut unclear = judged(Background::Unclear);
+        unclear.background.as_mut().unwrap().confidence = 0.5;
+        relay.apply_turn_assessment(revision, unclear).unwrap();
+        assert!(relay.activity_facts().background_needed.is_none());
+        for _ in 0..3 {
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+        }
+        drop(relay);
+
+        // The next restart asks once more, and a confident answer applies.
+        let mut relay = restart(dir.path());
+        relay
+            .claude_background_tasks_changed(vec![task("srv")])
+            .unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay
+            .apply_turn_assessment(revision, judged(Background::Unneeded))
+            .unwrap();
+        assert_eq!(relay.activity_facts().background_needed, Some(false));
+        let quiet = relay.operational_state().quiet();
+        assert!(quiet.is_yes(), "{}", quiet.reason());
+        relay.prepare_pending_assessment().unwrap();
+        assert!(relay.pending_replied_verdict().is_none());
     }
 
     #[test]
