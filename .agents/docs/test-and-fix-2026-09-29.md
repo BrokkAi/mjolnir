@@ -594,3 +594,4 @@ CI after the push: `fbb85556` failed only on macOS (`expired_claude_credentials_
 
 - Change Workspace needs no confirmation ("fully reversible"): a pick moves at once with the notice as feedback. Fix wave F28. Rule recorded for future UI work: confirmations only for actions that cannot be undone.
 - The Sessions `Filter:` input gets readline keys (Left/Right, Home/End, Ctrl-A/E/B/F, Alt-B/F, Ctrl-W/U/K, Delete, Backspace/Ctrl-H; caret at the cursor; horizontal scroll), using the shared single-line editor if one exists; its own `x` goes, the title's `×` stays. Fix wave F29.
+- `wait` without `child_session_ids` means every unfinished child of the parent (resolved by the daemon); `return_when` keeps its meaning; nothing running answers `complete` at once. Fix wave F30.
