@@ -22,6 +22,7 @@
 .github/macos-ci-paths.txt
 scripts/macos-ci-paths.sh
 scripts/test-macos-ci-paths.sh
+tests/e2e/macos_launch.py
 
 # Toolchain, dependencies, lint config, and build scripts.
 Cargo.toml

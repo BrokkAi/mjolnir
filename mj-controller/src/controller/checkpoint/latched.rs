@@ -107,6 +107,19 @@ impl Controller {
             .context("reconnect plan is empty")?;
         let worker_root = targets::worker_root(&backend, session_id)?;
         let harness_home = target_profile_home(&backend, session_id, profile);
+        let harness_home = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+            // A compatible old worker can still export checkpoints after the
+            // daemon is replaced. Give it the source home from its own launch
+            // file, rather than the upgraded controller's compatibility link.
+            mj_checkpoint::checkpoint::checkpoint_harness_home(
+                Path::new(&worker_root),
+                Path::new(&harness_home),
+            )?
+            .to_string_lossy()
+            .into_owned()
+        } else {
+            harness_home
+        };
         let SessionExportLayout {
             workspace_root,
             primary_repository,

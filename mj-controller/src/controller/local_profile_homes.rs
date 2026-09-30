@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use mj_core::config::HarnessKind;
 use mj_core::state::{State, TargetLocator};
+use mj_core::worker_launch::installed_harness_home;
 
 use crate::targets::{CommandExecutor, CommandSpec};
 
@@ -104,41 +105,6 @@ fn link_profile_home(worker_root: &Path) -> anyhow::Result<Option<PathBuf>> {
     }
     link_directory(&installed_home, &staged_home)?;
     Ok(Some(installed_home))
-}
-
-/// The harness home an installed launch configuration names, or `None` when
-/// there is no installed configuration.
-///
-/// Read loosely, as JSON, because it was written by an earlier release: only
-/// the fields that locate the home matter here. A configuration that states no
-/// home was started with the harness's home variable.
-fn installed_harness_home(launch_path: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let body = match std::fs::read(launch_path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let launch: serde_json::Value = serde_json::from_slice(&body)?;
-    let stated = launch
-        .get("harness_home")
-        .and_then(serde_json::Value::as_str)
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from);
-    if stated.is_some() {
-        return Ok(stated);
-    }
-    let Some(harness) = launch
-        .get("harness")
-        .cloned()
-        .and_then(|harness| serde_json::from_value::<HarnessKind>(harness).ok())
-    else {
-        return Ok(None);
-    };
-    Ok(launch
-        .get("environment")
-        .and_then(|environment| environment.get(harness.home_env()))
-        .and_then(serde_json::Value::as_str)
-        .map(|home| harness.home_from_environment(home)))
 }
 
 #[cfg(unix)]

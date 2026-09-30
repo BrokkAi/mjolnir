@@ -19,10 +19,12 @@ and continue to reuse a daemon already running the invoking build.
   concurrent-client regression to unchanged version, protocol and schema.
 - [x] (2026-09-30) Linux startup suite: 12 passed; identity tests: 3 passed.
   Formatting and diff checks passed.
-- [ ] Commit #1184 separately.
-- [ ] Build the changed source on macbook in a disposable source directory.
-- [ ] Verify Mac startup, safe handoff during a real turn, setup/doctor, staged
-  credentials and recovery; record supported terminal and viewer checks.
+- [x] (2026-09-30) Commit #1184 separately as `79f2ad0a`.
+- [x] (2026-09-30) Build native CLI/worker in a disposable Mac source directory.
+- [x] (2026-09-30) Mac startup: 11 passed; checkpoint: 69 passed, 2 ignored;
+  terminal PTY: 11 passed. Real Codex handoff, checkpoint/suspend/resume, staged
+  login and viewer durable logout passed; kitty custom prefix and packaged
+  Docker smoke passed. Fix the discovered legacy checkpoint home-alias defect.
 - [ ] Commit the #1135 verification evidence and any necessary fixes separately.
 - [ ] Run full dev-profile Cargo tests and all-targets Clippy, then publish.
 - [ ] Update issue evidence and leave any unexercised missions clearly open.
@@ -40,6 +42,12 @@ Two unrelated dirty files in the local checkout contain Move timing instrumentat
 and must remain untouched: `mj-controller/src/controller/move_session.rs` and
 `mj-controller/src/daemon/session_move.rs`.
 
+A released 2.21.0-to-2.24.0 handoff preserved the running turn but checkpoint
+failed because the old memory root and new compatibility link used different
+spellings of one physical directory. The worker launch file owns the source
+spelling. The final fixed Mac run changed daemon PID in 0.813 seconds, preserved
+worker PID and accepted turn 31, then passed checkpoint and recovery.
+
 ## Decision Log
 
 - Decision: Use `mj-client/src/executable.rs::process_runs_this_executable` in
@@ -55,10 +63,23 @@ and must remain untouched: `mj-controller/src/controller/move_session.rs` and
   tokens merely to exercise a mission card.
   Date/Author: 2026-09-30, Codex.
 
+- Decision: Share the installed-home parser in `mj-core/src/worker_launch.rs`
+  and resolve checkpoint source against that owner in both the checkpoint
+  collector and local controller export. Verify physical identity before using
+  the installed spelling; retain the memory containment check.
+  Rationale: The compatible old exporter remains in use across daemon handoff,
+  so a collector-only fix cannot repair existing workers. This corrects the
+  source rather than weakening containment or forcing worker replacement.
+  Date/Author: 2026-09-30, Codex.
+
 ## Outcomes & Retrospective
 
-Implementation and verification are in progress. No claim of full Mac launch
-coverage is made until the evidence identifies each exercised mission and limit.
+Both implementations pass focused checks and real Mac acceptance. The launch
+verification found a released upgrade checkpoint failure that required resolving
+the installed worker home before invoking even a compatible legacy exporter.
+The evidence report records five passing real-harness checks and remaining
+manual/authentication/OS missions. Full integrated validation and publication
+are pending; #1135 must remain open for its unexercised missions.
 
 ## Context and Orientation
 
@@ -84,7 +105,7 @@ First validate the identity change with the daemon startup integration suite and
 existing executable-identity tests. Commit only the implementation, regression
 and this plan. Build the same source on the Mac. Run its isolated startup suite
 and prepare a `tier1135` instance with a disposable project and the existing
-Claude login. Exercise replacement with a running turn and record daemon and
+Codex login copied into an isolated profile; Claude currently reports signed out. Exercise replacement with a running turn and record daemon and
 worker identities, the unique reply, and follow-up usability. Retest accessible
 setup, doctor and checkpoint/staged-home paths. Use previous terminal evidence
 where valid and record fresh evidence for supported automation. Store the
@@ -158,3 +179,6 @@ and available Mac target; includes prior mission limits and isolated validation.
 
 Revision note (2026-09-30): Put executable replacement after the store read
 compatibility check and add a refusal regression; focused Linux checks pass.
+
+Revision note (2026-09-30): Record real Mac acceptance and the released legacy
+checkpoint-home defect; preserve manual mission limits in the evidence report.
