@@ -6544,7 +6544,10 @@ async fn control_socket_appears(root: &Path, within: std::time::Duration) -> boo
 /// socket, and a sub-agent child paid that cost for a review it is never given.
 #[tokio::test]
 async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot_be_staged() {
-    let workspace = repository_whose_staging_blocks(10);
+    // The socket is published only once the harness is started (#1192), so the
+    // wait covers a harness start on a slow runner; a capture would take a
+    // minute, so a socket inside half of that still proves no capture ran.
+    let workspace = repository_whose_staging_blocks(60);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
     std::fs::create_dir_all(&root).unwrap();
@@ -6555,7 +6558,7 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
     assert!(
-        control_socket_appears(&root, std::time::Duration::from_secs(5)).await,
+        control_socket_appears(&root, std::time::Duration::from_secs(30)).await,
         "an unreviewed session must not wait for a working-tree capture"
     );
     daemon.abort();
