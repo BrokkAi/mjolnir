@@ -599,3 +599,4 @@ CI after the push: `fbb85556` failed only on macOS (`expired_claude_credentials_
 ### F28 — landed
 
 `68646657`: a workspace pick in the combobox (menu or palette) emits `DashboardAction::ChangeWorkspace` at once; `Confirmation::ChangeWorkspace` and its dialog code are gone; the "Moved … to workspace …" / "Could not move …" notices name the session and now the workspace in the one-line form. Tests: `choosing_a_workspace_moves_at_once`; the two confirmation tests removed. tui 889, CLI 253 green; clippy and fmt clean.
+- The Subagents Model combobox in the New session wizard needs a scrollbar; added to the shared `ComboBox` popup so every combobox gets it. Fix wave F31.
