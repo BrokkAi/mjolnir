@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use mj_core::config::HarnessKind;
@@ -54,21 +54,103 @@ fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
     }
 }
 
-/// The degraded answer when the daemon has not completed the request within
-/// the socket ceiling. The request stays queued; the model must check on it
-/// itself, because nothing is ever pushed into its conversation.
-fn pending_reply(request_id: &str, action: &SubagentToolAction) -> Value {
-    json!({
-        "request_id":request_id,
-        "accepted":true,
-        "note":format!("Mjolnir has not answered this request yet. {}", unanswered_advice(action))
-    })
+/// What the worker can say about a request the daemon has not answered. The
+/// worker sends it with an answer that has no result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DaemonContact {
+    /// Whether the daemon has read the worker's queue since this request
+    /// joined it.
+    pub picked_up: bool,
+    /// Seconds since the daemon last read the queue; absent when it has not
+    /// read it since the worker started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_collected_seconds_ago: Option<u64>,
+}
+
+impl DaemonContact {
+    /// Read it from a worker answer. An older worker does not send it.
+    fn from_reply(reply: &Value) -> Option<Self> {
+        serde_json::from_value(reply.get("daemon")?.clone()).ok()
+    }
+
+    /// One sentence naming a daemon that has not picked the request up.
+    fn not_picked_up(self) -> Option<String> {
+        if self.picked_up {
+            return None;
+        }
+        let last = match self.last_collected_seconds_ago {
+            Some(seconds) => format!(
+                "Its daemon last collected this session's requests {seconds} seconds ago"
+            ),
+            None => {
+                "Its daemon has not collected this session's requests since this session's worker started".to_owned()
+            }
+        };
+        Some(format!(
+            "Mjolnir has not picked up this request. {last}, so the daemon is probably restarting, stalled, or unreachable."
+        ))
+    }
+}
+
+/// What to do about a request the daemon has not picked up. It stays saved
+/// and runs once a daemon reads the queue, which can be long after this call.
+fn not_picked_up_advice(action: &SubagentToolAction) -> &'static str {
+    match action {
+        SubagentToolAction::Handback { .. } => HANDBACK_UNANSWERED_ADVICE,
+        SubagentToolAction::ListAgents | SubagentToolAction::ListProfiles => {
+            "It changes nothing, so call it again later."
+        }
+        SubagentToolAction::Spawn { .. } => {
+            "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Continue without this child or call list_agents later to see whether it started; close it if you no longer need it."
+        }
+        _ => {
+            "The request is saved and runs when the daemon picks it up, which can be much later, so do not repeat it. Call list_agents later to see whether it ran."
+        }
+    }
+}
+
+/// The degraded answer when the worker has taken the request but the daemon
+/// has not completed it in time. The request stays queued; the model must
+/// check on it itself, because nothing is ever pushed into its conversation.
+/// When the worker says the daemon has not even picked the request up, the
+/// answer says so and is an error: nothing is working on it.
+fn pending_reply(
+    request_id: &str,
+    action: &SubagentToolAction,
+    daemon: Option<DaemonContact>,
+) -> (Value, bool) {
+    if let Some(reason) = daemon.and_then(DaemonContact::not_picked_up) {
+        return (
+            json!({
+                "request_id": request_id,
+                "accepted": true,
+                "status": "not_picked_up",
+                "error": format!("{reason} {}", not_picked_up_advice(action)),
+            }),
+            true,
+        );
+    }
+    let status = if daemon.is_some() {
+        "Mjolnir picked up this request but has not finished it."
+    } else {
+        "Mjolnir has not answered this request yet."
+    };
+    (
+        json!({
+            "request_id": request_id,
+            "accepted": true,
+            "note": format!("{status} {}", unanswered_advice(action)),
+        }),
+        false,
+    )
 }
 
 /// How long any action other than `wait` may take to be answered. The daemon
 /// must notice the queued request, run the action (a spawn may provision a
-/// child session) and complete it back to the worker.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// child session) and complete it back to the worker. The worker answers a
+/// little sooner by itself, so it can say whether the daemon picked it up.
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The answer to a `close` Mjolnir has not confirmed within the call's budget.
 ///
@@ -414,17 +496,20 @@ fn call_with_budget(
                 .unwrap_or(false),
         ));
     }
+    let daemon = DaemonContact::from_reply(&reply);
     if let SubagentToolAction::CloseAgent { child_session_id } = &request.action {
-        return Ok((
-            still_closing_reply(
-                &request_id,
-                child_session_id,
-                "Mjolnir took this close but has not confirmed it, so this child is not known to be gone.",
+        let reason = match daemon.and_then(DaemonContact::not_picked_up) {
+            Some(reason) => format!(
+                "{reason} The close is saved and runs when the daemon picks it up, so this child is not known to be gone."
             ),
+            None => "Mjolnir took this close but has not confirmed it, so this child is not known to be gone.".to_owned(),
+        };
+        return Ok((
+            still_closing_reply(&request_id, child_session_id, &reason),
             false,
         ));
     }
-    Ok((pending_reply(&request_id, &request.action), false))
+    Ok(pending_reply(&request_id, &request.action, daemon))
 }
 
 /// Send the request and wait for the worker's answer, reporting progress while
@@ -786,7 +871,8 @@ mod tests {
 
     #[test]
     fn the_pending_reply_sends_the_model_to_list_agents_before_a_retry() {
-        let reply = pending_reply("request-1", &SubagentToolAction::ListAgents);
+        let (reply, is_error) = pending_reply("request-1", &SubagentToolAction::ListAgents, None);
+        assert!(!is_error);
         assert_eq!(reply["request_id"], "request-1");
         assert_eq!(reply["accepted"], true);
         let note = reply["note"].as_str().expect("note text");
@@ -797,6 +883,107 @@ mod tests {
         assert!(
             !note.contains("arrive in"),
             "the note must not promise pushed results: {note}"
+        );
+    }
+
+    /// Answer one spawn the way a worker does when the daemon has not
+    /// finished it: accepted, no result, and what the worker knows about the
+    /// daemon.
+    #[cfg(unix)]
+    fn spawn_answered_by_worker(daemon: Value) -> (Value, bool) {
+        use std::io::{BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut stream = reader.into_inner();
+            let mut body =
+                serde_json::to_vec(&json!({"accepted": true, "daemon": daemon})).unwrap();
+            body.push(b'\n');
+            stream.write_all(&body).unwrap();
+        });
+        let answer = call_with_budget(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i"}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(30),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        answer
+    }
+
+    /// #1197: a parent's spawn and list_agents went unanswered while the
+    /// daemon was stalled, and the model read only "did not answer". When the
+    /// worker reports that the daemon never picked the request up, the model
+    /// is told that, that the spawn is saved and may still start, and not to
+    /// repeat it.
+    #[cfg(unix)]
+    #[test]
+    fn a_spawn_the_daemon_never_picked_up_names_the_daemon_and_forbids_a_repeat() {
+        let (value, is_error) = spawn_answered_by_worker(
+            json!({"picked_up": false, "last_collected_seconds_ago": 140}),
+        );
+        assert!(is_error, "{value}");
+        assert_eq!(value["status"], "not_picked_up", "{value}");
+        let error = value["error"].as_str().expect("error text");
+        assert!(
+            error.contains("has not picked up this request")
+                && error.contains("140 seconds ago")
+                && error.contains("restarting, stalled, or unreachable")
+                && error.contains("do not repeat it")
+                && error.contains("list_agents"),
+            "{error}"
+        );
+
+        let (value, _) = spawn_answered_by_worker(json!({"picked_up": false}));
+        let error = value["error"].as_str().expect("error text");
+        assert!(
+            error.contains("since this session's worker started"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spawn_the_daemon_picked_up_but_did_not_finish_is_still_pending() {
+        let (value, is_error) =
+            spawn_answered_by_worker(json!({"picked_up": true, "last_collected_seconds_ago": 2}));
+        assert!(!is_error, "{value}");
+        assert_eq!(value["accepted"], true);
+        let note = value["note"].as_str().expect("note text");
+        assert!(
+            note.contains("picked up this request but has not finished it")
+                && note.contains("list_agents"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn a_list_the_daemon_never_picked_up_asks_for_a_later_call() {
+        let (reply, is_error) = pending_reply(
+            "request-1",
+            &SubagentToolAction::ListAgents,
+            Some(DaemonContact {
+                picked_up: false,
+                last_collected_seconds_ago: None,
+            }),
+        );
+        assert!(is_error);
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("call it again later"),
+            "{reply}"
         );
     }
 

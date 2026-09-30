@@ -14,7 +14,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::{Instant, sleep_until};
 
-use mj_core::subagent::{MAX_WAIT_SECONDS, SubagentToolRequest, SubagentToolResult};
+use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
+
+use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 /// Register the owned server in Codex's session-private profile. The ACP bridge
@@ -103,12 +105,12 @@ impl Default for SocketAdmission {
     }
 }
 
-/// How long a socket call waits for the daemon's result before giving up and
-/// answering with the "still running" placeholder. The daemon bounds its
-/// longest action (`wait`) to [`MAX_WAIT_SECONDS`], so this ceiling is
-/// only reached if the daemon never answers; it exists so a lost daemon cannot
-/// wedge the socket task forever.
-const SOCKET_WAIT_CEILING: Duration = Duration::from_secs(MAX_WAIT_SECONDS + 60);
+/// How much sooner than the MCP server gives up this worker answers an action
+/// other than `wait` by itself. The MCP server waits
+/// [`crate::subagent_mcp::REPLY_TIMEOUT`]; answering first lets it tell the
+/// model what this worker knows (whether the daemon has picked the request up)
+/// instead of only that nothing came back (#1197).
+const WORKER_REPLY_MARGIN: Duration = Duration::from_secs(10);
 
 /// Slack a `wait` gets on top of the caller's own timeout before this worker
 /// stops waiting for the daemon and answers by itself. It covers the hop that
@@ -122,6 +124,17 @@ struct QueueState {
     requests: BTreeMap<String, SubagentToolRequest>,
     #[serde(default)]
     results: BTreeMap<String, SubagentToolResult>,
+    /// The daemon's reads of this queue since this worker started. It lives
+    /// under the queue's lock so a request is either in a read or after it.
+    #[serde(skip)]
+    collections: Collections,
+}
+
+/// How often and how recently the daemon has read the queue.
+#[derive(Clone, Copy, Debug, Default)]
+struct Collections {
+    count: u64,
+    last: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -187,6 +200,7 @@ impl SubagentEndpoint {
         }
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> (Vec<SubagentToolRequest>, Vec<SubagentToolResult>) {
         let state = self.state.lock().expect("sub-agent queue lock poisoned");
         (
@@ -195,7 +209,44 @@ impl SubagentEndpoint {
         )
     }
 
-    pub fn enqueue(&self, mut request: SubagentToolRequest) -> Result<Option<SubagentToolResult>> {
+    /// The daemon's read of the queue: every queued request and recorded result. It
+    /// also records the read, so a caller still waiting can learn whether the
+    /// daemon has seen its request.
+    pub fn collect_for_daemon(&self) -> (Vec<SubagentToolRequest>, Vec<SubagentToolResult>) {
+        let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        state.collections.count += 1;
+        state.collections.last = Some(Instant::now());
+        (
+            state.requests.values().cloned().collect(),
+            state.results.values().cloned().collect(),
+        )
+    }
+
+    /// Whether the daemon has read the queue after the read numbered `mark`,
+    /// and how long ago it last read it.
+    fn daemon_contact(&self, mark: u64) -> DaemonContact {
+        let collections = self
+            .state
+            .lock()
+            .expect("sub-agent queue lock poisoned")
+            .collections;
+        DaemonContact {
+            picked_up: collections.count > mark,
+            last_collected_seconds_ago: collections.last.map(|last| last.elapsed().as_secs()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn enqueue(&self, request: SubagentToolRequest) -> Result<Option<SubagentToolResult>> {
+        self.enqueue_marked(request).map(|(result, _)| result)
+    }
+
+    /// Queue `request`. Also return any result already recorded for it, and
+    /// the number of daemon reads that happened before it joined the queue.
+    fn enqueue_marked(
+        &self,
+        mut request: SubagentToolRequest,
+    ) -> Result<(Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
         let relay = self
@@ -206,8 +257,9 @@ impl SubagentEndpoint {
             request.originating_command_id = relay.originating_command_id();
         }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        let mark = state.collections.count;
         if let Some(result) = state.results.get(&request.request_id) {
-            return Ok(Some(result.clone()));
+            return Ok((Some(result.clone()), mark));
         }
         let mut next = state.clone();
         next.requests
@@ -215,7 +267,7 @@ impl SubagentEndpoint {
             .or_insert(request);
         self.persist(&next)?;
         *state = next;
-        Ok(None)
+        Ok((None, mark))
     }
 
     pub fn complete(&self, result: SubagentToolResult) -> Result<()> {
@@ -750,6 +802,61 @@ enabled = false
         );
     }
 
+    /// #1197: the MCP server gives up on anything but `wait` after
+    /// `REPLY_TIMEOUT`. This worker answers first, and says whether the daemon
+    /// has read the queue since the request joined it; a read before the
+    /// request does not count.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_request_is_answered_here_with_whether_the_daemon_picked_it_up() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        for daemon_reads_it in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+            endpoint.collect_for_daemon();
+            let socket = directory.path().join("test.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let served = tokio::spawn({
+                let endpoint = endpoint.clone();
+                async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    serve_one(stream, endpoint).await.unwrap();
+                }
+            });
+
+            let mut client = UnixStream::connect(&socket).await.unwrap();
+            let mut body = serde_json::to_vec(&request("r-list")).unwrap();
+            body.push(b'\n');
+            client.write_all(&body).await.unwrap();
+            client.flush().await.unwrap();
+            let started = Instant::now();
+            while endpoint.snapshot().0.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            if daemon_reads_it {
+                endpoint.collect_for_daemon();
+            }
+
+            let mut line = String::new();
+            BufReader::new(&mut client)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            served.await.unwrap();
+            assert!(
+                started.elapsed() < crate::subagent_mcp::REPLY_TIMEOUT,
+                "the worker must answer before the MCP server gives up, took {:?}",
+                started.elapsed()
+            );
+            let reply: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(reply["accepted"], true, "{reply}");
+            assert!(reply.get("result").is_none(), "{reply}");
+            let contact: DaemonContact = serde_json::from_value(reply["daemon"].clone()).unwrap();
+            assert_eq!(contact.picked_up, daemon_reads_it, "{reply}");
+            assert!(contact.last_collected_seconds_ago.is_some(), "{reply}");
+        }
+    }
+
     #[tokio::test]
     async fn a_waiting_socket_call_gives_up_at_its_deadline() {
         let directory = tempfile::tempdir().unwrap();
@@ -768,6 +875,9 @@ struct SocketReply {
     accepted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result: Option<SubagentToolResult>,
+    /// Set only when `result` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon: Option<DaemonContact>,
 }
 
 pub(super) fn serve(
@@ -823,13 +933,13 @@ pub(super) fn serve(
 
 /// How long this worker waits for the daemon before answering by itself. Only
 /// a `wait` has a deadline of the caller's own choosing; every other action is
-/// bounded by the blanket ceiling, because the caller gave no deadline to keep.
+/// answered just before the MCP server would stop listening.
 fn wait_budget(action: &mj_core::subagent::SubagentToolAction) -> Duration {
     match action {
         mj_core::subagent::SubagentToolAction::WaitAgents {
             timeout_seconds, ..
         } => mj_core::subagent::subagent_wait_timeout(*timeout_seconds) + WORKER_WAIT_GRACE,
-        _ => SOCKET_WAIT_CEILING,
+        _ => crate::subagent_mcp::REPLY_TIMEOUT - WORKER_REPLY_MARGIN,
     }
 }
 
@@ -895,7 +1005,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         let body = SocketReply { accepted: false, result: Some(SubagentToolResult {
             request_id: request.request_id, completed_at_ms: mj_core::clock::epoch_millis(),
             is_error: true, message: "Sub-agent request was not accepted: this operation's queue is full; retry later.".into(),
-        }) };
+        }), daemon: None };
         return write_reply(&mut write, body).await;
     };
     // Input acknowledges durable queue admission, not delivery. Keep it pending
@@ -927,7 +1037,8 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         _ => None,
     };
     let started = Instant::now();
-    let result = match endpoint.enqueue(request)? {
+    let (queued, mark) = endpoint.enqueue_marked(request)?;
+    let result = match queued {
         Some(cached) => Some(cached),
         None if queued_input.is_some() => queued_input,
         None => {
@@ -947,11 +1058,16 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
             late_daemon_reply(&request_id, &children, started.elapsed().as_secs())
         })
     });
+    // Without a result, say whether the daemon has picked the request up: a
+    // daemon that is restarting or stalled otherwise looks the same as a slow
+    // action, and the model should act differently on the two.
+    let daemon = result.is_none().then(|| endpoint.daemon_contact(mark));
     write_reply(
         &mut write,
         SocketReply {
             accepted: true,
             result,
+            daemon,
         },
     )
     .await

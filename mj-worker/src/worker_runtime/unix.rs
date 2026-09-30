@@ -1102,7 +1102,7 @@ pub(super) async fn serve_client_with_memory(
                 let protocol_version = envelope.protocol_version;
                 let body = match (&subagents, envelope.request) {
                     (Some(endpoint), RelayRequest::SubagentRequests) => {
-                        let (requests, results) = endpoint.snapshot();
+                        let (requests, results) = endpoint.collect_for_daemon();
                         RelayResponseBody::Ok {
                             payload: RelayResponsePayload::SubagentRequests { requests, results },
                         }
