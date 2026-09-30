@@ -608,3 +608,5 @@ CI after the push: `fbb85556` failed only on macOS (`expired_claude_credentials_
 ### F31 — landed
 
 `9985398a`: the shared `ComboBox` popup draws a scrollbar in its last inner column when the list overflows (the existing `scrollbar_geometry`/`render_scrollbar`, the conversation pane's glyphs: `│`/`▐`, ASCII `|`/`#`); the popup height is unchanged and the selection keeps the thumb in view. Tests: `combobox_popup_draws_a_scrollbar_that_follows_the_selection`, `combobox_popup_scrollbar_is_ascii_under_the_ascii_glyph_set`, `combobox_popup_without_overflow_draws_no_scrollbar`. chat 645, tui 889 green; clippy and fmt clean.
+
+The manually dispatched macOS workflow on `f651860c` succeeded, so the pushed master is green on every lane including macOS.
