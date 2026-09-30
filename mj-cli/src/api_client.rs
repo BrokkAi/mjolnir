@@ -438,6 +438,11 @@ impl ApiClient {
         .await
     }
 
+    pub(crate) async fn usage_tree(&self, parent: &str) -> Result<mj_core::storage::UsageTree> {
+        self.get_json(&format!("/sessions/{parent}/usage/tree"))
+            .await
+    }
+
     pub(crate) async fn diff(
         &self,
         session_id: &str,

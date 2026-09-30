@@ -167,6 +167,7 @@ pub(super) async fn run_daemon_runtime(
             .collect::<BTreeSet<_>>();
         let move_owned = state.recover_moves(move_operations)?;
         state.resume_retained_cleanups();
+        state.resume_startup_cleanups(true);
         state.restore_startup_deliveries(&cancellation).await?;
         Ok::<_, anyhow::Error>((move_sessions, move_owned))
     }
@@ -529,6 +530,7 @@ pub(super) async fn run_daemon_runtime(
                 _ = background_policy_tick.tick() => {
                     progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
+                    state.resume_startup_cleanups(false);
                 }
                 _ = readiness_tick.tick() => {
                     progress.phase(ServingPhase::Readiness);

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -12,8 +12,7 @@ use mj_core::config::{TargetTemplate, atomic_write, data_dir};
 use mj_core::state::{SessionState, State, TargetLocator};
 
 use crate::targets::{
-    self, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage,
-    ProvisionStageGuard,
+    self, CommandExecutor, CommandOutput, CommandSpec, ProvisionStage, ProvisionStageGuard,
 };
 
 use super::backend::{
@@ -140,11 +139,11 @@ impl Controller {
         match result {
             Ok(native_session_id) => {
                 if let Err(error) = grant_commit() {
-                    return Err(self.rollback_failed_new_session(session_id, error, executor)?);
+                    return Err(self.rollback_failed_new_session(session_id, error)?);
                 }
                 self.mark_worker_connected(session_id, native_session_id)
             }
-            Err(error) => Err(self.rollback_failed_new_session(session_id, error, executor)?),
+            Err(error) => Err(self.rollback_failed_new_session(session_id, error)?),
         }
     }
 
@@ -162,86 +161,153 @@ impl Controller {
         // the target, so a transient start failure it could have retried by
         // hand is better retried here.
         let mut attempts: Vec<String> = Vec::new();
-        let (result, placement) = loop {
-            let attempt = self.attempt_subagent_start(session_id, executor).await;
-            let (result, placement) = attempt;
-            let Err(error) = &result else {
-                break (result, placement);
+        loop {
+            let (result, placement) = self.attempt_subagent_start(session_id, executor).await;
+            let error = match result {
+                Ok(native_session_id) => {
+                    return self.mark_worker_connected(session_id, native_session_id);
+                }
+                Err(error) => error,
             };
-            if attempts.len() == 1 || !subagent_start_is_retryable(error) {
-                if !attempts.is_empty() {
-                    let combined = attempts
+            let retry = attempts.is_empty() && subagent_start_is_retryable(&error);
+            let error = match &placement {
+                Some((backend, _)) => {
+                    super::subagent_park::explain_process_exhaustion(error, backend, session_id)
+                }
+                None => error,
+            };
+            attempts.push(format!("{error:#}"));
+            let error = if attempts.len() > 1 {
+                anyhow::anyhow!(
+                    "{}",
+                    attempts
                         .iter()
                         .enumerate()
-                        .map(|(index, attempt)| format!("attempt {}: {attempt}", index + 1))
-                        .chain(std::iter::once(format!(
-                            "attempt {}: {error:#}",
-                            attempts.len() + 1
-                        )))
+                        .map(|(index, error)| format!("attempt {}: {error}", index + 1))
                         .collect::<Vec<_>>()
-                        .join("; ");
-                    break (Err(anyhow::anyhow!("{combined}")), placement);
-                }
-                break (result, placement);
+                        .join("; ")
+                )
+            } else {
+                error
+            };
+            let diagnostic = note_new_session_launch_failure(session_id, &error);
+            let previous = self
+                .state
+                .sessions
+                .get(session_id)
+                .context("failed child disappeared")?
+                .clone();
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = SessionState::StartupCleanup;
+            record.updated_at = now();
+            record.last_error = Some(format!("sub-agent startup failed: {diagnostic}"));
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "record failed startup before teardown",
+            )?;
+            let cleanup = super::failed_launch_cleanup_executor();
+            if let Err(cleanup_error) =
+                self.finish_failed_startup_controlled(session_id, &cleanup, retry)
+            {
+                return Err(error.context(format!(
+                    "startup cleanup remains pending: {cleanup_error:#}"
+                )));
+            }
+            if !retry {
+                return Err(error);
             }
             tracing::warn!(
                 session_id,
                 error = format!("{error:#}"),
-                "sub-agent worker never started; retrying once"
+                "sub-agent worker never started and was stopped; retrying once"
             );
-            attempts.push(format!("{error:#}"));
-            // The next attempt reinstalls the worker files, so stop whatever
-            // the failed one may have left behind first.
-            if let Some((backend, worker_root)) = &placement
-                && let Err(stop_error) =
-                    super::worker_binary::stop_worker(executor, backend, worker_root)
-            {
-                tracing::debug!(
-                    session_id,
-                    error = format!("{stop_error:#}"),
-                    "could not stop the worker of a retried sub-agent start"
-                );
-            }
-        };
-        match result {
-            Ok(native_session_id) => self.mark_worker_connected(session_id, native_session_id),
-            Err(error) => {
-                // Without placement there is no worker to stop.
-                if let Some((backend, worker_root)) = &placement
-                    && let Err(stop_error) =
-                        super::worker_binary::stop_worker(executor, backend, worker_root)
-                {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{stop_error:#}"),
-                        "failed sub-agent worker could not be stopped cleanly"
-                    );
+        }
+    }
+
+    /// Finish a failed startup without reopening its relay or replaying work.
+    pub(crate) fn cleanup_failed_startup_controlled(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        self.finish_failed_startup_controlled(session_id, executor, false)
+    }
+
+    fn finish_failed_startup_controlled(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        retry_after_stop: bool,
+    ) -> Result<()> {
+        let previous = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("cleanup session disappeared")?
+            .clone();
+        ensure!(
+            previous.state == SessionState::StartupCleanup,
+            "session is not awaiting startup cleanup"
+        );
+        let child = self.state.subagents.contains_key(session_id);
+        ensure!(
+            !retry_after_stop || child,
+            "only unaccepted child startup may retry"
+        );
+        let outcome = (|| -> Result<()> {
+            if let Some(locator) = &previous.target {
+                let backend = backend_locator(locator, &previous, &self.config)?;
+                if child {
+                    let root = targets::worker_root(&backend, session_id)?;
+                    super::worker_binary::stop_worker(executor, &backend, &root)?;
+                } else {
+                    targets::close_plan(&backend, session_id)?.execute(executor)?;
                 }
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "sub-agent startup failed"
-                );
-                let record = self
-                    .state
-                    .sessions
-                    .get_mut(session_id)
-                    .context("failed sub-agent session disappeared")?;
-                record.state = SessionState::Error;
-                record.updated_at = super::now();
-                // A container out of process slots is something the parent
-                // can fix, so its `wait` reads that, not the raw failure.
-                let error = match &placement {
-                    Some((backend, _)) => {
-                        super::subagent_park::explain_process_exhaustion(error, backend, session_id)
-                    }
-                    None => error,
+            }
+            if !child {
+                self.cleanup_new_session_worktree_after_failure(session_id, executor)?;
+            }
+            Ok(())
+        })();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.updated_at = now();
+        let cause = previous
+            .last_error
+            .as_deref()
+            .unwrap_or("startup failed")
+            .split("; startup cleanup failed:")
+            .next()
+            .unwrap()
+            .to_owned();
+        match &outcome {
+            Ok(()) => {
+                record.state = if retry_after_stop {
+                    SessionState::Provisioning
+                } else {
+                    SessionState::Error
                 };
-                record.last_error = Some(format!("sub-agent startup failed: {error:#}"));
-                crate::database::save_lifecycle_session(record)?;
-                Err(error)
+                record.last_error = (!retry_after_stop).then_some(cause);
+                if !child {
+                    record.target = None;
+                }
+            }
+            Err(error) => {
+                record.last_error = Some(format!("{cause}; startup cleanup failed: {error:#}"));
             }
         }
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        if outcome.is_ok() && child && !retry_after_stop {
+            record.archived = true;
+        }
+        if let Err(error) = crate::database::save_startup_cleanup_outcome(
+            record,
+            outcome.is_ok() && child && !retry_after_stop,
+        ) {
+            self.state.sessions.insert(session_id.to_owned(), previous);
+            return Err(error).context("record startup cleanup outcome");
+        }
+        outcome
     }
 
     /// One start of a child worker: place it, install its files, and wait for
@@ -293,15 +359,13 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        executor: &impl CommandExecutor,
     ) -> Result<anyhow::Error> {
         self.rollback_failed_new_session_with(
             session_id,
             error,
-            executor,
             // Rollback must remain possible after the foreground operation's
             // cancellation token has been set.
-            &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+            &super::failed_launch_cleanup_executor(),
         )
     }
 
@@ -309,7 +373,6 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        executor: &impl CommandExecutor,
         target_cleanup_executor: &impl CommandExecutor,
     ) -> Result<anyhow::Error> {
         let session = self
@@ -345,15 +408,15 @@ impl Controller {
             })(),
             None => Ok(()),
         };
-        let worktree_cleanup =
-            self.cleanup_new_session_worktree_after_failure(session_id, executor);
-        let cleanup_error = [target_cleanup, worktree_cleanup]
-            .into_iter()
-            .filter_map(Result::err)
-            .map(|error| format!("{error:#}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        if !cleanup_error.is_empty() {
+        // A failed stop leaves the harness able to write its checkout. Keep
+        // that checkout until a later cleanup confirms process termination.
+        let cleanup_error = target_cleanup
+            .and_then(|()| {
+                self.cleanup_new_session_worktree_after_failure(session_id, target_cleanup_executor)
+            })
+            .err()
+            .map(|error| format!("{error:#}"));
+        if let Some(cleanup_error) = &cleanup_error {
             tracing::warn!(
                 session_id,
                 error = %cleanup_error,
@@ -364,7 +427,7 @@ impl Controller {
             &mut self.state,
             session_id,
             &original,
-            (!cleanup_error.is_empty()).then_some(cleanup_error),
+            cleanup_error,
         );
         self.persist_session_state(session_id)?;
         Ok(failure)
@@ -388,7 +451,7 @@ impl Controller {
         match execute_repository_setup(&repositories, executor) {
             Ok(()) => Ok(()),
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
-                Err(self.rollback_failed_new_session(session_id, error, executor)?)
+                Err(self.rollback_failed_new_session(session_id, error)?)
             }
             Err(error) => Err(error),
         }
@@ -688,7 +751,7 @@ impl Controller {
         };
         let result = match result {
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
-                return Err(self.rollback_failed_new_session(session_id, error, executor)?);
+                return Err(self.rollback_failed_new_session(session_id, error)?);
             }
             result => result,
         };
@@ -804,42 +867,8 @@ impl Controller {
                 // The diagnosis reads the worker's state, so it runs before the
                 // worker is stopped.
                 let error = worker_probe_diagnosis(executor, backend, worker_root, error);
-                Err(stop_worker_of_failed_launch(
-                    executor,
-                    backend,
-                    worker_root,
-                    error,
-                ))
+                Err(error)
             }
-        }
-    }
-}
-
-/// A launch that is declared failed must not leave its worker running: each
-/// one would keep a harness and its load on the target, and retries would pile
-/// up. Stop it through the same process-tree stop every other teardown uses.
-/// The worker root stays, because the failure is diagnosed from it, and the
-/// failure says what was done so the record is true about the target (#1192).
-fn stop_worker_of_failed_launch(
-    executor: &impl CommandExecutor,
-    backend: &targets::TargetLocator,
-    worker_root: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    match super::worker_binary::stop_worker(executor, backend, worker_root) {
-        Ok(()) => error.context(format!(
-            "the worker was stopped after the failed launch; its state directory \
-             {worker_root} was kept for diagnosis"
-        )),
-        Err(stop_error) => {
-            tracing::warn!(
-                worker_root,
-                error = format!("{stop_error:#}"),
-                "the worker of a failed launch could not be stopped"
-            );
-            error.context(format!(
-                "the worker could not be stopped after the failed launch: {stop_error:#}"
-            ))
         }
     }
 }
@@ -968,7 +997,7 @@ fn apply_new_session_provisioning_result(
 /// record is true while the rollback removes that target.
 fn apply_failed_new_session_launch(state: &mut State, session_id: &str, original_error: &str) {
     let record = state.sessions.get_mut(session_id).unwrap();
-    record.state = SessionState::Error;
+    record.state = SessionState::StartupCleanup;
     record.updated_at = now();
     record.last_error = Some(format!("worker bootstrap failed: {original_error}"));
 }
@@ -993,7 +1022,7 @@ pub(super) fn apply_failed_new_session_rollback(
                 "{original_error}; cleanup of the failed session target failed: {cleanup_error}"
             );
             let record = state.sessions.get_mut(session_id).unwrap();
-            record.state = SessionState::Error;
+            record.state = SessionState::StartupCleanup;
             record.updated_at = now();
             record.last_error = Some(format!("worker bootstrap failed: {failure}"));
             anyhow::anyhow!(failure)

@@ -6106,3 +6106,32 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
     assert_eq!(members(&destination.id), ["session-1"]);
     assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
 }
+
+#[tokio::test]
+async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() {
+    assert!(!lifecycle_cancellable(
+        LifecycleKind::StartupCleanup,
+        Some(SessionState::StartupCleanup)
+    ));
+    assert!(!lifecycle_cancellable(
+        LifecycleKind::Create,
+        Some(SessionState::StartupCleanup)
+    ));
+    let state = test_runtime_state();
+    let result = state
+        .start_or_join_lifecycle(
+            "failed-startup".into(),
+            LifecycleKind::StartupCleanup,
+            |_state, _id, _cancelled| async {
+                // A process-tree stop exceeds the former one-second join window.
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+                Ok(DaemonLifecycleResult::Done)
+            },
+        )
+        .unwrap();
+    state.cancel_and_wait_lifecycles().await.unwrap();
+    assert!(matches!(
+        RuntimeState::wait_lifecycle_result(result).await.unwrap(),
+        DaemonLifecycleResult::Done
+    ));
+}

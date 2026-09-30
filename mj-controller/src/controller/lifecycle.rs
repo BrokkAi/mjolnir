@@ -1263,7 +1263,7 @@ impl Controller {
 /// its worker was stopped when it was recorded as failed (I1-2).
 pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> bool {
     match session.state {
-        SessionState::Provisioning | SessionState::Parked => true,
+        SessionState::Provisioning | SessionState::Parked | SessionState::StartupCleanup => true,
         SessionState::Error if subagent => true,
         SessionState::Closing
         | SessionState::Destroying

@@ -510,6 +510,75 @@ impl RuntimeState {
         Ok(caller_result)
     }
 
+    /// Recovery is teardown only: never reconnect or reprovision a failed worker.
+    pub(super) fn resume_startup_cleanups(self: &Arc<Self>, immediately: bool) {
+        let ids = {
+            let owner = self.owner();
+            owner
+                .controller()
+                .state
+                .sessions
+                .values()
+                .filter(|session| {
+                    session.state == SessionState::StartupCleanup
+                        && !owner
+                            .lifecycle
+                            .get(&session.id)
+                            .is_some_and(|operation| operation.is_running())
+                        && (immediately
+                            || chrono::DateTime::parse_from_rfc3339(&session.updated_at)
+                                .map(|at| {
+                                    (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                                        .num_seconds()
+                                        >= 30
+                                })
+                                .unwrap_or(true))
+                })
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for session_id in ids {
+            let result = self.start_or_join_lifecycle(
+                session_id.clone(),
+                LifecycleKind::StartupCleanup,
+                |_state, session_id, _cancelled| async move {
+                    blocking(move || {
+                        let mut controller = Controller::load()?;
+                        // The decision follows lifecycle admission, so a competing
+                        // close or destroy cannot settle this snapshot under us.
+                        if controller
+                            .state
+                            .sessions
+                            .get(&session_id)
+                            .is_none_or(|record| record.state != SessionState::StartupCleanup)
+                        {
+                            return Ok(DaemonLifecycleResult::Done);
+                        }
+                        let executor = crate::controller::failed_launch_cleanup_executor();
+                        controller.cleanup_failed_startup_controlled(&session_id, &executor)?;
+                        Ok(DaemonLifecycleResult::Done)
+                    })
+                    .await
+                },
+            );
+            match result {
+                Ok(result) => {
+                    let state = self.clone();
+                    let completed = result.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = Self::wait_lifecycle_result(result).await {
+                            tracing::warn!(%session_id, error=format!("{error:#}"), "failed startup cleanup remains pending; retry in 30s");
+                        }
+                        state.remove_completed_lifecycle(&completed);
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(%session_id, error=format!("{error:#}"), "startup cleanup admission deferred")
+                }
+            }
+        }
+    }
+
     pub(super) fn resume_retained_cleanups(self: &Arc<Self>) {
         let session_ids = self
             .owner()

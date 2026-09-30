@@ -242,6 +242,7 @@ enum LifecycleKind {
     /// `send_input`.
     Unpark,
     Cleanup,
+    StartupCleanup,
 }
 
 impl LifecycleKind {
@@ -273,6 +274,7 @@ impl LifecycleKind {
             LifecycleKind::Park => "park",
             LifecycleKind::Unpark => "restart",
             LifecycleKind::Cleanup => "cleanup",
+            LifecycleKind::StartupCleanup => "failed startup cleanup",
         }
     }
 }
@@ -313,7 +315,9 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 /// A park and an unpark belong to the parent's sub-agent tools: a person ends
 /// either by closing the child, which waits for them.
 fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
-    !(kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying)
+    !(state == Some(SessionState::StartupCleanup)
+        || kind == LifecycleKind::StartupCleanup
+        || kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying)
         || matches!(
             kind,
             LifecycleKind::StopSubagent | LifecycleKind::Park | LifecycleKind::Unpark
@@ -544,7 +548,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             // the resume it is; neither needs a wire kind of its own.
             LifecycleKind::StopSubagent | LifecycleKind::Park => Self::StopSubagent,
             LifecycleKind::Unpark => Self::Resume,
-            LifecycleKind::Cleanup => Self::Cleanup,
+            LifecycleKind::Cleanup | LifecycleKind::StartupCleanup => Self::Cleanup,
         }
     }
 }

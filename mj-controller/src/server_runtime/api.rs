@@ -1484,6 +1484,13 @@ fn subagent_status(
     // as something the parent is done with while its teardown is still running.
     // A record that already settled to `Stopped` is left alone, exactly as the
     // daemon's viewer projection leaves it.
+    if record.is_some_and(|record| record.state == SessionState::StartupCleanup) {
+        return (
+            "stopping".into(),
+            record.and_then(|record| record.last_error.clone()),
+            false,
+        );
+    }
     if closing && record.is_some_and(|record| record.state != SessionState::Stopped) {
         return ("stopping".into(), None, false);
     }

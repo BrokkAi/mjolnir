@@ -904,6 +904,57 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;"))?;
     }
 
+    // Breaking: accounting is owned by durable session identities. Older
+    // projection writers cannot capture selections or preserve tree identity.
+    if version < 67 {
+        connection.execute_batch("BEGIN IMMEDIATE;
+            ALTER TABLE session_turn_usage RENAME TO old_session_turn_usage;
+            CREATE TABLE session_turn_usage (
+                session_id TEXT NOT NULL REFERENCES session_contexts(session_id),
+                command_id TEXT NOT NULL,
+                completed_ordinal INTEGER NOT NULL,
+                turn_start_position INTEGER,
+                body TEXT NOT NULL,
+                PRIMARY KEY(session_id, command_id)
+            );
+            INSERT INTO session_turn_usage SELECT * FROM old_session_turn_usage;
+            DROP TABLE old_session_turn_usage;
+            CREATE INDEX session_turn_usage_order ON session_turn_usage(session_id, completed_ordinal);
+            ALTER TABLE session_provider_cost RENAME TO old_session_provider_cost;
+            CREATE TABLE session_provider_cost (
+                session_id TEXT PRIMARY KEY REFERENCES session_contexts(session_id),
+                body TEXT NOT NULL
+            );
+            INSERT INTO session_provider_cost SELECT * FROM old_session_provider_cost;
+            DROP TABLE old_session_provider_cost;
+            CREATE TABLE subagent_accounting (
+                child_session_id TEXT PRIMARY KEY REFERENCES session_contexts(session_id),
+                parent_session_id TEXT NOT NULL REFERENCES session_contexts(session_id),
+                task_name TEXT NOT NULL,
+                CHECK(child_session_id <> parent_session_id)
+            ) STRICT;
+            CREATE INDEX subagent_accounting_parent ON subagent_accounting(parent_session_id);
+            INSERT INTO subagent_accounting SELECT child_session_id, parent_session_id,
+                json_extract(record_json, '$.task_name') FROM subagent_sessions;
+            CREATE TABLE session_turn_selections (
+                session_id TEXT NOT NULL REFERENCES session_contexts(session_id),
+                command_id TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                PRIMARY KEY(session_id, command_id)
+            ) STRICT;
+            UPDATE schema_compatibility SET minimum_compatible_version = 67 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (67, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 67;
+            COMMIT;")?;
+    }
+
+    // Breaking: older daemons cannot decode or resume startup teardown, and
+    // would release capacity or provision over a surviving failed worker.
+    if version < 68 {
+        migrate_startup_cleanup_state(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -990,6 +1041,66 @@ fn migrate_parked_session_state(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+// Rebuild from the stored definition so every shipped column and trigger survives.
+fn migrate_startup_cleanup_state(connection: &Connection) -> Result<()> {
+    const BEFORE: &str = "'stopped','parked','lost',";
+    const AFTER: &str = "'stopped','parked','startup-cleanup','lost',";
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        let sql: String = transaction.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='sessions'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (_, definition) = sql
+            .split_once('(')
+            .context("missing sessions table definition")?;
+        if !definition.contains(AFTER) {
+            ensure!(
+                definition.matches(BEFORE).count() == 1,
+                "unexpected sessions state constraint"
+            );
+            let definition = definition.replace(BEFORE, AFTER);
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name='sessions'
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE sessions_startup_cleanup_v68 ({definition};
+                 INSERT INTO sessions_startup_cleanup_v68 SELECT * FROM sessions;
+                 DROP TABLE sessions;
+                 ALTER TABLE sessions_startup_cleanup_v68 RENAME TO sessions;"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+            ensure!(
+                !transaction
+                    .prepare("PRAGMA foreign_key_check")?
+                    .exists([])?,
+                "foreign key violation in the startup-cleanup migration"
+            );
+        }
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 68
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (68, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 68;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate the sessions state constraint for failed startup cleanup")?;
+    restored.context("restore foreign key enforcement after the startup-cleanup migration")?;
+    Ok(())
+}
+
 /// Create an empty store at the baseline revision in one immediate transaction.
 /// The revision is read again under the write lock, so a second process that
 /// raced to create the same store finds it already created.
@@ -1058,7 +1169,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
-        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; PRAGMA user_version=63;").unwrap();
+        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
@@ -1155,9 +1266,65 @@ mod reader_tests {
         }
     }
 
+    #[test]
+    fn accounting_migration_preserves_usage_and_changes_its_deletion_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migration.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("legacy_v1.sql"))
+            .unwrap();
+        connection.execute_batch("INSERT INTO session_contexts VALUES ('old-session','project','2026-01-01T00:00:00Z');
+            INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+            VALUES ('old-session','Retain usage','codex','codex','local','error','2026-01-01T00:00:00Z');
+            CREATE TRIGGER stop_before_accounting BEFORE INSERT ON schema_migrations WHEN NEW.version=67
+            BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;").unwrap();
+        super::super::legacy_schema::migrate_to_baseline(&connection).unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch(
+                "ROLLBACK; DROP TRIGGER stop_before_accounting;
+            INSERT INTO session_turn_usage VALUES ('old-session','turn',7,1,'{}');
+            INSERT INTO session_provider_cost VALUES ('old-session','{\"amount\":1}');",
+            )
+            .unwrap();
+        drop(connection);
+        let writer = open_writer(&path).unwrap();
+        writer
+            .execute("DELETE FROM sessions WHERE session_id='old-session'", [])
+            .unwrap();
+        for table in ["session_turn_usage", "session_provider_cost"] {
+            assert_eq!(
+                writer
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, u64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            writer
+                .query_row("SELECT body FROM session_turn_usage", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "{}"
+        );
+        assert!(
+            !writer
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        assert_eq!(
+            read_schema_state(&writer).unwrap().minimum_compatible,
+            Some(SCHEMA_VERSION)
+        );
+    }
+
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 66 removes the saved runtime constraint.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 66;
+    /// `SCHEMA_VERSION`. Migration 68 introduces durable startup cleanup.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 68;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -1167,6 +1334,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 67 {
+            connection.execute_batch("DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET;").unwrap();
+        }
         connection
             .execute_batch(&format!("PRAGMA user_version = {version};"))
             .unwrap();
@@ -1205,7 +1375,7 @@ mod reader_tests {
              DROP TABLE subagent_preference;
              DELETE FROM schema_migrations WHERE version >= 56;
              UPDATE schema_compatibility SET minimum_compatible_version = 55;
-             PRAGMA user_version = 55;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 55;",
             )
             .unwrap();
         drop(connection);
@@ -1242,7 +1412,7 @@ mod reader_tests {
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
              UPDATE schema_compatibility SET minimum_compatible_version = 47;
-             PRAGMA user_version = 47;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 47;",
             )
             .unwrap();
         drop(connection);
@@ -1274,7 +1444,7 @@ mod reader_tests {
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
              DELETE FROM schema_migrations WHERE version >= 46;
              UPDATE schema_compatibility SET minimum_compatible_version = 44;
-             PRAGMA user_version = 45;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 45;",
             )
             .unwrap();
         forget_verified_schema(&path);
@@ -1308,7 +1478,7 @@ mod reader_tests {
              DROP TABLE native_agent_replay;
              DELETE FROM schema_migrations WHERE version >= 39;
              UPDATE schema_compatibility SET minimum_compatible_version = 32;
-             PRAGMA user_version = 38;
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 38;
              COMMIT;",
             )
             .unwrap();

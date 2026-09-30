@@ -31,6 +31,8 @@ pub use session_move::*;
 #[serde(rename_all = "kebab-case")]
 pub enum SessionState {
     Provisioning,
+    /// Startup failed; teardown owns the target until termination is confirmed.
+    StartupCleanup,
     Running,
     Disconnected,
     Checkpointing,
@@ -714,6 +716,7 @@ impl SessionState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Provisioning => "provisioning",
+            Self::StartupCleanup => "startup-cleanup",
             Self::Running => "running",
             Self::Disconnected => "disconnected",
             Self::Checkpointing => "checkpointing",
@@ -732,6 +735,7 @@ impl SessionState {
     pub fn from_stored(value: &str) -> Option<Self> {
         Some(match value {
             "provisioning" => Self::Provisioning,
+            "startup-cleanup" => Self::StartupCleanup,
             "running" => Self::Running,
             "disconnected" => Self::Disconnected,
             "checkpointing" => Self::Checkpointing,
@@ -751,6 +755,7 @@ impl SessionState {
     pub const fn transition_kind(self) -> Option<SessionTransitionKind> {
         match self {
             Self::Provisioning => Some(SessionTransitionKind::Starting),
+            Self::StartupCleanup => Some(SessionTransitionKind::Stopping),
             Self::Closing => Some(SessionTransitionKind::Suspending),
             Self::Destroying => Some(SessionTransitionKind::Destroying),
             _ => None,
@@ -767,6 +772,7 @@ impl SessionState {
         matches!(
             self,
             Self::Provisioning
+                | Self::StartupCleanup
                 | Self::Running
                 | Self::Disconnected
                 | Self::Checkpointing
@@ -784,6 +790,7 @@ impl SessionState {
         matches!(
             self,
             Self::Provisioning
+                | Self::StartupCleanup
                 | Self::Running
                 | Self::Disconnected
                 | Self::Checkpointing

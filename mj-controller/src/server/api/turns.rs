@@ -338,6 +338,17 @@ pub(super) async fn usage(
     Ok(Json(page))
 }
 
+pub(super) async fn usage_tree(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<crate::database::UsageTree>, ApiFailure> {
+    let tree = backend(&state)?
+        .usage_tree(session_id)
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("no accounting identity exists for that session"))?;
+    Ok(Json(tree))
+}
+
 pub(super) async fn transcript(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

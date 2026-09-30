@@ -2193,7 +2193,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 }
 // Subagent model discovery runs in the daemon that owns the profile cache.
 // Session creation no longer accepts a runtime identity constraint.
-pub const PROTOCOL_VERSION: u32 = 46;
+// Failed startup retains target ownership until process teardown completes.
+pub const PROTOCOL_VERSION: u32 = 47;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

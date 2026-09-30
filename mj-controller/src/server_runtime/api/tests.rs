@@ -3350,3 +3350,28 @@ async fn an_id_less_wait_answers_at_once_when_nothing_is_running() {
     assert_eq!(listed["agents"][0]["state"], "completed", "{listed}");
     assert_eq!(listed["agents"][0]["output"], "Done.", "{listed}");
 }
+
+#[test]
+fn startup_cleanup_is_unfinished_even_after_startup_delivery_failed() {
+    let mut record = crate::controller::test_support::checkpoint_test_session("child");
+    record.state = SessionState::StartupCleanup;
+    record.last_error = Some("launch cancelled; cleanup failed: host unreachable".into());
+    let status = StartStatus::Failed {
+        message: "startup refused".into(),
+    };
+    let (state, output, finished) = subagent_status(
+        Some(&record),
+        None,
+        Some(&status),
+        None,
+        false,
+        &ChildProgress::settled(ReportState::Fallback),
+    );
+    assert_eq!(state, "stopping");
+    assert_eq!(output, record.last_error);
+    assert!(!finished);
+    assert_eq!(
+        implicit_wait_set(&[("child".into(), state, finished)]),
+        vec!["child"]
+    );
+}

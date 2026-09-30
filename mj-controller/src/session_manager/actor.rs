@@ -12,6 +12,7 @@ fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
     matches!(
         state,
         SessionState::Error
+            | SessionState::StartupCleanup
             | SessionState::Lost
             | SessionState::Stopped
             | SessionState::Parked

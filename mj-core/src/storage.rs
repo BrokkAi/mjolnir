@@ -255,6 +255,9 @@ pub struct UsageCoverage {
     pub last_request_reports: u64,
     pub unspecified_reports: u64,
     pub missing_reports: u64,
+    /// Started turns for which no completion report has been recorded.
+    #[serde(default)]
+    pub unfinished_turns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +278,51 @@ pub struct UsagePage {
     pub coverage: UsageCoverage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_cost: Option<ProviderCost>,
+    #[serde(default)]
+    pub turn_selections: BTreeMap<String, UsageSelection>,
+    #[serde(default)]
+    pub by_model: Vec<UsageModelTotal>,
+}
+
+/// Configuration observed when a turn started. None means unknown, not zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UsageSelection {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageModelTotal {
+    #[serde(flatten)]
+    pub selection: UsageSelection,
+    pub totals: BTreeMap<String, UsageCounterTotal>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub totals: BTreeMap<String, UsageCounterTotal>,
+    pub coverage: UsageCoverage,
+    pub by_model: Vec<UsageModelTotal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_cost: Option<ProviderCost>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageTreeSession {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub task_name: Option<String>,
+    pub operational_session_present: bool,
+    #[serde(flatten)]
+    pub summary: UsageSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageTree {
+    pub parent_session_id: String,
+    pub sessions: Vec<UsageTreeSession>,
+    #[serde(flatten)]
+    pub summary: UsageSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

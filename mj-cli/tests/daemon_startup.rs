@@ -76,6 +76,12 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     connection
         .execute_batch(
             "DROP TABLE quota_reset_cache;
+         DROP TABLE subagent_accounting;
+         DROP TABLE session_turn_selections;
+         PRAGMA writable_schema=ON;
+         UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
+             WHERE type='table' AND name='sessions';
+         PRAGMA writable_schema=RESET;
          DELETE FROM schema_migrations WHERE version > 43;
          UPDATE schema_compatibility SET minimum_compatible_version = 43;
          PRAGMA user_version = 43;",

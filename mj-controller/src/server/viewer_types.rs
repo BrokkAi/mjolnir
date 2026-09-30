@@ -1016,7 +1016,9 @@ impl ViewerLifecycleCategory {
             | SessionState::Disconnected
             | SessionState::Checkpointing
             | SessionState::Parked => Self::Live,
-            SessionState::Closing | SessionState::Destroying => Self::Suspending,
+            SessionState::Closing | SessionState::Destroying | SessionState::StartupCleanup => {
+                Self::Suspending
+            }
             SessionState::Stopped => Self::Suspended,
             SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
                 Self::Failed

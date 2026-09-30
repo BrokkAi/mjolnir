@@ -36,6 +36,7 @@ pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bo
         && !matches!(
             session.state,
             SessionState::Error
+                | SessionState::StartupCleanup
                 | SessionState::Provisioning
                 | SessionState::Destroying
                 | SessionState::Parked

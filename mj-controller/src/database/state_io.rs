@@ -200,6 +200,7 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
         insert_session(&tx, session)?;
     }
     for subagent in state.subagents.values() {
+        super::usage::record_child_accounting(&tx, subagent)?;
         let record_json = serde_json::to_string(subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(

@@ -1,7 +1,6 @@
 //! Managed worktrees and raw-to-workspace project conversion.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -12,9 +11,7 @@ use mj_core::state::{
     ProjectSourceIdentity, SessionRecord,
 };
 
-use crate::targets::{
-    self, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
-};
+use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 pub(super) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
@@ -393,7 +390,7 @@ impl Controller {
         Ok(true)
     }
 
-    fn cleanup_new_session_worktree(
+    pub(super) fn cleanup_new_session_worktree_after_failure(
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
@@ -409,20 +406,6 @@ impl Controller {
         // A session that never started has a branch Mjolnir just created and
         // nobody has worked on, so the rollback takes the branch too.
         cleanup_managed_worktree(executor, worktree, BranchDisposition::Delete)
-    }
-
-    pub(super) fn cleanup_new_session_worktree_after_failure(
-        &self,
-        session_id: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<()> {
-        if executor.cancellation_requested() {
-            let cleanup_executor =
-                CancellableProcessExecutor::with_timeout(Duration::from_secs(15));
-            self.cleanup_new_session_worktree(session_id, &cleanup_executor)
-        } else {
-            self.cleanup_new_session_worktree(session_id, executor)
-        }
     }
 }
 

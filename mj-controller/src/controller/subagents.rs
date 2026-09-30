@@ -186,6 +186,10 @@ impl Controller {
             "only Claude and Codex sessions can spawn sub-agents"
         );
         ensure_parent_may_delegate(&parent)?;
+        ensure!(
+            parent.state != SessionState::StartupCleanup,
+            "parent startup cleanup is pending"
+        );
         if let Some(mj_core::subagent::SubagentPolicy::SingleModel { model, effort }) =
             &parent.subagents
         {
@@ -365,7 +369,9 @@ fn live_subagent_state(session: &SessionRecord) -> &'static str {
     match session.state {
         SessionState::Provisioning => "starting",
         SessionState::Checkpointing => "checkpointing",
-        SessionState::Closing | SessionState::Destroying => "stopping",
+        SessionState::Closing | SessionState::Destroying | SessionState::StartupCleanup => {
+            "stopping"
+        }
         SessionState::Disconnected => "disconnected",
         _ => match crate::database::load_materialized_session_summary(&session.id) {
             Ok(Some(summary))

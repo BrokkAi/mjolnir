@@ -89,6 +89,7 @@ pub(crate) fn attention_level(
             return AttentionLevel::Failed;
         }
         SessionState::Disconnected => return AttentionLevel::Unreachable,
+        SessionState::StartupCleanup => return AttentionLevel::Failed,
         // A parked sub-agent is idle by definition: its turn ended, its parent
         // was told, and it has no worker to report anything else.
         SessionState::Parked => return AttentionLevel::Idle,
