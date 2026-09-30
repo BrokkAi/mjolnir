@@ -347,9 +347,16 @@ impl SessionHandle {
         key: String,
         value: String,
     ) -> Result<u64> {
-        let ordinal = self
-            .submit(command_id.clone(), RelayCommand::SetConfig { key, value })
-            .await?;
+        self.apply_configuration_command(command_id, RelayCommand::SetConfig { key, value })
+            .await
+    }
+
+    async fn apply_configuration_command(
+        &self,
+        command_id: String,
+        command: RelayCommand,
+    ) -> Result<u64> {
+        let ordinal = self.submit(command_id.clone(), command).await?;
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if let Some(error) = self.backend.config_result(command_id.clone()).await? {
@@ -380,6 +387,10 @@ impl SessionHandle {
         control: mj_core::acp::PlanControl,
     ) -> Result<()> {
         match control {
+            mj_core::acp::PlanControl::RestoreExecutionMode => self
+                .apply_configuration_command(command_id, RelayCommand::RestoreExecutionMode)
+                .await
+                .map(|_| ()),
             mj_core::acp::PlanControl::SetConfig { key, value } => self
                 .set_config_with_id(command_id, key, value)
                 .await

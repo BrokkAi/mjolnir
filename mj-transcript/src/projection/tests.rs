@@ -35,6 +35,37 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
 }
 
 #[test]
+fn execution_mode_restoration_reports_durable_success_and_failure_to_clients() {
+    let session = MaterializedSession::empty("restore-mode");
+    for (observation, expected) in [
+        (
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: Some(RelayCommandKind::RestoreExecutionMode),
+                command_id: "restore-mode".into(),
+                outcome: RelayCommandOutcome::Configured,
+            },
+            None,
+        ),
+        (
+            RelayObservation::CommandRejected {
+                reason: None,
+                command_id: "restore-mode".into(),
+                command: RelayCommandKind::RestoreExecutionMode,
+                message: "auto mode refused".into(),
+            },
+            Some("auto mode refused".to_owned()),
+        ),
+    ] {
+        let projected = project_relay_event(&session, &event(&session, observation)).unwrap();
+        assert_eq!(
+            projected.mutation.config_results,
+            [("restore-mode".into(), expected)]
+        );
+    }
+}
+
+#[test]
 fn configuration_replacement_preserves_goals_and_removes_obsolete_adapter_settings() {
     let mut session = MaterializedSession::empty("goal-config");
     apply_observation(&mut session, RelayObservation::SessionUpdate {

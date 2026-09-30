@@ -272,6 +272,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | RelayCommand::CancelTurnFor { .. }
                 | RelayCommand::ClearContext
                 | RelayCommand::GoalControl { .. }
+                | RelayCommand::RestoreExecutionMode
                 | RelayCommand::SetSessionMode { .. } => {
                     snapshot.continuation.suppressed = true;
                     snapshot.continuation.quota_suppressed = true;
@@ -608,6 +609,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     snapshot.config.insert("mode".to_owned(), mode_id);
                 }
+                (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => {}
                 (
                     RelayCommand::SeedAssessmentContext { .. }
                     | RelayCommand::InstallPromptContext { .. },
@@ -1323,6 +1325,7 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
             | RelayCommand::Cancel
             | RelayCommand::CancelTurn
             | RelayCommand::SetConfig { .. }
+            | RelayCommand::RestoreExecutionMode
             | RelayCommand::GoalControl { .. }
             | RelayCommand::SetSessionMode { .. }
             | RelayCommand::Close { .. }

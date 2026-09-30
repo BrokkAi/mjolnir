@@ -193,6 +193,7 @@ pub(crate) fn move_refuses_command(session_id: &str, command: &RelayCommand) -> 
             RelayCommand::Prompt { .. }
                 | RelayCommand::SetConfig { .. }
                 | RelayCommand::SetSessionMode { .. }
+                | RelayCommand::RestoreExecutionMode
                 | RelayCommand::RunUserShell { .. }
                 | RelayCommand::CancelUserShell { .. }
                 | RelayCommand::Cancel
