@@ -393,20 +393,6 @@ impl DashboardContext {
 }
 
 impl DashboardContext {
-    /// Republishes what the pollers should watch, leaving out sessions a
-    /// lifecycle operation currently owns.
-    pub(crate) fn refresh_poll_targets(&self) {
-        let controller = self
-            .polling_records
-            .borrow_mut()
-            .controller(&self.controller);
-        refresh_dashboard_poll_targets(
-            &controller,
-            &self.resource_targets_tx,
-            &self.lifecycle_operations.keys().cloned().collect(),
-        );
-    }
-
     /// Retires the chat and attachments captured when the lifecycle began.
     ///
     /// Pause and destroy retire that session's actor. Resume starts a new one,

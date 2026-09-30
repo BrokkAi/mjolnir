@@ -2484,148 +2484,6 @@ fn remote_podman_is_ssh_plus_podman_not_remote_api() {
     );
 }
 
-#[test]
-fn remote_podman_resource_probe_uses_ssh_and_container_cgroups() {
-    let locator = TargetLocator::SshPodman {
-        borrowed_from: None,
-        ssh: ssh(),
-        container_id: resource_name(SESSION).unwrap(),
-        workspace_storage: Default::default(),
-    };
-
-    let probe = resource_probe(&locator, SESSION).unwrap();
-
-    assert_eq!(probe.memory.program, "ssh");
-    assert!(
-        probe
-            .memory
-            .args
-            .last()
-            .unwrap()
-            .contains("memory.swap.current")
-    );
-    assert_eq!(probe.disk.as_ref().unwrap().program, "ssh");
-    assert!(
-        probe
-            .disk
-            .as_ref()
-            .unwrap()
-            .args
-            .last()
-            .unwrap()
-            .contains("'podman' 'container' 'inspect' '--size'")
-    );
-}
-
-#[test]
-fn ec2_resource_probe_reads_host_pressure_and_session_disk() {
-    let locator = TargetLocator::AwsEc2 {
-        profile: "default".to_owned(),
-        region: "us-east-1".to_owned(),
-        instance_id: "i-0123456789abcdef0".to_owned(),
-        ssh: ssh(),
-        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
-    };
-
-    let probe = resource_probe(&locator, SESSION).unwrap();
-
-    assert_eq!(probe.memory.program, "ssh");
-    assert!(probe.memory.args.last().unwrap().contains("MemAvailable"));
-    assert_eq!(probe.disk.as_ref().unwrap().program, "ssh");
-    assert!(
-        probe
-            .disk
-            .as_ref()
-            .unwrap()
-            .args
-            .last()
-            .unwrap()
-            .contains(&format!(".local/share/hel/workspaces/{SESSION}"))
-    );
-}
-
-#[test]
-fn parses_cgroup_memory_swap_and_writable_disk_usage() {
-    let usage = parse_resource_usage(
-            b"cpu.percent=37.4\nmemory.current=1073741824\nmemory.max=2147483648\nmemory.swap.current=4096\nmemory.swap.max=max\n",
-            Some(b"8192\n"),
-        )
-        .unwrap();
-
-    assert_eq!(usage.cpu_percent, Some(37));
-    assert_eq!(usage.memory_current_bytes, 1_073_741_824);
-    assert_eq!(usage.memory_limit_bytes, Some(2_147_483_648));
-    assert_eq!(usage.swap_current_bytes, Some(4_096));
-    assert_eq!(usage.swap_limit_bytes, None);
-    assert_eq!(usage.writable_disk_bytes, Some(8_192));
-}
-
-#[test]
-fn a_disk_probe_that_answered_garbage_is_a_failure_not_unknown_usage() {
-    let memory = b"memory.current=1073741824\n";
-
-    // A probe that never ran leaves the usage unknown.
-    let unknown = parse_resource_usage(memory, None).unwrap();
-    assert_eq!(unknown.writable_disk_bytes, None);
-
-    // A probe that ran and answered something that is not a byte count
-    // measured nothing, and must not be reported as usage.
-    let error = parse_resource_usage(memory, Some(b"du: cannot access\n")).unwrap_err();
-    assert!(
-        error.to_string().contains("instead of a byte count"),
-        "{error}"
-    );
-    assert!(parse_resource_usage(memory, Some(b"")).is_err());
-}
-
-#[test]
-fn the_ec2_disk_probe_fails_instead_of_undercounting_an_unreadable_path() {
-    let directory = tempfile::tempdir().unwrap();
-    let measured = directory.path().join("workspace");
-    fs::create_dir_all(&measured).unwrap();
-    fs::write(measured.join("file"), vec![0_u8; 64 * 1024]).unwrap();
-    let missing = directory.path().join("never-created");
-    let disk_probe = |paths: &[&Path]| {
-        let mut args = vec![
-            "-c".to_owned(),
-            AWS_SESSION_DISK_USAGE_SCRIPT.to_owned(),
-            "sh".to_owned(),
-        ];
-        args.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
-        ProcessExecutor
-            .execute(&CommandSpec::new("sh", args).purpose("test the EC2 session disk probe"))
-            .unwrap()
-    };
-
-    let measured_only = disk_probe(&[&measured]);
-    assert_eq!(measured_only.status, 0);
-    let bytes = parse_disk_usage(&measured_only.stdout).unwrap();
-    // `du -sk` counts allocated blocks, which sparse, compressed, or FUSE
-    // development filesystems can report far below a file's apparent size.
-    // Compare against the same measurement instead of assuming block
-    // granularity, so the probe is checked on what it aggregates.
-    let du = CommandSpec::new("du", ["-sk", measured.to_str().unwrap()])
-        .purpose("measure the disk-probe fixture");
-    let du_output = ProcessExecutor.execute(&du).unwrap();
-    let measured_kib: u64 = String::from_utf8_lossy(&du_output.stdout)
-        .split_whitespace()
-        .next()
-        .and_then(|kib| kib.parse().ok())
-        .expect("du reports the fixture's KiB");
-    assert!(bytes > 0, "the probe must see the written file");
-    assert_eq!(bytes, measured_kib * 1024);
-
-    // One unreadable path must fail the probe rather than quietly reporting
-    // the total of the paths that did answer.
-    let with_missing = disk_probe(&[&measured, &missing]);
-    assert_ne!(with_missing.status, 0);
-    assert!(
-        String::from_utf8_lossy(&with_missing.stderr).contains("never-created"),
-        "the failure must name the path: {}",
-        String::from_utf8_lossy(&with_missing.stderr)
-    );
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn host_capacity_counts_zfs_arc_above_its_minimum_as_available_memory() {
@@ -4637,7 +4495,7 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
 }
 
 #[test]
-fn ssh_docker_reconnect_recovery_and_metrics_use_remote_docker() {
+fn ssh_docker_reconnect_and_recovery_use_remote_docker() {
     let locator = TargetLocator::SshDocker {
         borrowed_from: None,
         ssh: ssh(),
@@ -4645,14 +4503,12 @@ fn ssh_docker_reconnect_recovery_and_metrics_use_remote_docker() {
     };
     let reconnect = reconnect_plan(&locator, SESSION).unwrap();
     let recovery = target_recovery_plan(&locator, SESSION).unwrap().unwrap();
-    let resource = resource_probe(&locator, SESSION).unwrap();
-    for command in reconnect.commands.iter().chain([
-        &recovery.exists,
-        &recovery.inspect,
-        &recovery.start,
-        &resource.memory,
-        resource.disk.as_ref().unwrap(),
-    ]) {
+    for command in
+        reconnect
+            .commands
+            .iter()
+            .chain([&recovery.exists, &recovery.inspect, &recovery.start])
+    {
         assert_eq!(command.program, "ssh");
         assert!(command.args.last().unwrap().contains("docker"));
         assert!(!command.args.last().unwrap().contains("podman"));

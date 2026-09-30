@@ -10,27 +10,6 @@ pub(crate) fn take_pollability_visits() -> usize {
     POLLABILITY_VISITS.with(|visits| visits.replace(0))
 }
 
-pub(super) fn dashboard_resource_targets(controller: &Controller) -> Vec<ResourcePollTarget> {
-    controller
-        .state
-        .sessions
-        .values()
-        .filter(|session| session_resources_are_sampled(session))
-        .filter_map(|session| {
-            match controller.resource_probe(&session.id) {
-                Ok(probe) => Some(ResourcePollTarget {
-                    session_id: session.id.clone(),
-                    probe,
-                }),
-                Err(error) => {
-                    tracing::warn!(session_id = %session.id, "could not build resource poll target: {error:#}");
-                    None
-                }
-            }
-        })
-        .collect()
-}
-
 /// `is_active` means visible on the active dashboard, not necessarily backed
 /// by a live target. A recoverable error stays visible so the user can resume
 /// its checkpoint, but its failed target must not keep reconnecting or being
@@ -64,32 +43,6 @@ pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bo
         && session.target.is_some()
 }
 
-/// Whether the resource poller samples this session: its target is live
-/// (see [`session_target_is_pollable`]) and has something to measure. A bare
-/// target runs the worker straight on its host, with no container or
-/// instance of its own, and `targets::resource_probe` refuses it. It is
-/// skipped here, silently: asking would fail and warn on every poll (R7-3).
-fn session_resources_are_sampled(session: &mj_core::state::SessionRecord) -> bool {
-    session_target_is_pollable(session)
-        && !matches!(
-            session.target,
-            Some(
-                mj_core::state::TargetLocator::LocalBare { .. }
-                    | mj_core::state::TargetLocator::SshBare { .. }
-            )
-        )
-}
-
-pub fn refresh_dashboard_poll_targets(
-    controller: &Controller,
-    resource_targets_tx: &tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
-    excluded_sessions: &std::collections::BTreeSet<String>,
-) {
-    let mut resource_targets = dashboard_resource_targets(controller);
-    resource_targets.retain(|target| !excluded_sessions.contains(&target.session_id));
-    resource_targets_tx.send_replace(resource_targets);
-}
-
 pub fn spawn_aws_resource_options_resolution(
     config: Config,
     target_id: String,
@@ -117,127 +70,4 @@ pub fn spawn_aws_resource_options_resolution(
         }
         drop(guard);
     });
-}
-
-pub fn spawn_dashboard_resource_poller() -> (
-    tokio::sync::watch::Sender<Vec<ResourcePollTarget>>,
-    tokio::sync::mpsc::Sender<String>,
-    tokio::sync::mpsc::Receiver<ResourcePollUpdate>,
-) {
-    let (targets_tx, mut targets_rx) =
-        tokio::sync::watch::channel(Vec::<ResourcePollTarget>::new());
-    let (triggers_tx, mut triggers_rx) = tokio::sync::mpsc::channel(64);
-    let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        let mut targets = std::collections::BTreeMap::new();
-        let mut last_started = std::collections::BTreeMap::new();
-        let mut interval = tokio::time::interval(RESOURCE_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let due = targets.values().cloned().collect::<Vec<_>>();
-                    for target in due {
-                        schedule_resource_sample(target, &mut last_started, &updates_tx);
-                    }
-                }
-                changed = targets_rx.changed() => {
-                    if changed.is_err() {
-                        tracing::debug!("resource poll target feed closed; stopping resource poller");
-                        break;
-                    }
-                    targets = targets_rx
-                        .borrow_and_update()
-                        .iter()
-                        .cloned()
-                        .map(|target| (target.session_id.clone(), target))
-                        .collect();
-                    last_started.retain(|session_id, _| targets.contains_key(session_id));
-                    let due = targets.values().cloned().collect::<Vec<_>>();
-                    for target in due {
-                        schedule_resource_sample(target, &mut last_started, &updates_tx);
-                    }
-                }
-                session_id = triggers_rx.recv() => {
-                    let Some(session_id) = session_id else {
-                        break;
-                    };
-                    if let Some(target) = targets.get(&session_id).cloned() {
-                        schedule_resource_sample(target, &mut last_started, &updates_tx);
-                    }
-                }
-            }
-        }
-    });
-    (targets_tx, triggers_tx, updates_rx)
-}
-
-pub(super) fn resource_sample_is_due(
-    last_started: Option<&tokio::time::Instant>,
-    now: tokio::time::Instant,
-) -> bool {
-    last_started.is_none_or(|started| now.duration_since(*started) >= RESOURCE_POLL_INTERVAL)
-}
-
-pub(super) fn schedule_resource_sample(
-    target: ResourcePollTarget,
-    last_started: &mut std::collections::BTreeMap<String, tokio::time::Instant>,
-    updates: &tokio::sync::mpsc::Sender<ResourcePollUpdate>,
-) {
-    let now = tokio::time::Instant::now();
-    if !resource_sample_is_due(last_started.get(&target.session_id), now) {
-        return;
-    }
-    last_started.insert(target.session_id.clone(), now);
-    let updates = updates.clone();
-    tokio::spawn(async move {
-        let usage = match tokio::time::timeout(
-            RESOURCE_POLL_TIMEOUT,
-            collect_session_resource_usage(&target.probe),
-        )
-        .await
-        {
-            Ok(Ok(usage)) => Some(usage),
-            Ok(Err(error)) => {
-                tracing::warn!(session_id = %target.session_id, "resource probe failed: {error:#}");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(session_id = %target.session_id, "resource probe timed out");
-                None
-            }
-        };
-        let Some(usage) = usage else {
-            return;
-        };
-        if let Err(error) = updates
-            .send(ResourcePollUpdate {
-                session_id: target.session_id.clone(),
-                usage,
-            })
-            .await
-        {
-            tracing::debug!(session_id = %target.session_id, %error, "resource probe result dropped after dashboard shutdown");
-        }
-    });
-}
-
-pub(super) async fn collect_session_resource_usage(
-    probe: &SessionResourceProbe,
-) -> Result<SessionResourceUsage> {
-    let memory = execute_resource_command(&probe.memory).await?;
-    let disk = match &probe.disk {
-        Some(command) => match execute_resource_command(command).await {
-            Ok(output) => Some(output),
-            Err(error) => {
-                tracing::debug!(purpose = %command.purpose, "optional disk resource probe failed: {error:#}");
-                None
-            }
-        },
-        None => None,
-    };
-    crate::targets::parse_resource_usage(
-        &memory.stdout,
-        disk.as_ref().map(|output| output.stdout.as_slice()),
-    )
 }

@@ -96,18 +96,6 @@ impl WorkerDiagnosisTracker {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ResourcePollTarget {
-    pub(super) session_id: String,
-    pub(super) probe: SessionResourceProbe,
-}
-
-#[derive(Debug)]
-pub struct ResourcePollUpdate {
-    pub session_id: String,
-    pub usage: SessionResourceUsage,
-}
-
 #[derive(Debug)]
 pub struct CapacityPollUpdate {
     pub target_id: String,

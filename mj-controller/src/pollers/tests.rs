@@ -152,7 +152,6 @@ fn podman_controller(state: SessionState) -> Controller {
 fn recoverable_error_session_stays_out_of_live_target_pollers() {
     let running = podman_controller(SessionState::Running);
     assert_eq!(dashboard_worker_targets(&running).len(), 1);
-    assert_eq!(dashboard_resource_targets(&running).len(), 1);
     assert_eq!(credential_sync_targets(&running).len(), 1);
 
     let recoverable_error = podman_controller(SessionState::Error);
@@ -173,7 +172,6 @@ fn recoverable_error_session_stays_out_of_live_target_pollers() {
         "an errored session is not dialed even while its target exists"
     );
     assert!(dashboard_worker_targets(&recoverable_error).is_empty());
-    assert!(dashboard_resource_targets(&recoverable_error).is_empty());
     assert!(credential_sync_targets(&recoverable_error).is_empty());
 }
 
@@ -199,7 +197,6 @@ fn a_parked_sub_agent_stays_out_of_live_target_pollers_and_startup_repair() {
             .any(session_target_is_pollable)
     );
     assert!(dashboard_worker_targets(&parked).is_empty());
-    assert!(dashboard_resource_targets(&parked).is_empty());
     assert!(credential_sync_targets(&parked).is_empty());
     assert!(interrupted_suspend_session_ids(&parked).is_empty());
     assert!(unowned_interrupted_lifecycles(&parked, &Default::default()).is_empty());
@@ -232,49 +229,6 @@ fn startup_finishes_only_destroys_that_failed() {
 /// used to log one warning each time (455 in 15 minutes with 12 sessions).
 /// Its worker is still polled.
 #[test]
-fn a_bare_session_is_left_out_of_resource_sampling_without_a_warning() {
-    let mut controller = podman_controller(SessionState::Running);
-    controller.config.targets.insert(
-        "local-bare".into(),
-        mj_core::config::TargetTemplate::LocalBare,
-    );
-    for id in controller
-        .state
-        .sessions
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        let session = controller
-            .state
-            .sessions
-            .get_mut(&id)
-            .expect("collected session");
-        session.target_template_id = "local-bare".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
-            worker_root: PathBuf::from("/tmp/mj-workers").join(&session.id),
-        });
-    }
-
-    let log = crate::test_log::CapturedLog::default();
-    let resource_targets =
-        tracing::subscriber::with_default(log.clone(), || dashboard_resource_targets(&controller));
-    assert!(resource_targets.is_empty());
-    let warnings = log.at_or_above(tracing::Level::WARN);
-    assert!(warnings.is_empty(), "{warnings:#?}");
-    assert_eq!(
-        dashboard_worker_targets(&controller).len(),
-        1,
-        "the worker of a bare session is still polled"
-    );
-}
-
-/// A session gets its `target` as soon as the target exists, which is
-/// before its worker binary has finished being copied into place. Polling
-/// that window runs `execve` on a file `cp` still holds open for writing:
-/// `ETXTBSY`, and a session recorded as unreachable while it was merely
-/// still being built.
-#[test]
 fn a_provisioning_session_is_not_polled_before_its_worker_exists() {
     let provisioning = podman_controller(SessionState::Provisioning);
     assert!(
@@ -286,13 +240,11 @@ fn a_provisioning_session_is_not_polled_before_its_worker_exists() {
     );
 
     assert!(dashboard_worker_targets(&provisioning).is_empty());
-    assert!(dashboard_resource_targets(&provisioning).is_empty());
 
     // Provisioning connects to its own worker and then marks the session
     // running, which is when there is something to poll.
     let running = podman_controller(SessionState::Running);
     assert_eq!(dashboard_worker_targets(&running).len(), 1);
-    assert_eq!(dashboard_resource_targets(&running).len(), 1);
 }
 
 #[test]
@@ -317,7 +269,6 @@ fn failed_destruction_stays_out_of_pollers_without_an_active_lifecycle() {
     let excluded = std::collections::BTreeSet::new();
     for _ in 0..3 {
         assert!(dashboard_worker_targets_excluding(&controller, &excluded).is_empty());
-        assert!(dashboard_resource_targets(&controller).is_empty());
         assert!(credential_sync_targets(&controller).is_empty());
     }
     let closing = podman_controller(SessionState::Closing);
@@ -692,19 +643,6 @@ fn quota_refresh_requests_exclude_disabled_profiles() {
             .collect::<Vec<_>>(),
         ["codex"]
     );
-}
-
-#[test]
-fn resource_samples_are_throttled_to_one_per_minute() {
-    let started = tokio::time::Instant::now();
-    assert!(!resource_sample_is_due(
-        Some(&started),
-        started + Duration::from_secs(59),
-    ));
-    assert!(resource_sample_is_due(
-        Some(&started),
-        started + RESOURCE_POLL_INTERVAL,
-    ));
 }
 
 struct PendingCapacityProbe {
