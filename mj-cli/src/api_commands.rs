@@ -119,7 +119,7 @@ pub(crate) struct NewArgs {
     #[arg(long)]
     effort: Option<String>,
     /// Delegation policy. Omitted uses the selected profile's setting.
-    #[arg(long, value_parser = ["native", "single-model"])]
+    #[arg(long, value_parser = ["native", "single-model", "none"])]
     subagents: Option<String>,
     /// Fixed child model, required with --subagents single-model.
     #[arg(long, requires = "subagents")]
@@ -707,6 +707,7 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     }
     Ok(match args.subagents.as_deref() {
         Some("native") => Some(SubagentPolicy::Native),
+        Some("none") => Some(SubagentPolicy::None),
         Some("single-model") => Some(SubagentPolicy::SingleModel {
             model: args
                 .subagent_model
@@ -1945,6 +1946,10 @@ mod tests {
             Some(SubagentPolicy::Native)
         );
         assert_eq!(
+            parse(&["--subagents", "none"]).unwrap(),
+            Some(SubagentPolicy::None)
+        );
+        assert_eq!(
             parse(&[
                 "--subagents",
                 "single-model",
@@ -1962,8 +1967,12 @@ mod tests {
         for args in [
             &["--mj-subagents"][..],
             &["--native-subagents"],
+            &["--subagents", "all-models"],
             &["--subagents", "single-model"],
             &["--subagents", "native", "--subagent-model", "model"],
+            &["--subagents", "native", "--subagent-effort", "high"],
+            &["--subagents", "none", "--subagent-model", "model"],
+            &["--subagents", "none", "--subagent-effort", "high"],
         ] {
             assert!(parse(args).is_err());
         }

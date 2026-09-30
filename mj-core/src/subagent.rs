@@ -102,7 +102,7 @@ pub fn deserialize_launch_policy<'de, D: serde::Deserializer<'de>>(
     Ok(deserialize_optional_policy(deserializer)?.unwrap_or_default())
 }
 
-pub const PROFILE_HELP: &str = "Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
+pub const PROFILE_HELP: &str = "Configure the fixed subagent model and effort in Settings → Agent Profiles → a profile → Sub-agents, or override them for a new session with --subagent-model and --subagent-effort. Mjolnir chooses an eligible profile offering that selection by remaining quota. Configure additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
 
 /// Choices before a parent session exists, using the same eligibility as spawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

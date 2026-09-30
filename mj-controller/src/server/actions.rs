@@ -25,7 +25,7 @@ pub enum ControllerAction {
         /// revision for a raw managed worktree.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
-        /// Omitted reuses the last accepted top-level session choice.
+        /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// Which workspace the session belongs to. Optional on the wire so a
