@@ -284,6 +284,9 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
                     &mut environment,
                     std::env::vars(),
                 );
+                if let WorkerCommand::Run { root, .. } = &args.command {
+                    mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
+                }
             }
             environment.extend(launch.target_environment);
         }

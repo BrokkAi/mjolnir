@@ -86,8 +86,9 @@ fn carries_image_variable(name: &str) -> bool {
         || name.starts_with("MJ_")
         // Shell bookkeeping the login shell already re-derives for itself.
         || matches!(name, "_" | "SHLVL" | "PWD" | "OLDPWD")
-        // Tokens flow through the controller's own credential channel, not the
-        // image contract, and are stripped from some child contexts.
+        // Tokens flow through the session's token file, not the image
+        // contract: the worker keeps the container's token there before its
+        // re-exec, and the controller's credential sync updates it.
         || matches!(name, "GH_TOKEN" | "GITHUB_TOKEN"))
 }
 
