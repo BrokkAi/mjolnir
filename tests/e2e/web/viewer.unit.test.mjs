@@ -250,10 +250,13 @@ test('entering Review does not wait for project preflight', async () => {
   assert.equal(draft.step, 1, 'failure stays on Review for retry');
 });
 
-test('the create payload carries a sub-agent choice only for Claude and Codex', async () => {
+test('the create payload uses the selected profile sub-agent policy', async () => {
   const posted = [];
   const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
-    snapshot: { profiles: [{ id: profileId, harness_kind: harnessKind }] },
+    snapshot: { profiles: [
+      { id: 'other', harness_kind: 'claude', subagents: { mode: 'native' } },
+      { id: profileId, harness_kind: harnessKind, subagents },
+    ] },
     newDraft: {
       workspaceId: 'test',
       preflighted: true,
@@ -264,7 +267,8 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
       title: '',
       worktreeOptions: { available: false, default_create: false },
       createManagedWorktree: false,
-      subagents,
+      // Old drafts must not override the policy saved on the selected profile.
+      subagents: { mode: 'none' },
     },
     pendingNewPreflight: null,
     targetIsBare: () => false,
@@ -276,15 +280,15 @@ test('the create payload carries a sub-agent choice only for Claude and Codex', 
   });
 
   for (const [kind, choice, expected] of [
-    ['claude', { mode: 'all_models' }, { mode: 'all_models' }],
+    ['claude', { mode: 'single_model', model: 'sonnet', effort: 'high' }, { mode: 'single_model', model: 'sonnet', effort: 'high' }],
     ['claude', { mode: 'native' }, { mode: 'native' }],
-    ['codex', { mode: 'none' }, { mode: 'none' }],
-    ['grok', { mode: 'all_models' }, null],
-    ['kimi', { mode: 'native' }, null],
+    ['codex', { mode: 'single_model', model: 'gpt', effort: null }, { mode: 'single_model', model: 'gpt', effort: null }],
+    ['grok', { mode: 'native' }, { mode: 'native' }],
+    ['kimi', undefined, { mode: 'native' }],
   ]) {
     const context = makeContext('profile', kind, choice);
     context.newDraft.committing = false;
-    vm.runInContext(sourceBetween('/// Only Claude and Codex receive', '\nfunction targetIsBare('), context);
+    vm.runInContext(sourceBetween('function profileSubagents(', '\nfunction targetIsBare('), context);
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
     assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);

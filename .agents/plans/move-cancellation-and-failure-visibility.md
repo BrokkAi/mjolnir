@@ -20,7 +20,7 @@ Private paths and credentials must not enter the public error for a live session
 - [x] (2026-09-30) Focused tests passed: two outcome tests, one ACP/relay cancellation test, and both controller Close regressions.
 - [x] (2026-09-30) Commit the fix separately as 4cd9c35e; integrate upstream in e9022119.
 - [x] (2026-09-30) Complete full dev tests and all-targets Clippy before publication; formatting, docs, and all 70 browser unit tests also pass.
-- [ ] Validate the subsequent integration of upstream 91929a04 (profile defaults and wizards), then publish to origin/master.
+- [ ] Validate the subsequent integration of upstream 91929a04 (profile defaults and wizards) before publication.
 
 ## Surprises & Discoveries
 
@@ -186,3 +186,9 @@ implementation commit. Only the two original timing edits remain uncommitted.
 
 Revision note (2026-09-30): publication found another concurrent upstream batch;
 merge it without changing branches and validate the new combination.
+
+Revision note (2026-09-30): the newly merged profile-policy UI removed the old
+per-session sub-agent chooser but left its browser payload test unchanged.
+Update that behavioral regression to exercise the selected profile's Native or
+SingleModel policy, including a legacy profile without the field, and prove a
+stale draft cannot override it. Commit this integration-test correction separately.
