@@ -1,0 +1,138 @@
+{
+  "id": "E06",
+  "title": "Project-naming advice is answered before optional implementation",
+  "category": "optional-implementation-offer",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "ba55fe3e43207548125cdf15471f218c",
+    "session_title": "hel via claude2",
+    "reply_position": 1792,
+    "captured_at": "2026-08-17T04:33:57.048Z",
+    "note": "The user asks how to name imported projects from the git repository name. The assistant recommends a naming rule, then offers to implement it and asks for config only for a separate reuse diagnosis."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:12",
+          "role": "user",
+          "text": "a. i feel like we should be able to resume a containerized session onto a compatible raw checkout, how should we make that work? b. are containerized sesions always bundle even w/ just one root? if so, should probably special-case that"
+        },
+        {
+          "id": "user:412",
+          "role": "user",
+          "text": "2. yes but resume-into-existing-worktree should be allowed like new-from-worktree right?"
+        },
+        {
+          "id": "user:439",
+          "role": "user",
+          "text": "fac ita"
+        },
+        {
+          "id": "agent:563",
+          "role": "assistant",
+          "text": "Implementation is underway. Recap of what's happening and the plan:\n\n**Design locked in:**\n- Resume gains an optional project directory. Supplying one for a bundle-session resume onto a bare target flips the session to raw shape, then reuses the creation-time flavor rule unchanged: a primary checkout gets a managed worktree (`.hel/worktrees/<session_id>`, branch `hel/<session_id>`), a linked worktree is used in place — exactly matching \"new-from-worktree\".\n- The restore spec gains per-repository overrides (destination, branch, `existing_checkout`) so the archived state lands in the user's checkout and the harness cwd rewrite follows it.\n- In-place restores get hard pre-flight gates before anything is mutated: clean tracked tree, commit availability (`git bundle verify` / head reachable, with one fetch-origin retry), local-branch ancestry, and untracked-file collision scan.\n- Two v1 restrictions: single-repository sessions only, and the selected directory must be the repo root (patches and the untracked tar are repo-root-relative).\n- Two safety fixes folded in: `connect_local_repositories` must skip raw-shaped sessions (otherwise a flipped session's bundle config could rewire the user checkout's origin to the hel-local proxy), and a failed resume cleans up a worktree it created before rolling back.\n\nAn Opus agent is now implementing the restore layer and controller changes with tests (no commit — I review first). The TUI step (project-directory prompt in the resume wizard, reusing the existing new-session directory input) comes after that review, since it depends on the controller API. I'll report back when the core implementation lands.Implementation is underway. Recap of what's happening and the plan:\n\n**Design locked in:**\n- Resume gains an optional project directory. Supplying one for a bundle-session resume onto a bare target flips the session to raw shape, then reuses the creation-time flavor rule unchanged: a primary checkout gets a managed worktree (`.hel/worktrees/<session_id>`, branch `hel/<session_id>`), a linked worktree is used in place — exactly matching \"new-from-worktree\".\n- The restore spec gains per-repository overrides (destination, branch, `existing_checkout`) so the archived state lands in the user's checkout and the harness cwd rewrite follows it.\n- In-place restores get hard pre-flight gates before anything is mutated: clean tracked tree, commit availability (`git bundle verify` / head reachable, with one fetch-origin retry), local-branch ancestry, and untracked-file collision scan.\n- Two v1 restrictions: single-repository sessions only, and the selected directory must be the repo root (patches and the untracked tar are repo-root-relative).\n- Two safety fixes folded in: `connect_local_repositories` must skip raw-shaped sessions (otherwise a flipped session's bundle config could rewire the user checkout's origin to the hel-local proxy), and a failed resume cleans up a worktree it created before rolling back.\n\nAn Opus agent is now implementing the restore layer and controller changes with tests (no commit — I review first). The TUI step (project-directory prompt in the resume wizard, reusing the existing new-session directory input) comes after that review, since it depends on the controller API. I'll report back when the core implementation lands."
+        },
+        {
+          "id": "agent:1005",
+          "role": "assistant",
+          "text": "Phases 1–2 are done and all tests pass. Now the review pass — this is the part I own. Let me read the actual diff.Phases 1–2 are done and all tests pass. Now the review pass — this is the part I own. Let me read the actual diff."
+        },
+        {
+          "id": "agent:1039",
+          "role": "assistant",
+          "text": "The diffs read well. Two load-bearing claims to verify myself — the pre-existing `connect_local_repositories` guard and the resume-rollback worktree cleanup — then I'll run the validation.The diffs read well. Two load-bearing claims to verify myself — the pre-existing `connect_local_repositories` guard and the resume-rollback worktree cleanup — then I'll run the validation."
+        },
+        {
+          "id": "agent:1067",
+          "role": "assistant",
+          "text": "All validation passes: rustfmt clean, clippy clean, 782 tests green. Committing the core, then launching the TUI phase.All validation passes: rustfmt clean, clippy clean, 782 tests green. Committing the core, then launching the TUI phase."
+        },
+        {
+          "id": "agent:1106",
+          "role": "assistant",
+          "text": "The core is committed as `abc918c` and validated — I reviewed the full diff myself, confirmed the two \"already handled\" claims in the code (the live-record guard in `connect_local_repositories` and the rollback's worktree cleanup), and re-ran the suite: rustfmt, clippy, and all 782 tests clean.\n\nWhat landed:\n\n- **Restore layer** (`hel_checkpoint.rs`, `hel_archive.rs`): the restore spec gains per-repository overrides — destination, branch, and an `existing_checkout` flag. Overrides are applied in one place so the git restore and the harness cwd rewrite agree on where the checkout lives. For checkouts Hel doesn't own, all pre-flight gates run before anything is mutated: clean tracked tree, checkpoint commits present (`git bundle verify` or head-commit check, with one repair fetch from origin), no diverged same-named local branch, no untracked-file collisions.\n- **Controller** (`hel_controller.rs`): resume accepts an optional project directory for a bundle session on a bare target. It validates up front (single-repository checkpoint, absolute path, repository root), flips the session to raw shape, and lets provisioning apply the same flavor rule as creation — primary checkout gets a managed worktree on `hel/<session-id>`, a linked worktree is restored in place on the archived branch. A failed resume rolls back the flip and removes a worktree it created; the end-to-end test proves this against the real database and real git.\n\nAn Opus agent is now building the TUI piece: the resume wizard gets the project-directory step (reusing the new-session wizard's input, history, and async validation) when a bundle session is resumed onto a bare target, with empty input on SSH-bare meaning today's fresh-clone behavior. I'll review, validate, and commit that when it reports back.The core is committed as `abc918c` and validated — I reviewed the full diff myself, confirmed the two \"already handled\" claims in the code (the live-record guard in `connect_local_repositories` and the rollback's worktree cleanup), and re-ran the suite: rustfmt, clippy, and all 782 tests clean.\n\nWhat landed:\n\n- **Restore layer** (`hel_checkpoint.rs`, `hel_archive.rs`): the restore spec gains per-repository overrides — destination, branch, and an `existing_checkout` flag. Overrides are applied in one place so the git restore and the harness cwd rewrite agree on where the checkout lives. For checkouts Hel doesn't own, all pre-flight gates run before anything is mutated: clean tracked tree, checkpoint commits present (`git bundle verify` or head-commit check, with one repair fetch from origin), no diverged same-named local branch, no untracked-file collisions.\n- **Controller** (`hel_controller.rs`): resume accepts an optional project directory for a bundle session on a bare target. It validates up front (single-repository checkpoint, absolute path, repository root), flips the session to raw shape, and lets provisioning apply the same flavor rule as creation — primary checkout gets a managed worktree on `hel/<session-id>`, a linked worktree is restored in place on the archived branch. A failed resume rolls back the flip and removes a worktree it created; the end-to-end test proves this against the real database and real git.\n\nAn Opus agent is now building the TUI piece: the resume wizard gets the project-directory step (reusing the new-session wizard's input, history, and async validation) when a bundle session is resumed onto a bare target, with empty input on SSH-bare meaning today's fresh-clone behavior. I'll review, validate, and commit that when it reports back."
+        },
+        {
+          "id": "agent:1443",
+          "role": "assistant",
+          "text": "TUI phase is done; now my review pass on that diff.TUI phase is done; now my review pass on that diff."
+        },
+        {
+          "id": "agent:1476",
+          "role": "assistant",
+          "text": "The extraction preserves the original input behavior and error strings verbatim. Running the validation suite.The extraction preserves the original input behavior and error strings verbatim. Running the validation suite."
+        },
+        {
+          "id": "agent:1495",
+          "role": "assistant",
+          "text": "The feature is complete: two commits on master, both reviewed by me and fully validated (rustfmt, clippy `-D warnings`, 791 tests passing).\n\n**`abc918c` — Resume a container session onto a raw checkout** (restore layer + controller)\n- The restore spec gains per-repository overrides: destination, branch, and an `existing_checkout` flag. One rewrite point feeds both the git restore and the harness cwd rewrite, so Claude/Kimi/Codex session state follows the checkout to its real path.\n- Resume accepts an optional project directory when the archived session was a container session and the target is bare. The session flips to raw shape and provisioning applies the same flavor rule as creation: a primary checkout gets a managed worktree on `hel/<session-id>`; a linked worktree is restored in place on the archived branch — the symmetry with new-from-worktree you asked for.\n- In-place restores are gated before anything is touched: clean tracked tree, checkpoint commits present (`git bundle verify` or head-commit check, one repair fetch from origin), no diverged same-named local branch, no untracked-file collisions. All gates run across the board before any mutation, so a refusal leaves the checkout untouched.\n- A failed resume rolls back the flip and removes a worktree it created; an end-to-end test proves this against the real database and real git, including that the persisted target row transitions from container to `local-bare` cleanly.\n\n**`f08d2dd` — Resume wizard checkout step** (TUI)\n- Resuming a single-repository container session onto a bare target adds a checkout step: required on local-bare, optional on ssh-bare where an empty field keeps today's fresh-clone behavior. The review step shows where state will land, and validation stays on the async action round-trip (no event-loop blocking).\n- Multi-repository sessions get an inline error on local-bare and keep the fresh-clone path on ssh-bare.\n- The project-directory input (history, prefill, path checks, async validation) is now one shared component between the new-session and resume wizards instead of a near-duplicate.\n\nThe v1 limits we agreed on are enforced with plain error messages: single-repository sessions only, and the selected directory must be the repository root (patches and the untracked tar are repo-root-relative). Natural follow-ups if you want them later: multi-root support via a per-root directory mapping, and letting the harness cwd be a subdirectory of the restored repo. Nothing has been pushed.The feature is complete: two commits on master, both reviewed by me and fully validated (rustfmt, clippy `-D warnings`, 791 tests passing).\n\n**`abc918c` — Resume a container session onto a raw checkout** (restore layer + controller)\n- The restore spec gains per-repository overrides: destination, branch, and an `existing_checkout` flag. One rewrite point feeds both the git restore and the harness cwd rewrite, so Claude/Kimi/Codex session state follows the checkout to its real path.\n- Resume accepts an optional project directory when the archived session was a container session and the target is bare. The session flips to raw shape and provisioning applies the same flavor rule as creation: a primary checkout gets a managed worktree on `hel/<session-id>`; a linked worktree is restored in place on the archived branch — the symmetry with new-from-worktree you asked for.\n- In-place restores are gated before anything is touched: clean tracked tree, checkpoint commits present (`git bundle verify` or head-commit check, one repair fetch from origin), no diverged same-named local branch, no untracked-file collisions. All gates run across the board before any mutation, so a refusal leaves the checkout untouched.\n- A failed resume rolls back the flip and removes a worktree it created; an end-to-end test proves this against the real database and real git, including that the persisted target row transitions from container to `local-bare` cleanly.\n\n**`f08d2dd` — Resume wizard checkout step** (TUI)\n- Resuming a single-repository container session onto a bare target adds a checkout step: required on local-bare, optional on ssh-bare where an empty field keeps today's fresh-clone behavior. The review step shows where state will land, and validation stays on the async action round-trip (no event-loop blocking).\n- Multi-repository sessions get an inline error on local-bare and keep the fresh-clone path on ssh-bare.\n- The project-directory input (history, prefill, path checks, async validation) is now one shared component between the new-session and resume wizards instead of a near-duplicate.\n\nThe v1 limits we agreed on are enforced with plain error messages: single-repository sessions only, and the selected directory must be the repository root (patches and the untracked tar are repo-root-relative). Natural follow-ups if you want them later: multi-root support via a per-root directory mapping, and letting the harness cwd be a subdirectory of the restored repo. Nothing has been pushed."
+        },
+        {
+          "id": "user:1620",
+          "role": "user",
+          "text": "how do we auto-name projects for the dashboard\n\ni resumed a session from raw to container and it got named `import-$projectname`, i'd prefer just $projectname [i.e. git repo name]"
+        },
+        {
+          "id": "agent:1669",
+          "role": "assistant",
+          "text": "Now let me check the current state of the repo — the raw→container resume path may have landed after our work — and find exactly which flow produced the name."
+        },
+        {
+          "id": "agent:1792",
+          "role": "assistant",
+          "text": "Here's the full picture — the name has two layers, and the `import-` prefix comes from the bundle-id generator in the import flow.\n\n**How dashboard project names are derived.** The session list and chat header call `SessionRecord::project_name` (`src/hel_state.rs:552-571`), which tries in order:\n\n1. managed worktree → directory name of the source repository\n2. raw session → directory name of `project_directory`\n3. bundle session → directory name of the configured bundle's primary repository `destination`\n4. fallback when the bundle id isn't in config → the bundle id itself\n\nOther surfaces — the new-session wizard's project picker and the wizard review's `Project:` row (`crates/hel-tui/src/lib.rs:5993`) — show the **bundle id** directly.\n\n**Where the bundle id comes from.** Raw→container goes through the import machinery, and `resolve_bundle` (`src/hel_import.rs:2009-2095`) names the synthesized bundle: sanitized repo directory name (`setup_style_id`), then `unique_bundle_id` (`src/hel_import.rs:2157-2172`), which on a name collision produces `import-<name>`, then `import-<name>-2`, and so on. That's your `import-$projectname` — confirmed as the only source of that prefix in the codebase.\n\n**Why it collided at all.** The prefix only appears when a bundle named `$projectname` already exists in your config but wasn't reused. Reuse requires an *exact* match (`bundle_matches`, `src/hel_import.rs:2097-2114`): same set of repository identities and the same primary as the session's detected git roots. Likely mismatch causes (can't confirm without your config): the existing bundle records the repo one way (`github:` owner/repo) while detection classified your checkout the other way (`local:` path, e.g. no or non-GitHub origin), you imported from a different clone path than the recorded `local:` one, or the session had edited files in a different set of git roots than the bundle lists.\n\nOne nuance: in the current code the session list would usually still display `$projectname` even for bundle `import-$projectname`, because arm 3 uses the repo *destination* (`hel`), not the bundle id. So you either hit the fallback (arm 4) or you're seeing the bundle id surface (picker/review) — either way the ugly part is that the id `import-$projectname` now lives permanently in your config and every surface that shows ids exposes it.\n\n**Recommendation:** change `unique_bundle_id` to drop the `import-` prefix and disambiguate with numeric suffixes only — `hel`, `hel-2`, `hel-3`. That keeps the name recognizable and sorts next to its sibling. Separately, it's worth checking why your existing bundle wasn't reused — reuse is the better outcome than a second bundle, and if the cause is identity classification (github vs local), `bundle_matches` could be taught to treat them as equivalent when they point at the same repository. If you want, I'll make the `unique_bundle_id` change now and, if you paste the relevant bundle from your config, diagnose the reuse failure too."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "how do we auto-name projects for the dashboard\n\ni resumed a session from raw to container and it got named `import-$projectname`, i'd prefer just $projectname [i.e. git repo name]",
+    "assistant_text_tail": "_style_id`), then `unique_bundle_id` (`src/hel_import.rs:2157-2172`), which on a name collision produces `import-<name>`, then `import-<name>-2`, and so on. That's your `import-$projectname` — confirmed as the only source of that prefix in the codebase.\n\n**Why it collided at all.** The prefix only appears when a bundle named `$projectname` already exists in your config but wasn't reused. Reuse requires an *exact* match (`bundle_matches`, `src/hel_import.rs:2097-2114`): same set of repository identities and the same primary as the session's detected git roots. Likely mismatch causes (can't confirm without your config): the existing bundle records the repo one way (`github:` owner/repo) while detection classified your checkout the other way (`local:` path, e.g. no or non-GitHub origin), you imported from a different clone path than the recorded `local:` one, or the session had edited files in a different set of git roots than the bundle lists.\n\nOne nuance: in the current code the session list would usually still display `$projectname` even for bundle `import-$projectname`, because arm 3 uses the repo *destination* (`hel`), not the bundle id. So you either hit the fallback (arm 4) or you're seeing the bundle id surface (picker/review) — either way the ugly part is that the id `import-$projectname` now lives permanently in your config and every surface that shows ids exposes it.\n\n**Recommendation:** change `unique_bundle_id` to drop the `import-` prefix and disambiguate with numeric suffixes only — `hel`, `hel-2`, `hel-3`. That keeps the name recognizable and sorts next to its sibling. Separately, it's worth checking why your existing bundle wasn't reused — reuse is the better outcome than a second bundle, and if the cause is identity classification (github vs local), `bundle_matches` could be taught to treat them as equivalent when they point at the same repository. If you want, I'll make the `unique_bundle_id` change now and, if you paste the relevant bundle from your config, diagnose the reuse failure too.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "unclear",
+    "work": "unclear",
+    "quiet": null,
+    "action": "uncertain",
+    "wrong_actions": []
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The requested explanation and recommendation are delivered. The implementation offer is optional.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [],
+    "strict_input_scoring": false,
+    "session_group": "ba55fe3e43207548125cdf15471f218c",
+    "label_review": "Before any API evaluation: user combines a how-does-this-work question with a preference for changed behavior. Captured scope does not establish whether the implementation offer is optional or repeats an authorized change. Missing config is only conditional on optional reuse diagnosis. Treat as ambiguous, not a definite no-input control."
+  }
+}

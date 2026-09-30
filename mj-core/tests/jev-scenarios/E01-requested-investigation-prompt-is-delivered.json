@@ -1,0 +1,408 @@
+{
+  "id": "E01",
+  "title": "Requested investigation prompt is delivered",
+  "category": "information-request-satisfied",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "54b129beebda87d233ffb12c22d33913",
+    "session_title": "bifrost4 via claude",
+    "decision": "assessment-54b129beebda87d233ffb12c22d33913-3137",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T20:10:11.615Z",
+    "assessed_at": "2026-09-30T20:21:31.187Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "superseded",
+    "recorded_reason": "user_or_lifecycle_action",
+    "note": "The user asks for a prompt to give an mbx agent. The assistant supplies a complete, copyable investigation brief; the request is answered and the optional investigation is delegated by the user."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-7c8812527599e0cd0c050aa03253bd7e",
+          "role": "user",
+          "text": "Take ownership of finishing BrokkAi/bifrost-dev issue #3746. The previous session was interrupted; its work has been saved to origin. Continue through review, integration, remaining fixes, and validation.\n\nRead AGENTS.md, its routed architecture/testing guidance, and:\n.agents/plans/issue-3746-scheduled-rust-regressions.md\n\nFollow repository Git and coordination rules. Refresh the issue’s assignment and agent-in-progress label. Keep the ExecPlan current.\n\nOwner decision:\nScheduled-only tests intentionally run only in Hourly/Nightly CI. Their absence from per-push CI is an accepted risk, already documented in AGENTS.md. Do not propose adding the full scheduled suite to every push.\n\nRoot-cause findings:\n- #3746 originally reported 93 failures: 90 Rust, two C#/TypeScript, and one policy test.\n- 63 failures appeared around 0f281eb825, the native Rust provider switch. Several neighboring commits did not compile, so attribution to that exact commit is strongly supported, not directly proven.\n- Another 27 appeared at the legacy resolver/usage-graph deletion c15f540905, merged as ff9a0616c7; that boundary was confirmed.\n- Both events were on 2026-09-11. The later master merge and platform differences were not the original cause.\n- There are multiple independent defects. Historical failure onset does not necessarily explain today’s symptom.\n- The policy test diff_base_narrows_the_gate_to_new_findings_across_formats belongs to #3421 and is excluded from this repair.\n\nSaved branches:\n- origin/3746-wip — 48c3abf771\n  Integration baseline, accepted-risk documentation, store-crash fix, C#/TypeScript expectation corrections, and checkpointed plan.\n- origin/3746-wip-d1 — e1638284b5\n  Definition boundary/alias cases, 14 tests.\n- origin/3746-wip-d2 — 96a2bf61f7\n  Other definition and issue cases, 25 tests.\n- origin/3746-wip-u1 — dea67a7254\n  Usage cases with wrong hits/owners, 28 tests.\n- origin/3746-wip-u2 — f2d44a8f4f\n  Incomplete usage and macro cases, 23 tests.\n- origin/3746-wip-trial — bd886f1535\n  Partial trial integration. Inspect its ancestry and contents; it is not certified or necessarily current with all lane tips.\n\nAlready completed on the baseline:\n- c6056a9a6a fixes duplicate enum-variant exports when identical source is mounted in two modules. Preserve its regression test:\n  rust_enum_variants_resolve_when_two_modules_share_identical_source\n- 0ca64ea7e2 updates the two non-Rust tests to expect ambiguity under the documented navigation contract. Display-target deduplication does not erase resolver ambiguity.\n\nWhat remains:\n1. Inspect the saved lane histories and trial integration. Determine which changes are already included before importing commits; avoid duplicating work.\n2. Review fixture and expectation changes carefully. Classify each failure as invalid fixture, deliberate contract change, native defect, or crash. Repair invalid fixtures while preserving assertions. Require checked-in contract evidence for changed expectations.\n3. Integrate the useful lane changes into the current working branch, resolve conflicts, and reproduce remaining failures. The transcript ended while waiting for final lane reports and before a planned second repair round. Do not assume all lanes or their combination passed.\n4. Fix remaining native defects in structured producers, lowering, resolution, or adapters. No text/regex fallbacks or workspace-sized persistent Rust maps. Bump the appropriate producer, resolution, or crate-derivation version when stored output changes.\n\nReview concerns from the interrupted session:\n- D2’s handling of .unwrap()/.expect() needed scrutiny for unsupported name-based shortcuts.\n- U1 changed the #1377 cfg-alternatives test and removed attributes from another fixture; verify these preserve the intended regression coverage.\n- Type-alias presentation in get_type_by_location remained under investigation.\n- Version-knob conflicts were being combined mechanically. Review invalidation semantics rather than trusting the integration helper.\n- An inactive local item may shadow an active cfg-gated import, producing false absence in the #1377 fixture. The plan records this as a separate finding to reproduce and file.\n- A TypeScript competing-import boundary mapped to analysis_failure is another recorded follow-up.\n\nValidation:\nUse mbx normally; do not redirect Cargo targets. Follow the repository’s test-environment guidance, including clearing JAVA_HOME and setting BIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency and use --max-fail 100.\n\nExplicitly run the 92 in-scope tests with RUSTFLAGS='--cfg scheduled_tests'; ordinary runs skip them. The plan contains exact names across suite_symbols, suite_usages, and suite_issues, plus the excluded suite_bench_policy case. Run required formatting, Clippy, affected per-push tests, and scripts/public/pre-push-gate.sh for the final combined tree.\n\nOptional retained evidence:\nOn morannon, container mj-efba03292be3-291aac contains:\n/workspace/efba03292be3de3d55d216940337bc12/scratch-3746/\nUseful files include brief-common.md, lane-*.txt, target92.txt, trial1-fail.txt, and trial1-suite_*.log. Treat logs as evidence for their recorded revision, not current validation.\n\nPush to origin/master when the tests pass or are removed as obsolete."
+        },
+        {
+          "id": "msg_011CfZ5uirq7bArHRpenr8qw",
+          "role": "assistant",
+          "text": "I've read the plan and routed guidance. Next I'm checking how the saved branches relate to `origin/master` and to each other."
+        },
+        {
+          "id": "user:prompt-7f07ba1bfde97aa359ebbdf2ab2a683e",
+          "role": "user",
+          "text": "ofc use parallel subagents when that can speed things up"
+        },
+        {
+          "id": "msg_011CfZ61wAux5ze5fuR5uWNE",
+          "role": "assistant",
+          "text": "Now integrating: baseline first."
+        },
+        {
+          "id": "msg_011CfZ62eR8sc884iUQ4Asjy",
+          "role": "assistant",
+          "text": "Baseline applied cleanly. Now lane D1."
+        },
+        {
+          "id": "msg_011CfZ65JfLBMZUZAR5mBNCg",
+          "role": "assistant",
+          "text": "Knobs are equality-checked strings, so any fresh value invalidates correctly; I'll just make sure the combined value differs from every lane's value. Now lane D2."
+        },
+        {
+          "id": "msg_011CfZ66fQ2bGiravTvoYZyV",
+          "role": "assistant",
+          "text": "Now lane U1."
+        },
+        {
+          "id": "msg_011CfZ66wRSeGmN7ZnfCvqmT",
+          "role": "assistant",
+          "text": "My salt helper mishandled a conflict in a comment block in 6089aa505 and appended comment words to the salt. Fixing that commit before going on."
+        },
+        {
+          "id": "msg_011CfZ69mjrbW5fM8MJKeSPv",
+          "role": "assistant",
+          "text": "Now repairing the salt that 6089aa505 corrupted."
+        },
+        {
+          "id": "msg_011CfZ6AhUurYc56c1muKiv2",
+          "role": "assistant",
+          "text": "Now lane U2."
+        },
+        {
+          "id": "msg_011CfZ6DnJhtTMZwwAcDNxus",
+          "role": "assistant",
+          "text": "All lane commits are now cherry-picked onto current master. I'm fixing the version values and then starting the scheduled-test build."
+        },
+        {
+          "id": "msg_011CfZ6ENDeNUQP7S5d7UtyN",
+          "role": "assistant",
+          "text": "Now building the combined tree with the scheduled configuration. I'll run the four whole suites, not just the 92 names, so that lane changes that break other scheduled tests also show up."
+        },
+        {
+          "id": "msg_011CfZ6HjKEJhhUj8a8ZMUg6",
+          "role": "assistant",
+          "text": "While that builds (about eight minutes or more), I'll collect the three review reports."
+        },
+        {
+          "id": "msg_011CfZ8HBs7Ho6BNwR4ciNc6",
+          "role": "assistant",
+          "text": "Reviews are in. Before acting on them, the scheduled-run results:"
+        },
+        {
+          "id": "msg_011CfZ8JVyZHZUqqFeb5CcDG",
+          "role": "assistant",
+          "text": "Still compiling after 26 minutes. Checking what the build is doing."
+        },
+        {
+          "id": "msg_011CfZ8NCtGpTvzzHZUg77TF",
+          "role": "assistant",
+          "text": "I'm checking whether the `Unwrap` transfer stays safe when a user type has its own `unwrap` method; the scheduled build is still running."
+        },
+        {
+          "id": "msg_011CfZ8VXTuoNWrLY8ZJX4PT",
+          "role": "assistant",
+          "text": "Dispatching the four fix children now."
+        },
+        {
+          "id": "msg_011CfZ8YAzwS9EWz4RompFkD",
+          "role": "assistant",
+          "text": "While the children work and the scheduled run continues, I'll update the ExecPlan with the integration state and review findings."
+        },
+        {
+          "id": "msg_011CfZ8aJEZq6XV72uAeijs7",
+          "role": "assistant",
+          "text": "Only the expected #3421 policy test has failed so far (1,248 of 6,903 done). I'll wait for the first child to finish."
+        },
+        {
+          "id": "msg_011CfZC2ZYPF6cP2vNTDzHDK",
+          "role": "assistant",
+          "text": "The combined tree passes 64 of the 92 target tests, and no other scheduled test in the four suites fails (only the excluded #3421 policy test). 28 target tests still fail. Grouping them by symptom:"
+        },
+        {
+          "id": "msg_011CfZC8oQEv6iiKz4aNh7Ay",
+          "role": "assistant",
+          "text": "Six children are now working in separate worktrees. I'll checkpoint the ExecPlan with the scheduled-run result, then wait for them."
+        },
+        {
+          "id": "msg_011CfZEfmmcPeFe3GUY8ZyVB",
+          "role": "assistant",
+          "text": "While they work, I'll pick up the finished commits (C's `479824549`, D's `bd4bb96e6`) to surface conflicts early."
+        },
+        {
+          "id": "msg_011CfZEgnubUT1qXXycLNQ6j",
+          "role": "assistant",
+          "text": "Reviewing the alias fix diff for text-based shortcuts before accepting it:"
+        },
+        {
+          "id": "msg_011CfZF5Ky1aWxHsMN8cV5hi",
+          "role": "assistant",
+          "text": "My background run died with its parent shell. Restarting the per-push analysis library tests properly."
+        },
+        {
+          "id": "msg_011CfZHYCDABL4Rr7u4oDDdf",
+          "role": "assistant",
+          "text": "Builds are serializing on mbx's shared cache lock (`registrar.lock`), so parallel children mostly wait on each other. Checking my own per-push run:"
+        },
+        {
+          "id": "msg_011CfZHbRrnkFQ8SrAsUuW5W",
+          "role": "assistant",
+          "text": "I'm tracing which lane commit added the extra cold-search SQL statement; the most likely one is D2's trait-scope probe (`9688ea633`)."
+        },
+        {
+          "id": "msg_011CfZHd2NDevUKGYc6Qukcy",
+          "role": "assistant",
+          "text": "I'll hand this pin investigation to a child rather than spend my own context on it."
+        },
+        {
+          "id": "msg_011CfZHfoyvAzJrWxi5378SF",
+          "role": "assistant",
+          "text": "While the children work, I'll file the false-absence bug that child B confirmed and pinned. First, the pinned test's name and message:"
+        },
+        {
+          "id": "msg_011CfZHhzn6xUxAugyA4a1qh",
+          "role": "assistant",
+          "text": "Filing the other recorded follow-up, the TypeScript competing-import boundary reported as `analysis_failure`:"
+        },
+        {
+          "id": "msg_011CfZHxUytQPeBvFDZsLbvU",
+          "role": "assistant",
+          "text": "Filing the `unwrap` regression issue and linking it from the pinned test."
+        },
+        {
+          "id": "msg_011CfZNZLwPJakm6SfqaUK43",
+          "role": "assistant",
+          "text": "An hour passed and no child completed; several report builds sitting with no output. I'll check what the builds are waiting on."
+        },
+        {
+          "id": "msg_011CfZNdft2YQGuAtx7XWo7d",
+          "role": "assistant",
+          "text": "I've told the children how to get past the sandbox build stall. Meanwhile I'll pick up child A's checkpoint commit `1e664bcec` to check for conflicts."
+        },
+        {
+          "id": "msg_011CfZPbMkB6kq3bksV34ZMo",
+          "role": "assistant",
+          "text": "Six fixes are integrated so far. Five children are still running (macro tt, alias generalization, associated items, incomplete answers, macro definitions). Waiting for the next one to finish."
+        },
+        {
+          "id": "msg_011CfZPnYaMghRKFp3RGNQdR",
+          "role": "assistant",
+          "text": "Child D generalized the alias display (`d6ca8f409`) and also changed closure-parameter lowering in the producer. That needs a salt bump, so I'll check for one while picking."
+        },
+        {
+          "id": "msg_011CfZPoLrBrAZmtvDPsxEm6",
+          "role": "assistant",
+          "text": "That producer change (closure parameters now get declared-type facts) has no salt bump, so stored facts from before would be reused. Adding the bump to this commit:"
+        },
+        {
+          "id": "msg_011CfZTCAV5eC3tXyxyNQ8Kg",
+          "role": "assistant",
+          "text": "Child A is done; its fixture follow-up `e2fa2f3ad` is next to pick. A has the most context on macro token trees, so it gets the seven macro-usage failures, working from my current integrated HEAD."
+        },
+        {
+          "id": "msg_011CfZXoiAWy3TBLiuWTA3uE",
+          "role": "assistant",
+          "text": "Children are progressing slowly because of long builds. Waiting again."
+        },
+        {
+          "id": "msg_011CfZZprCipFk9yhsgqiGZ8",
+          "role": "assistant",
+          "text": "Child F fixed all five macro-scope definition tests (`78164455a`). It touches crate SQL and the same point-cost pins that G changed, so I expect conflicts."
+        },
+        {
+          "id": "msg_011CfZZtVC31zgCQhXTT8yo1",
+          "role": "assistant",
+          "text": "Child F is porting its change. Child A is also editing macro code from the same base, so whichever of them finishes second will port onto the other's result. Waiting for results."
+        },
+        {
+          "id": "msg_011CfZc8Ge7SNATQSsKAHAkd",
+          "role": "assistant",
+          "text": "Conflicts are resolved; finishing the pick with a corrected message (the point-cost claim was wrong)."
+        },
+        {
+          "id": "msg_011CfZc93PAHsdhsgem4U7gn",
+          "role": "assistant",
+          "text": "C still has three open tests (relative module alias owner, member declared on a type alias, re-exported trait method path). Sending it back from the new integrated HEAD:"
+        },
+        {
+          "id": "msg_011CfZeLGjtNAthxKZWzKmtt",
+          "role": "assistant",
+          "text": "While the full scheduled run builds, I'll bring the ExecPlan up to date with the fix round so far."
+        },
+        {
+          "id": "msg_011CfZgf1TNcosfNveVeHWSj",
+          "role": "assistant",
+          "text": "Three children (C, H, I) are on the associated-item defects; A has the macro-usage cluster plus the new regression; E has the incomplete-answer cluster and the marker-trait rule. Waiting for results."
+        },
+        {
+          "id": "user:prompt-f7709bab919dfc445df8bf4c61a23b9a",
+          "role": "user",
+          "text": "progress?"
+        },
+        {
+          "id": "msg_011CfZgpe7GMENJ9XpnBtRgj",
+          "role": "assistant",
+          "text": "The integrated branch now passes **76 of the 92** target tests, up from 64 after the first integration. It is not pushed yet.\n\n**Done so far** (local `bifrost4` branch, HEAD `4f0753247`, rebuilt on current `origin/master`):\n- All saved lane work is cherry-picked. I didn't use the trial branch: it held only 27 of the 41 lane commits and lacked master's #3764 salt tag.\n- **Version knobs:** master and lane D1 had both changed the bundle epoch from `v85` to `v86` for different changes, and git merged the two identical lines, which dropped D1's bump. The combined tree now uses values no branch has written (bundle epoch `v90`, the Rust salt holds every lane's tags, and a fresh crate-derivation string).\n- **Review fixes merged:**\n  - Macro token-tree paths now count as references only when the macro's expansion actually emits them. Several fixtures had macros that discard their input while asserting references, so I treated those as invalid fixtures.\n  - The U1 member-surface discharge now applies only to trait owners.\n  - The #1377 test's positive hit check is restored.\n  - Dropped intent assertions are restored in the D1, D2 and U2 tests.\n  - Type lookup keeps showing the alias name for `let`, parameter and closure-parameter bindings.\n  - The point-cost pin failure came from D2's trait-scope probe, which adds one SQL statement; the pin is updated.\n  - Round 2 fixed all 5 macro-scope definition tests and 4 of the 8 associated-item tests.\n- **Issues filed:**\n  - #3773: an inactive `cfg` item shadows an active `cfg`-gated import, giving a false absence. The test is pinned as ignored.\n  - #3774: definition lookup labels a partial import boundary as `analysis_failure`.\n  - #3775: a user type's own `unwrap`/`expect` method at a receiver loses its answer. D2's change makes the common `Option`/`Result` unwrap resolve, but this rarer case goes from resolved to an honest `incomplete`. I accepted that trade and filed the full design rather than doing it inside #3746. The test is pinned as ignored.\n\n**Still open:** 16 target tests, plus one new regression outside the target list, `qualified_macro_free_paths_create_exact_workspace_edges`. It passed before the macro changes. Five children are working on these in separate worktrees:\n- A: 7 macro token-tree usage tests, plus the regression.\n- E: 6 incomplete-answer tests, including a rule that std marker traits (`Send`, `Sized`, ...) contribute no methods. That rule also unblocks the `Sized` supertrait test.\n- C: generic type aliases, which are not lowered at all today.\n- H: reverse lookup for a qualified path through a module alias.\n- I: `f16::to_f32` should count as a use of the concrete impl member, not only the trait declaration.\n\n**Slowdown:** sandboxed children stalled for over an hour because mbx cannot use Unix sockets inside their sandbox and waits forever. Children now run cargo with escalated permissions, and builds are moving again.\n\n**Remaining steps:** integrate these fixes, rerun all four suites with `--cfg scheduled_tests`, then run the pre-push gate and push to `origin/master`.\n\nResuming the wait now."
+        },
+        {
+          "id": "user:prompt-e22a40fe69bda6c4968969287a6662a8",
+          "role": "user",
+          "text": "> sandboxed children stalled for over an hour\n│ because mbx cannot use Unix sockets inside their sandbox\n│ and waits forever. Children now run cargo with escalated\n│ permissions, and builds are moving again.\n\ni added ~/.cache/cargo to the ~/.codex/config.toml whitelist, i guess that's not working?"
+        },
+        {
+          "id": "msg_011CfZkvJsGjC919UFnEa2ec",
+          "role": "assistant",
+          "text": "Child C implemented generic type-alias lowering; the acceptance test passes with its generic fixture unchanged. The changes are uncommitted, so I'll commit them in C's worktree and pick them."
+        },
+        {
+          "id": "msg_011CfZq6SZsKaKfYDbNEocrY",
+          "role": "assistant",
+          "text": "Now committing H's uncommitted change in its worktree and picking it:"
+        },
+        {
+          "id": "msg_011CfZsVLwu9R1cefxoTpAcf",
+          "role": "assistant",
+          "text": "Child I finished the `f16::to_f32` impl attribution; its changes are uncommitted. Reading its commit message and a quick look at the diff:"
+        },
+        {
+          "id": "msg_011CfZsVpqwDuYnmjmRz1SiT",
+          "role": "assistant",
+          "text": "AGENTS.md requires new query-plan pins to go through the `pinned_queries()` registry and run under both statistics states. Checking how I's pin is written:"
+        },
+        {
+          "id": "msg_011CfZsY7LgEc1c5NQ5KxEvP",
+          "role": "assistant",
+          "text": "I's plan pin uses the existing `rust_crate_point_queries_have_populated_plan_pins` test, which is this module's established pin mechanism. That is acceptable. Committing and picking:"
+        },
+        {
+          "id": "msg_011CfZsYqWTcTpAkQjU6HDQU",
+          "role": "assistant",
+          "text": "I's change runs at query time only and doesn't change stored rows, so no version bump is needed. Waiting on A, E, H and D."
+        },
+        {
+          "id": "msg_011CfZx8gyuyAGzJDmhniXSY",
+          "role": "assistant",
+          "text": "All four are in final validation. Waiting again."
+        },
+        {
+          "id": "msg_011CfZzQensNJrCqFjHJNopE",
+          "role": "assistant",
+          "text": "Picked cleanly. I'll start a full scheduled run on `b9f72c244` now. It checks that the merges compile and settles the `enum_variant` question while E, H and D finish."
+        },
+        {
+          "id": "msg_011Cfa7BwbNTJGCZec1gbXxj",
+          "role": "assistant",
+          "text": "D's work is integrated (`0ae8c7b13`). Still waiting on A (two regressions), E (marker traits, #2130) and H (dependency kinds, map-valued field)."
+        },
+        {
+          "id": "msg_011CfaCiNguVZcksHJGSg1WX",
+          "role": "assistant",
+          "text": "H's sandbox cannot write the git index, so it can't move its own worktree. I'll do it: save its diff as a patch, move to `e14f7ee95`, and re-apply."
+        },
+        {
+          "id": "user:prompt-42d3db434ecd6b0d40b8809b4e4252ee",
+          "role": "user",
+          "text": ">  A path whitelist won't fix this: the failure is a blocked\n│ Unix socket bind (sandbox network restriction), not a file\n│ write, and it likely causes mbx's FIFO fallback to stall\n│ —fixes would be enabling network access, patching mbx's\n│ FIFO transport, or continuing with escalated permissions.\n\ngive me a prompt that i can pass to my mbx agent to investigate this pls"
+        },
+        {
+          "id": "msg_011CfaELMu92TvSG7ZNiman5",
+          "role": "assistant",
+          "text": "Here is a prompt you can paste into your mbx agent:\n\n```\nInvestigate why mbx builds hang inside the Codex Linux sandbox. I need a\nconfirmed cause and a proposed fix. Do not change the shared cache at\n/mnt/optane/mbx-cache or /mnt/optane/mbx-targets while investigating\nunless I approve it.\n\nSymptom (2026-09-30, mbx 1.16.0, host morannon/WSL2):\nCodex child agents run cargo through the mbx shim inside a sandbox\n(codex-linux-sandbox + `bwrap --as-pid-1 --new-session --die-with-parent\n--ro-bind / / ...`). Their permission profile extends \":workspace\" and\ngrants write access to ~/.cargo and /mnt/optane; network access is off.\nMany of their cargo/nextest runs sat for 20-50 minutes with no compiler\noutput and no rustc child process, while host load was low (~7). The\nsame commands completed normally when rerun outside the sandbox. Plain\nhost runs (not sandboxed) were never affected, and `mbx doctor` on the\nhost reports 0 failures.\n\nEvidence:\n1. Every sandboxed run logs:\n   mbx[warning]: Unix-domain cache session listener unavailable; using FIFO\n   transport: failed to bind cache session listener at\n   /tmp/mbx-session-XXXX/cache-agent.sock: Operation not permitted (os error 1)\n   Examples: /tmp/i3746-d2/custom-unwrap-pinned.log,\n   /tmp/i3746-child-c/per-push-nextest.log.\n   EPERM on bind() suggests the sandbox's seccomp filter blocks AF_UNIX\n   sockets when network is disabled; filesystem grants don't help.\n2. Lease files in /mnt/optane/mbx-cache/incremental/.locks/*/ are named\n   <pid>-0.lease. Several had tiny PIDs (3-0, 24-0, 38-0), which fits PIDs\n   from inside a bwrap PID namespace (--as-pid-1). Many leases from dead\n   host PIDs were still present hours later. Children also reported\n   waiting on /mnt/optane/mbx-cache/incremental/.locks/registrar.lock.\n3. One sandboxed stall had no FIFO warning: the mbx-rustc shim was\n   sleeping with no compiler child attached.\n\nHypotheses to confirm or rule out (keep all of them open until evidence\ndecides):\na. The FIFO fallback transport deadlocks or waits forever under some\n   condition (e.g. two ends in different PID/mount namespaces, a stale\n   FIFO in /tmp/mbx-session-*, or a reader that never opens).\nb. Lease or lock liveness checks use PIDs, and PIDs from a sandbox's PID\n   namespace are meaningless on the host (or vice versa). A lease can then\n   look alive forever, or look dead while its holder is still running.\nc. registrar.lock or the incremental-state locks are held across a slow\n   step, so concurrent builds from many worktrees serialize.\n\nPlease:\n- Reproduce with a minimal sandbox. Either run codex's sandbox directly,\n  or use bwrap with --as-pid-1 --unshare-pid plus a seccomp filter that\n  denies AF_UNIX socket/bind. Run two concurrent `cargo check` builds on\n  a small crate through mbx and see whether one hangs.\n- Read the FIFO transport and lease/lock code; say how liveness is\n  decided and what happens across PID namespaces.\n- Report the cause with evidence (file/function references, a\n  reproduction command, strace/ps output), not a guess.\n- Propose fixes, e.g.: a transport that works without AF_UNIX (or a\n  fixed FIFO path); lease liveness that doesn't depend on PIDs (flock on\n  the lease file, or a namespace-aware identity); a bounded wait with a\n  clear error instead of an indefinite hang; a `mbx doctor` check that\n  detects the sandbox case. Also say whether enabling network access in\n  the Codex permission profile would avoid the problem, and what exact\n  config key that needs.\n```\n\nThe shared evidence logs are under `/tmp` on this host, so they should still be there when your mbx agent runs."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": ">  A path whitelist won't fix this: the failure is a blocked\n│ Unix socket bind (sandbox network restriction), not a file\n│ write, and it likely causes mbx's FIFO fallback to stall\n│ —fixes would be enabling network access, patching mbx's\n│ FIFO transport, or continuing with escalated permissions.\n\ngive me a prompt that i can pass to my mbx agent to investigate this pls",
+    "assistant_text_tail": "Here is a prompt you can paste into your mbx agent:\n\n```\nInvestigate why mbx builds hang inside the Codex Linux sandbox. I need a\nconfirmed cause and a proposed fix. Do not change the shared cache at\n/mnt/optane/mbx-cache or /mnt/optane/mbx-targets while investigating\nunless I approve it.\n\nSymptom (2026-09-30, mbx 1.16.0, host morannon/WSL2):\nCodex child agents run cargo through the mbx shim inside a sandbox\n(codex-linux-sandbox + `bwrap --as-pid-1 --new-session --die-with-parent\n--ro-bind / / ...`). Their permission profile extends \":workspace\" and\ngrants write access to ~/.cargo and /mnt/optane; network access is off.\nMany of their cargo/nextest runs sat for 20-50 minutes with no compiler\noutput and no rustc child process, while host load was low (~7). The\nsame commands completed normally when rerun outside the sandbox. Plain\nhost runs (not sandboxed) were never affected, and `mbx doctor` on the\nhost reports 0 failures.\n\nEvidence:\n1. Every sandboxed run logs:\n   mbx[warning]: Unix-domain cache session listener unavailable; using FIFO\n   transport: failed to bind cache session listener at\n   /tmp/mbx-session-XXXX/cache-agent.sock: Operation not permitted (os error 1)\n   Examples: /tmp/i3746-d2/custom-unwrap-pinned.log,\n   /tmp/i3746-child-c/per-push-nextest.log.\n   EPERM on bind() suggests the sandbox's seccomp filter blocks AF_UNIX\n   sockets when network is disabled; filesystem grants don't help.\n2. Lease files in /mnt/optane/mbx-cache/incremental/.locks/*/ are named\n   <pid>-0.lease. Several had tiny PIDs (3-0, 24-0, 38-0), which fits PIDs\n   from inside a bwrap PID namespace (--as-pid-1). Many leases from dead\n   host PIDs were still present hours later. Children also reported\n   waiting on /mnt/optane/mbx-cache/incremental/.locks/registrar.lock.\n3. One sandboxed stall had no FIFO warning: the mbx-rustc shim was\n   sleeping with no compiler child attached.\n\nHypotheses to confirm or rule out (keep all of them open until evidence\ndecides):\na. The FIFO fallback transport deadlocks or waits forever under some\n  ",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9800000190734863
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.9700000286102295
+    },
+    "work": {
+      "choice": "finished",
+      "confidence": 0.550000011920929
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.8199999928474426
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The response fulfills the exact information request. No further user input is needed.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T20:10:23.887Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-30T20:12:09.488Z",
+        "kind": "system",
+        "text": "Subagent \"fix-3746-e-incomplete\" (6ac72cb1) finished turn 23325 (completed, end of turn)."
+      },
+      {
+        "at": "2026-09-30T20:21:31.192Z",
+        "kind": "user",
+        "text": "ty. continue w the fixes"
+      },
+      {
+        "at": "2026-09-30T20:22:13.805Z",
+        "kind": "agent",
+        "text": "Picked cleanly. Moving E's worktree to the new HEAD with its remaining #2130 diff, then sending it back:"
+      },
+      {
+        "at": "2026-09-30T20:22:24.075Z",
+        "kind": "agent",
+        "text": "While E and H work, a full scheduled run on the integrated HEAD `ad59e8440` to confirm the latest picks together:"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "54b129beebda87d233ffb12c22d33913"
+  }
+}

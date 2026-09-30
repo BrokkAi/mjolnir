@@ -6,16 +6,25 @@ the current bundled questions (`mj-core/src/activity/verdict_questions.json`) to
 TypeSafe directly, three times each, and writes `results.jsonl` plus `report.md`
 under --output. The report compares the model's answers and the resulting
 Mjolnir action with each fixture's `expected`, per category. It never runs in
-CI. The key comes from TYPESAFE_API_KEY or ~/.secrets/typesafe_api_key and is
+CI. Input detection and false required-input alerts are also scored separately
+using the recorded policy (currently probability >= 0.50 and >= 2.5x runner-up); cases marked context.strict_input_scoring=false are
+excluded from that count. The key comes from TYPESAFE_API_KEY or ~/.secrets/typesafe_api_key and is
 never printed. Standard library only.
+
+Use --questions to compare an alternative prompt. Questions and labeled cases
+are frozen before requests; resuming with changed questions or fixtures fails.
+An offline --report uses those snapshots, so later edits cannot relabel a run.
 
     python3 scripts/jev-scenarios-eval.py --output /mnt/optane/mj-jev-scenarios/results-<stamp>
     python3 scripts/jev-scenarios-eval.py --only S01,P04 --repeats 1 --output /tmp/x
+    python3 scripts/jev-scenarios-eval.py --questions /path/candidate.json --only D01,D05 --output /mnt/optane/jev-candidate
     python3 scripts/jev-scenarios-eval.py --report /mnt/optane/mj-jev-scenarios/results-<stamp>   # rebuild report offline
 """
 import argparse
 import concurrent.futures
+import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -29,6 +38,13 @@ FIXTURES = ROOT / "mj-core/tests/jev-scenarios"
 QUESTIONS = ROOT / "mj-core/src/activity/verdict_questions.json"
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
+POLICY = "input-ratio2.5-floor0.5-finished0.8"
+CHOICES = {
+    "failure": ("none", "transient_provider", "quota", "other", "unclear"),
+    "input": ("none", "redundant_request", "required", "unclear"),
+    "work": ("finished", "authorized_unfinished", "waiting", "unclear"),
+    "background": ("needed", "unneeded", "unclear"),
+}
 ACT_CONFIDENCE = 0.85
 AUTOMATION_CONFIDENCE = 0.90
 USER_BYTES = 32 * 1024
@@ -36,10 +52,17 @@ ASSISTANT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 64 * 1024
 
 
+def requires_input(input_):
+    probabilities = input_.get("probabilities", {})
+    winner = probabilities.get("required", 0.0)
+    runner_up = max((p for name, p in probabilities.items() if name != "required"), default=0.0)
+    return input_["choice"] == "required" and winner + 1e-12 >= .50 and winner + 1e-12 >= 2.5 * runner_up
+
+
 def action(verdict, authorization_complete):
     """Python port of `mj_core::assessment::Verdict::action`. Pinned by the test file."""
     failure, input_, work = verdict["failure"], verdict["input"], verdict["work"]
-    if input_["choice"] == "required" and input_["confidence"] >= ACT_CONFIDENCE:
+    if requires_input(input_):
         return "await_input"
     if failure["confidence"] >= AUTOMATION_CONFIDENCE:
         if failure["choice"] == "transient_provider":
@@ -58,10 +81,10 @@ def action(verdict, authorization_complete):
         and input_["confidence"] >= AUTOMATION_CONFIDENCE
     ):
         return "continue"
-    if work["confidence"] >= ACT_CONFIDENCE and input_["choice"] == "none" and input_["confidence"] >= ACT_CONFIDENCE:
-        if work["choice"] == "finished":
+    if input_["choice"] == "none" and input_["confidence"] >= ACT_CONFIDENCE:
+        if work["choice"] == "finished" and work.get("probabilities", {}).get("finished", 0.0) + 1e-12 >= .80:
             return "finished"
-        if work["choice"] == "waiting":
+        if work["choice"] == "waiting" and work["confidence"] >= ACT_CONFIDENCE:
             return "wait"
     return "uncertain"
 
@@ -92,12 +115,22 @@ def parse_answers(answers):
         answer = answers.get(axis)
         if answer is None and axis == "background":
             continue
-        if answer.get("type") != "choice":
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
             raise ValueError(f"{axis}: not a choice answer")
-        confidence = float(answer["confidence"])
-        if not 0.0 <= confidence <= 1.0:
+        confidence = answer["confidence"]
+        if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
             raise ValueError(f"{axis}: confidence out of range")
-        verdict[axis] = {"choice": answer["choice"], "confidence": confidence}
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, dict) or set(probabilities) != set(CHOICES[axis]):
+            raise ValueError(f"{axis}: incomplete probabilities")
+        if any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values()):
+            raise ValueError(f"{axis}: invalid probabilities")
+        if abs(sum(probabilities.values()) - 1) > .005 * len(probabilities) + 1e-12:
+            raise ValueError(f"{axis}: invalid distribution total")
+        choice = answer["choice"]
+        if choice not in probabilities or probabilities[choice] + 1e-12 < max(probabilities.values()):
+            raise ValueError(f"{axis}: choice is not a probability winner")
+        verdict[axis] = {"choice": choice, "confidence": confidence, "probabilities": probabilities}
     return verdict
 
 
@@ -160,7 +193,7 @@ def ask(key, questions, evidence):
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read(MAX_BODY_BYTES + 1))
     except urllib.error.HTTPError as error:
-        return {"error": f"HTTP {error.code}", "latency_s": round(time.monotonic() - started, 3)}
+        return {"error": f"HTTP {error.code}", "http_status": error.code, "latency_s": round(time.monotonic() - started, 3)}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         return {"error": str(error), "latency_s": round(time.monotonic() - started, 3)}
     try:
@@ -169,6 +202,9 @@ def ask(key, questions, evidence):
         return {"error": f"malformed answer: {error}", "latency_s": round(time.monotonic() - started, 3)}
     return {
         "verdict": verdict,
+        # Keep the full distribution for offline margin/odds comparisons.
+        # Provider confidence is a separate statistic, not the winning probability.
+        "answers": payload["answers"],
         "model": payload.get("model"),
         "usage": payload.get("usage"),
         "request_bytes": len(body),
@@ -177,10 +213,15 @@ def ask(key, questions, evidence):
 
 
 def run(args):
+    questions = json.loads(args.questions.read_text())
+    validate_questions(questions)
+    if (args.output / "stopped.json").exists():
+        raise ValueError("run stopped on an account-wide failure; preserve it and use a new output directory")
     key = api_key()
-    questions = json.loads(QUESTIONS.read_text())
     fixtures = load_fixtures(args.only)
-    args.output.mkdir(parents=True, exist_ok=True)
+    if not fixtures:
+        raise ValueError("no fixtures selected")
+    prepare_run(args.output, questions, fixtures)
     results_path = args.output / "results.jsonl"
     done = set()
     if results_path.exists():
@@ -189,30 +230,103 @@ def run(args):
             done.add((record["id"], record["repeat"]))
     jobs = [(f, r) for f in fixtures for r in range(args.repeats) if (f["id"], r) not in done]
     print(f"{len(fixtures)} fixtures, {len(jobs)} requests to send ({len(done)} already recorded)", flush=True)
+    remaining = iter(jobs)
+    stopped = None
     with results_path.open("a") as out, concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {pool.submit(ask, key, questions, f["evidence"]): (f, r) for f, r in jobs}
-        for future in concurrent.futures.as_completed(futures):
-            fixture, repeat = futures[future]
-            answer = future.result()
-            record = {"id": fixture["id"], "repeat": repeat, **answer}
-            if "verdict" in answer:
-                record["action"] = action(answer["verdict"], authorization_complete(fit_to_wire(fixture["evidence"])))
-            out.write(json.dumps(record) + "\n")
-            out.flush()
-            summary = record.get("action") or record.get("error")
-            print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
-    (args.output / "questions.json").write_text(json.dumps(questions, indent=2) + "\n")
+        futures = {}
+        while True:
+            # Admit at most two requests, so an account-wide failure cannot
+            # leave the rest of the corpus queued for needless submission.
+            while not stopped and len(futures) < 2:
+                job = next(remaining, None)
+                if job is None:
+                    break
+                fixture, repeat = job
+                futures[pool.submit(ask, key, questions, fixture["evidence"])] = job
+            if not futures:
+                break
+            completed, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in completed:
+                fixture, repeat = futures.pop(future)
+                answer = future.result()
+                record = {"id": fixture["id"], "repeat": repeat, **answer}
+                if "verdict" in answer:
+                    record["action"] = action(answer["verdict"], authorization_complete(fit_to_wire(fixture["evidence"])))
+                out.write(json.dumps(record) + "\n")
+                out.flush()
+                summary = record.get("action") or record.get("error")
+                print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
+                if answer.get("http_status") in (401, 402):
+                    stopped = answer["error"]
+    if stopped:
+        (args.output / "stopped.json").write_text(json.dumps({"reason": stopped, "requested_jobs": len(jobs), "note": "Account-wide failure; remaining requests were not sent. Preserve this run and retry in a new directory after restoring access."}, indent=2) + "\n")
     report(args)
+    if stopped:
+        raise SystemExit(f"stopped after {stopped}; remaining requests were not sent; see stopped.json")
+
+
+def validate_questions(questions):
+    """Reject malformed choice prompts before reading credentials or sending evidence."""
+    if not isinstance(questions, dict) or not {"failure", "input", "work"} <= questions.keys():
+        raise ValueError("questions must include failure, input, and work")
+    for axis, question in questions.items():
+        if not isinstance(question, dict) or question.get("type") != "choice":
+            raise ValueError(f"{axis}: question type must be choice")
+        if not isinstance(question.get("instructions"), str) or not question["instructions"].strip():
+            raise ValueError(f"{axis}: missing question instructions")
+        criteria = question.get("criteria")
+        if not isinstance(criteria, dict) or not criteria or any(
+            not isinstance(item, dict) or not isinstance(item.get("what"), str) or not item["what"].strip()
+            for item in criteria.values()
+        ):
+            raise ValueError(f"{axis}: missing choice criteria")
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def prepare_run(output, questions, fixtures):
+    """Freeze prompts and labeled cases before sending requests; never mix experiments."""
+    manifest = {
+        "policy": POLICY,
+        "model": "jev-latest",
+        "endpoint": ENDPOINT,
+        "questions_sha256": digest(questions),
+        "fixtures_sha256": digest(fixtures),
+        "evidence_sha256": {f["id"]: digest(fit_to_wire(f["evidence"])) for f in fixtures},
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / "run.json"
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text()) != manifest:
+            raise ValueError("policy, prompt or fixtures changed; use a new output directory")
+        for name, expected in (("questions.json", questions), ("fixtures.json", fixtures)):
+            if json.loads((output / name).read_text()) != expected:
+                raise ValueError(f"{name} differs from the frozen experiment; use a new output directory")
+    elif (output / "results.jsonl").exists():
+        raise ValueError("existing results have no experiment manifest; use a new output directory")
+    else:
+        (output / "questions.json").write_text(json.dumps(questions, indent=2) + "\n")
+        (output / "fixtures.json").write_text(json.dumps(fixtures, indent=2) + "\n")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
 def report(args):
-    fixtures = {f["id"]: f for f in load_fixtures(None)}
+    manifest_path = args.output / "run.json"
+    policy = json.loads(manifest_path.read_text()).get("policy", "confidence-0.85") if manifest_path.exists() else "confidence-0.85"
+    if policy not in (POLICY, "confidence-0.85"):
+        raise ValueError(f"unknown report policy: {policy}")
+    snapshot = args.output / "fixtures.json"
+    fixtures = {f["id"]: f for f in (json.loads(snapshot.read_text()) if snapshot.exists() else load_fixtures(None))}
     by_id = defaultdict(list)
     for line in (args.output / "results.jsonl").read_text().splitlines():
         record = json.loads(line)
         by_id[record["id"]].append(record)
     rows = []
     categories = defaultdict(lambda: {"n": 0, "axes_agree": 0, "above": 0, "action_ok": 0, "wrong_high": 0, "errors": 0})
+    inputs = defaultdict(lambda: {"n": 0, "agree": 0, "agree_high": 0, "detected": 0, "missed": 0, "false_required": 0, "errors": 0})
+    input_unscored = 0
     for identity in sorted(by_id):
         fixture = fixtures.get(identity)
         if not fixture:
@@ -221,11 +335,28 @@ def report(args):
         stats = categories[fixture["category"]]
         for record in by_id[identity]:
             stats["n"] += 1
+            input_stats = inputs[expected["input"]] if fixture.get("context", {}).get("strict_input_scoring", True) else None
+            if input_stats is None:
+                input_unscored += 1
+            else:
+                input_stats["n"] += 1
             if "verdict" not in record:
                 stats["errors"] += 1
+                if input_stats is not None:
+                    input_stats["errors"] += 1
                 rows.append((identity, fixture["category"], record["repeat"], "error", record.get("error"), "", "", ""))
                 continue
             verdict = record["verdict"]
+            predicted_input = verdict["input"]
+            input_agrees = predicted_input["choice"] == expected["input"]
+            required_high = (requires_input(predicted_input) if policy == POLICY else
+                             predicted_input["choice"] == "required" and predicted_input["confidence"] >= ACT_CONFIDENCE)
+            if input_stats is not None:
+                input_stats["agree"] += input_agrees
+                input_stats["agree_high"] += input_agrees and predicted_input["confidence"] >= ACT_CONFIDENCE
+                input_stats["detected"] += expected["input"] == "required" and required_high
+                input_stats["missed"] += expected["input"] == "required" and not required_high
+                input_stats["false_required"] += expected["input"] != "required" and required_high
             agree = all(verdict[axis]["choice"] == expected[axis] for axis in ("failure", "input", "work"))
             above = all(verdict[axis]["confidence"] >= ACT_CONFIDENCE for axis in ("failure", "input", "work"))
             act = record["action"]
@@ -241,6 +372,18 @@ def report(args):
                     agree = False
             rows.append((identity, fixture["category"], record["repeat"], cells, act, expected["action"], "agree" if agree else "differ", "WRONG" if wrong else ""))
     lines = ["# Jev scenario replay", "", f"Results: `{args.output / 'results.jsonl'}`", ""]
+    if (args.output / "stopped.json").exists():
+        stopped = json.loads((args.output / "stopped.json").read_text())
+        lines += [f"Incomplete run: {stopped['reason']}. Counts below cover recorded requests only; remaining requests were not sent.", ""]
+    lines += [
+        f"Input is scored independently of failure and work. Detection policy: `{policy}`. Confidence columns remain separate diagnostics. Errors count as unsuccessful requests.",
+        f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.", "",
+        "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required | errors |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for label, s in sorted(inputs.items()):
+        lines.append(f"| {label} | {s['n']} | {s['agree']} | {s['agree_high']} | {s['detected']} | {s['missed']} | {s['false_required']} | {s['errors']} |")
+    lines += [""]
     lines += ["| category | requests | axes agree | agree and all >= 0.85 | action as expected | wrong action | errors |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for category, s in sorted(categories.items()):
         lines.append(f"| {category} | {s['n']} | {s['axes_agree']} | {s['above']} | {s['action_ok']} | {s['wrong_high']} | {s['errors']} |")
@@ -258,6 +401,7 @@ def main():
     parser.add_argument("--output", type=Path, help="directory for results.jsonl and report.md")
     parser.add_argument("--report", type=Path, help="rebuild report.md from an existing results directory, no requests")
     parser.add_argument("--only", help="comma-separated fixture ids")
+    parser.add_argument("--questions", type=Path, default=QUESTIONS, help="alternative question bundle; saved with results")
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
     args.only = set(args.only.split(",")) if args.only else None

@@ -1,0 +1,25 @@
+{
+  "selected": "candidate-c-questions.json",
+  "questions_sha256": "a9f7314462a5c9479e5b26c74acb3495c2af7766bb9485e874f24521ea12b331",
+  "selected_at": "2026-09-30T18:09:12.597048+00:00",
+  "selection_basis": "Tuning only. Required input detected 9/9 versus baseline3/9, with0/15 confident false alerts on scored controls. A and B also detected9/9 but each falsely alerted3/15 optional-offer controls. Held-out and regression results have not been inspected.",
+  "tuning_runs": {
+    "baseline": "baseline-tuning",
+    "a": "candidate-a-tuning-valid",
+    "b": "candidate-b-tuning-valid",
+    "c": "candidate-c-tuning"
+  },
+  "failed_schema_runs": [
+    "candidate-a-tuning",
+    "candidate-b-tuning"
+  ],
+  "held_out_ids": [
+    "D06",
+    "D11",
+    "D12",
+    "D13",
+    "D15",
+    "D16",
+    "D18"
+  ]
+}

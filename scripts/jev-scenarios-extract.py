@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "mj-core/tests/jev-scenarios"
-WORKERS = Path.home() / ".local/share/hel/workers"
+WORKERS = Path.home() / ".local/share/mjolnir/workers"
 DATABASE = Path.home() / ".local/share/mjolnir/mj.sqlite3"
 LOCAL_TZ = ZoneInfo("America/Chicago")
 

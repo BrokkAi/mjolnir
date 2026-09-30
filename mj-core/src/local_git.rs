@@ -1,6 +1,6 @@
 //! Controller-side support for repositories configured with `local` sources.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -208,11 +208,15 @@ pub fn canonical_repository(path: &Path) -> Result<PathBuf> {
 /// A linked worktree created by `git worktree add` reports its own top level,
 /// but Hel treats it as the same repository as the main working tree.
 pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("start git in {}", root.display()))?;
+    let directory = std::fs::canonicalize(root)
+        .with_context(|| format!("resolve Git working directory {}", root.display()))?;
+    let output = crate::subprocess::run_with_input(
+        Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(&directory),
+        &[],
+    )
+    .with_context(|| format!("start git in {}", root.display()))?;
     if !output.status.success() {
         bail!(
             "could not read the common Git directory for {}: {}",
@@ -221,7 +225,7 @@ pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
         );
     }
     let common = String::from_utf8(output.stdout).context("decode common Git directory")?;
-    let common = PathBuf::from(common.trim());
+    let common = resolve_git_path(&directory, &common)?;
     // A bare or otherwise unusual layout has no `.git` parent to fall back to.
     if common.file_name() != Some(std::ffi::OsStr::new(".git")) {
         return Ok(root.to_path_buf());
@@ -235,6 +239,33 @@ pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
         return Ok(root.to_path_buf());
     }
     Ok(parent)
+}
+
+/// Resolve a single Git path result against its working directory. Older Git
+/// reports common-directory and --git-path results as relative paths.
+pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        directory.is_absolute(),
+        "Git working directory must be absolute"
+    );
+    let mut lines = output.lines();
+    let value = lines.next().context("Git omitted the path")?;
+    anyhow::ensure!(
+        !value.is_empty() && !value.starts_with("--") && lines.next().is_none(),
+        "Git returned an invalid path: {output:?}"
+    );
+    let mut common = PathBuf::new();
+    for component in directory.join(value).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                anyhow::ensure!(common.pop(), "Git path escapes its filesystem root");
+            }
+            component => common.push(component.as_os_str()),
+        }
+    }
+    anyhow::ensure!(common.is_absolute(), "Git path must be absolute");
+    Ok(common)
 }
 
 fn local_status(path: &Path) -> Result<Option<String>> {
@@ -729,6 +760,38 @@ fn remote_urls(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_common_directory_resolves_relative_output_and_rejects_echoed_options() {
+        use super::resolve_git_path;
+        use std::path::Path;
+        for (directory, output, expected) in [
+            ("/projects/app", ".git\n", "/projects/app/.git"),
+            (
+                "/projects/app/src/nested",
+                "../../.git\n",
+                "/projects/app/.git",
+            ),
+            (
+                "/worktrees/side",
+                "/projects/app/.git\n",
+                "/projects/app/.git",
+            ),
+        ] {
+            assert_eq!(
+                resolve_git_path(Path::new(directory), output).unwrap(),
+                Path::new(expected)
+            );
+        }
+        for output in [
+            "",
+            "\n",
+            "--path-format=absolute\n.git\n",
+            "--path-format=absolute\n",
+            "../../../../.git\n",
+        ] {
+            assert!(resolve_git_path(Path::new("/projects/app"), output).is_err());
+        }
+    }
     use super::*;
     use crate::targets::ProcessExecutor;
     use std::fs;

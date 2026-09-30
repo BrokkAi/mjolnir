@@ -10,21 +10,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use mj_core::config::HarnessKind;
-use mj_core::subagent::{
-    FileSourceRanges, SubagentMcpRole, SubagentToolAction, SubagentToolRequest,
-};
+use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 
-/// Routing advice lives beside `spawn`; server instructions carry only mechanics.
-const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigative work whose intermediate results would otherwise fill a significant fraction of your context; spawn a child before collecting that context yourself, and keep for yourself only a known-file lookup or a check that needs no build and whose output fits in a few lines. Implement through children by default: split the agreed design into slices with a spec, files and tests each, and dispatch them in parallel. Keep a slice yourself only when it needs your whole context, when the setup a child would need exceeds doing it yourself, or when a child has already failed it once; say which, in one sentence, when you keep it. When a handback is wrong or incomplete, re-task that child once with the specific correction and the failing evidence; if the second handback is still wrong, take the slice over and note it in your report. A child running suites reports failures with test names, reasons and log paths; run a suite yourself only to reproduce one failure a child reported, and rerun nothing a child ran green. Children can also locate and map behavior, diagnose competing explanations, or independently verify a consequential claim. You own design decisions, the review of the integrated change, the commit and final acceptance. Dispatch independent assignments together and do not read the files or answer the questions you assigned while a child is on them. Collect results with one wait covering all relevant children at the default timeout, not repeated short waits. Give a focused question or outcome, relevant context and constraints, starting pointers, and the evidence or validation needed; the child does not receive your full conversation automatically. Starting files are pointers, not an implicit whitelist; state actual exclusions and ownership boundaries.";
+/// Delegation policy is delivered through initialization, never a tool description.
+const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before collecting that context yourself. Keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice yourself only when it needs your whole context, briefing a child would exceed doing it yourself, or a child has already failed it once; state the reason in one sentence. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failed handback and note it in your report. Children running suites report test names, reasons and log paths; run a suite yourself only to reproduce a reported failure, and do not repeat green suites. You own design, integrated review, the commit and final acceptance. Do not duplicate assignments while children work on them. Give a focused outcome, constraints, ownership boundaries and required evidence in instructions; point to relevant files, symbols, line ranges and earlier reports. Children share your target and filesystem but do not receive your full conversation automatically. Starting files are pointers, not a whitelist. Before spawning, give follow-up work through send_input to an idle child that already has useful context; spawn for independent work or when the old context would mislead it.";
 
 /// Results reach the model through wait, never as a push notification.
-const SERVER_INSTRUCTIONS: &str = "spawn returns a child_session_id immediately, not a finished result. Collect results or startup errors with wait. wait blocks until the requested children finish or its timeout; status complete supplies results, while still_running means wait again when needed. Use the default maximum timeout and return_when any if one result lets you advance; avoid short polling because each call carries the parent's context. Read the short handback and decisive references in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no process slots. send_input resumes one when its existing context helps; a fresh child can implement your design using the investigation's decisive references. close cancels or retires a child. Only children holding processes count toward the live-child limit. The user can see children in the Sub-agents workspace.";
+static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{DELEGATION_ROUTING} Collect results through wait or list_agents; no result is pushed into your conversation. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no processes. send_input resumes one with its conversation intact. Close children you no longer need, including failed children after reading their error. The user can see children in the Sub-agents workspace."
+    )
+});
 
 /// Legacy shared Codex homes still receive this server over ACP, where its
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{SERVER_INSTRUCTIONS} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost."
+        "{} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost.",
+        SERVER_INSTRUCTIONS.as_str()
     )
 });
 
@@ -309,7 +312,7 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     let socket = socket.to_path_buf();
     let parent_instructions = match harness {
         Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
-        _ => SERVER_INSTRUCTIONS,
+        _ => SERVER_INSTRUCTIONS.as_str(),
     };
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (parent_instructions, tool_definitions(harness)),
@@ -339,8 +342,7 @@ struct CallParams {
     arguments: Value,
 }
 
-/// Strict, like the schema it answers to: a model still sending the removed
-/// `request_key` is told so instead of having it silently dropped.
+/// Reject obsolete arguments rather than silently discarding assignment text.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArgs {
@@ -354,10 +356,6 @@ struct SpawnArgs {
     effort: Option<String>,
     #[serde(default)]
     working_directory: PathBuf,
-    #[serde(default)]
-    context: Option<String>,
-    #[serde(default)]
-    files: Vec<FileSourceRanges>,
 }
 
 #[derive(Deserialize)]
@@ -420,16 +418,29 @@ fn call_with_budget(
     let action = match params.name.as_str() {
         "list_profiles" => SubagentToolAction::ListProfiles,
         "spawn" => {
+            if ["files", "context"]
+                .iter()
+                .any(|key| params.arguments.get(key).is_some())
+            {
+                bail!(
+                    "spawn no longer accepts files or context; put context and file, symbol, line-range or earlier-report pointers in instructions"
+                );
+            }
             let args: SpawnArgs = serde_json::from_value(params.arguments)?;
+            let instructions = args.instructions.trim();
+            if instructions.is_empty() {
+                bail!("spawn instructions cannot be empty");
+            }
             SubagentToolAction::Spawn {
                 task_name: args.task_name,
-                instructions: args.instructions,
+                instructions: instructions.to_owned(),
                 profile_id: args.profile_id,
                 model: args.model,
                 effort: args.effort,
                 working_directory: args.working_directory,
-                context: args.context,
-                files: args.files,
+                // Legacy accepted requests keep these wire fields; new calls omit them.
+                context: None,
+                files: Vec::new(),
             }
         }
         "list_agents" => SubagentToolAction::ListAgents,
@@ -579,16 +590,13 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "spawn",
-            &format!(
-                "{DELEGATION_ROUTING} Start an independent Mjolnir child session in this session's target and filesystem. The child handles routine decisions and necessary supporting work within its assignment. Returns child_session_id and report_dir at once: report_dir is the directory where the child writes the details its short report points to. child_session_id means the child was registered, not that it started. The child starts on its own; collect its result, or the reason it could not start, with wait or list_agents, which report state \"error\" with the reason as output. A child that ends in error cannot be re-prompted; spawn a new one instead. A profile whose login the provider has refused is refused here, with the `mj login` command that fixes it, until that login changes; list_profiles lists it as unavailable. This session may have only a limited number of live children at once. A child counts while it holds processes, idle or not, and stops counting when it hands back (Mjolnir then parks it) or when you close it; a spawn over the limit is refused with the list of live children. A child that could not start because this session's container ran out of process slots says so in its error, with the container's process counts: close children you no longer need before spawning again."
-            ),
+            "Start a child in your target and filesystem. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect the report or startup error with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and starting pointers in instructions. Use send_input for follow-up work when an idle child's context helps. Choose a model from list_profiles; Mjolnir selects an eligible profile with the most quota unless profile_id pins one. An unavailable model, effort or login is an error, never replaced by another selection. A login the provider has refused stays unavailable until repaired with `mj login`. Only children holding processes count against the live children limit; Mjolnir parks it when a child hands back. A refused spawn names the live children. Close children you no longer need; failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
             json!({
                 "type":"object",
                 "properties":{
-                    "task_name":{"type":"string"},"instructions":{"type":"string"},
+                    "task_name":{"type":"string"},"instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
                     "profile_id":{"type":"string","description":"Only to pin one profile; normally omit it and let the model choose the profile."},"model":{"type":"string","description":model},"effort":{"type":"string","description":"An effort the chosen profile offers. Omitted, the child uses this session's effort when the chosen profile offers it, otherwise the harness default."},
-                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."},"context":{"type":"string"},
-                    "files":{"type":"array","description":"Source excerpts to include in the child's first prompt, grouped by file. Each entry names one relative file and a list of one or more one-based, inclusive line ranges to pull from it.","items":{"type":"object","properties":{"file":{"type":"string"},"ranges":{"type":"array","minItems":1,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1},"end":{"type":"integer","minimum":1}},"required":["start","end"],"additionalProperties":false}}},"required":["file","ranges"],"additionalProperties":false}}
+                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."}
                 },
                 "required":["task_name","instructions","model"],"additionalProperties":false
             }),
@@ -606,7 +614,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Omit child_session_ids to wait for every child of yours that is still running; when none is, the answer comes at once with status complete and lists your finished children. Otherwise call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. Queued input keeps a child unfinished; pending_inputs lists undelivered request IDs, and input_deliveries records recent delivery outcomes. A delivery failure reports state failed and its cause instead of an old report. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again after repairing that login or making another eligible profile available. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                "Wait for child turns or timeout. Omit child_session_ids to wait for every child of yours that is still running; with none running, it returns immediately with finished children. Call once for every child you need, using the default maximum timeout; do not poll with short timeouts because every call carries your whole context. Use return_when any to advance on the first finished child. Status complete means all named children finished; still_running means some remain or return_when any returned early: wait again when needed. Each entry carries finished and output, a short handback or last message; report_source identifies which. Details are in report_dir; output over {max_output} characters is truncated. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause, not an old report. A reminder to hand back keeps a child running. A finished child has parked true when its processes were released; send_input resumes it. A closed child reports state \"stopping\" until teardown finishes, then \"stopped\". A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`; repair that login or make another eligible profile available before spawning again. timeout_seconds defaults to {default_wait}, the most this harness allows; work may take longer, so another wait is normal.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"description":"The children to wait for. Omit, or pass an empty list, to wait for every child of yours that is still running."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"additionalProperties":false}),
@@ -638,9 +646,9 @@ fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
             .remove(key);
     }
     spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
-    spawn["description"] = json!(format!(
-        "{DELEGATION_ROUTING} Start an independent Mjolnir child in this session's target and filesystem using the model and effort selected by the user. Mjolnir chooses an eligible profile with the most quota supporting that exact selection. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect results or startup errors with wait or list_agents. The child handles routine decisions and necessary supporting work within its assignment. Reports are short and point to files in report_dir. Only children holding processes count toward the configured live-child limit; finished children are parked. Close children you no longer need. An unavailable model, effort, or login is reported as an error, never replaced by another model."
-    ));
+    spawn["description"] = json!(
+        "Start a child in your target and filesystem using the model and effort fixed by the user. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Prefer send_input for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the exact model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted."
+    );
     tools
 }
 
@@ -649,7 +657,7 @@ fn child_tool_definitions() -> Vec<Value> {
     vec![tool(
         "handback",
         &format!(
-            "Deliver your report to the session that started you. Call it once, as your last action for the task: that session reads this report, not the rest of your conversation. A second call in the same turn is refused. If a decision from that session blocks further progress, hand back your question and stop; its answer arrives as your next prompt. {}",
+            "Deliver the task report to your parent, once as your last action. Repeating it in the same turn is refused. Your parent reads this report, not your conversation. {}",
             mj_core::subagent::HANDBACK_REPORT_RULES
         ),
         json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
@@ -664,6 +672,123 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    struct ContractWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for ContractWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn initialize_and_tool_list_deliver_concise_parent_and_child_contracts() {
+        for role in [
+            SubagentMcpRole::Parent,
+            SubagentMcpRole::FixedParent,
+            SubagentMcpRole::Child,
+        ] {
+            for harness in [HarnessKind::Claude, HarnessKind::Codex] {
+                let input = format!(
+                    "{}\n{}\n",
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+                );
+                let output = Arc::new(Mutex::new(Vec::new()));
+                run(
+                    input.as_bytes(),
+                    ContractWriter(output.clone()),
+                    Path::new("unused.sock"),
+                    Some(harness),
+                    role,
+                )
+                .unwrap();
+                let output = output.lock().unwrap();
+                let replies: Vec<Value> = std::str::from_utf8(&output)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let instructions =
+                    replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
+                        .as_str()
+                        .unwrap();
+                let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
+                    .as_array()
+                    .unwrap();
+                for tool in tools {
+                    let description = tool["description"].as_str().unwrap();
+                    assert!(
+                        description.len() <= 1800,
+                        "{role} {harness:?} {} description is {} bytes",
+                        tool["name"],
+                        description.len()
+                    );
+                    assert!(!description.contains(DELEGATION_ROUTING));
+                }
+                if role == SubagentMcpRole::Child {
+                    assert!(!instructions.contains(DELEGATION_ROUTING));
+                    assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
+                } else {
+                    assert!(instructions.contains(DELEGATION_ROUTING));
+                    assert!(
+                        instructions
+                            .contains("Before spawning, give follow-up work through send_input")
+                    );
+                    assert_eq!(
+                        instructions.contains("ALL_TOOLS"),
+                        harness == HarnessKind::Codex
+                    );
+                    let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
+                    let props = &spawn["inputSchema"]["properties"];
+                    assert!(props.get("files").is_none() && props.get("context").is_none());
+                    assert_eq!(
+                        props.get("model").is_some(),
+                        role == SubagentMcpRole::Parent
+                    );
+                    assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn obsolete_spawn_arguments_fail_before_socket_dispatch() {
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::FixedParent] {
+            for (name, value) in [
+                ("context", json!("important instructions")),
+                ("files", json!([])),
+            ] {
+                let mut args = json!({"task_name":"task", "instructions":"read src/lib.rs"});
+                args[name] = value;
+                let error = call(
+                    Path::new("missing.sock"),
+                    None,
+                    role,
+                    Some(&json!({"name":"spawn", "arguments":args})),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("put context and file, symbol, line-range or earlier-report pointers in instructions"), "{error:#}");
+            }
+        }
+        let error = call(
+            Path::new("missing.sock"),
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"task", "instructions":" \n "}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("instructions cannot be empty"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
@@ -765,19 +890,14 @@ mod tests {
         assert!(SERVER_INSTRUCTIONS.contains("wait"));
         assert!(
             !SERVER_INSTRUCTIONS.contains("arrive in"),
-            "instructions must not promise pushed results: {SERVER_INSTRUCTIONS}"
+            "instructions must not promise pushed results: {SERVER_INSTRUCTIONS:?}"
         );
         // Each wait call resends the parent's whole context, so the parent is
         // told to wait long and once, and to read details from files.
-        for needed in [
-            "avoid short polling",
-            "default maximum timeout",
-            "report_dir",
-            "instead of duplicating work",
-        ] {
+        for needed in ["report_dir", "instead of duplicating work"] {
             assert!(
                 SERVER_INSTRUCTIONS.contains(needed),
-                "{needed}: {SERVER_INSTRUCTIONS}"
+                "{needed}: {SERVER_INSTRUCTIONS:?}"
             );
         }
         let wait = tool_definitions(None)

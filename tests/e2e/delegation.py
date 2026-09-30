@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Delegation through real workers with web access disabled, in a named instance."""
+"""Delegation without web access, then durable accounting, in a named instance."""
 
 import argparse
 import concurrent.futures
@@ -55,6 +55,21 @@ def main():
             '    elif method == "session/set_config_option":\n        result = {"configOptions": '
             + repr(options)
             + '}\n    elif method == "session/set_mode":',
+        )
+        options.append({
+            "id": "effort", "name": "Reasoning effort", "category": "thought_level",
+            "type": "select", "currentValue": "high",
+            "options": [{"value": "high", "name": "High fixture"}],
+        })
+        # Rebuild the inserted options with effort as well, so attribution is
+        # checked against the harness's actual advertised turn configuration.
+        script = script.replace(repr(options[:1]), repr(options))
+        script = script.replace(
+            '    if method == "session/prompt":\n        report_execution("idle")',
+            '    if method == "session/prompt":\n'
+            '        result["usage"] = {"totalTokens": 120, "inputTokens": 100, '
+            '"outputTokens": 20, "_meta": {"mjolnir.dev/usage-scope": "turn"}}\n'
+            '        report_execution("idle")',
         )
         # This fixture never owns a native goal. Report that alongside every
         # execution update, including after loading a parked conversation.
@@ -117,6 +132,8 @@ def main():
                 "single-model",
                 "--subagent-model",
                 "tiny",
+                "--subagent-effort",
+                "high",
                 "--json",
             )
         )
@@ -291,6 +308,69 @@ def main():
             ), second
         tool(parent, "list_agents")
         wait_parked(child)
+        # Delegation above works with the viewer disabled. Usage is an HTTP
+        # command, so enable its API for the accounting checks below.
+        config.write_text(config.read_text().replace("[phone]\nenabled = false", "[phone]\nenabled = true"))
+        cli("daemon", "restart")
+        usage = json.loads(cli("usage", "--parent", parent, "--json"))
+        child_usage = json.loads(cli("usage", "--session", child, "--json"))
+        assert child_usage["coverage"]["full_turn_reports"] >= 2, child_usage
+        assert child_usage["totals"]["total_tokens"]["tokens"] >= 240, child_usage
+        assert any(group["model"] == "tiny" and group["effort"] == "high"
+                   for group in usage["by_model"]), usage
+
+        # The old worker wire shape remains supported for requests accepted
+        # before an upgrade, including exact source ranges and parent context.
+        (lab.project / "legacy.rs").write_text("excluded\nlegacy source evidence\nexcluded\n")
+        cli("put-file", "--session", parent, "--path", "legacy.rs", str(lab.project / "legacy.rs"))
+        legacy = tool(parent, "spawn", {
+            "task_name": "legacy-accepted",
+            "instructions": "Return the legacy attachment evidence.",
+            "context": "retained parent context",
+            "files": [{"file": "legacy.rs", "ranges": [{"start": 2, "end": 2}]}],
+        })["child_session_id"]
+        wait_prompt(legacy, "legacy source evidence")
+        wait_prompt(legacy, "retained parent context")
+        tool(legacy, "handback", {"message": "legacy content retained"})
+        tool(parent, "wait_agents", {"child_session_ids": [legacy], "timeout_seconds": 30})
+        wait_parked(legacy)
+
+        # Simulate a daemon exiting after it records failed startup but before
+        # confirming teardown. Recovery must stop and settle it, not start it.
+        cli("daemon", "stop")
+        with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='startup-cleanup', last_error='fixture startup failure' WHERE session_id=?", (child,))
+        cli("daemon", "restart")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                row = database.execute("SELECT state, archived FROM sessions WHERE session_id=?", (child,)).fetchone()
+            if row == ("error", 1):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"startup teardown did not settle after restart: {row}")
+        assert child_usage == json.loads(cli("usage", "--session", child, "--json"))
+
+        retained = json.loads(cli("usage", "--parent", parent, "--json"))
+        for session in [child, legacy, parent]:
+            cli("destroy", "--session", session)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    exists = database.execute("SELECT 1 FROM sessions WHERE session_id=?", (session,)).fetchone()
+                if not exists:
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"destroy did not remove {session}")
+        after = json.loads(cli("usage", "--parent", parent, "--json"))
+        for key in ["totals", "coverage", "by_model"]:
+            assert after[key] == retained[key], (key, retained, after)
+        assert {s["session_id"] for s in after["sessions"]} == {parent, child, legacy}, after
+        assert all(not s["operational_session_present"] for s in after["sessions"]), after
+        cli("daemon", "restart")
+        assert after == json.loads(cli("usage", "--parent", parent, "--json"))
         print(
             json.dumps(
                 {

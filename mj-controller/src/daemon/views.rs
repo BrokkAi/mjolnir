@@ -83,8 +83,25 @@ impl RuntimeState {
                 }
             }
         }
-        let join_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        for (session_id, operation_id, _, stage, mut result) in pending {
+        let join_started = tokio::time::Instant::now();
+        let join_deadline = join_started + Duration::from_secs(1);
+        // Launch cancellation is followed by independent, bounded teardown.
+        // Join that owner before closing the store it must settle.
+        let startup_cleanup_deadline = join_started
+            + crate::controller::FAILED_STARTUP_CLEANUP_TIMEOUT
+            + Duration::from_secs(1);
+        for (session_id, operation_id, kind, stage, mut result) in pending {
+            let join_deadline = if matches!(
+                kind,
+                LifecycleKind::Create
+                    | LifecycleKind::Resume
+                    | LifecycleKind::Unpark
+                    | LifecycleKind::StartupCleanup
+            ) {
+                startup_cleanup_deadline
+            } else {
+                join_deadline
+            };
             self.cancel_operation(&session_id, &operation_id);
             let joined = tokio::time::timeout_at(join_deadline, async {
                 while result.borrow_and_update().is_none() {

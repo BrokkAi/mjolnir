@@ -309,10 +309,10 @@ test("v6 lists background commands and returns the background judgment", async (
     background: [{ id: "claude:task-1", command: "npm run dev", started_s_ago: 900 }],
     final_tool_calls: [{ name: "mcp__mj-agents__handback", status: "completed" }] };
   const result = { answers: {
-    failure: { type: "choice", choice: "none", confidence: 0.97 },
-    input: { type: "choice", choice: "none", confidence: 0.96 },
-    work: { type: "choice", choice: "finished", confidence: 0.95 },
-    background: { type: "choice", choice: "unneeded", confidence: 0.93 },
+    failure: { type: "choice", choice: "none", confidence: 0.97, probabilities: { none: 1, transient_provider: 0, quota: 0, other: 0, unclear: 0 } },
+    input: { type: "choice", choice: "none", confidence: 0.96, probabilities: { none: 1, redundant_request: 0, required: 0, unclear: 0 } },
+    work: { type: "choice", choice: "finished", confidence: 0.95, probabilities: { finished: 1, authorized_unfinished: 0, waiting: 0, unclear: 0 } },
+    background: { type: "choice", choice: "unneeded", confidence: 0.93, probabilities: { needed: 0, unneeded: 1, unclear: 0 } },
   } };
   const calls = upstream(t, async (_url, options) => {
     assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: currentQuestions });
@@ -354,9 +354,9 @@ test("v5 and v6 accept the whole-message authorization history and bound it", as
   const state = { ...ordinary, phase: "replied", transcript_summary: "", authorization,
     completion: { stop_reason: "EndTurn", diagnostic: null } };
   const result = { answers: {
-    failure: { type: "choice", choice: "none", confidence: 0.99 },
-    input: { type: "choice", choice: "none", confidence: 0.99 },
-    work: { type: "choice", choice: "finished", confidence: 0.97 },
+    failure: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, transient_provider: 0, quota: 0, other: 0, unclear: 0 } },
+    input: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, redundant_request: 0, required: 0, unclear: 0 } },
+    work: { type: "choice", choice: "finished", confidence: 0.97, probabilities: { finished: 1, authorized_unfinished: 0, waiting: 0, unclear: 0 } },
   } };
   const calls = upstream(t, async (_url, options) => {
     assert.deepEqual(JSON.parse(options!.body as string).state, state);
@@ -375,4 +375,37 @@ test("v5 and v6 accept the whole-message authorization history and bound it", as
     await expectError(await proxy.fetch(request({ ...state, authorization: { ...authorization, messages: [{ id: "u", role: "user", text: "x".repeat(32 * 1024 + 1) }] } }), environment()), 400);
     assert.equal(calls.callCount(), before);
   }
+});
+
+test("v6 preserves gate evidence and rejects malformed distributions while v5 stays frozen", async (t) => {
+  const { readFile } = await import("node:fs/promises");
+  const cases = JSON.parse(await readFile(new URL("../../../mj-core/tests/jev-gates.json", import.meta.url), "utf8"));
+  const { recent_tools: _recent, ...ordinary } = base;
+  const state = { ...ordinary, phase: "running", transcript_summary: "Choose a destination." };
+  let result = { answers: cases[0].answers, diagnostic: "private upstream detail" };
+  upstream(t, async () => Response.json(result));
+  const request = (version = "v6") => new Request(`https://proxy.example/${version}/turn-verdict`, {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  });
+  for (const c of cases) {
+    result = { answers: c.answers, diagnostic: "private upstream detail" };
+    const response = await proxy.fetch(request(), environment());
+    assert.equal(response.status, 200, c.name);
+    assert.deepEqual(await response.json(), { answers: c.answers }, c.name);
+  }
+  for (const bad of [undefined, null, {}, { required: 1 }, { required: .5, none: .2, redundant_request: .2, unclear: .1, extra: 0 },
+    { required: .5, none: -.1, redundant_request: .2, unclear: .4 },
+    { required: .5, none: "0.2", redundant_request: .2, unclear: .1 },
+    { required: .5, none: .8, redundant_request: .2, unclear: .1 },
+    { required: .3, none: .5, redundant_request: .1, unclear: .1 }]) {
+    result = structuredClone({ answers: cases[0].answers, diagnostic: "private" });
+    result.answers.input.probabilities = bad;
+    await expectError(await proxy.fetch(request(), environment()), 502);
+  }
+  // v5 does not require or expose distributions.
+  result = structuredClone({ answers: cases[0].answers, diagnostic: "private" });
+  for (const answer of Object.values(result.answers) as Record<string, unknown>[]) delete answer.probabilities;
+  const old = await proxy.fetch(request("v5"), environment());
+  assert.equal(old.status, 200);
+  assert.deepEqual(await old.json(), { answers: result.answers });
 });

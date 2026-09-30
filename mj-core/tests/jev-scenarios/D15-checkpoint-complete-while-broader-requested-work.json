@@ -1,0 +1,425 @@
+{
+  "id": "D15",
+  "title": "Checkpoint complete while broader requested work remains",
+  "category": "remaining-scope-without-question",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "430c302f0bd8f53f4c2b9df22191f6f4",
+    "session_title": "java-scopes-lane",
+    "decision": "assessment-430c302f0bd8f53f4c2b9df22191f6f4-28824",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T15:34:53.381Z",
+    "assessed_at": "2026-09-30T15:57:02.313Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "superseded",
+    "recorded_reason": "turn_or_lifecycle_changed",
+    "note": "Broader requested gates and route fixes are paused on the newer 2771 head SHA the user said they would provide. The following context shows the user supplying it."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_04ea884fed90d62c016abcece488e887d2b5636f5041971964",
+          "role": "assistant",
+          "text": "The focused run is now about 13 minutes old, still waiting in its mbx wrapper; the host has eight `rustc` processes, though none is a child of this run at the moment. I’m not touching locks or other processes and will follow the 20-minute threshold you set."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcee10c1a087d2b06dd9352830d1bf",
+          "role": "assistant",
+          "text": "The failures came from two regressions: persisted validation treated anonymous type scopes as source declarations, and a single-type import shortcut marked cross-file access complete without Maven ownership evidence. I’ve corrected both validation layers, removed that shortcut, and made the inherited-member fixture provide a Maven source root. I’m rerunning the full Java analysis filter now."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abceebc9ad487d2b55dde7ad6842555",
+          "role": "assistant",
+          "text": "The full filter is recompiling `brokk-bifrost-analysis`; mbx discarded its oversized incremental state, so this pass is taking the full compile path. Host compilers remain active. The earlier lock wait has cleared, and I’m waiting for the test run."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf007228087d2b214c95aeadaa6b2",
+          "role": "assistant",
+          "text": "The full filter is at about eight minutes; its `mbx-rustc` wrapper is waiting, while host `rustc` processes remain active. The previous compile settled shortly after nine minutes, so I’m continuing to monitor this run without intervention."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf11a50a087d2bc302ce7c24fadf9",
+          "role": "assistant",
+          "text": "The full analysis filter now passes 351/352. All anonymous/local scope, visibility-publication, and selected-source-witness failures are cleared; the sole failure is the inherited-member test, which still carries unrelated `UnsupportedSemantic` reasons after the Maven source-access gap is gone. I narrowed that test to assert the exact `Base.run` candidate and absence of `java-source-access-open`, then I’ll rerun the full filter."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf262212087d2beca69e6e1af9aaa",
+          "role": "assistant",
+          "text": "The final Java-filter run is still compiling after about five minutes, with host compilers active. It also logged a non-fatal mbx cache prediction warning for a missing test fixture input; compilation continues, and I’m retaining the full log for the receipt."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf337f82887d2baa8e42f47416a1c",
+          "role": "assistant",
+          "text": "The complete Java-filtered analysis suite now passes 352/352. The synthetic-scope visibility assertions and source-access authority test are green; the inherited-member fixture still checks the exact `Base.run` candidate and confirms the Maven context no longer emits `java-source-access-open`. I’m committing these fixes before running Clippy, formatting, and the native trial."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf355e1c887d2ad8f6934d56b1c77",
+          "role": "assistant",
+          "text": "The current tree is committed as `00ccd0e1a`, and the Java-filtered analysis suite passed 352/352 on that exact source state. I’m running the two requested Clippy modes now, one at a time, followed by `cargo fmt --check` and the baseline/native trial."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf3fdcb3487d2b4405af686c372cc",
+          "role": "assistant",
+          "text": "The analysis-library Clippy mode passed. I’m starting the workspace all-targets/all-features Clippy check now."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf4aa8b1887d2b1798c1fd1104769",
+          "role": "assistant",
+          "text": "Workspace Clippy is still compiling the broader all-features target set and has reported no lint failures so far. The non-fatal mbx warning about the missing prediction input recurred; I’m continuing to retain the output."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf58e926c87d295d369462ca0fc54",
+          "role": "assistant",
+          "text": "Both Clippy modes passed on `00ccd0e1a`. I’m checking workspace formatting next; then I’ll run the baseline and temporary native-Java trial, removing the trial-only hook afterward."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf5b29ecc87d28c9b79215fa2de82",
+          "role": "assistant",
+          "text": "Formatting found only the four multiline diagnostics in my JVM test-expectation commit. I’m applying rustfmt to the workspace, then I’ll recheck and commit that mechanical fix before continuing."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf61236a087d2a2963ec1d6f96b73",
+          "role": "assistant",
+          "text": "The workspace format check now passes after commit `a6b341772`. I’m starting the no-hook baseline run with `--no-fail-fast` so it reports all 1,338 selected Java tests, even if some fail."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf771054487d290f6c9552e891a54",
+          "role": "assistant",
+          "text": "The baseline is still compiling the combined analysis and facade test targets; no test results have started yet. Host compilers are active, and the run is within the ordinary compile period we’ve seen on this shared build cache."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf829b1f887d2939b4d8eb27514e9",
+          "role": "assistant",
+          "text": "The final baseline selection contains 1,350 tests rather than the original 1,338 because this lane added 12 regression tests. It has reached 486/1,350 with no failures reported so far; I’ll use the observed final total for both baseline and trial counts."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf8c86d2087d2b590167f6541c01a",
+          "role": "assistant",
+          "text": "The baseline has progressed to 1,270/1,350; the remaining 80 are still running, and I haven’t seen a failure entry. The run is producing results now, so the earlier quiet period was test execution rather than a build stall."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf9075c5c87d289c57881b4d41a08",
+          "role": "assistant",
+          "text": "Baseline passed 1,350/1,350 with no failures. I’m adding the task’s temporary native-Java dispatch hook for the trial only; I’ll run the same 1,350-test selection, then restore both temporary edits and verify the tree is clean."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf9567e0487d2821e976c68c406bc",
+          "role": "assistant",
+          "text": "The committed JVM, analysis, Clippy, and formatting checks are complete; the baseline Java run is 1,350/1,350, including the 12 new regression tests. I’m adding the temporary native-only dispatch now, measuring that trial, then I’ll remove the hook and verify the committed tree is clean."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf9a5289887d29150d53c968c7b4e",
+          "role": "assistant",
+          "text": "The temporary hook is in place and routes Java directly to the bounded native resolver only when `BIFROST_TRIAL_NATIVE_JAVA` is set; it has no incumbent fallback. I’m formatting that temporary edit before starting the measured trial."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcf9eaa36887d2a887393799a0dc6a",
+          "role": "assistant",
+          "text": "The first trial compile caught a path-resolution mistake in my temporary hook: the existing `java` name in this module refers to the legacy adapter, not the analyzer module. I’m letting this run exit naturally, then I’ll correct the hook to use the explicit crate path and rerun; the checkouts show active rustc processes, so there’s no stalled-build condition."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfa3af10c87d28fed5d6871a43c94",
+          "role": "assistant",
+          "text": "The failed compile is still unwinding through Cargo’s queued targets, while host rustc processes remain active. I’m leaving all processes untouched and will patch only after this trial wrapper exits."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfacc09ac87d29e5f30c4cdf0576b",
+          "role": "assistant",
+          "text": "I corrected the path to `crate::analyzer::java::native_points`; the temporary hook now formats cleanly. The first attempt exited 101 before running tests, and its compiler diagnostic identifies only that temporary path mistake. I’m starting the corrected trial with a separate receipt log."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfb2ce25c87d2962813876cf860ba",
+          "role": "assistant",
+          "text": "The corrected native trial is compiling both packages, with rustc active and no new diagnostics. Once nextest finishes I’ll record the result, remove the uncommitted trial hook, and run the final cleanliness/format checks."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfb61f32887d288538ed58e777c67",
+          "role": "assistant",
+          "text": "The trial remains in its build phase after about two minutes; no test failures or new compiler diagnostics have appeared, and rustc is still active. I’m continuing to monitor the run without touching other processes."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfba66dd487d283f7154a47a2941f",
+          "role": "assistant",
+          "text": "The native trial has spent about three minutes in Cargo’s build queue; its log has not advanced past package compilation, and no rustc is currently visible. I’m respecting the owner’s 20-minute threshold and will collect `/proc/locks` only if that condition persists."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfc023bec87d2b0a5e6fff19b8260",
+          "role": "assistant",
+          "text": "Host rustc activity has resumed, and the trial process is waiting on its child build rather than hanging without compiler work. The trial log has not reached test execution yet; I’ll keep the run intact and check again shortly."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfc35200c87d2924a8ef7e056eea2",
+          "role": "assistant",
+          "text": "The corrected run has been waiting about six minutes while rustc processes continue across the host. It has produced no new errors; this is still below the owner’s 20-minute no-rustc threshold."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfc9dac9887d28823f21e25222925",
+          "role": "assistant",
+          "text": "Compilation has advanced into the runtime/MCP dependency set, with rustc still active. The build identity warning is from mbx’s incremental reuse check; the trial has emitted no compiler errors or test failures so far."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfce83a7c87d2b68519665be5c7e9",
+          "role": "assistant",
+          "text": "The trial has reached test execution: the corpus is 1,350 tests, and early failures match the expected native-versus-incumbent gap rather than the committed Java-filter validation, which passed 352/352. I’ll let nextest finish so the complete native pass count and scoped residuals are accurate."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfd5c616c87d28582beb00a1854f7",
+          "role": "assistant",
+          "text": "The corrected trial completed: 1,141 passed and 209 failed out of 1,350, versus the supplied earlier native result of 1,110/1,338. I’m checking the failing diagnostics for the assigned import/scope cases now, then I’ll restore the temporary hook and verify the committed worktree."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcfed394dc87d2953fe38f0a50e33c",
+          "role": "assistant",
+          "text": "The inherited-member native failure is specifically `java-source-access-open`: that warm fixture spans packages but has no Maven project metadata, so the selected-context resolver correctly keeps visibility incomplete. I’m correcting the two warm Java fixtures to model a real Maven source root; this preserves fail-closed authority checks and lets those candidate-bounded cases test resolution under established source ownership."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcff4afba887d29922a6f8d95ce4aa",
+          "role": "assistant",
+          "text": "I added explicit Maven metadata and valid `src/main/java` layouts to both cross-package warm Java fixtures. The focused native checks are rebuilding `brokk-bifrost`; rustc is active and there are no diagnostics yet."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abcffc0e90087d28fc1381c1d65a25d",
+          "role": "assistant",
+          "text": "The native warm checks now show the Maven authority gap is closed, but both still return `incomplete` because the selected binding contains `UnsupportedSemantic` gaps; I’m preserving that result rather than weakening the test. The incumbent-path check is rebuilding behind another Cargo package-cache lock, with rustc activity present."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd00543cb087d2853096fb6605205b",
+          "role": "assistant",
+          "text": "The baseline warm-fixture check is compiling `brokk-bifrost` under the normal dispatch; rustc is active. The corrected fixtures have not introduced compile diagnostics, and I’m waiting for the two-test receipt before the final native run."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd008cfbb487d29461dfe024c5f631",
+          "role": "assistant",
+          "text": "Both updated warm Java tests pass with the incumbent dispatch (2/2). Their native route remains incomplete due `UnsupportedSemantic` evidence, even after Maven authority closes; I’m starting a fresh full native trial on the updated fixtures for the final counts."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd014450d487d29d916dba9526502c",
+          "role": "assistant",
+          "text": "The fixture correction is committed as `40f73fb95`; only the two uncommitted trial-hook edits remain. The full native trial is progressing on the same committed source tree and will provide the final denominator."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd0238af2487d285c5e4b10032de84",
+          "role": "assistant",
+          "text": "The updated fixtures pass in the normal path, the final formatter check passes, and I’ve rerun workspace Clippy on commit `40f73fb95` to cover the changed integration test. The full native trial finished at 1,141/1,350, with 209 expected incomplete native cases; I’m finishing the last lint check and collecting scoped failure details."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd02de51e087d29d6d17cdf1c6e16d",
+          "role": "assistant",
+          "text": "The final format check exited 0. Workspace Clippy is still compiling the changed package under active host rustc processes; the earlier analysis-only Clippy and JVM/analysis test receipts are already clean, and this rerun covers the new test fixture."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd04cf8c2887d2b9ddcd00509b7432",
+          "role": "assistant",
+          "text": "The detailed residual list is saved in the agent report directory, including every scoped failure name and its observed native outcome. JVM tests and workspace Clippy pass on `40f73fb95`; the final analysis Java filter is still waiting on Cargo’s build-directory lock while rustc remains active host-wide."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd0519fd3c87d280deb684896b2bd6",
+          "role": "assistant",
+          "text": "The analysis Java filter remains in Cargo’s package/build lock queue, but rustc processes are active and the run is under four minutes. I’m leaving host processes untouched and will report it if the specified 20-minute/no-rustc threshold is reached."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd0632408c87d2bd8260e24f6c7e29",
+          "role": "assistant",
+          "text": "Handed back the validation receipts, commit SHAs, native-trial counts, and scoped residuals."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd18cac5f887d29cc67a322828881b",
+          "role": "assistant",
+          "text": "I’ll move the clean Java lane worktree to `49b950e81` as directed, then inspect the merged state and continue the scoped native fixes in your requested order. I’ll leave all processes untouched and preserve the lane’s no-push/no-branch rules."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1904307087d2a5fce1124d3b79c5",
+          "role": "assistant",
+          "text": "I’ll move the clean lane worktree to `49b950e81`, inspect what the merge changed, and continue the remaining scoped failures. I’ll leave other processes alone and report any build stall with lock evidence rather than intervening."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd193ac7e087d285dd941fa2821663",
+          "role": "assistant",
+          "text": "The worktree is now clean at `49b950e81`. The merged base includes the prior Java work and later master changes, so I’m measuring its native trial before touching the remaining causes; that gives us a trustworthy before count for this tree."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1a40b41c87d2bb305d4874f41a76",
+          "role": "assistant",
+          "text": "The base trial has compiled several crates, then reported waits on the mbx package-cache and build-directory locks; there is no `rustc` process visible at the moment. I’m making no lock or process changes, as requested, and will keep working from the source while watching for progress."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1cd0b88c87d2818d1daea09425a3",
+          "role": "assistant",
+          "text": "The lock wait has remained unchanged for roughly 12 minutes, with no Rust compiler activity visible from the worktree. The 20-minute reporting threshold has not elapsed yet. Source review points to several fixes that are separable from the Java calls lane; the warm `run()` queries and `URLDecoder.decode` summary proof appear to require its call-applicability work, so I’m keeping those untouched."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1d7d0b2c87d2968b166b7f37854a",
+          "role": "assistant",
+          "text": "A process check with the required elevated view found an active `rustc` build in another worktree. So the current wait is behind host-wide compilation, and the “over 20 minutes with no rustc” condition is not met; I’ll keep the trial queued and won’t touch that build."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1ef9d51887d294e6f625ee1ac118",
+          "role": "assistant",
+          "text": "The base trial completed on `49b950e81`: **1,141/1,350 passed, 209 failed** (log `/tmp/java-native-49b-before.log`). It confirms the six switch-label and six field-owner failures, three enum/local residuals, the nested-anonymous case, warm call queries, and four external-route boundary failures. I’m removing the temporary trial dispatch now, then I’ll add focused producer regressions for the switch type-pattern and receiver-scope defects that do not need call applicability."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd1faebbf887d2a78bc66d38fea131",
+          "role": "assistant",
+          "text": "I’ve resumed at `49b950e81`. I’m checking the lane state and the current failure details, then I’ll add focused native regressions and work through only the remaining in-scope producer and authority issues."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd204728c487d288db91f24f263034",
+          "role": "assistant",
+          "text": "The baseline confirms several independent causes. Two are concrete producer gaps: the named switch-pattern type is never emitted as a reference, and synchronized-statement lock expressions are skipped. Other cases carry unrelated call, constructor, or generic-type gaps that belong to the Java calls lane; I’m keeping those untouched while tracing the owner and external-boundary cases."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd21901ca487d2b056c0b2dd3ed38c",
+          "role": "assistant",
+          "text": "The focused build is queued behind concurrent host Cargo work, and rustc processes are still active, so I’m leaving those processes alone. I’ve applied the two AST-root fixes; I’m using this run to confirm the new regressions and check whether current-instance typing or hierarchy completeness needs a fact-model change before touching that boundary."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2305813887d29f60eff76eaf10ea",
+          "role": "assistant",
+          "text": "The producer test run confirms the switch-pattern and synchronized cases were missing AST references before the fix. The remaining `this.field` and inherited-field gaps are deeper: the current fact model has no direct expression for a current-instance type, and mirrored same-file supertypes can produce competing owner identities. I’m testing whether the existing lexical-member route can express those cases without extending the persisted fact contract."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd25094ad887d28bc11138620c79ab",
+          "role": "assistant",
+          "text": "I found why the first pattern fix did not take: tree-sitter-java exposes `type_pattern` as ordered named children, with no `type` or `name` fields. I’ve switched it to AST child-role inspection and added a no-new-contract path for plain `this.field`; the focused build is compiling these revisions now."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd26c70b8087d2b34e45e55d251d1e",
+          "role": "assistant",
+          "text": "I’m continuing at `49b950e81`. I’ll first verify the partial edits and focused-test receipt in the lane worktree, then finish the field/scope fixes and run the requested validation and native trial. I’ll leave any process I didn’t start untouched."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2769947087d29033e3493cd030d4",
+          "role": "assistant",
+          "text": "I’ve noted the new integration and validation rule. The changes in this lane are confined to Java’s lowering and Java lexical-hierarchy replay, so I’ll keep the Java-filtered analysis gate for these edits; if I touch language-neutral analysis or store code, I’ll expand to the full analysis suite."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2855436887d28a9db4a9dec2e7e1",
+          "role": "assistant",
+          "text": "The focused run is still compiling both affected crates through mbx; its Rust compiler children are present, so I’m letting it proceed. I haven’t inspected or changed host locks."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd29f04b6887d29ebbe5bd65100c40",
+          "role": "assistant",
+          "text": "The first focused run now passes the pattern type reference and both inherited-field cases. It caught one projection-contract mismatch in `this.field`; I corrected the projection to match Java’s value namespace and am rerunning the focused gate before broader checks."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2bb09b1887d2afa804fc0f0c797d",
+          "role": "assistant",
+          "text": "The four focused regressions now pass, including the `this.field` switch selector and inherited fields in synchronized and ordinary expressions. I’m checkpointing these Java-only fixes on the requested base; broader validation and the remaining boundary cases await the updated 2771 head you said you’ll provide."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2becd1cc87d2807d7cb29ba5232c",
+          "role": "assistant",
+          "text": "I spotted that the checkpoint message stored literal `\\n` text instead of paragraph breaks. I’m correcting the message now so the commit meets the required multiline format."
+        },
+        {
+          "id": "msg_04ea884fed90d62c016abd2c189b9c87d2888783660ab13ed0",
+          "role": "assistant",
+          "text": "Checkpoint `526af3fc5` adds the Java pattern, synchronized-lock, and inherited-field fixes. The four focused native regressions pass.\n\nI’m pausing on the requested `49b950e81` base because the primary asked that further work use a newer 2771 head, whose SHA is still pending. The broader gates, final native trial, and external pack/class-jar route fixes remain outstanding."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Primary: integration of 40f73fb95 broke 10 Rust tests. Your change to the language-neutral assertions in typed_fact_lowering.rs (the property_gaps loop and the declaration_visibilities loop) required Java's restricted access levels for every language, and Rust's CrateOrModule/Internal visibilities panicked. I fixed it on 2771 (Java-only refinement, original rule for other languages); rebase your next work onto the 2771 head I will name when I merge. From now on, when you edit shared code under analyzer/resolution or analyzer/store (anything not Java-specific), run the whole `-p brokk-bifrost-analysis` suite, not only the Java filter, before handing back.",
+    "assistant_text_tail": "Checkpoint `526af3fc5` adds the Java pattern, synchronized-lock, and inherited-field fixes. The four focused native regressions pass.\n\nI’m pausing on the requested `49b950e81` base because the primary asked that further work use a newer 2771 head, whose SHA is still pending. The broader gates, final native trial, and external pack/class-jar route fixes remain outstanding.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 1.0
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.36000001430511475
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.9200000166893005
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.8999999761581421
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "input-axis real-turn mining sample",
+    "judgment": "independent evidence label; Jev verdict retained separately",
+    "next": "The user later supplied head `a3b88a3fe` and instructed the agent to rebase onto it.",
+    "input_rationale": "Broader requested gates and route fixes are paused on the newer 2771 head SHA the user said they would provide. The following context shows the user supplying it."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T15:56:51.762Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-30T15:57:02.199Z",
+        "kind": "user",
+        "text": "Primary: rebase onto 2771 head a3b88a3fe (it contains your 40f73fb95 plus my language-neutral visibility fix in typed_fact_lowering.rs and fact_resolution.rs; read that commit, do not reintroduce Java"
+      },
+      {
+        "at": "2026-09-30T15:57:10.905Z",
+        "kind": "agent",
+        "text": "I’ll move the lane worktree to `a3b88a3fe`, read the visibility fix, and cherry-pick `526af3fc5` as requested. Then I’ll reproduce the callable-shape panic, align source-shape capture with the callabl"
+      },
+      {
+        "at": "2026-09-30T15:59:34.418Z",
+        "kind": "agent",
+        "text": "The base update and cherry-pick are clean. I’ve read `a3b88a3fe`: it preserves one visibility gap for non-public declarations across languages and allows Java scoped `Unknown` without one. I’m now rep"
+      },
+      {
+        "at": "2026-09-30T16:05:12.792Z",
+        "kind": "agent",
+        "text": "The panic is caused by record-component `formal_parameters` inside a local record: the enclosing method remains on the callable stack, so those components were misread as that method’s parameters. I c"
+      },
+      {
+        "at": "2026-09-30T16:07:34.741Z",
+        "kind": "agent",
+        "text": "The exact branch-relations regression and the new JVM producer test both pass. The missing shape was not a nested method: record components were being lowered as parameters of the still-active enclosi"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "430c302f0bd8f53f4c2b9df22191f6f4"
+  }
+}

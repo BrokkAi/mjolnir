@@ -732,10 +732,10 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
 /// A sub-agent create has no waiter, so a failure that happens before the
 /// first command has to land in the child's own record.
 #[test]
-fn subagent_placement_failure_marks_the_child_record_in_error() {
+fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let test = "subagent_placement_failure_marks_the_child_record_in_error";
+        let test = "subagent_placement_failure_keeps_unverifiable_cleanup_pending";
         IsolatedTest::new(test_name(module_path!(), test))
             .env(SSH_DOCKER_FAILURE_CHILD, "1")
             .env("MJ_DATA_DIR", directory.path())
@@ -803,7 +803,7 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
         controller.state.sessions[&child_id].clone(),
         Controller::load().unwrap().state.sessions[&child_id].clone(),
     ] {
-        assert_eq!(record.state, SessionState::Error);
+        assert_eq!(record.state, SessionState::StartupCleanup);
         assert!(
             record
                 .last_error
@@ -815,93 +815,175 @@ fn subagent_placement_failure_marks_the_child_record_in_error() {
     }
 }
 
-/// #1192: a launch whose readiness wait failed leaves no worker running on the
-/// target, keeps the worker's state directory for diagnosis, and says both.
+/// A child that fails to stop owns its live slot across reopening the store.
 #[test]
-fn a_failed_readiness_wait_stops_the_worker_and_keeps_its_directory() {
-    if std::env::var_os(SSH_DOCKER_FAILURE_CHILD).is_none() {
+fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
+    const MARKER: &str = "MJ_TEST_PENDING_STARTUP_CLEANUP";
+    let name = "failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching";
+    if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
-        let test = "a_failed_readiness_wait_stops_the_worker_and_keeps_its_directory";
-        IsolatedTest::new(test_name(module_path!(), test))
-            .env(SSH_DOCKER_FAILURE_CHILD, "1")
-            .env("MJ_DATA_DIR", directory.path())
-            .env("MJ_CONFIG_DIR", directory.path())
+        IsolatedTest::new(test_name(module_path!(), name))
+            .env(MARKER, "1")
+            .isolated_store(directory.path())
             .run();
         return;
     }
-
     let _writer = crate::database::install_isolated_test_writer();
-    let config = ssh_docker_registration_config();
-    config.save().unwrap();
-    let mut controller = Controller {
-        config,
-        state: State::default(),
+    let (mut controller, child_id) = startup_cleanup_fixture();
+    let stop = RecordingExecutor::failing("stop Mjolnir worker daemon");
+    assert!(
+        controller
+            .finish_failed_startup_controlled(&child_id, &stop, true)
+            .is_err()
+    );
+    assert_eq!(
+        stop.commands().len(),
+        1,
+        "failed stop must not reinstall or relaunch anything"
+    );
+    let mut recovered = Controller::load().unwrap();
+    let child = &recovered.state.sessions[&child_id];
+    assert_eq!(child.state, SessionState::StartupCleanup);
+    assert!(!child.archived);
+    assert!(
+        child
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("fixture launch failed")
+    );
+    assert!(!crate::pollers::session_target_is_pollable(child));
+    assert!(
+        recovered
+            .ensure_subagent_slot_available(PROVISIONED_SESSION, None)
+            .is_err()
+    );
+    let stop = DurableStateAtCleanup {
+        session_id: child_id.clone(),
+        seen: Mutex::new(Vec::new()),
     };
-    let session_id = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "docker",
-            "worker that never becomes ready",
-            SessionLaunchOptions {
-                at: None,
-                branch: None,
-                base: None,
-                subagents: None,
-                create_managed_worktree: None,
-                initial_prompt: None,
-                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-                additional_mounts: Vec::new(),
-                resource_allocation: None,
-                project_directory: None,
-                session_title_override: None,
-            },
-        )
+    recovered
+        .cleanup_failed_startup_controlled(&child_id, &stop)
         .unwrap();
-    let worker_root = format!("/tmp/mj-test-workers/{session_id}");
-    let worker_root = worker_root.as_str();
-    let backend = targets::TargetLocator::LocalBare {
-        worker_root: worker_root.into(),
-    };
-
-    // Starting the worker fails, which is the readiness wait failing before
-    // any connection: the same arm a wait that times out reaches.
-    let executor = RecordingExecutor::failing("start detached Mjolnir worker");
-    let error = futures::executor::block_on(controller.connect_and_start_worker(
-        &session_id,
-        &executor,
-        &backend,
-        worker_root,
-        false,
-    ))
-    .unwrap_err();
-
-    let commands = executor.commands();
-    let stop = commands
-        .iter()
-        .position(|argv| argv.iter().any(|arg| arg.contains("worker process tree")))
-        .unwrap_or_else(|| panic!("no worker stop ran: {commands:?}"));
-    let diagnosis = commands
-        .iter()
-        .position(|argv| argv.iter().any(|arg| arg.contains("worker-startup.json")))
-        .unwrap_or_else(|| panic!("no diagnosis ran: {commands:?}"));
     assert!(
-        diagnosis < stop,
-        "the worker must be read before it is stopped: {commands:?}"
-    );
-    assert!(
-        !commands
+        stop.seen
+            .lock()
+            .unwrap()
             .iter()
-            .flatten()
-            .any(|arg| arg.contains("rm -rf") && arg.contains(worker_root)),
-        "the state directory must be kept: {commands:?}"
+            .all(|(state, _)| *state == SessionState::StartupCleanup)
     );
-    let reported = format!("{error:#}");
+    let recovered = Controller::load().unwrap();
+    let child = &recovered.state.sessions[&child_id];
+    assert_eq!(child.state, SessionState::Error);
+    assert!(child.archived);
+    recovered
+        .ensure_subagent_slot_available(PROVISIONED_SESSION, None)
+        .unwrap();
+    assert_eq!(
+        crate::database::load_usage_tree(PROVISIONED_SESSION)
+            .unwrap()
+            .unwrap()
+            .sessions
+            .len(),
+        2
+    );
+}
+
+struct CancelledLaunch;
+impl CommandExecutor for CancelledLaunch {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        bail!("operation cancelled")
+    }
+    fn cancellation_requested(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
+    const MARKER: &str = "MJ_TEST_CANCELLED_CHILD_CLEANUP";
+    let name = "a_cancelled_child_launch_still_stops_with_an_independent_executor";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), name))
+            .env(MARKER, "1")
+            .env("MJ_WORKER_BINARY", std::env::current_exe().unwrap())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, child_id) = startup_cleanup_fixture();
+    let record = controller.state.sessions.get_mut(&child_id).unwrap();
+    record.state = SessionState::Provisioning;
+    crate::database::save_lifecycle_session(record).unwrap();
+    let error = futures::executor::block_on(
+        controller.provision_subagent_session_controlled(&child_id, &CancelledLaunch),
+    )
+    .unwrap_err();
     assert!(
-        reported.contains("the worker was stopped after the failed launch")
-            && reported.contains(worker_root),
-        "{reported}"
+        format!("{error:#}").contains("operation cancelled"),
+        "{error:#}"
     );
+    let controller = Controller::load().unwrap();
+    let record = &controller.state.sessions[&child_id];
+    assert_eq!(
+        record.state,
+        SessionState::Error,
+        "cleanup used a fresh executor despite launch cancellation: {record:?}"
+    );
+    assert!(record.archived);
+    controller
+        .ensure_subagent_slot_available(PROVISIONED_SESSION, None)
+        .unwrap();
+}
+
+fn startup_cleanup_fixture() -> (Controller, String) {
+    let mut config = ssh_docker_registration_config();
+    config
+        .targets
+        .insert("podman".into(), TargetTemplate::LocalBare);
+    config.subagents.max_concurrent = 1;
+    config.save().unwrap();
+    let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
+    parent.project_directory = Some(mj_core::config::data_dir());
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join(PROVISIONED_SESSION),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let child_id = "fedcba9876543210fedcba9876543210";
+    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
+    child.state = SessionState::StartupCleanup;
+    child.last_error = Some("fixture launch failed".into());
+    child.project_directory = Some(mj_core::config::data_dir());
+    child.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join(child_id),
+    });
+    crate::database::save_subagent_session(
+        &child,
+        &mj_core::subagent::SubagentRecord {
+            child_session_id: child_id.into(),
+            parent_session_id: PROVISIONED_SESSION.into(),
+            task_name: "failed child".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "inspect".into(),
+            request_key: "cleanup-test".into(),
+            created_at: now(),
+            noticed_turn: None,
+            handback_tool: true,
+        },
+    )
+    .unwrap();
+    (
+        Controller {
+            config,
+            state: crate::database::load_state().unwrap(),
+        },
+        child_id.into(),
+    )
 }
 
 #[test]
@@ -1063,7 +1145,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         Some("ssh unavailable".into()),
     );
     let retained = cleanup_failed.sessions.get(session_id).unwrap();
-    assert_eq!(retained.state, SessionState::Error);
+    assert_eq!(retained.state, SessionState::StartupCleanup);
     assert!(retained.target.is_some());
     assert_eq!(retained.target_runtime, runtime);
     assert!(failure.to_string().contains("cleanup"));
@@ -1180,7 +1262,6 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
         .rollback_failed_new_session_with(
             &session_id,
             anyhow::anyhow!("operation cancelled while connecting to the worker relay"),
-            &RefusingExecutor("the cancelled launch"),
             &cleanup,
         )
         .unwrap();
@@ -1190,7 +1271,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     for (state, last_error) in seen {
         assert_eq!(
             state,
-            SessionState::Error,
+            SessionState::StartupCleanup,
             "the target was removed while the record still said {state:?}"
         );
         assert!(
@@ -1204,6 +1285,51 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     let retained = &reloaded.state.sessions[&session_id];
     assert_eq!(retained.state, SessionState::Error);
     assert!(retained.target.is_none());
+
+    struct RefuseStop(Mutex<usize>);
+    impl CommandExecutor for RefuseStop {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            *self.0.lock().unwrap() += 1;
+            bail!("target stop failed");
+        }
+    }
+    let checkout = PathBuf::from("/srv/project/.mj/clones").join(&session_id);
+    let record = controller.state.sessions.get_mut(&session_id).unwrap();
+    record.target = Some(TargetLocator::SshBare {
+        host: "builder".into(),
+        workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
+        worker_id: None,
+    });
+    record.project_directory = Some(checkout.clone());
+    record.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        kind: mj_core::state::ManagedCheckoutKind::Clone,
+        source_project_directory: "/srv/project".into(),
+        source_repository: "/srv/project".into(),
+        worktree_root: checkout,
+        branch: "main".into(),
+        target: mj_core::state::ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    controller.persist_session_state(&session_id).unwrap();
+    let refused = RefuseStop(Mutex::new(0));
+    controller
+        .rollback_failed_new_session_with(&session_id, anyhow::anyhow!("launch failed"), &refused)
+        .unwrap();
+    assert_eq!(
+        *refused.0.lock().unwrap(),
+        1,
+        "failed stop must prevent checkout cleanup"
+    );
+    let reloaded = Controller::load().unwrap();
+    assert_eq!(
+        reloaded.state.sessions[&session_id].state,
+        SessionState::StartupCleanup
+    );
+    assert!(
+        reloaded.state.sessions[&session_id]
+            .managed_worktree
+            .is_some()
+    );
 }
 #[test]
 fn launch_failure_is_persisted_separately_from_session_state() {

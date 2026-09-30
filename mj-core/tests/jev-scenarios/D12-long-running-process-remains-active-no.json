@@ -1,0 +1,427 @@
+{
+  "id": "D12",
+  "title": "Long-running process remains active; no question is asked",
+  "category": "background-wait-without-question",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "73cbf0fb7bb73d1ed6594a0a3b955d21",
+    "session_title": "materialize-common-check-h2h",
+    "decision": "assessment-73cbf0fb7bb73d1ed6594a0a3b955d21-10997",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T06:16:43.072Z",
+    "assessed_at": "2026-09-30T06:16:43.462Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "assessed",
+    "recorded_reason": "assessment_uncertain",
+    "note": "The report says a CodeQL process remains alive and has no new output. It reports waiting state without asking for input."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_0eba247eaa2c10b1016abc81af874487d285886b35d9b73d5f",
+          "role": "assistant",
+          "text": "CodeQL source indexing has finished after 8:36; database creation has moved on to the instrumented Cargo workspace build. The target symlink has remained unchanged, and the mbx target directory is now populated through the configured path. No additional extractor error has appeared."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc821757e087d2a34898d6fdee7392",
+          "role": "assistant",
+          "text": "The post-edit database create hit a concrete build failure: Materialize’s `libduckdb-sys` tried to download DuckDB 1.4.3 from GitHub, but network access is blocked in this run. The source is still guarded for restoration. I’m checking whether that exact library is already cached locally so I can complete the requested create without changing Cargo’s target configuration."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8293418487d2ba508259c1cc6aa3",
+          "role": "assistant",
+          "text": "The original CodeQL database contains the exact DuckDB 1.4.3 archive and shared library needed by the failed Cargo build. I’ll reuse that verified local artifact through `DUCKDB_LIB_DIR` on the retry; this avoids network access and leaves the configured Cargo target path unchanged. The initial failed attempt’s full log and timing remain saved."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc837e4eec87d28cdfdced8d4d5697",
+          "role": "assistant",
+          "text": "The failed database directory is removed, its diagnostics are preserved, and the source is back at the original SHA-256. The retry is indexing the edited source again and now points DuckDB to the exact 1.4.3 library already used by the baseline database."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc83e97ed087d2b69b35b2d3f5340c",
+          "role": "assistant",
+          "text": "The retried source index is progressing through the workspace; the nested fuzz-manifest diagnostics remain the same known warnings. The cached DuckDB workaround has passed its earlier failure point, and the build still has more of the pipeline to complete."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8480a36487d2b4a2389a52c24a00",
+          "role": "assistant",
+          "text": "The retry has moved past the earlier workspace files and is continuing source indexing; the DuckDB cache workaround has not triggered another download error. Load has varied between roughly 50 and 250, so I’ll call out the host contention prominently in the comparison."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc84ea151087d2bcad34a4cac920a0",
+          "role": "assistant",
+          "text": "Source indexing remains active and has reached the `persist-client` portion of Materialize. Memory availability is back above 63 GB; I have not started any other heavy task alongside this rebuild."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc854deb5887d299869a5ddd8bae92",
+          "role": "assistant",
+          "text": "The retry is near the same point as the first source-index pass, with no new failure; host load has dropped below 20 at this check. I’m waiting through extraction and the Cargo build to capture a complete post-edit result."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8575431887d28bef9ae92d44ae65",
+          "role": "assistant",
+          "text": "The retry passed DuckDB using the local library, but another build script now fails on a separate blocked download: `src/fivetran-destination/build.rs` fetches `https://curl.se/cacert.pem`. I’m checking the existing successful database and system trust store for a reusable exact artifact before deciding whether the edited DB can be completed offline. The source has again been restored to its baseline hash."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc85a7d2f087d29cb08244e4a0c2ab",
+          "role": "assistant",
+          "text": "The existing DB also contains the CA bundle emitted by Materialize’s successful prior build, but the build script ignores that file and always downloads anew. To keep the source tree and Cargo targets unchanged, I need the CodeQL database-create command to reach that upstream URL; I’ll request the required network escalation and retain both failed-attempt logs."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc85f431ec87d2b1f442a4df432f7c",
+          "role": "assistant",
+          "text": "The network-enabled retry has started successfully, so the shell was allowed to run with the requested escalation. It will use the cached DuckDB library and fetch only the remaining build dependency through Materialize’s unchanged build script."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc863ecce087d28feca5a389c3c793",
+          "role": "assistant",
+          "text": "The network-enabled retry is in the source-index phase and has not reported a fatal error. The project’s known nested-fuzz diagnostics remain; I’ll verify that the Cargo step now completes after indexing."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8690955887d2b2b53c4fbcaffda6",
+          "role": "assistant",
+          "text": "The retry is taking longer than the prior indexing pass under sustained host load, but it remains active and memory is available. Since this is the required full post-edit database rebuild, I’m letting it finish rather than substituting a partial source-only database."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc86fe24fc87d28bb62578afab2dbf",
+          "role": "assistant",
+          "text": "The network-enabled attempt has passed DuckDB and the CA-bundle stage will occur after extraction; source indexing is still active under host load near 117. No additional build failure has appeared."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc87651d3087d2809b167eae840c7e",
+          "role": "assistant",
+          "text": "The retried index has reached `adapter` sources and continues without a fatal error. It is close to the completion point of the previous pass; host load is still elevated, which will remain a limitation on the wall-time comparison."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc87ccf7f487d2b15e362cde01afa6",
+          "role": "assistant",
+          "text": "The source-index pass has reached the same final warning area as the earlier runs. It should transition to Cargo shortly; once that succeeds, the query and result validation are comparatively quick."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc883a3d7087d293267837691a7d25",
+          "role": "assistant",
+          "text": "The source-index log is still open but has stopped adding warnings; memory remains available and the process is active. This pass is slower than the earlier attempts, likely due host contention; I’m continuing to monitor for either the end of indexing or a concrete error."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc887ed27887d2bbaeecad6c676901",
+          "role": "assistant",
+          "text": "The network-enabled create has stopped adding log entries for about three minutes after source indexing, though its process is still active. I’m checking whether it has moved into Cargo or is waiting on another dependency before I leave it running longer."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc88c0af2487d2b5b9137f06c71708",
+          "role": "assistant",
+          "text": "The log is advancing again: the indexer is processing Materialize’s representation fuzz targets. The pause was slow extraction rather than a blocked Cargo download; the network-enabled attempt has not reported a failure."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8902fd9c87d29c2442a60249caba",
+          "role": "assistant",
+          "text": "Source indexing completed in 12:58 on this retry, slower than the baseline pass’s 8:36 under the observed load. The database-create command has moved into the Cargo build; this is where the local DuckDB and network-enabled CA retrieval should let it proceed."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc89556f8087d29e963fd14e3f22af",
+          "role": "assistant",
+          "text": "Cargo is compiling workspace crates now, including RocksDB and Materialize internal crates; the network-dependent Fivetran step no longer appears to block. Host load has spiked above 220, so the eventual build duration is a noisy single observation rather than a stable estimate."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc89a78c7087d2b391bd688c1b7b5d",
+          "role": "assistant",
+          "text": "The workspace build is advancing through Materialize crates (`mz-pgcopy`, cloud and orchestrator components, then `mz`) with no new failures. Memory remains available, though host load is around 188–210."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8a009df087d2b443a619de7ca9cb",
+          "role": "assistant",
+          "text": "The build has progressed through orchestration, storage-types, and expression crates without a new error. Host load has climbed to roughly 274 while Cargo compiles in parallel, so I’ll preserve that context alongside each timing rather than treating the value as typical."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8a832f4087d2aec47c57f8b02c11",
+          "role": "assistant",
+          "text": "The Cargo build has moved into controller and transform crates after finishing the core SQL, storage, and compute dependencies. It remains error-free; available memory is about 40 GB, with load around 228."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8b34d1a087d29b47c9cd66993fa6",
+          "role": "assistant",
+          "text": "Cargo has advanced through RocksDB and into `mz-catalog`. The post-edit database build is roughly 23 minutes in so far, with no failure; host load remains above 200, while available memory has recovered to about 53 GB."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8bced83087d288641927f0e12dde",
+          "role": "assistant",
+          "text": "The build is now compiling adapter and deploy crates, still without errors. Host load has eased to about 152, and the source remains restored only after this process completes."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8c3ac1d487d2a45a091d826e0424",
+          "role": "assistant",
+          "text": "The Cargo workspace build has advanced through `mz-authenticator`, `mz-testdrive`, `mz-pgwire`, and `mz-sqllogictest`. Host load has dropped below 80 and memory availability is about 60 GB; the build log remains error-free."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8cbdfbc487d2bc787552ab396882",
+          "role": "assistant",
+          "text": "The build has reached `mz-catalog-debug`; that crate is taking longer than the preceding small crates, but no error is logged. Host load has fallen to about 49, with 62 GB available."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8d600dc487d2a14c734810c21be3",
+          "role": "assistant",
+          "text": "`mz-catalog-debug` has been the last logged crate for several minutes, with no compiler error and no completion fingerprint yet. The job is still active; memory remains available, so I’m giving that large crate time to finish while monitoring for a stall or failure."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8dfc4a6087d2b47c89f5be98fb34",
+          "role": "assistant",
+          "text": "The candidate is qualified, and the baseline timing runs are complete. I’m waiting for the post-edit CodeQL database build and query to finish; the current build has cleared indexing and is compiling Materialize’s workspace."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8ed7a70c87d28e94219058a46f12",
+          "role": "assistant",
+          "text": "The post-edit build has stopped emitting CodeQL progress while compiling `mz-catalog-debug`; no database or query result is available yet. I’m checking whether Cargo is still advancing before I treat this as a failed edit-cycle run."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8f714ebc87d2b3bd0ba0476f2c10",
+          "role": "assistant",
+          "text": "Cargo still holds the shared release-target lock, but its outputs have not changed for several minutes; host load is elevated, with over 48 GB available. I’m preparing the report from the completed timings while the database build continues, so I can finish promptly once it returns."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc8fedb72887d2b5973c29dabb6e2c",
+          "role": "assistant",
+          "text": "The build is still holding the Cargo lock, and the source remains in the temporary edited state guarded by the runner’s `finally` restore. The same one-row query is already validated on the existing CodeQL DB; I’m letting the full post-edit reindex continue for the required freshness check."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9079e88887d290b1ff7d1ea0fa04",
+          "role": "assistant",
+          "text": "The Rust capture stage is unusually slow under current host contention (load averages above 200), though memory remains available and the shared Cargo build lock is still held. I’ll include the host condition as a caveat and keep the post-edit run active through the expected database-build window."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc90f0b42887d2a8bc2631db383b4c",
+          "role": "assistant",
+          "text": "The build lock is still held, and available memory has climbed back above 60 GB. The unchanged `mz-catalog-debug` fingerprint suggests one long crate compile under host contention; I’m comparing it with the original database-build trace to judge expected duration while the run continues."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc91ed29a087d282441ddcdd285368",
+          "role": "assistant",
+          "text": "The full post-edit database build has now run for about 52 minutes, close to the earlier 51:59 baseline database creation, but the last Cargo output remains the `mz-catalog-debug` compile. The run is still active with memory available; I’m continuing through its completion rather than infer a post-edit latency from a partial build."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc92b65d2087d2a70b49891aab4a55",
+          "role": "assistant",
+          "text": "The Cargo lock remains held after roughly an hour, and the 1-minute host load has eased from above 200 to around 60. There is still no failure or completion record, so the capture is active; the earlier database took about the same total time, and I’m allowing more time for the release build to finish."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc92fc1a7487d2a46f9afc5d8d0abb",
+          "role": "assistant",
+          "text": "The ordinary shell cannot see the host-side build process, so lock checks alone do not prove it is compiling. I’m doing a read-only host process check to distinguish a slow Rust link from a blocked database-create command."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc93301ea887d2865061dd358e4d31",
+          "role": "assistant",
+          "text": "The host process tree reveals the capture is alive, but Cargo is waiting on several MBX `rustc` cache shims that are sleeping between retries. I’m checking whether those cache workers are making progress; this is a build-cache wait, not CodeQL query evaluation."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9396bcc887d296daeea5a421db62",
+          "role": "assistant",
+          "text": "The host check confirms the long stage is waiting inside MBX: the Cargo process has only a handful of sleeping `mbx-rustc` wrappers, and no real compiler child is running. I’m inspecting MBX’s read-only status and logs; I will leave its cache and Cargo settings untouched."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc956c068887d28cfb1614b16d68cf",
+          "role": "assistant",
+          "text": "The MBX scheduler state explains the stall: all 120 compiler permits are currently leased to other builds, and this CodeQL capture has no compiler lease. I won’t change shared scheduler or Cargo settings; I’m waiting briefly for capacity to free and will record any scheduler wait separately from CodeQL’s own work."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc980add5487d2b30b7ab3512f44ee",
+          "role": "assistant",
+          "text": "The capture remains queued: at 00:02 the shared pool was 117/120 permits, none assigned to this build, and its MBX session has emitted no compile event since 23:13. I’m preserving the run and its source-restore guard while waiting for capacity; I have not changed Cargo or scheduler settings."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc98ca0fc487d284812af8615fa452",
+          "role": "assistant",
+          "text": "No change yet: at 00:06, other builds held 116 of 120 permits, and the CodeQL MBX event stream was still unchanged since 23:13. The ongoing capture has not failed, but its edit-cycle result remains unavailable."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9a43e2b487d293abcc87ff01d14e",
+          "role": "assistant",
+          "text": "I’ll leave the current CodeQL capture running unchanged, then use the prebuilt database for the parsing-in-loop parity check while it waits. I’ll first load the policy guidance and tract benchmark’s exact query, then compare complete result sets before deciding whether the check qualifies for new Phase 2 samples."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9a91316487d2a376c6653e232e41",
+          "role": "assistant",
+          "text": "I’ll keep the active CodeQL post-edit build untouched while I check the parsing-in-loop policy semantics and compare it on the existing database. If the comparison qualifies, I’ll run its query timings first, then the persistent Bifrost warm/edit samples; I’ll also document concrete re-export examples for the importer gap."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9af1320087d2b5bdec17e105738e",
+          "role": "assistant",
+          "text": "The parsing-in-loop rule is a promising multi-row candidate: it flags lexically nested `serde_json`, `bincode`, and `toml` parse calls under Rust loop expressions, including deferred closure bodies, while excluding only proven small literal `for` iterables. I’m mapping that boundary into CodeQL’s Rust AST now; the post-edit create session remains live, though it has not emitted build output since 23:13."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9d10642487d290f2e2b3f08485f1",
+          "role": "assistant",
+          "text": "The custom CodeQL query compiled and completed on the existing database in about 33 seconds, returning 41 call sites. It covers all three parser families and all Rust loop-expression kinds, with AST-ancestor containment that includes closures; I’m waiting for Bifrost’s complete policy response before deciding whether this check meets the parity bar."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9e1c85f887d28ee7b9cf4dfcc5f6",
+          "role": "assistant",
+          "text": "The parsing-in-loop policy is complete on Bifrost, but its Rust set does not match CodeQL: 34 vs 41 rows, with 33 shared. CodeQL finds seven calls inside a closure nested in a `for` loop that Bifrost omits, while Bifrost also reports a field method named `bincode.deserialize` that the exact crate-path CodeQL query excludes. Since those differences conflict with the policy’s stated lexical/deferred-body semantics, I’m treating this candidate as unqualified and testing the allowed call-sites mirror next."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abc9f9a9e5c87d2b552aef7088b2db7",
+          "role": "assistant",
+          "text": "The call-sites alternative is also disqualified on this workspace: Bifrost marks its Rust reverse-call inventory incomplete and reports omitted files, so its zero rows cannot be compared fairly with CodeQL’s two resolved call sites. I’m checking one simpler built-in structural Rust rule now; if it cannot meet the same completeness and parity bar, I’ll use the already verified 11-row first-hop importer relation only if it meets the brief’s nontriviality threshold."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca1653f0887d29d09756d33f7dcf8",
+          "role": "assistant",
+          "text": "The serialization-in-loop policy is complete with 21 Rust findings; CodeQL finds those same 21 plus four more, including a call inside a deferred closure that the policy says should count. I’m not treating that as parity. I’m screening the remaining simple Rust loop policies, then I’ll fall back to the previously exact 11-importer first hop only if it passes the multi-row comparison on its own."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca1ed5c2c87d290ef50b5f60dff6a",
+          "role": "assistant",
+          "text": "I’m continuing Phase 1 with the multi-row `file-read-in-loop` policy, while leaving the in-flight CodeQL post-edit create alone. I’ll finish that comparison, then update the README with the importers divergence and the create’s MBX timing evidence if it has completed."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca27c646c87d28a8028bc8ece03af",
+          "role": "assistant",
+          "text": "The `file-read-in-loop` comparison is close: Bifrost reports 16 Rust rows and the matching CodeQL query reports 14. I’m checking the two Bifrost-only sites now; if they reflect a real alias or resolution gap rather than a clear query-boundary difference, I’ll reject this candidate and avoid presenting it as an apples-to-apples check."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca34a4aa887d2a4ad7ad282a439de",
+          "role": "assistant",
+          "text": "The receiver-by-name CodeQL branch for `fs.read*` methods closes the gap: both tools now return the same 16 Rust call sites. Bifrost’s policy run is complete and every row is proven. I’m validating the sample rows and collecting the required CodeQL reruns before starting the persistent Bifrost warm/edit series."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca4a4a06087d298a6a8210487db90",
+          "role": "assistant",
+          "text": "The qualifying policy’s CodeQL first run and four fresh-process reruns all completed with the same 16 rows (`--threads=1`). I’ve started the 100 warm and 30 edit samples in one persistent Bifrost MCP session, with each edit placed before the matching read in `SystemParameterSyncFrontend::pull`; the harness checks that the row moves by one line and restores the file afterward."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca52a74dc87d29b7bea9eac539040",
+          "role": "assistant",
+          "text": "One harness assertion was too strict: it treated every Bifrost warmup as an edited result and expected the finding to shift, so it stopped before any source edit. The 16-row output itself matched; I’m correcting the baseline-versus-edited check and rerunning, with the target file restored."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca63ce09887d2a31acc634cdf4084",
+          "role": "assistant",
+          "text": "CodeQL timing is complete: first run 17.22 s; the four reruns were 14.79–16.17 s (p50 15.01 s). The Bifrost policy response is large, so its 100 sequential warm samples are taking several minutes; 83 have completed so far, all complete and matching. The source is still at its baseline hash."
+        },
+        {
+          "id": "msg_0eba247eaa2c10b1016abca739272487d2a541aa965c0884ac",
+          "role": "assistant",
+          "text": "All 100 Bifrost warm samples are complete. The 30-edit series has 20 verified samples so far; each edit changes the matching finding’s line from 134 to 135, and the harness restores the source between samples. The CodeQL post-edit create remains alive but has produced no new build output or MBX events since 23:13 CDT."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "final_tool_calls": [
+      {
+        "name": "wc ; sha256sum ; stat",
+        "status": "completed"
+      },
+      {
+        "name": "python ; sha256sum ; stat ; python",
+        "status": "completed"
+      },
+      {
+        "name": "python",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      },
+      {
+        "name": "stat && sha256sum && tail",
+        "status": "completed"
+      },
+      {
+        "name": "python",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      },
+      {
+        "name": "python",
+        "status": "completed"
+      },
+      {
+        "name": "mcp.mj-agents.handback",
+        "status": "completed"
+      }
+    ],
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "s count as parsing, which loop kinds, direct containment vs nested closures). Compare result sets on Materialize using the same bar: Bifrost complete, all differences explained by a stated semantic difference, spot-check >=10 rows each way.\n   - Second choice if the first diverges unfixably: another Bifrost built-in Rust policy (e.g. loop-invariant-sort) or a call-sites/implementations query with a clear CodeQL mirror.\n   If one qualifies, run the same Phase 2 set for it (CodeQL first + 4 reruns on existing DB; Bifrost warm n=100 and edit n=30 via the persistent MCP harness, editing a file that contributes to the result). The CodeQL post-edit cost is the same db create as item 1, plus that query's time.\n\nAlso add a short README section on the importers-of divergence (35 vs 277, re-exports) with 2-3 concrete example paths CodeQL finds and Bifrost misses and the re-export declaration involved, since it may be a Bifrost resolution gap. Update the README and hand back with a comparison table per qualifying check.",
+    "assistant_text_tail": "All 100 Bifrost warm samples are complete. The 30-edit series has 20 verified samples so far; each edit changes the matching finding’s line from 134 to 135, and the harness restores the source between samples. The CodeQL post-edit create remains alive but has produced no new build output or MBX events since 23:13 CDT.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9900000095367432
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 1.0
+    },
+    "work": {
+      "choice": "waiting",
+      "confidence": 0.5600000023841858
+    },
+    "background": {
+      "choice": "needed",
+      "confidence": 0.30000001192092896
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "waiting",
+    "quiet": null,
+    "action": "wait",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "input-axis real-turn mining sample",
+    "judgment": "independent evidence label; Jev verdict retained separately",
+    "next": "n/a",
+    "input_rationale": "The report says a CodeQL process remains alive and has no new output. It reports waiting state without asking for input."
+  },
+  "context": {
+    "after": [],
+    "strict_input_scoring": true,
+    "session_group": "73cbf0fb7bb73d1ed6594a0a3b955d21"
+  }
+}

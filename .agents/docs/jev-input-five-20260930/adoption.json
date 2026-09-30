@@ -1,0 +1,10 @@
+{
+  "adopted_at": "2026-09-30T20:38:50.271976+00:00",
+  "selected": "round-4",
+  "selection_record": "selection.json",
+  "holdout": "holdout.json",
+  "basis": "Development improves required and finished detections without additional false input or harmful actions. Fresh controls have no false input or harmful actions for either prompt and selected gains one finished action.",
+  "limitation": "No fresh required-input cases were found, so holdout cannot establish recall generalization. Known development regressions remain documented.",
+  "runtime_file": "mj-core/src/activity/verdict_questions.json",
+  "deployment": "Local only; no worker rollout or hosted proxy deployment."
+}

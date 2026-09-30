@@ -268,14 +268,6 @@ pub struct StartSessionResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubagentSourceRange {
-    pub file: PathBuf,
-    pub start: u64,
-    pub end: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SpawnSubagentRequest {
     pub task_name: String,
     pub instructions: String,
@@ -287,10 +279,6 @@ pub struct SpawnSubagentRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub working_directory: Option<PathBuf>,
-    #[serde(default)]
-    pub context: Option<String>,
-    #[serde(default)]
-    pub files: Vec<SubagentSourceRange>,
 }
 
 /// One profile a parent may start a sub-agent on, with what it offers and how

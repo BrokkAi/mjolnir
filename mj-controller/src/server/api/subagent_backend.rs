@@ -191,6 +191,15 @@ pub trait SubagentBackend: Send + Sync {
         })
     }
 
+    fn usage_tree(
+        &self,
+        parent: String,
+    ) -> BoxFuture<'_, AnyResult<Option<crate::database::UsageTree>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::load_usage_tree(&parent)).await?
+        })
+    }
+
     /// A unified diff of the session's work.
     fn diff(
         &self,

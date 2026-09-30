@@ -22,6 +22,7 @@ mod resume;
 mod reviewer;
 mod subagent_park;
 pub use subagent_park::ParkOutcome;
+pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -1413,6 +1413,9 @@ pub struct ProjectionPage<'a> {
     pub(super) pending: MaterializedSessionMutation,
     pub(super) pending_transcript: BTreeMap<String, PendingTranscriptMutation>,
     pub(super) pending_turns: Vec<MaterializedTurnOutcome>,
+    /// Configuration changes are coalesced for the session, but selection is
+    /// captured at each turn start before later events can overwrite it.
+    usage_configuration: mj_core::state::SessionConfiguration,
     pub(super) pending_events: Vec<(i64, ApiEventData)>,
 }
 
@@ -1494,6 +1497,7 @@ impl ProjectionPage<'_> {
             self.pending.session_title = Some(title.clone());
         }
         if let Some(configuration) = &mutation.configuration {
+            self.usage_configuration = configuration.clone();
             self.pending.configuration = Some(configuration.clone());
         }
         for item_mutation in &mutation.transcript {
@@ -1538,6 +1542,14 @@ impl ProjectionPage<'_> {
             .config_results
             .extend(mutation.config_results.clone());
         if let Some(active_turn) = &mutation.active_turn {
+            if let Some(turn) = active_turn {
+                super::usage::record_turn_selection(
+                    &self.transaction,
+                    session_id,
+                    &turn.command_id,
+                    &self.usage_configuration,
+                )?;
+            }
             self.pending.active_turn = Some(active_turn.clone());
         }
         if mutation.clear_turn_outcome {
@@ -1734,6 +1746,9 @@ pub(super) fn apply_projection_page_with<T>(
         &applied_digest,
         "persisted relay event frontier",
     )?;
+    let usage_configuration = read_materialized_session_fields(&transaction, session_id)?
+        .context("projection session disappeared")?
+        .configuration;
     let mut page = ProjectionPage {
         session_id,
         transaction,
@@ -1743,6 +1758,7 @@ pub(super) fn apply_projection_page_with<T>(
         pending: MaterializedSessionMutation::default(),
         pending_transcript: BTreeMap::new(),
         pending_turns: Vec::new(),
+        usage_configuration,
         pending_events: Vec::new(),
     };
     // Dropping the page on failure rolls the whole transaction back, leaving

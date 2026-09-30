@@ -60,8 +60,10 @@ pub enum ParkOutcome {
 
 /// An executor for stopping what a failed unpark started. The unpark's own
 /// executor may be the reason it failed, cancelled by a close of the child.
-fn cleanup_executor() -> targets::CancellableProcessExecutor {
-    targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(30))
+pub(crate) const FAILED_STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn failed_launch_cleanup_executor() -> targets::CancellableProcessExecutor {
+    targets::CancellableProcessExecutor::with_timeout(FAILED_STARTUP_CLEANUP_TIMEOUT)
 }
 
 /// Say plainly that a sub-agent could not start because its target ran out of
@@ -265,7 +267,9 @@ impl Controller {
         let connection = match started {
             Ok(connection) => connection,
             Err(error) => {
-                if let Err(stop_error) = stop_worker(&cleanup_executor(), &backend, &worker_root) {
+                if let Err(stop_error) =
+                    stop_worker(&failed_launch_cleanup_executor(), &backend, &worker_root)
+                {
                     tracing::warn!(
                         session_id,
                         error = format!("{stop_error:#}"),
@@ -282,7 +286,9 @@ impl Controller {
         record.last_error = None;
         record.updated_at = super::now();
         if let Err(error) = crate::database::save_lifecycle_session(&record) {
-            if let Err(stop_error) = stop_worker(&cleanup_executor(), &backend, &worker_root) {
+            if let Err(stop_error) =
+                stop_worker(&failed_launch_cleanup_executor(), &backend, &worker_root)
+            {
                 tracing::warn!(
                     session_id,
                     error = format!("{stop_error:#}"),

@@ -152,7 +152,9 @@ impl RuntimeState {
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
                 // other lifecycles hold the handoff until they finish.
-                let admitted = if kind == LifecycleKind::ForceDestroy {
+                let admitted = if kind == LifecycleKind::StartupCleanup {
+                    crate::upgrade::activity_unless_draining("failed startup cleanup")?
+                } else if kind == LifecycleKind::ForceDestroy {
                     crate::upgrade::destroy_activity(&session_id)?
                 } else {
                     crate::upgrade::activity("session lifecycle")?

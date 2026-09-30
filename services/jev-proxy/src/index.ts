@@ -60,11 +60,24 @@ function evidenceV6(value: unknown): value is TurnEvidenceV6 {
 function answersV6(value: unknown): Record<string, unknown> | null {
   const result = answersV5(value);
   if (!result || !object(value) || !object(value.answers)) return null;
-  const answer = value.answers.background;
-  if (answer === undefined || answer === null) return result;
-  if (!object(answer) || answer.type !== "choice" || typeof answer.choice !== "string"
-    || !["needed", "unneeded", "unclear"].includes(answer.choice) || !probability(answer.confidence)) return null;
-  return { ...result, background: { type: "choice", choice: answer.choice, confidence: answer.confidence } };
+  // v5 stays frozen; v6 adds the distributions used by current workers.
+  for (const [key, question] of Object.entries(questions)) {
+    const answer = value.answers[key];
+    if (key === "background" && (answer === undefined || answer === null)) continue;
+    const allowed = Object.keys(question.criteria);
+    if (!object(answer) || answer.type !== "choice" || typeof answer.choice !== "string"
+      || !allowed.includes(answer.choice) || !probability(answer.confidence)
+      || !object(answer.probabilities)) return null;
+    const scores = answer.probabilities;
+    if (Object.keys(scores).length !== allowed.length || !allowed.every(k => probability(scores[k]))) return null;
+    const values = Object.values(scores) as number[];
+    const winner = scores[answer.choice] as number;
+    // The provider rounds each probability independently to hundredths.
+    if (Math.abs(values.reduce((a, b) => a + b, 0) - 1) > 0.005 * allowed.length + 1e-12
+      || values.some(p => p > winner + 1e-12)) return null;
+    result[key] = { type: "choice", choice: answer.choice, confidence: answer.confidence, probabilities: scores };
+  }
+  return result;
 }
 
 function evidenceV5(value: unknown): value is TurnEvidenceV4 {

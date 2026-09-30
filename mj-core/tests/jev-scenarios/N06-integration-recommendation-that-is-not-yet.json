@@ -1,6 +1,6 @@
 {
   "id": "N06",
-  "title": "Integration recommendation that is not yet a decision",
+  "title": "Replacement recommendation delivered without an approval request",
   "category": "control-plan-approval",
   "harness": "codex",
   "source": {
@@ -277,12 +277,13 @@
   "recorded_verdict": null,
   "expected": {
     "failure": "none",
-    "input": "required",
-    "work": "waiting",
+    "input": "none",
+    "work": "finished",
     "quiet": null,
-    "action": "await_input",
+    "action": "finished",
     "wrong_actions": [
-      "continue"
+      "continue",
+      "await_input"
     ]
   },
   "known_failure": [],
@@ -323,6 +324,20 @@
         "kind": "agent",
         "text": "The grid predictors run on the headless A4000 with CPU fallback disabled: about 17 ms for JPEG and 8 ms for the 4K tone model at the current 640-pixel test size. Those are predictor timings, not full-"
       }
-    ]
+    ],
+    "label_review": {
+      "date": "2026-09-30",
+      "reason": "The latest request asks about a working older release and possible replacements. The answer reports the investigation and recommends BPAM, without asking for approval or a selection. Replacing the implementation with that new candidate has not yet been requested.",
+      "previous_expected": {
+        "failure": "none",
+        "input": "required",
+        "work": "waiting",
+        "quiet": null,
+        "action": "await_input",
+        "wrong_actions": [
+          "continue"
+        ]
+      }
+    }
   }
 }

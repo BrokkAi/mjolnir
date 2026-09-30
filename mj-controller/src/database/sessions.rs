@@ -75,6 +75,7 @@ pub fn save_subagent_session(
         let mut connection = open(&database_path())?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         insert_session(&tx, &session)?;
+        super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
                  child_session_id, parent_session_id, request_key, record_json
@@ -1129,6 +1130,25 @@ pub(super) fn save_lifecycle_session_to(path: &Path, session: &SessionRecord) ->
     update_lifecycle_fields(&tx, session)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Settle teardown and archive failed children in the same owner transaction.
+pub(crate) fn save_startup_cleanup_outcome(session: &SessionRecord, archive: bool) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save_startup_cleanup_outcome", move |_| {
+        validate_session_record(&session)?;
+        let mut connection = open(&database_path())?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        update_lifecycle_fields(&tx, &session)?;
+        if archive {
+            tx.execute(
+                "UPDATE sessions SET archived=1 WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 pub(super) fn save_checkpointed_session_to(path: &Path, session: &SessionRecord) -> Result<()> {

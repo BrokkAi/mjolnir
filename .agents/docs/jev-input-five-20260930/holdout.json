@@ -1,0 +1,30 @@
+{
+  "frozen_at": "2026-09-30T20:37:55.699421+00:00",
+  "ids": [
+    "E01",
+    "E02",
+    "E03",
+    "E04",
+    "E05",
+    "E06",
+    "E07",
+    "E08"
+  ],
+  "sessions": [
+    "54b129beebda87d233ffb12c22d33913",
+    "1c2820c44b1cae51f1102627ed5d1afa",
+    "0bf0983d553751026807d97d54857ede",
+    "418f5bfcd099c0cb562b053262e44072",
+    "58aaa46da0e41c23eec11b9e97e78f09",
+    "ba55fe3e43207548125cdf15471f218c",
+    "2f88c7f26089ed109ffe71820f9234ef",
+    "cfaf0702664b39f3d199a8403dd41a6d"
+  ],
+  "strict_controls": 7,
+  "ambiguous": [
+    "E06"
+  ],
+  "required_cases": 0,
+  "note": "Luna mined eight previously unrepresented sessions. Root reviewed labels before requests; E06 scope ambiguous. This holdout tests false alerts only; it cannot establish generalization of required-input recall.",
+  "fixtures_sha256": "9c38a1ea53e96a77be92ae0a436bbfe070c8aa6cf6c0e4afa63a036802742424"
+}

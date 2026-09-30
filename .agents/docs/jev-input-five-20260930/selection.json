@@ -1,0 +1,19 @@
+{
+  "selected_at": "2026-09-30T20:31:17.186152+00:00",
+  "selected": "round-4",
+  "questions_sha256": "273b3ceca7978fe21a9067a32b6c9f2b1468b6728d4d146451fe504bad648775",
+  "basis": "Highest required-input detection among candidates with no additional false required alerts or listed wrong actions, and improved finished detections. Selection precedes all fresh-session API comparisons.",
+  "development_metrics": {
+    "baseline_required": 29,
+    "selected_required": 36,
+    "required_requests": 54,
+    "baseline_false_required": 0,
+    "selected_false_required": 0,
+    "controls": 216,
+    "baseline_finished": 22,
+    "selected_finished": 27,
+    "finished_requests": 69
+  },
+  "known_regressions": "D01 loses one of three detections; P13 loses three continues; S43 shifts one uncertain to wait. Same three A03 harmful finished actions persist.",
+  "holdout_rule": "Do not tune on fresh cases. Adopt only if they introduce no additional confident false input or listed harmful action and do not reduce required detections; report limited sample coverage."
+}

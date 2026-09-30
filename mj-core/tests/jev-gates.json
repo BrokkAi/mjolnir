@@ -1,0 +1,674 @@
+[
+  {
+    "name": "required at both boundaries beats provider recovery",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "transient_provider",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 0,
+          "transient_provider": 1,
+          "quota": 0,
+          "other": 0,
+          "unclear": 0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 0.5,
+          "none": 0.2,
+          "redundant_request": 0.2,
+          "unclear": 0.1
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "await_input",
+    "requires_input": true
+  },
+  {
+    "name": "required below probability floor despite clear lead",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 0.49,
+          "none": 0.17,
+          "redundant_request": 0.17,
+          "unclear": 0.17
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "required below ratio despite probability floor",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 0.6,
+          "none": 0.25,
+          "redundant_request": 0.1,
+          "unclear": 0.05
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "ratio uses biggest of all competitors",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 0.6,
+          "none": 0.05,
+          "redundant_request": 0.1,
+          "unclear": 0.25
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "rounded floating boundary qualifies",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 0.7,
+          "none": 0.28,
+          "redundant_request": 0.01,
+          "unclear": 0.01
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "await_input",
+    "requires_input": true
+  },
+  {
+    "name": "zero runner up qualifies",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.2,
+        "probabilities": {
+          "required": 1,
+          "none": 0,
+          "redundant_request": 0,
+          "unclear": 0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "await_input",
+    "requires_input": true
+  },
+  {
+    "name": "finished probability qualifies despite low confidence",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "finished",
+    "requires_input": false
+  },
+  {
+    "name": "finished just below probability bar",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.99,
+        "probabilities": {
+          "finished": 0.799,
+          "authorized_unfinished": 0.151,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "finished still requires confident no input",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.84,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "finished still requires confident no failure",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.89,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "waiting confidence unchanged at boundary",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.85,
+        "probabilities": {
+          "finished": 0,
+          "authorized_unfinished": 0,
+          "waiting": 1,
+          "unclear": 0
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "wait",
+    "requires_input": false
+  },
+  {
+    "name": "waiting high probability does not relax confidence",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "waiting",
+        "confidence": 0.84,
+        "probabilities": {
+          "finished": 0,
+          "authorized_unfinished": 0,
+          "waiting": 1,
+          "unclear": 0
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "continuation confidence unchanged at boundary",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.9,
+        "probabilities": {
+          "finished": 0,
+          "authorized_unfinished": 1,
+          "waiting": 0,
+          "unclear": 0
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "continue",
+    "requires_input": false
+  },
+  {
+    "name": "continuation high probability does not relax confidence",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "transient_provider": 0.0,
+          "quota": 0.0,
+          "other": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.89,
+        "probabilities": {
+          "finished": 0,
+          "authorized_unfinished": 1,
+          "waiting": 0,
+          "unclear": 0
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "recovery still requires confidence",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "transient_provider",
+        "confidence": 0.89,
+        "probabilities": {
+          "none": 0,
+          "transient_provider": 1,
+          "quota": 0,
+          "other": 0,
+          "unclear": 0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "uncertain",
+    "requires_input": false
+  },
+  {
+    "name": "local failure does not end a running turn",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "other",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 0,
+          "transient_provider": 0,
+          "quota": 0,
+          "other": 1,
+          "unclear": 0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.99,
+        "probabilities": {
+          "none": 1.0,
+          "redundant_request": 0.0,
+          "required": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "finished",
+        "confidence": 0.2,
+        "probabilities": {
+          "finished": 0.8,
+          "authorized_unfinished": 0.15,
+          "waiting": 0.03,
+          "unclear": 0.02
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "await_input",
+    "requires_input": false
+  }
+]

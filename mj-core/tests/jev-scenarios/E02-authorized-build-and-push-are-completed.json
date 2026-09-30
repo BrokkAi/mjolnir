@@ -1,0 +1,210 @@
+{
+  "id": "E02",
+  "title": "Authorized build and push are completed without another approval",
+  "category": "authorized-action-completed",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "1c2820c44b1cae51f1102627ed5d1afa",
+    "session_title": "bifrost via claude",
+    "reply_position": 1209,
+    "captured_at": "2026-09-30T18:36:12.428Z",
+    "note": "The user explicitly says to build and push the site-frontier-row removal. The assistant reports the implementation, tests, and requested follow-up ticket; no new approval is asked."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "│ covers = 7 is a type-frontier gap. It marks one type slot\n│ as possibly incomplete because of one gap reason.\n│\n│ What a type slot is. A type slot is a position at a site\n│ where the typed resolver tracks a value's type. Its role is\n│ one of the following (ResolutionTypeSlotRole,\n│ crates/bifrost-core/src/analyzer/resolution_facts.rs:225):\n│\n│ • TargetTypeIdentity\n│\n│ • DeclaredValue\n│\n│ • AssignmentValue\n│\n│ • ReturnValue\n│\n│ • Receiver\n│\n│ • Argument\n│\n│ • CallResult\n│\n│ • ExpressionValue\n│\n│ A call site like assert.Equal(t, a, b) has a receiver slot,\n│ one argument slot per argument, and a call-result slot.\n│\n│ How the rows are written. The code is in\n│ lower_coverage_gaps, fact_lowering.rs:4016-4034.\n│\n│ • A gap produces type-frontier rows only if its origin\n│   affects types (has_type_impact, :3638). Most extracted\n│   gap kinds do, and QualifiedReference does. Scope and\n│   binder, member scope, placement, malformed syntax,\n│   generated item surface, activation, missing binder, and\n│   prelude gaps do not.\n│\n│ • For such a gap, lowering emits one Type frontier for\n│   every type slot at the gap's site. The row's subject is\n│   that slot's semantic key.\n│\n│ • If the site has no slot rows, lowering emits one\n│   site-level frontier instead\n│   (site_type_frontier_semantic_identity). The comment there\n│   explains why: without it, an implicit-constructor gap\n│   would contaminate unrelated type transfers.\n│\n│ Who reads the rows. Type-frontier completion reads them\n│ (resolution_stage/frontier_completion.rs:60-100). For each\n│ requested slot it seeks covers = 7 AND subject = slot and\n│ unions the result with the declared\n│ resolution_type_frontiers. It returns the reason keys that\n│ keep that slot's type open. So when the typed resolver asks\n│ for the type flowing through a slot, these rows let it\n│ answer \"incomplete, because of reasons X, Y\" rather than\n│ silently giving a wrong exact answer.\n│\n│ Why it is the largest gap class on Gin (26%). This is\n│ likely but not measured per origin. The census found that\n│ most Gin gaps are qualified calls into code outside the\n│ workspace, such as assert.Equal and httptest.NewRecorder.\n│ Each of those sites carries a receiver slot, N argument\n│ slots, and a result slot. One gap reason therefore becomes\n│ about N+2 type rows. That fits the census: most reasons\n│ have 4 or 5 gap rows (median 4, 90th percentile 5).\n│\n│ Could it shrink? It has the same shape as the\n│ reverse-endpoint fan-out: one row per (reason, slot at the\n│ site), when all slots at a site share the same reasons. A\n│ site-keyed row with a slot-to-site hop in the reader would\n│ give the same answer. That depends on a stored mapping from\n│ slot to site that the reader can seek, and I have not\n│ checked whether one exists. resolution_type_frontiers has\n│ no site column. This is a lead to check, not a proposal I\n│ have verified."
+        },
+        {
+          "id": "agent:12",
+          "role": "assistant",
+          "text": "I'll verify the claims in that summary against the current code, and check the one unverified lead: whether a stored slot-to-site mapping exists that a site-keyed frontier row could use."
+        },
+        {
+          "id": "user:60",
+          "role": "user",
+          "text": "i want to tackle this piece of #3737\n\nfan out subagents to answer the missing pieces first, then bring me your recommended plan"
+        },
+        {
+          "id": "agent:62",
+          "role": "assistant",
+          "text": "I'll read the #3737 memory note and the issue state first, then send out parallel read-only investigations."
+        },
+        {
+          "id": "agent:79",
+          "role": "assistant",
+          "text": "The issue is already tagged and assigned to you. I'll fetch origin so the children read current code, then dispatch three parallel investigations."
+        },
+        {
+          "id": "agent:104",
+          "role": "assistant",
+          "text": "Three read-only children are running: one on the slot-to-site mapping, one on whether the per-site invariant holds and who reads the rows, and one measuring the saving on Gin and serde_json."
+        },
+        {
+          "id": "agent:137",
+          "role": "assistant",
+          "text": "The per-site collapse turns out to save very little. I'll check the census results and who reads the site-level frontier rows, because those turn out to be the majority."
+        },
+        {
+          "id": "agent:193",
+          "role": "assistant",
+          "text": "The follow-up changes the picture: the site-level rows are almost entirely write-only. I'll look at the doc changes the children left before committing them as the census record."
+        },
+        {
+          "id": "agent:225",
+          "role": "assistant",
+          "text": "One question decides between two designs: does the reader of property gaps look up covers=7 rows by the site frontier? I'll check that directly."
+        },
+        {
+          "id": "agent:255",
+          "role": "assistant",
+          "text": "I have enough to recommend. I'll commit the two census records the measurement child wrote, so the evidence is on master."
+        },
+        {
+          "id": "agent:274",
+          "role": "assistant",
+          "text": "The remote moved. The repo forbids rebasing, and its history uses merges, so I'll merge origin/master and push again."
+        },
+        {
+          "id": "agent:289",
+          "role": "assistant",
+          "text": "Pushed. Now I'll update the #3737 memory note with the new facts."
+        },
+        {
+          "id": "agent:302",
+          "role": "assistant",
+          "text": "The lead in my earlier message was wrong, but it pointed to a better target. Merging per-slot rows into one row per site saves only about 0.6% of rows. The real waste is a different kind of covers = 7 row, which almost nothing reads. I recommend we stop writing those rows.\n\n**What the investigations found**\n\n- **Per-site merge: not worth doing.** The cache has no stored link from a type slot to its site, so readers would need a new table. The saving would be only 4,084 rows on Gin and 3,439 on serde_json. That table would use up most of the saving.\n- **My earlier explanation was wrong.** On Gin, most covers = 7 rows do not belong to type slots at all. They are \"site frontier\" rows, which lowering writes when a gap's site has no type slot. The \"one reason becomes N+2 rows\" claim does not explain the data.\n- **Site frontier rows are almost never read (confirmed for current readers).** Frontier completion only asks about real type slots, never site frontier IDs. The only stored fact that names a site frontier is a definition property gap, and that row already carries its own reason.\n- **The per-site assumption held where we could check it.** Every site with several slots had the same reasons on each slot. This covers only slots that had covers = 7 rows, because the cache does not record each slot's site.\n\n| | Gin | serde_json |\n| --- | ---: | ---: |\n| covers = 7 rows | 34,278 | 19,381 |\n| Site frontier rows | 20,843 | 3,733 |\n| Never named by any typed fact | 20,823 | 3,501 |\n| Saving as share of gap rows | 15.8% | 7.4% |\n| Saving as share of all rows | 3.2% | 0.5% |\n\n**Recommended plan**\n\n1. **Check one thing first.** The typed resolver uses the frontier on a property gap as a dependency. I have not traced whether that path could ever turn into a completion request. The child reported that no current caller makes one, but I rate this \"likely\", not confirmed.\n2. **If the check passes, remove site frontier rows entirely.** Delete the fallback branch in `lower_coverage_gaps` that writes a site frontier when a site has no slots. This is the simplest change and removes code.\n3. **If the check fails, keep only the named ones.** Write a site frontier row only when a property gap names that site. This keeps about 250 more rows on serde_json and none worth counting on Gin. It needs the property-gap list to be ready when gaps are lowered, which I have not checked.\n4. **Bump the epoch salt.** Increase every language's value in the bundle epoch function in `crates/bifrost-core/src/analyzer/structural/resolution.rs`, lines 655 to 671, because this lowering code is shared.\n5. **Validate.** Update the lowering and typed-lowering tests that expect site frontier rows. Run the semantic and typed Rust suites; two Python semantic tests already fail on master. Then rerun the cold census and the quick-signal gate.\n\nOne caveat is that Gin's resolution rows are not read yet, until #3726 moves Go onto the new resolver. The rows still cost write time during a cold build.\n\n**A bigger lead for later.** On Gin, 7,026 qualified-call sites carry both a QualifiedReference reason and an UnsupportedRoute reason. Those sites account for 67,052 gap rows, about 10% of all rows. The current code makes this pairing on purpose, so reducing it is a separate design question.\n\nI committed the new census and a correction note on the 2026-09-29 census, and pushed them to master after merging origin. The query scripts and counts are in the new census file:\n\n```\n.agents/docs/3737-covers7-census-2026-09-30.md\n```\n\n`★ Insight ─────────────────────────────────────`\n- The fallback exists for correctness, not speed. A gap on a site with no type slot still needs a place to live, or it would spread to unrelated type transfers. Removing it is safe only if nothing asks for that place.\n- The measurement found more than the code reading did. The code reading proved the site merge was possible but costly. Only the row counts showed that most rows were a different kind altogether.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:610",
+          "role": "user",
+          "text": "1. file a ticket for the \"bigger lead\", assign to David and tag Escalated\n\n2. does your proposal change behavior/correctness?"
+        },
+        {
+          "id": "agent:614",
+          "role": "assistant",
+          "text": "I'll look up David's GitHub login and check that the Escalated label exists. At the same time I'll trace the one path I left unverified, so I can answer the correctness question on evidence."
+        },
+        {
+          "id": "agent:652",
+          "role": "assistant",
+          "text": "This consumer reads the reason directly from the property-gap row. It uses the frontier only to pair that row with a supertype row. I'll check the other consumers of property gaps too."
+        },
+        {
+          "id": "agent:683",
+          "role": "assistant",
+          "text": "All production requests for frontier completion use real type slots. I have enough to answer the question. Now I'll read the code behind the overlap so the ticket describes it accurately."
+        },
+        {
+          "id": "agent:707",
+          "role": "assistant",
+          "text": "I have what I need for the ticket. Filing it now."
+        },
+        {
+          "id": "agent:718",
+          "role": "assistant",
+          "text": "I stated in the ticket that the Go extractor produces the `UnsupportedRoute` gap, which I had not checked. I'll check it now."
+        },
+        {
+          "id": "agent:732",
+          "role": "assistant",
+          "text": "Java and Rust also produce that gap kind, so the ticket's wording was too narrow. I'll correct it."
+        },
+        {
+          "id": "agent:744",
+          "role": "assistant",
+          "text": "The ticket is filed as #3786, assigned to David with the `escalated` label: https://github.com/BrokkAi/bifrost-dev/issues/3786\n\nOn your second question: the proposal should not change results. I rate this \"likely\", not \"confirmed\". What changes is what gets stored, not what readers answer.\n\n**Why results should stay the same**\n\n- **One reader.** Frontier completion is the only code that reads covers = 7 rows. It returns a row only when the row's subject exactly matches an ID it was asked for.\n- **Nobody asks for site frontiers.** Production code builds these requests in four places. Three are in the typed resolver and one is in the lexical reader. They ask for projection outputs, transfer source slots, and slots nothing produced. All of these are real type slots, never site frontiers.\n- **No other file can ask for them either.** A site frontier ID is local to one file. No other file can build it, not even through remounting.\n- **The one fact that names a site frontier does not need the rows.** That fact is a definition property gap. I read its hierarchy consumer, around line 23243 of `fact_resolution.rs`. It takes the reason from the property-gap row itself. It uses the frontier only to pair that row with a supertype row, and never looks in the gap table.\n- **The data agrees.** On both Gin and serde_json, no stored transfer or projection names a site frontier.\n- **The code comment's concern still holds.** The comment says the site frontier stops an implicit-constructor gap from affecting unrelated type transfers. With no row at all, the gap cannot affect them either.\n\n**What does change**\n\n- Row counts, gap digests, and gap numbering change. The bundle epoch must be bumped, so every workspace rebuilds its cache once after upgrading.\n\n**Why not \"confirmed\"**\n\n- I traced one of the nine readers of property gaps. The others do not call the session method for frontier completion. Two store functions call the underlying page reader directly, and I have not traced what IDs they pass.\n- Our only check that all slots at a site share the same reasons covers slots that had rows. It does not change this answer, because removing site frontier rows does not touch slot rows.\n\nThe Rust semantic and typed test suites would settle it during implementation. A missing reason would show up there as a wrong exact answer.\n\nOne correction while writing the ticket: `UnsupportedRoute` is not only a Go gap. The Rust and Java extractors can produce it too. The ticket says so, and it says the overlap was measured only on Gin.\n\n`★ Insight ─────────────────────────────────────`\n- The property-gap reader uses the site frontier ID only to pair two kinds of typed rows. So the ID still matters, but its rows in the gap table do not. The plan keeps the ID and drops only those rows.\n- The #3786 overlap has a similar shape. Readers suppress a `QualifiedReference` reason whenever its route exists, and every such reason on Gin has one. Its rows may be write-only too. The ticket marks this as unverified, because exclusion proofs read the raw gaps before suppression.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:961",
+          "role": "user",
+          "text": "let's build and push the site frontier row removal then"
+        },
+        {
+          "id": "agent:963",
+          "role": "assistant",
+          "text": "I'll send one child to implement the change and a second child to trace the last open question. That question is which IDs the two direct callers of the frontier-completion page reader pass. First I'll check the routed guidance on epoch bumps and cache production."
+        },
+        {
+          "id": "agent:988",
+          "role": "assistant",
+          "text": "The local branch is 470 commits behind origin. I'll fast-forward before anyone starts, then locate the epoch function."
+        },
+        {
+          "id": "agent:1008",
+          "role": "assistant",
+          "text": "The branch to remove and the epoch table are both where expected. I'll send out the implementer and the verifier together."
+        },
+        {
+          "id": "agent:1027",
+          "role": "assistant",
+          "text": "Both children are running. The implementer edits, tests, and re-measures, and I'll commit once I've reviewed its diff. The verifier looks for any path that could ask about a site frontier."
+        },
+        {
+          "id": "agent:1146",
+          "role": "assistant",
+          "text": "The implementation is done and its tests pass. I'm reviewing the diff before I commit and push."
+        },
+        {
+          "id": "agent:1209",
+          "role": "assistant",
+          "text": "I pushed a narrower version of the change to master as 644c6e6df9. Removing every site frontier row, as I first proposed, would have changed behavior. So lowering now writes a site frontier row only when the gap has no other row. I've added a note to #3737.\n\n**Correction to my earlier answer.** I said the removal likely would not change behavior. Frontier completion results do stay the same, and a second trace confirmed that. But the writer builds each reason's provenance record, meaning its site and gap kind, from that reason's gap rows. The staged path for macro expansions reads the same facts straight off its gap rows.\n\nSome gaps have only a site frontier row. Examples are an unsupported-visibility gap on a type declaration with no type slot, or an unsupported-call-applicability gap on a callable declaration. Other stored facts still name those reasons: 153 on Gin and 203 on serde_json. Removing every site frontier row would have left those reasons with no site or gap kind in diagnostics.\n\n**What changed**\n\n- **Lowering.** A gap on a site with no type slot keeps its site frontier row only if it has no other coverage row. Every reason keeps at least one row, so provenance stays the same. The change is in `lower_coverage_gaps`.\n- **Epochs.** Every language's resolution bundle epoch went up by one, because this lowering code is shared. Each workspace rebuilds its cache once after upgrading.\n- **Tests.** Test updates follow the new row shape, and no resolved answer changed. The two tests that broke under full removal pass again with their original checks.\n\n**Result, on a cold build of each repository**\n\n| | Gin before | Gin after | serde_json before | serde_json after |\n| --- | ---: | ---: | ---: | ---: |\n| Site frontier rows | 20,843 | 739 | 3,733 | 1,997 |\n| covers = 7 rows | 34,278 | 12,203 | 19,381 | 17,645 |\n\nA SQL comparison found that every reason with a provenance row before the change still has one.\n\n**Validation.** All of these passed:\n- The analysis tests for resolution, fact lowering, and typed facts: 1,129 tests.\n- The Rust and Java semantic tests: 118 tests.\n- Workspace clippy with warnings denied, and rustfmt on the changed crate.\n\nThe two Python semantic tests that failed on master on 2026-09-29 now pass.\n\n**Limits.**\n- I did not rerun tests after merging origin. That merge brought in seven commits, and none of them touch the changed files.\n- Total row counts in the census doc also reflect other changes on master since the earlier census. Only the site frontier and covers = 7 numbers isolate this change.\n\n**Possible follow-up.** Reason provenance should come from the gaps themselves, not from their coverage rows. With that change, the remaining 739 and 1,997 rows could also go. The staged path would then need its own reason table, so I left it out of this commit.\n\nThe QualifiedReference and UnsupportedRoute overlap is filed as #3786, assigned to David with the `escalated` label.\n\n`★ Insight ─────────────────────────────────────`\n- The code has two separate reasons to keep a row. Completion needs rows keyed by real type slots. Provenance needs at least one row per reason, keyed by anything. The site frontier row now exists only for the second reason, and its comment says so.\n- Measuring caught this where reading the code had not. The first trace answered whether anything requests these rows. The later question was whether anything is built from them. Both questions have to be asked before a write-only claim holds.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "let's build and push the site frontier row removal then",
+    "assistant_text_tail": " before | serde_json after |\n| --- | ---: | ---: | ---: | ---: |\n| Site frontier rows | 20,843 | 739 | 3,733 | 1,997 |\n| covers = 7 rows | 34,278 | 12,203 | 19,381 | 17,645 |\n\nA SQL comparison found that every reason with a provenance row before the change still has one.\n\n**Validation.** All of these passed:\n- The analysis tests for resolution, fact lowering, and typed facts: 1,129 tests.\n- The Rust and Java semantic tests: 118 tests.\n- Workspace clippy with warnings denied, and rustfmt on the changed crate.\n\nThe two Python semantic tests that failed on master on 2026-09-29 now pass.\n\n**Limits.**\n- I did not rerun tests after merging origin. That merge brought in seven commits, and none of them touch the changed files.\n- Total row counts in the census doc also reflect other changes on master since the earlier census. Only the site frontier and covers = 7 numbers isolate this change.\n\n**Possible follow-up.** Reason provenance should come from the gaps themselves, not from their coverage rows. With that change, the remaining 739 and 1,997 rows could also go. The staged path would then need its own reason table, so I left it out of this commit.\n\nThe QualifiedReference and UnsupportedRoute overlap is filed as #3786, assigned to David with the `escalated` label.\n\n`★ Insight ─────────────────────────────────────`\n- The code has two separate reasons to keep a row. Completion needs rows keyed by real type slots. Provenance needs at least one row per reason, keyed by anything. The site frontier row now exists only for the second reason, and its comment says so.\n- Measuring caught this where reading the code had not. The first trace answered whether anything requests these rows. The later question was whether anything is built from them. Both questions have to be asked before a write-only claim holds.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The user had already authorized the requested work and push; the response reports completion.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [],
+    "strict_input_scoring": true,
+    "session_group": "1c2820c44b1cae51f1102627ed5d1afa"
+  }
+}

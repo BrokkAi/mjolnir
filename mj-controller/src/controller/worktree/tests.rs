@@ -175,7 +175,7 @@ fn worktree_choice_survives_reload_and_controls_creation() {
                 .is_none()
         );
         controller
-            .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+            .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
             .unwrap();
     }
     assert!(root.join("dirty.txt").exists());
@@ -225,7 +225,7 @@ fn worktree_choice_survives_reload_and_controls_creation() {
         Some(managed.worktree_root.join("nested"))
     );
     controller
-        .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
         .unwrap();
     assert!(linked.join("nested/file.txt").exists());
     assert!(!managed.worktree_root.exists());
@@ -240,7 +240,7 @@ fn worktree_choice_survives_reload_and_controls_creation() {
             .unwrap()
     );
     controller
-        .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
         .unwrap();
 }
 
@@ -327,7 +327,7 @@ fn a_launch_base_starts_the_worktree_at_that_commit() {
         first
     );
     controller
-        .cleanup_new_session_worktree(&record.id, &ProcessExecutor)
+        .cleanup_new_session_worktree_after_failure(&record.id, &ProcessExecutor)
         .unwrap();
 
     // A revision the repository does not hold fails provisioning rather than
@@ -1922,6 +1922,18 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     };
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let executor = CancellableProcessExecutor::new(cancelled);
+    assert!(executor.cancellation_requested());
+
+    // The lifecycle owner supplies a fresh cleanup budget after cancellation.
+    // An exhausted cleanup budget must not be reset inside checkout removal.
+    let expired = CancellableProcessExecutor::with_timeout(std::time::Duration::ZERO);
+    assert!(
+        controller
+            .cleanup_new_session_worktree_after_failure(session_id, &expired)
+            .is_err()
+    );
+    assert!(worktree.worktree_root.exists());
+    let executor = super::super::failed_launch_cleanup_executor();
 
     controller
         .cleanup_new_session_worktree_after_failure(session_id, &executor)

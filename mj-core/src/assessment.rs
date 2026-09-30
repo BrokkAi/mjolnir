@@ -1,4 +1,6 @@
 //! One semantic assessment and durable action for a completed physical turn.
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +10,11 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
+pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
+pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
+pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
+// Provider scores are rounded; tolerate floating point representation at a boundary.
+const PROBABILITY_EPSILON: f64 = 1e-12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,12 +53,16 @@ pub enum Background {
     Unclear,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judgment<T> {
     pub choice: T,
     pub confidence: f32,
+    /// Full provider distribution, separate from confidence. Empty only in old
+    /// durable judgments; their previously stored action remains authoritative.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub probabilities: BTreeMap<String, f64>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
     pub failure: Judgment<Failure>,
     pub input: Judgment<Input>,
@@ -66,6 +77,7 @@ impl Verdict {
         fn choice<T: serde::de::DeserializeOwned>(
             answers: &Value,
             key: &str,
+            allowed: &[&str],
         ) -> Result<Judgment<T>> {
             let answer = &answers[key];
             ensure!(answer["type"] == "choice", "invalid {key} answer type");
@@ -76,27 +88,88 @@ impl Verdict {
                 confidence.is_finite() && (0.0..=1.0).contains(&confidence),
                 "invalid confidence"
             );
+            let probabilities: BTreeMap<String, f64> = serde_json::from_value(
+                answer
+                    .get("probabilities")
+                    .context(format!("missing {key} probabilities"))?
+                    .clone(),
+            )
+            .with_context(|| format!("invalid {key} probabilities"))?;
+            ensure!(
+                probabilities.len() == allowed.len()
+                    && allowed.iter().all(|name| probabilities.contains_key(*name)),
+                "incomplete {key} probabilities"
+            );
+            ensure!(
+                probabilities
+                    .values()
+                    .all(|p| p.is_finite() && (0.0..=1.0).contains(p))
+                    && (probabilities.values().sum::<f64>() - 1.0).abs()
+                        <= 0.005 * allowed.len() as f64 + PROBABILITY_EPSILON,
+                "invalid {key} probability distribution"
+            );
+            let selected = answer["choice"].as_str().context("missing choice")?;
+            ensure!(
+                probabilities
+                    .get(selected)
+                    .is_some_and(|winner| probabilities
+                        .values()
+                        .all(|p| *winner + PROBABILITY_EPSILON >= *p)),
+                "{key} choice is not a probability winner"
+            );
             Ok(Judgment {
                 choice: serde_json::from_value(answer["choice"].clone())?,
                 confidence: confidence as f32,
+                probabilities,
             })
         }
         let answers = response
             .get("answers")
             .context("missing assessment answers")?;
         Ok(Self {
-            failure: choice(answers, "failure")?,
-            input: choice(answers, "input")?,
-            work: choice(answers, "work")?,
+            failure: choice(
+                answers,
+                "failure",
+                &["none", "transient_provider", "quota", "other", "unclear"],
+            )?,
+            input: choice(
+                answers,
+                "input",
+                &["none", "redundant_request", "required", "unclear"],
+            )?,
+            work: choice(
+                answers,
+                "work",
+                &["finished", "authorized_unfinished", "waiting", "unclear"],
+            )?,
             background: answers
                 .get("background")
                 .filter(|answer| !answer.is_null())
-                .map(|_| choice(answers, "background"))
+                .map(|_| choice(answers, "background", &["needed", "unneeded", "unclear"]))
                 .transpose()?,
         })
     }
-    pub fn action(self, authorization_complete: bool) -> Action {
-        if self.input.choice == Input::Required && self.input.confidence >= 0.85 {
+    pub fn requires_input(&self) -> bool {
+        self.input.choice == Input::Required
+            && self
+                .input
+                .probabilities
+                .get("required")
+                .is_some_and(|winner| {
+                    let runner_up = self
+                        .input
+                        .probabilities
+                        .iter()
+                        .filter(|(name, _)| name.as_str() != "required")
+                        .map(|(_, probability)| *probability)
+                        .fold(0.0_f64, f64::max);
+                    *winner + PROBABILITY_EPSILON >= REQUIRED_INPUT_PROBABILITY
+                        && *winner + PROBABILITY_EPSILON >= REQUIRED_INPUT_RATIO * runner_up
+                })
+    }
+
+    pub fn action(&self, authorization_complete: bool) -> Action {
+        if self.requires_input() {
             return Action::AwaitInput;
         }
 
@@ -120,13 +193,18 @@ impl Verdict {
         {
             return Action::Continue;
         }
-        if self.work.confidence >= 0.85
-            && self.input.choice == Input::None
-            && self.input.confidence >= 0.85
-        {
+        if self.input.choice == Input::None && self.input.confidence >= 0.85 {
             return match self.work.choice {
-                Work::Finished => Action::Finished,
-                Work::Waiting => Action::Wait,
+                Work::Finished
+                    if self
+                        .work
+                        .probabilities
+                        .get("finished")
+                        .is_some_and(|p| *p + PROBABILITY_EPSILON >= FINISHED_WORK_PROBABILITY) =>
+                {
+                    Action::Finished
+                }
+                Work::Waiting if self.work.confidence >= 0.85 => Action::Wait,
                 _ => Action::Uncertain,
             };
         }
@@ -449,14 +527,33 @@ mod tests {
             failure: Judgment {
                 choice: failure,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             input: Judgment {
                 choice: input,
                 confidence: 0.99,
+                probabilities: [(
+                    serde_json::to_value(input)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    1.0,
+                )]
+                .into(),
             },
             work: Judgment {
                 choice: work,
                 confidence: 0.99,
+                probabilities: [(
+                    serde_json::to_value(work)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    1.0,
+                )]
+                .into(),
             },
             background: None,
         }
@@ -466,14 +563,33 @@ mod tests {
             failure: Judgment {
                 choice: failure.0,
                 confidence: failure.1,
+                probabilities: Default::default(),
             },
             input: Judgment {
                 choice: input.0,
                 confidence: input.1,
+                probabilities: [(
+                    serde_json::to_value(input.0)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    1.0,
+                )]
+                .into(),
             },
             work: Judgment {
                 choice: work.0,
                 confidence: work.1,
+                probabilities: [(
+                    serde_json::to_value(work.0)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    1.0,
+                )]
+                .into(),
             },
             background: None,
         }
@@ -572,15 +688,128 @@ mod tests {
     }
 
     #[test]
+    fn probability_gates_agree_across_running_and_completed_turns() {
+        use crate::activity::verdict::{Decision, TurnPhase, TurnVerdict, decide};
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/jev-gates.json")).unwrap();
+        for case in cases {
+            let verdict = TurnVerdict::parse(&case).unwrap();
+            let assessment = verdict.assessment.as_ref().unwrap();
+            let expected: Action = serde_json::from_value(case["action"].clone()).unwrap();
+            let complete = case["authorization_complete"].as_bool().unwrap();
+            assert_eq!(assessment.action(complete), expected, "{}", case["name"]);
+            let required = case["requires_input"].as_bool().unwrap();
+            assert_eq!(assessment.requires_input(), required, "{}", case["name"]);
+            assert_eq!(
+                decide(TurnPhase::Running, &verdict),
+                if required {
+                    Decision::AwaitingInput
+                } else {
+                    Decision::KeepCurrent
+                },
+                "{}",
+                case["name"]
+            );
+            let replied = match assessment.action(false) {
+                Action::AwaitInput => Decision::AwaitingInput,
+                Action::Finished => Decision::InferIdle,
+                Action::Wait => Decision::ExpectContinuation,
+                _ => Decision::KeepCurrent,
+            };
+            assert_eq!(
+                decide(TurnPhase::Replied, &verdict),
+                replied,
+                "{}",
+                case["name"]
+            );
+            let stored = serde_json::to_value(assessment).unwrap();
+            let restored: Verdict = serde_json::from_value(stored).unwrap();
+            assert_eq!(&restored, assessment);
+            assert_eq!(restored.action(complete), expected);
+        }
+    }
+
+    #[test]
+    fn fresh_answers_require_complete_valid_winning_distributions() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/jev-gates.json")).unwrap();
+        for axis in ["failure", "input", "work"] {
+            for bad in [
+                serde_json::json!(null),
+                serde_json::json!({}),
+                serde_json::json!({"required": 1.0}),
+            ] {
+                let mut response = cases[0].clone();
+                response["answers"][axis]["probabilities"] = bad;
+                assert!(Verdict::parse(&response).is_err());
+            }
+            let mut response = cases[0].clone();
+            response["answers"][axis]
+                .as_object_mut()
+                .unwrap()
+                .remove("probabilities");
+            assert!(Verdict::parse(&response).is_err());
+        }
+        for bad in [
+            serde_json::json!(-0.1),
+            serde_json::json!(1.1),
+            serde_json::json!("0.5"),
+            serde_json::json!(null),
+            serde_json::json!(0.0),
+        ] {
+            let mut response = cases[0].clone();
+            response["answers"]["input"]["probabilities"]["required"] = bad;
+            assert!(Verdict::parse(&response).is_err());
+        }
+        let mut response = cases[0].clone();
+        response["answers"]["input"]["choice"] = serde_json::json!("none");
+        assert!(Verdict::parse(&response).is_err());
+        // Independent hundredth rounding can make the total 0.99 or 1.01.
+        for p in [0.49, 0.51] {
+            response = cases[0].clone();
+            response["answers"]["input"]["probabilities"]["required"] = serde_json::json!(p);
+            assert!(Verdict::parse(&response).is_ok());
+        }
+    }
+
+    #[test]
+    fn old_saved_assessments_keep_their_action_without_inventing_probabilities() {
+        let mut assessment = TurnAssessment::pending(
+            "old".into(),
+            1,
+            0,
+            CompletionEvidence {
+                stop_reason: "EndTurn".into(),
+                diagnostic: None,
+            },
+        );
+        assessment.verdict = Some(verdict(Failure::None, Input::Required, Work::Finished));
+        assessment.action = Some(Action::AwaitInput);
+        assessment.status = Status::Assessed;
+        let mut saved = serde_json::to_value(&assessment).unwrap();
+        for axis in ["failure", "input", "work"] {
+            saved["verdict"][axis]
+                .as_object_mut()
+                .unwrap()
+                .remove("probabilities");
+        }
+        let restored: TurnAssessment = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.action, Some(Action::AwaitInput));
+        assert!(!restored.needs_classification(0));
+        let judgment = restored.verdict.unwrap();
+        assert!(!judgment.requires_input());
+        assert_eq!(judgment.action(true), Action::Uncertain);
+    }
+
+    #[test]
     fn a_missing_background_answer_parses_and_a_bad_one_fails() {
         let mut answers = serde_json::json!({"answers": {
-            "failure": {"type": "choice", "choice": "none", "confidence": 0.99},
-            "input": {"type": "choice", "choice": "none", "confidence": 0.99},
-            "work": {"type": "choice", "choice": "finished", "confidence": 0.99},
+            "failure": {"type": "choice", "choice": "none", "confidence": 0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}},
+            "input": {"type": "choice", "choice": "none", "confidence": 0.99, "probabilities": {"none": 1.0, "redundant_request": 0.0, "required": 0.0, "unclear": 0.0}},
+            "work": {"type": "choice", "choice": "finished", "confidence": 0.99, "probabilities": {"finished": 1.0, "authorized_unfinished": 0.0, "waiting": 0.0, "unclear": 0.0}},
         }});
         assert!(Verdict::parse(&answers).unwrap().background.is_none());
-        answers["answers"]["background"] =
-            serde_json::json!({"type": "choice", "choice": "unneeded", "confidence": 0.9});
+        answers["answers"]["background"] = serde_json::json!({"type": "choice", "choice": "unneeded", "confidence": 0.9, "probabilities": {"needed": 0.0, "unneeded": 1.0, "unclear": 0.0}});
         assert_eq!(
             Verdict::parse(&answers)
                 .unwrap()
@@ -605,6 +834,7 @@ mod tests {
         v.failure = Judgment {
             choice: Failure::Quota,
             confidence: 0.99,
+            probabilities: Default::default(),
         };
         assert_eq!(v.action(false), Action::RecoverQuota);
     }
@@ -638,9 +868,9 @@ mod tests {
     #[test]
     fn parser_rejects_unknown_choices_and_invalid_confidence() {
         let mut body = serde_json::json!({"answers":{
-            "failure":{"type":"choice","choice":"transient_provider","confidence":0.91},
-            "input":{"type":"choice","choice":"unclear","confidence":0.32},
-            "work":{"type":"choice","choice":"unclear","confidence":0.24}
+            "failure": {"type":"choice","choice":"transient_provider","confidence":0.91, "probabilities": {"none": 0.0, "transient_provider": 1.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}},
+            "input": {"type":"choice","choice":"unclear","confidence":0.32, "probabilities": {"none": 0.0, "redundant_request": 0.0, "required": 0.0, "unclear": 1.0}},
+            "work": {"type":"choice","choice":"unclear","confidence":0.24, "probabilities": {"finished": 0.0, "authorized_unfinished": 0.0, "waiting": 0.0, "unclear": 1.0}}
         }});
         assert_eq!(
             Verdict::parse(&body).unwrap().action(false),

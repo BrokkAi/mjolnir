@@ -1,7 +1,6 @@
 //! Managed worktrees and raw-to-workspace project conversion.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -12,9 +11,7 @@ use mj_core::state::{
     ProjectSourceIdentity, SessionRecord,
 };
 
-use crate::targets::{
-    self, CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
-};
+use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 pub(crate) use mj_client::target::managed_worktree_target;
 pub use mj_client::target::{ResumePlan, resume_compatibility};
 
@@ -394,7 +391,7 @@ impl Controller {
         Ok(true)
     }
 
-    fn cleanup_new_session_worktree(
+    pub(super) fn cleanup_new_session_worktree_after_failure(
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
@@ -410,20 +407,6 @@ impl Controller {
         // A session that never started has a branch Mjolnir just created and
         // nobody has worked on, so the rollback takes the branch too.
         cleanup_managed_worktree(executor, worktree, BranchDisposition::Delete)
-    }
-
-    pub(super) fn cleanup_new_session_worktree_after_failure(
-        &self,
-        session_id: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<()> {
-        if executor.cancellation_requested() {
-            let cleanup_executor =
-                CancellableProcessExecutor::with_timeout(Duration::from_secs(15));
-            self.cleanup_new_session_worktree(session_id, &cleanup_executor)
-        } else {
-            self.cleanup_new_session_worktree(session_id, executor)
-        }
     }
 }
 
@@ -656,7 +639,6 @@ fn resolve_git_root(
         "-C".to_owned(),
         directory.to_string_lossy().into_owned(),
         "rev-parse".into(),
-        "--path-format=absolute".into(),
         "--show-toplevel".into(),
     ];
     let top_level = match target {
@@ -692,17 +674,23 @@ fn resolve_git_root(
             .context("project Git root was not UTF-8")?
             .trim_end_matches(['\r', '\n']),
     );
-    if root.as_os_str().is_empty() {
-        bail!("resolve project Git root returned an empty path");
+    if !root.is_absolute() {
+        bail!(
+            "resolve project Git root returned a non-absolute path: {}",
+            root.display()
+        );
     }
 
-    let common = PathBuf::from(managed_git_stdout(
-        executor,
-        target,
+    let common = mj_core::local_git::resolve_git_path(
         directory,
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        "resolve project Git common directory",
-    )?);
+        &managed_git_stdout(
+            executor,
+            target,
+            directory,
+            ["rev-parse", "--git-common-dir"],
+            "resolve project Git common directory",
+        )?,
+    )?;
     if common.file_name() == Some(std::ffi::OsStr::new(".git"))
         && let Some(main_root) = common.parent()
     {
@@ -1430,7 +1418,7 @@ fn inspect_raw_project(
         executor,
         target,
         selected,
-        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        ["rev-parse", "--show-toplevel"],
         "resolve raw project repository root",
     )?);
     let prefix = managed_git_stdout(
@@ -1447,13 +1435,16 @@ fn inspect_raw_project(
         ["rev-parse", "--absolute-git-dir"],
         "resolve raw project Git directory",
     )?);
-    let common_git_dir = PathBuf::from(managed_git_stdout(
-        executor,
-        target,
+    let common_git_dir = mj_core::local_git::resolve_git_path(
         selected,
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        "resolve raw project common Git directory",
-    )?);
+        &managed_git_stdout(
+            executor,
+            target,
+            selected,
+            ["rev-parse", "--git-common-dir"],
+            "resolve raw project common Git directory",
+        )?,
+    )?;
     let branch_command = managed_git_command(
         target,
         selected,
@@ -1521,18 +1512,16 @@ fn ensure_managed_worktree_excluded(
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
-    let exclude_path = PathBuf::from(managed_git_stdout(
-        executor,
-        target,
+    let exclude_path = mj_core::local_git::resolve_git_path(
         repository,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "info/exclude",
-        ],
-        "resolve repository-local exclude file",
-    )?);
+        &managed_git_stdout(
+            executor,
+            target,
+            repository,
+            ["rev-parse", "--git-path", "info/exclude"],
+            "resolve repository-local exclude file",
+        )?,
+    )?;
     match target {
         ManagedWorktreeTarget::Local => {
             use std::io::Write;
@@ -1970,31 +1959,27 @@ fn copy_clone_local_git_preferences(
             ),
         )?;
     }
-    let source_exclude = PathBuf::from(managed_git_stdout(
-        executor,
-        &checkout.target,
+    let source_exclude = mj_core::local_git::resolve_git_path(
         &checkout.source_repository,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "info/exclude",
-        ],
-        "locate source Git exclusions",
-    )?);
-    if path_exists_on_managed_target(executor, &checkout.target, &source_exclude)? {
-        let clone_exclude = PathBuf::from(managed_git_stdout(
+        &managed_git_stdout(
             executor,
             &checkout.target,
+            &checkout.source_repository,
+            ["rev-parse", "--git-path", "info/exclude"],
+            "locate source Git exclusions",
+        )?,
+    )?;
+    if path_exists_on_managed_target(executor, &checkout.target, &source_exclude)? {
+        let clone_exclude = mj_core::local_git::resolve_git_path(
             staging,
-            [
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-path",
-                "info/exclude",
-            ],
-            "locate clone Git exclusions",
-        )?);
+            &managed_git_stdout(
+                executor,
+                &checkout.target,
+                staging,
+                ["rev-parse", "--git-path", "info/exclude"],
+                "locate clone Git exclusions",
+            )?,
+        )?;
         execute_checked(
             executor,
             managed_target_command(

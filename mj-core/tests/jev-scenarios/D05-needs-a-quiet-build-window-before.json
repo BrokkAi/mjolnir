@@ -1,0 +1,255 @@
+{
+  "id": "D05",
+  "title": "Needs a quiet build window before the requested benchmark rerun",
+  "category": "availability-needed-for-work",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "0305d10cd40fb1342e5ad6171d6ae993",
+    "session_title": "bifrost3 via codex",
+    "decision": "assessment-0305d10cd40fb1342e5ad6171d6ae993-11508",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T06:17:54.863Z",
+    "assessed_at": "2026-09-30T14:27:56.035Z",
+    "recorded_action": "await_input",
+    "recorded_status": "assessed",
+    "recorded_reason": "user_input_required",
+    "note": "The reply asks the user to provide a time window needed to run the proposed tests; the user had conditionally approved only if both tools could complete on Rust."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-2183f70a3d793470d87f1dd64ce1f0f9",
+          "role": "user",
+          "text": "I need defensible performance numbers for an investor pitch deck around the claim that Bifrost is fast enough to sit inside an AI coding agent's edit/check/fix loop.\n\nPlease design and run a benchmark of Bifrost warm-query latency on this repository.\n\nThe primary numbers I want are:\n\n1. **Warm steady-state query latency:** repository already indexed and analyzer process already running; no source changes between calls.\n2. **Warm incremental latency after a one-file edit:** repository/analyzer already warm, modify one representative source file in a way that invalidates the relevant analysis, let Bifrost observe/update that change, then execute the query.\n\nFor each, report **p50, p95, min, max, and sample count**.\n\n### Measure what the agent experiences\n\nThe primary latency metric should be **end-to-end elapsed wall-clock time from the persistent client issuing the query until the complete result is received**.\n\nDo NOT use CLI process startup time: this is modeling a long-lived coding-agent/Bifrost session.\n\nDo NOT report `CodeQueryProfile.timings_ns.total` as the primary number. Bifrost documentation explicitly says that it excludes query-scope setup/cleanup, report projection, serialization, transport, and host initialization.\n\nIf practical, benchmark through the same persistent MCP interface an agent would use. Otherwise use the closest long-lived public API and state exactly what is and is not included.\n\nUse ordinary, unprofiled query executions for the primary latency measurements, because profiling itself adds instrumentation overhead. Separately run a small number of profiled executions to explain where the time goes and verify cache behavior.\n\n### Query workloads\n\nPick 3 representative workloads that correspond to real SlopCop/Bifrost usage:\n\n**A. Structural / policy-style query**\nA nontrivial RQL query that has enough matches/work to be representative, rather than an exact lookup that trivially returns one symbol.\n\n**B. Cross-file semantic query**\nSomething involving references, calls, resolved identity, or another cross-file relationship representative of a correctness rule.\n\n**C. Deep semantic query**\nA realistic value-flow / taint / typestate / correctness-policy query that exercises the semantic engine.\n\nPrefer existing checked-in queries or policies that we can publish and reproduce. Do not invent an artificially favorable microbenchmark.\n\nFor each workload, record:\n- exact query/policy\n- result cardinality\n- completion/proof status\n- whether result is complete or inconclusive\n- repository commit\n- repository size: files and LOC\n- machine CPU, RAM, OS\n- Bifrost build/version\n\n### Warm-state methodology\n\nDefine precisely what \"warm\" means.\n\nStart a fresh Bifrost process/session, initialize the repository normally, and run enough untimed executions to ensure indexes and legitimate reusable analyzer state are populated.\n\nThen perform at least **100 measured ordinary executions** per workload if runtime permits.\n\nBefore trusting the result, inspect Bifrost's cache/profile telemetry and source to make sure repeated execution is not simply returning a whole-query result from a memoized result cache. Reuse of indexes, parsed facts, Git-blob-derived analysis, call/reference relations, semantic summaries, etc. is desirable and is exactly what \"warm\" is supposed to capture. Returning a cached final answer without executing the query would make this benchmark misleading; if such a cache exists, bypass it or clearly separate that result.\n\nRandomize or interleave workloads if useful to avoid measuring an artifact of one repeated tight loop.\n\n### Incremental-edit methodology\n\nFor the incremental benchmark, use a representative source file involved in each workload.\n\nFor every measured iteration:\n\n1. Start from the same warm analyzer/session state.\n2. Make a small realistic edit to one source file, ideally changing a method body without causing a large dependency/schema rebuild.\n3. Ensure Bifrost has observed the new workspace state.\n4. Start the latency timer at the point corresponding to an agent asking Bifrost to check its work.\n5. Execute the relevant query/policy and wait for the complete response.\n6. Stop the timer.\n7. Verify the result corresponds to the edited snapshot.\n8. Restore or alternate the edit so another iteration can be measured without restarting the analyzer.\n\nIf change detection and incremental re-analysis happen synchronously as part of the query request, include them in the end-to-end number. If they happen asynchronously before the request, report BOTH:\n- edit-to-ready latency\n- ready-to-query-response latency\n\nDo not hide update/indexing work outside the measured interval without documenting it.\n\n### Profiling / validation\n\nRun representative executions with `profile` enabled and capture at least:\n- `timings_ns`\n- `work`\n- `cache_layers`\n- semantic request-cache / summary reuse where applicable\n- access-path/index reuse\n- operator timings\n\nUse these to explain why the warm result is warm and how much work is actually being reused.\n\nAlso compare one genuinely cold execution for context, but cold performance is secondary here.\n\n### Output\n\nGive me a concise table like:\n\n| Workload | Warm p50 | Warm p95 | After 1-file edit p50 | After 1-file edit p95 | Results |\n|---|---:|---:|---:|---:|---:|\n| Structural | | | | | |\n| Cross-file | | | | | |\n| Semantic | | | | | |\n\nThen recommend the **single most defensible headline number** for an investor deck.\n\nFor example, if supported by the data:\n\n> \"Typical Bifrost checks return in XX ms warm and YY ms p95 after a source edit on a XXXk/1M-line repository.\"\n\nDo not cherry-pick the fastest query. Prefer the workload that best represents a SlopCop correctness check inside an agent loop.\n\nSave the benchmark harness/scripts and raw measurements in a reproducible location in the repo, but do not commit them unless they clearly belong in the project."
+        },
+        {
+          "id": "user:prompt-d1613b0162ab1f13220887648c6401a9",
+          "role": "user",
+          "text": "(we used the `tract` repo from /nfs/morannon/nvme/repo-clones as a test candidate. only rust is native so far)"
+        },
+        {
+          "id": "user:prompt-f62f28ee784e1c1ee0ed81f35f253ea1",
+          "role": "user",
+          "text": "i don't want to scope creep this to new analysis implementation tho, if we can't do that then pick something existing or a minor variant"
+        },
+        {
+          "id": "user:prompt-9095ec5896195375bc87a9b68a2a42e4",
+          "role": "user",
+          "text": "implement the plan"
+        },
+        {
+          "id": "user:prompt-99afd83c303f11fb9a035490df5f6f67",
+          "role": "user",
+          "text": "fuck\n\nthat means you need to go outside the sandbox, not redirect the build"
+        },
+        {
+          "id": "user:web-prompt-8ee78788ea224f9e391056e3387a8ee7",
+          "role": "user",
+          "text": "What check did you test? Does it have an analog in our competitors? "
+        },
+        {
+          "id": "user:prompt-2e096f31018c21ce34aff61baab5e627",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
+          "id": "user:prompt-bcacfa868730ef3285a075b0c571efbc",
+          "role": "user",
+          "text": "if we run multiple policies against a workspace with a small number of changes, \n\n1. do they run concurrently?\n2. how does the \"process changes\" run? once for each query, or once?"
+        },
+        {
+          "id": "user:prompt-007b5d13b1f7e4d977fe08ff3f785d07",
+          "role": "user",
+          "text": "does any of our competition support rust so we can do a h2h test?"
+        },
+        {
+          "id": "user:prompt-8ffd8a701c244e235e9bf84771096da9",
+          "role": "user",
+          "text": "no cross file support in semgrep means we're almost completely certain to not be able to do a meaningful comparison\n\nhave luna see if it can find a common comparison with codeql"
+        },
+        {
+          "id": "user:prompt-52855c59d6f276dc4f3f1daad6f4c2a0",
+          "role": "user",
+          "text": "how do we install a copy of codeql to try this?"
+        },
+        {
+          "id": "agent:msg_05a3fe33e7b07c30016abbead8dec887d1bcb123d230558d16",
+          "role": "assistant",
+          "text": "Use GitHub’s **CodeQL bundle**, which includes the CLI and matching query packs. This machine is Linux x86-64 and already has `gh`, Cargo, and rustup; CodeQL isn’t on `PATH`. [Official setup](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/scan-from-the-command-line/set-up-codeql-cli).\n\nFor a reproducible installation pinned to the current **2.27.1** release:\n\n```bash\nmkdir -p /mnt/optane/codeql-2.27.1\n\ngh release download codeql-bundle-v2.27.1 \\\n  --repo github/codeql-action \\\n  --pattern 'codeql-bundle-linux64.tar.gz' \\\n  --dir /mnt/optane/codeql-2.27.1\n\ntar -xzf /mnt/optane/codeql-2.27.1/codeql-bundle-linux64.tar.gz \\\n  -C /mnt/optane/codeql-2.27.1\n\nexport PATH=\"/mnt/optane/codeql-2.27.1/codeql:$PATH\"\n\ncodeql version\ncodeql resolve languages\ncodeql resolve packs\n```\n\nThe bundle includes `codeql/rust-all` and `codeql/rust-queries`. Confirm those appear in the last command. [Release](https://github.com/github/codeql-action/releases/tag/codeql-bundle-v2.27.1).\n\nThat installs the tools locally; creating a database and running our comparison would be the next step."
+        },
+        {
+          "id": "user:prompt-78eae7634fe7b86a579d159a198d49ae",
+          "role": "user",
+          "text": "great, pls give that a try"
+        },
+        {
+          "id": "msg_011CfY6ZMTGmJYrb9fspVpWq",
+          "role": "assistant",
+          "text": "CodeQL works on the test fixture. The Bifrost binary used for the benchmark has been removed from the mbx cache, so I'm finding a way to rebuild the same v0.12.0 build."
+        },
+        {
+          "id": "msg_011CfY7ML8h8WZKZSAYkvcGG",
+          "role": "assistant",
+          "text": "The v0.12.0 release build is running in the background, and I'll pick this up when it finishes.\n\nSo far:\n- **CodeQL 2.27.1 is installed** at `/mnt/optane/codeql-2.27.1/codeql/codeql`, with its Rust query packs.\n- **CodeQL result:** I built a small three-file test crate. The stock CodeQL `rust/sql-injection` query flags only the real problem: input goes through two helper functions and is pasted into a SQL string. It correctly ignores both control cases: a parameterized query, and input that never reaches SQL. The crate, commands and logs are in `.agents/docs/tract-warm-latency/codeql-h2h/`.\n- **CodeQL timings:**\n\n  | Step | Time |\n  |---|---:|\n  | Build the CodeQL database | 43.5 s |\n  | First query run | 50 s |\n  | Repeat run | 10 s |\n\n  The repeat still used CodeQL's cache of intermediate results.\n- **Bifrost has not run yet.** The v0.12.0 binary from the benchmark has been removed from the mbx build cache. I'm rebuilding it from the same commit (4b87647) in a separate worktree at `~/Projects/bifrost3-v0.12.0`, using the normal mbx build. The worktree is detached, so no new branch.\n- **The Bifrost policy is written but not tested.** It uses the same SQL call as the CodeQL sink and leaves out the store step.\n\nWhen the build finishes, I'll run the Bifrost policy on the same three cases. That shows whether Bifrost finds the same single result. If it does, the two tools are directly comparable on this check.\n\ntract is probably the wrong repository for a head-to-head. It is an ML inference library with no request-to-SQL code. A comparison needs a Rust web service that uses a database library CodeQL already models."
+        },
+        {
+          "id": "msg_011CfY7fSxTbexy3EUpTpVvH",
+          "role": "assistant",
+          "text": "The rebuilt binary is v0.12.0, built from a clean worktree at 4b87647. I'll send it to the child so it can finish the Bifrost side."
+        },
+        {
+          "id": "msg_011CfYBZB3JKpLT2QEkPWj2V",
+          "role": "assistant",
+          "text": "I tried it. In this test **the head-to-head is not yet fair.** CodeQL gets the right answer. Bifrost finds the real problem but cannot confirm it, so its result is \"inconclusive\" rather than \"complete\". Timing an inconclusive answer against a complete one would not hold up in an investor deck.\n\n**What I ran:** a small Rust crate with three cases, plus a matching Bifrost policy and CodeQL setup:\n- **(a)** A request value goes through helpers in two other files and is pasted into SQL text passed to `postgres::Client::execute`. This should be flagged.\n- **(b)** The same path, but the query is parameterized. This should not be flagged.\n- **(c)** The value never reaches SQL. This should not be flagged.\n\n| Case | CodeQL 2.27.1 (stock `rust/sql-injection` + a small custom source model) | Bifrost 0.12.0 (policy without the store step) |\n|---|---|---|\n| (a) should flag | 1 finding, complete | 1 finding, **but only partly proven** |\n| (b) should not flag | none | none, but not proven clean |\n| (c) should not flag | none | none, but not proven clean |\n| Overall status | complete | **inconclusive** |\n\n**Why Bifrost is inconclusive (confirmed from its own error message):** `procedure semantics for src/api.rs:api.rs.execute is unknown`. The function that fails is the fixture's small wrapper that calls `client.execute(sql, params)` in the stub `postgres` crate. The likely cause is that Bifrost has no summary for a call into an unindexed external crate, so it cannot finish the proof for the function that makes that call. I have not confirmed this in the source. The first attempt failed the same way on the source side: it used `std::io::stdin().read_line`, which is another external call Bifrost has not indexed. The second attempt used the source shape from Bifrost's own Rust test fixture, which fixed source selection.\n\n**Timings recorded:**\n\n| Step | CodeQL | Bifrost |\n|---|---:|---:|\n| Build database / cold run | 31.4 s | 0.82 s |\n| First query | 41.7 s | — |\n| Forced repeat | 6.7 s | 0.54 s |\n\nBifrost's warm runs over MCP took 55 ms, measured in the first attempt. All Bifrost runs ended inconclusive, and I stopped before the edit-cycle timing. So none of the Bifrost numbers pass the completeness check we used for tract.\n\n**What I recommend:** don't put a CodeQL comparison in the deck from this test. There are two ways to continue:\n1. **Treat this as a Bifrost Rust gap and file an issue.** Taint analysis should not become inconclusive just because a function calls a modeled SQL sink in an external crate. Once that's fixed, rerun this fixture; the harness is ready.\n2. **Look for a real Rust web service whose flow Bifrost already handles completely.** The same external-crate gap may show up on real code, so this probably runs into the same problem.\n\nI'd do option 1 first. I have not filed the issue; say if you want me to.\n\nTwo open points:\n- The rebuilt binary reports build identity `a7b3d21…`, not commit `4b87647`, even though I built it from a clean worktree at 4b87647. I don't know how the two are related. This doesn't affect the tract numbers already recorded.\n- The Bifrost runs happened before a signature fix to the fixture (`String` changed to `&str`). The child says the fix only mattered for compiling, but Bifrost was not rerun afterwards.\n\nEverything is uncommitted in `.agents/docs/tract-warm-latency/codeql-h2h/`: the crate, policy, CodeQL model pack, SARIF and JSON outputs, and exact commands. The CodeQL databases are in `/mnt/optane/codeql-h2h/`. The v0.12.0 worktree is still at `~/Projects/bifrost3-v0.12.0`; tell me if you want it removed.\n\n`★ Insight ─────────────────────────────────────`\n- CodeQL assumes that code it cannot see does nothing unless a model says otherwise. That is how it gives a \"complete\" answer at a stub crate boundary. Bifrost reports unknown semantics as \"inconclusive\" instead. For deck numbers, only complete results are safe to time.\n- The latency gap is large, as expected: CodeQL has no incremental Rust database, so every edit means rebuilding the database (about 31 s here) and running the query again. That comparison only means something once both tools give the same complete answer.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:web-prompt-62f5183a23b89deefc6f5dc82776478a",
+          "role": "user",
+          "text": "How wide is the by-frost problem here? Please file a ticket, but make sure that it's not for a tiny tweak. Spec the ticket as: Let's make sure SQL taint works to the best of our ability and give this example as a sample but not exhaustive problem. Then, find a much larger Rust project to test against. I'm looking for codeql to take at least tens of minutes to build it."
+        },
+        {
+          "id": "msg_011CfYHRTj7RaKxqsfg1BUkU",
+          "role": "assistant",
+          "text": "I'll run two investigations in parallel: one to measure how widespread the Bifrost gap is, so the ticket has the right scope, and one to find and time a large Rust project for CodeQL."
+        },
+        {
+          "id": "msg_011CfYKNJHjfxewTsNTAQ3V7",
+          "role": "assistant",
+          "text": "Here is the draft issue for review before I file it."
+        },
+        {
+          "id": "msg_011CfYKNaDSqbLr5ygrF8SHj",
+          "role": "assistant",
+          "text": "The draft points to local files that aren't committed, so readers of the issue couldn't see them. I'll put the fixture source and the probe table directly in the issue."
+        },
+        {
+          "id": "msg_011CfYKRuwgFURjteaCXobDW",
+          "role": "assistant",
+          "text": "I filed the issue as [#3757](https://github.com/BrokkAi/bifrost-dev/issues/3757). The large-repo search is still running, so I'll wait for it."
+        },
+        {
+          "id": "e396da0b-3a63-4ab7-b086-2a063469e943",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 6:10pm (America/Chicago)"
+        },
+        {
+          "id": "user:prompt-713837eafb8535595cc3e0e70389695f",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "msg_011CfYe64rcBNvHdcJn7eWLw",
+          "role": "assistant",
+          "text": "Both parts are done. I filed the ticket, and Materialize is the large Rust project to test against: CodeQL took **52 minutes** to build its database.\n\n**How wide the Bifrost problem is: wide.** The small fixture's failure is not a one-off. Bifrost 0.12.0 was tested against stub versions of common Rust SQL libraries:\n- SQLx, Diesel, rusqlite, postgres and tokio-postgres all end incomplete.\n- Common Rust input sources are not recognised at all: `std::env::args`, `env::var` and stdin.\n- `format!`, `push_str`, closures and async code each have their own gaps.\n\nThe cause is confirmed in `crates/bifrost-rust/src/diagnostics.rs` and `crates/bifrost-flow/src/dataflow/call_model.rs`. Bifrost correctly refuses to guess about external crate calls it has no model for, and we have shipped almost no Rust models. The only built-in Rust SQL policy covers the declared-storage case. `origin/master` (18f71e2aa) has not fixed any of this since 0.12.0.\n\n**Ticket:** [#3757](https://github.com/BrokkAi/bifrost-dev/issues/3757). It is scoped as described: make Rust SQL taint work as well as we can. It has five work areas:\n- input sources\n- SQL library models\n- complete results for functions whose only unknowns are modelled calls\n- how Rust code builds strings\n- a shipped general Rust request-to-SQL policy\n\nIt includes the three-case fixture as one regression sample, the full probe table, and links to #3412, #3678, #1877 and #2705. The code is pasted directly into the issue, because the local evidence folders are not committed. I did not tag or assign it, because nobody is working on it yet.\n\n**Large project: Materialize** at commit `09975fd0`. Materialize is a SQL database that speaks the PostgreSQL protocol.\n\n| | Materialize |\n|---|---:|\n| Rust code | 1,492 files, 641k lines |\n| Dependencies | 1,021 crates |\n| CodeQL: build database | **51 min 59 s**, 68 GB peak memory |\n| CodeQL: stock `rust/sql-injection` query | 16 min 19 s, **0 results** |\n| Bifrost 0.12.0: cold index + first query | **3 min 23 s**, 4.3 GB peak memory, completed |\n\nLimits on these numbers:\n- Other Cargo builds were running on the machine during the CodeQL build, so 52 minutes may be somewhat high.\n- CodeQL found no SQL injection in Materialize. That is expected for a database engine, but it means Materialize has no example of the problem to compare on. A SQL-injection head-to-head is blocked twice: by #3757, and by the lack of a real finding.\n- The Bifrost cold check was a symbol search that happened to match nothing. It shows indexing finishes and how long it takes, not that queries run correctly.\n\n**Second candidate, Databend (689k lines): not usable yet.** The CodeQL build failed after 59 minutes because `protoc` is missing. Bifrost **panicked** after about 3 minutes, at `rust_crates.rs:950`, with `a crate has a root module`. That panic is a real Bifrost bug, separate from #3757. I'd file it too. Say if you want that.\n\n**Recommendation:** for a latency comparison on Materialize now, pick a check that both tools complete on Rust today, not SQL taint. One option is a cross-file structural or call-graph query that has a CodeQL equivalent. That would show the scale difference fairly: 52 minutes to build plus about 16 minutes per query for CodeQL, against Bifrost's 3.4-minute cold start and warm queries in milliseconds. I have not checked which query to use; that is the next step if you want it. The SQL-taint comparison should wait for #3757.\n\nEverything is uncommitted under `.agents/docs/tract-warm-latency/`: the `rust-sql-taint-gap/` and `large-rust-target/` folders each have a README with the exact commands. The CodeQL databases are in `/mnt/optane/codeql-h2h/`."
+        },
+        {
+          "id": "user:prompt-a3412f4d4996a48af4e59c829c17f7e2",
+          "role": "user",
+          "text": "> a check that both tools complete on Rust today\n\nif there is such a check, then i accept"
+        },
+        {
+          "id": "msg_011CfYpNv2S1saFyu5WsUbYt",
+          "role": "assistant",
+          "text": "I'll look for a check that both tools finish completely on Materialize and that returns the same answers. If one exists, I'll run the latency comparison."
+        },
+        {
+          "id": "msg_011CfYpnwvTQhmpnjGUWFBQG",
+          "role": "assistant",
+          "text": "The rebuild runs in the background and takes about 14 minutes. When it finishes, I'll give the check-selection task the stable binary path.\n\n`★ Insight ─────────────────────────────────────`\n- mbx stores build outputs by content hash and removes them automatically. A binary path taken from a build is only valid until the next cleanup. For a benchmark that runs for hours, copying the finished binary to a fixed path keeps it available, and it does not change how cargo builds.\n- A rebuilt binary usually won't have the same SHA-256 as the tract campaign binary (`7eddad…`), because release builds are not guaranteed to be byte-for-byte reproducible. What makes the builds equivalent is the source commit (4b87647), not the file hash.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "ba5158f8-2cbf-467b-90ce-8f8f2767e65d",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 11:10pm (America/Chicago)"
+        },
+        {
+          "id": "msg_011CfZ8s5gEikzjyFhxDVGem",
+          "role": "assistant",
+          "text": "The CodeQL rebuild was killed before its cleanup step ran, so its edit is still in the Materialize copy. I'll remove the inserted line."
+        },
+        {
+          "id": "msg_011CfZ8sXq6VTfGMK5zLApXF",
+          "role": "assistant",
+          "text": "A check that both tools complete does exist, but I don't think these Materialize numbers should go in the deck yet. They were measured while the machine was overloaded by other agents' builds and tests (load average 164 on 120 threads). The CodeQL after-edit rebuild never finished. And Bifrost was much slower on Materialize than on tract.\n\n**The qualifying check: `file-read-in-loop`** (confirmed). Bifrost's built-in policy and a small custom CodeQL query return the same 16 locations on Materialize (commit `09975fd0`). Bifrost proved all 16, and 10 were checked by hand.\n\n| Check on Materialize (641k lines of Rust) | CodeQL 2.27.1 | Bifrost 0.12.0 |\n|---|---:|---:|\n| One-time setup | Build database: 52 min | Cold index + first query: 3 min 28 s |\n| Warm query (repeated, no edits) | p50 15.0 s, p95 16.2 s (n=5) | p50 **1.63 s**, p95 3.70 s, max 8.5 s (n=100) |\n| After a one-file edit | Full database rebuild + query: **not measured** (see below) | p50 **4.66 s**, p95 17.2 s, max 48 s (n=30) |\n\nProblems with these numbers:\n- **Host load.** Other agents were running Java nextest suites and other builds throughout, and held 119 of 120 mbx compile slots. The Bifrost spread (warm max 8.5 s, after-edit max 48 s) is consistent with that contention. I can't separate load effects from real cost with this data.\n- **The CodeQL after-edit rebuild never completed.** It waited more than 2 hours for an mbx compile slot and was then killed. Its cleanup step didn't run, so I removed its leftover edit from the Materialize copy myself. The only CodeQL rebuild figure is the original 52-minute build, which was also run on a shared machine.\n- **Unequal scope.** The Bifrost policy also checks Materialize's non-Rust files (41 findings in total), while the CodeQL query covers Rust only. A Rust-only Bifrost run would be the fair comparison.\n- **Bifrost is about 10 times slower here than on tract** (1.63 s against about 0.1–0.16 s warm). The scope and the host load are two possible explanations. It could also be real cost at this size. That is unknown until we remeasure on a quiet machine.\n\n**Rejected candidate, possibly a Bifrost bug:** a two-hop \"which files import this file\" query. The first hop matched (11 files). At two hops, Bifrost found 35 files and CodeQL found 277. The difference is mostly CodeQL following re-exports such as `pub use crate::scalar`, which Bifrost appears not to follow. The README has three concrete examples. This is worth its own issue if confirmed; I have not filed one.\n\n**Decision needed from you:** defensible numbers require a quiet machine, and the load comes from other agents' work that I shouldn't stop. Can you give me a window with no other builds or tests running? In that window I would:\n1. Rerun Bifrost warm (n=100) and after-edit (n=30) with a Rust-only version of the policy.\n2. Rerun the CodeQL queries.\n3. Do one full CodeQL rebuild plus query for the after-edit cost. This takes about an hour.\n\nEverything is uncommitted in `.agents/docs/tract-warm-latency/materialize-h2h/`, with a README that has the exact commands and raw data. The pinned Bifrost binary is now kept outside the mbx cache at `/mnt/optane/codeql-h2h/bin/bifrost-0.12.0-4b87647`. Its SHA-256 matches the tract campaign binary."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "assistant_text_tail": "A check that both tools complete does exist, but I don't think these Materialize numbers should go in the deck yet. They were measured while the machine was overloaded by other agents' builds and tests (load average 164 on 120 threads). The CodeQL after-edit rebuild never finished. And Bifrost was much slower on Materialize than on tract.\n\n**The qualifying check: `file-read-in-loop`** (confirmed). Bifrost's built-in policy and a small custom CodeQL query return the same 16 locations on Materialize (commit `09975fd0`). Bifrost proved all 16, and 10 were checked by hand.\n\n| Check on Materialize (641k lines of Rust) | CodeQL 2.27.1 | Bifrost 0.12.0 |\n|---|---:|---:|\n| One-time setup | Build database: 52 min | Cold index + first query: 3 min 28 s |\n| Warm query (repeated, no edits) | p50 15.0 s, p95 16.2 s (n=5) | p50 **1.63 s**, p95 3.70 s, max 8.5 s (n=100) |\n| After a one-file edit | Full database rebuild + query: **not measured** (see below) | p50 **4.66 s**, p95 17.2 s, max 48 s (n=30) |\n\nProblems with these numbers:\n- **Host load.** Other agents were running Java nextest suites and other builds throughout, and held 119 of 120 mbx compile slots. The Bifrost spread (warm max 8.5 s, after-edit max 48 s) is consistent with that contention. I can't separate load effects from real cost with this data.\n- **The CodeQL after-edit rebuild never completed.** It waited more than 2 hours for an mbx compile slot and was then killed. Its cleanup step didn't run, so I removed its leftover edit from the Materialize copy myself. The only CodeQL rebuild figure is the original 52-minute build, which was also run on a shared machine.\n- **Unequal scope.** The Bifrost policy also checks Materialize's non-Rust files (41 findings in total), while the CodeQL query covers Rust only. A Rust-only Bifrost run would be the fair comparison.\n- **Bifrost is about 10 times slower here than on tract** (1.63 s against about 0.1–0.16 s warm). The scope and the host load are two possible explanations. It could also be real cost at this size. That ",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.8799999952316284
+    },
+    "input": {
+      "choice": "required",
+      "confidence": 0.9100000262260437
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.9900000095367432
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.800000011920929
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "wait",
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "input-axis real-turn mining sample",
+    "judgment": "independent evidence label; Jev verdict retained separately",
+    "next": "n/a",
+    "input_rationale": "The reply asks the user to provide a time window needed to run the proposed tests; the user had conditionally approved only if both tools could complete on Rust."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T14:27:56.035Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "0305d10cd40fb1342e5ad6171d6ae993"
+  }
+}

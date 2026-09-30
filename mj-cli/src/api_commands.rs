@@ -213,14 +213,17 @@ fn parse_transcript_role(value: &str) -> Result<mj_core::transcript::TranscriptR
 
 #[derive(Debug, Args)]
 pub(crate) struct UsageArgs {
-    /// Session id, as `mj sessions` lists it.
-    #[arg(long)]
-    session: String,
-    /// Return entries after this sequence number.
-    #[arg(long)]
+    /// Read one session, including accounting retained after cleanup.
+    #[arg(long, required_unless_present = "parent", conflicts_with = "parent")]
+    session: Option<String>,
+    /// Read this session and every descendant, including cleaned-up children.
+    #[arg(long, required_unless_present = "session", conflicts_with = "session")]
+    parent: Option<String>,
+    /// Return entries after this sequence number (one session only).
+    #[arg(long, conflicts_with = "parent")]
     after_seq: Option<u64>,
-    /// Most entries to return in one page.
-    #[arg(long)]
+    /// Most entries to return in one page (one session only).
+    #[arg(long, conflicts_with = "parent")]
     limit: Option<usize>,
     /// Print the response as JSON instead of text.
     #[arg(long)]
@@ -228,17 +231,86 @@ pub(crate) struct UsageArgs {
 }
 
 pub(crate) async fn usage(args: UsageArgs) -> Result<()> {
-    let page = ApiClient::connect()
-        .await?
-        .usage(&args.session, args.after_seq, args.limit)
-        .await?;
-    if args.json {
-        return print_json(&page);
-    }
-    for line in usage_lines(&page) {
-        println!("{line}");
+    let client = ApiClient::connect().await?;
+    if let Some(parent) = args.parent {
+        let tree = client.usage_tree(&parent).await?;
+        if args.json {
+            return print_json(&tree);
+        }
+        for line in usage_tree_lines(&tree) {
+            println!("{line}");
+        }
+    } else {
+        let session = args
+            .session
+            .context("usage requires --session or --parent")?;
+        let page = client.usage(&session, args.after_seq, args.limit).await?;
+        if args.json {
+            return print_json(&page);
+        }
+        for line in usage_lines(&page) {
+            println!("{line}");
+        }
     }
     Ok(())
+}
+
+fn model_usage_lines(groups: &[mj_core::storage::UsageModelTotal]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for group in groups {
+        lines.push(format!(
+            "model {}; effort {}:",
+            group.selection.model.as_deref().unwrap_or("unknown"),
+            group.selection.effort.as_deref().unwrap_or("unknown")
+        ));
+        for (counter, total) in &group.totals {
+            lines.push(format!(
+                "  {counter}  {}  ({} turns)",
+                total.tokens, total.reported_turns
+            ));
+        }
+    }
+    lines
+}
+
+fn usage_tree_lines(tree: &mj_core::storage::UsageTree) -> Vec<String> {
+    let coverage = &tree.summary.coverage;
+    let mut lines = vec![
+        format!(
+            "usage tree {}: {} sessions",
+            tree.parent_session_id,
+            tree.sessions.len()
+        ),
+        format!(
+            "totals from the {} of {} turns that reported a whole turn; {} started turns without a completion report",
+            coverage.full_turn_reports, coverage.recorded_turns, coverage.unfinished_turns
+        ),
+    ];
+    lines.extend(model_usage_lines(&tree.summary.by_model));
+    lines.push(format!(
+        "not in totals: {} last-request, {} unknown-scope, {} missing reports",
+        coverage.last_request_reports, coverage.unspecified_reports, coverage.missing_reports
+    ));
+    for session in &tree.sessions {
+        lines.push(format!(
+            "session {}: task {}; parent {}; {}",
+            session.session_id,
+            session.task_name.as_deref().unwrap_or("root"),
+            session.parent_session_id.as_deref().unwrap_or("none"),
+            if session.operational_session_present {
+                "retained session"
+            } else {
+                "accounting retained after cleanup"
+            }
+        ));
+        if let Some(cost) = &session.summary.provider_session_cost {
+            lines.push(format!(
+                "  provider session cost: {:.4} {}",
+                cost.amount, cost.currency
+            ));
+        }
+    }
+    lines
 }
 
 /// What `mj usage` prints without `--json`.
@@ -283,6 +355,13 @@ fn usage_lines(page: &mj_core::storage::UsagePage) -> Vec<String> {
         lines.push(format!(
             "provider cost for the session so far: {:.4} {}",
             cost.amount, cost.currency
+        ));
+    }
+    lines.extend(model_usage_lines(&page.by_model));
+    if coverage.unfinished_turns > 0 {
+        lines.push(format!(
+            "{} started turns without a completion report",
+            coverage.unfinished_turns
         ));
     }
     lines.push(format!(
@@ -2219,6 +2298,56 @@ mod tests {
         // reason recorded, and that is still a failure.
         let failed_resume = suspended(serde_json::json!("the archive was missing"));
         assert!(report_wait(&failed_resume, false).is_err());
+    }
+
+    #[test]
+    fn usage_selects_one_session_or_a_whole_tree_and_pages_only_sessions() {
+        #[derive(clap::Parser)]
+        struct UsageCommand {
+            #[command(flatten)]
+            usage: UsageArgs,
+        }
+        let parse = |args: &[&str]| <UsageCommand as clap::Parser>::try_parse_from(args);
+        assert!(
+            parse(&[
+                "usage",
+                "--session",
+                "s",
+                "--after-seq",
+                "1",
+                "--limit",
+                "2"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["usage", "--parent", "p", "--json"]).is_ok());
+        for args in [
+            vec!["usage"],
+            vec!["usage", "--session", "s", "--parent", "p"],
+            vec!["usage", "--parent", "p", "--limit", "2"],
+            vec!["usage", "--parent", "p", "--after-seq", "1"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn usage_tree_text_distinguishes_models_efforts_and_removed_children() {
+        let tree: mj_core::storage::UsageTree=serde_json::from_value(serde_json::json!({
+            "parent_session_id":"parent", "totals":{},
+            "coverage":{"recorded_turns":2,"full_turn_reports":2,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0},
+            "by_model":[{"model":"sol","effort":"high","totals":{"input_tokens":{"tokens":10,"reported_turns":1}}},
+                {"model":"luna","effort":"low","totals":{"input_tokens":{"tokens":20,"reported_turns":1}}}],
+            "sessions":[{"session_id":"child","parent_session_id":"parent","task_name":"investigate",
+                "operational_session_present":false,"totals":{},"by_model":[],
+                "coverage":{"recorded_turns":0,"full_turn_reports":0,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0}}]
+        })).unwrap();
+        let text = usage_tree_lines(&tree).join("\n");
+        assert!(text.contains("model sol; effort high:"));
+        assert!(text.contains("model luna; effort low:"));
+        assert!(
+            text.contains("task investigate; parent parent; accounting retained after cleanup")
+        );
     }
 
     /// F-16: `mj usage` printed JSON unless asked for text.

@@ -285,6 +285,7 @@ impl DurableRelay {
             .is_some_and(|e| !e.background.is_empty());
         let needed = verdict
             .background
+            .as_ref()
             .filter(|judgment| {
                 listed && judgment.confidence >= mj_core::activity::verdict::ACT_CONFIDENCE
             })
@@ -741,18 +742,22 @@ mod settled_task_tests {
             failure: Judgment {
                 choice: Failure::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             input: Judgment {
                 choice: Input::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             work: Judgment {
                 choice: Work::Finished,
                 confidence: 0.99,
+                probabilities: [("finished".into(), 1.0)].into(),
             },
             background: Some(Judgment {
                 choice: background,
                 confidence: 0.95,
+                probabilities: Default::default(),
             }),
         };
         relay
@@ -787,18 +792,22 @@ mod settled_task_tests {
             failure: Judgment {
                 choice: Failure::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             input: Judgment {
                 choice: Input::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             work: Judgment {
                 choice: Work::Finished,
                 confidence: 0.99,
+                probabilities: [("finished".into(), 1.0)].into(),
             },
             background: Some(Judgment {
                 choice: background,
                 confidence: 0.95,
+                probabilities: Default::default(),
             }),
         };
         let restart = |root: &Path| {
@@ -926,14 +935,17 @@ mod settled_task_tests {
             failure: Judgment {
                 choice: Failure::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             input: Judgment {
                 choice: Input::None,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             work: Judgment {
                 choice: Work::AuthorizedUnfinished,
                 confidence: 0.99,
+                probabilities: Default::default(),
             },
             background: None,
         };

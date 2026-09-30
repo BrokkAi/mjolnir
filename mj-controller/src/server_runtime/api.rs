@@ -651,12 +651,13 @@ impl ApiBackend {
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
+                    // This wire queue can contain requests accepted by older workers.
                     let ranges = files
                         .iter()
                         .flat_map(|entry| {
                             let file = entry.file.clone();
                             entry.ranges.iter().map(move |range| {
-                                crate::server::api::SubagentSourceRange {
+                                crate::server::api::LegacySubagentSourceRange {
                                     file: file.clone(),
                                     start: range.start,
                                     end: range.end,
@@ -664,7 +665,7 @@ impl ApiBackend {
                             })
                         })
                         .collect::<Vec<_>>();
-                    let prompt = crate::server::api::build_subagent_prompt(
+                    let prompt = crate::server::api::build_legacy_subagent_prompt(
                         &backend,
                         parent_session_id,
                         instructions,
@@ -1483,6 +1484,13 @@ fn subagent_status(
     // as something the parent is done with while its teardown is still running.
     // A record that already settled to `Stopped` is left alone, exactly as the
     // daemon's viewer projection leaves it.
+    if record.is_some_and(|record| record.state == SessionState::StartupCleanup) {
+        return (
+            "stopping".into(),
+            record.and_then(|record| record.last_error.clone()),
+            false,
+        );
+    }
     if closing && record.is_some_and(|record| record.state != SessionState::Stopped) {
         return ("stopping".into(), None, false);
     }

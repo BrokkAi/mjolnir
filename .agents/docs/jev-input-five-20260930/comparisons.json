@@ -1,0 +1,181 @@
+{
+  "artifact_root": "/mnt/optane/mj-jev-input-five-20260930",
+  "repeats": 3,
+  "runs": {
+    "baseline-reviewed": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 29,
+        "false_required": 0,
+        "correct_actions": 135,
+        "wrong_actions": 3,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 22,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "a9f7314462a5c9479e5b26c74acb3495c2af7766bb9485e874f24521ea12b331",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-1-reviewed": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 44,
+        "false_required": 18,
+        "correct_actions": 151,
+        "wrong_actions": 22,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 27,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "27d3f4344d4bab8d6e37613b86b554b29eeb6f47270eb376e21632bbc11d40db",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-2-reviewed": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 27,
+        "false_required": 0,
+        "correct_actions": 138,
+        "wrong_actions": 4,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 28,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "dea6c7db776b567a3349d0f3f9f0cfd94a267227aaa8fb61ea6ff362f80b49ab",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-3": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "errors": 282,
+        "required": 54,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "138f06e2a5db746ed8c5403d1bdf7c4aa8c2362d1c96b97997dc6d2e1d9af2c6",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-3-restored": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 32,
+        "false_required": 6,
+        "correct_actions": 138,
+        "wrong_actions": 12,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 25,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "138f06e2a5db746ed8c5403d1bdf7c4aa8c2362d1c96b97997dc6d2e1d9af2c6",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-4": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 36,
+        "false_required": 0,
+        "correct_actions": 143,
+        "wrong_actions": 3,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 27,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "273b3ceca7978fe21a9067a32b6c9f2b1468b6728d4d146451fe504bad648775",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "round-5": {
+      "metrics": {
+        "requests": 282,
+        "controls": 216,
+        "detected": 46,
+        "false_required": 3,
+        "correct_actions": 143,
+        "wrong_actions": 6,
+        "required": 54,
+        "finished_expected": 69,
+        "finished_correct": 24,
+        "ambiguous": 12
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "f4536a2a7e08783c5b40c1f264344f9be1891c57636b3abff6ef70440b04a7ed",
+        "fixtures_sha256": "cda2b7fc8807417251b79ec802b86fd0937ab05ac604951957cecaa0123beae4"
+      }
+    },
+    "baseline-holdout": {
+      "metrics": {
+        "requests": 24,
+        "controls": 21,
+        "detected": 0,
+        "false_required": 0,
+        "correct_actions": 7,
+        "wrong_actions": 0,
+        "finished_expected": 18,
+        "finished_correct": 4,
+        "ambiguous": 3
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "a9f7314462a5c9479e5b26c74acb3495c2af7766bb9485e874f24521ea12b331",
+        "fixtures_sha256": "9c38a1ea53e96a77be92ae0a436bbfe070c8aa6cf6c0e4afa63a036802742424"
+      }
+    },
+    "selected-holdout": {
+      "metrics": {
+        "requests": 24,
+        "controls": 21,
+        "detected": 0,
+        "false_required": 0,
+        "correct_actions": 8,
+        "wrong_actions": 0,
+        "finished_expected": 18,
+        "finished_correct": 5,
+        "ambiguous": 3
+      },
+      "manifest": {
+        "model": "jev-latest",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "questions_sha256": "273b3ceca7978fe21a9067a32b6c9f2b1468b6728d4d146451fe504bad648775",
+        "fixtures_sha256": "9c38a1ea53e96a77be92ae0a436bbfe070c8aa6cf6c0e4afa63a036802742424"
+      }
+    }
+  },
+  "successful_requests": 1740,
+  "billing_error_requests": 283
+}

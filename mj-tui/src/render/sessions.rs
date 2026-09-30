@@ -785,7 +785,7 @@ impl SessionRowFacts<'_> {
             SessionState::Stopped => glyphs.stopped,
             SessionState::Provisioning => glyphs.starting,
             SessionState::Checkpointing => glyphs.checkpointing,
-            SessionState::Closing => glyphs.stopping,
+            SessionState::Closing | SessionState::StartupCleanup => glyphs.stopping,
             SessionState::Destroying => glyphs.destroying,
             SessionState::Parked => glyphs.idle,
             SessionState::Lost
