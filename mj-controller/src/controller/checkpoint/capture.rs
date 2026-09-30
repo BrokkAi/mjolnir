@@ -73,6 +73,7 @@ impl Controller {
                 LatchExclusivity::ReleaseAfterLatch,
                 CheckpointExportPolicy::Always,
                 Some(operation_id),
+                None,
             )
             .await
         {
@@ -188,6 +189,7 @@ impl Controller {
                 LatchExclusivity::ReleaseAfterLatch,
                 CheckpointExportPolicy::Always,
                 true,
+                None,
                 None,
             )
             .await?;

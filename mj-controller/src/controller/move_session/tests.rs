@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
 use anyhow::Result;
 
-use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
+use super::{
+    Controller, MoveMutationGuard, MoveSourceRelay, move_owns_session, move_refuses_command,
+};
 use crate::controller::test_support::{
     IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository, local_bundle,
     managed_raw_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
@@ -1207,6 +1209,7 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
                     &executor,
                     &manager.control,
                     &mut operation,
+                    &mut MoveSourceRelay::default(),
                 )
                 .await
                 .unwrap_err();
@@ -1871,7 +1874,13 @@ fn run_in_place_move(
     runtime.block_on(async {
         let channels = start_source_relay_manager(&source_relay);
         let result = controller
-            .execute_move(operation, None, executor, &channels.control)
+            .execute_move(
+                operation,
+                None,
+                executor,
+                &channels.control,
+                MoveSourceRelay::default(),
+            )
             .await;
         channels.shutdown.shutdown().await.unwrap();
         result
@@ -2437,6 +2446,7 @@ fn in_place_move_failure_retains_environment_for_retry() {
                 Some(&preparation),
                 &RecordingProcessExecutor::default(),
                 &channels.control,
+                MoveSourceRelay::default(),
             )
             .await
             .unwrap();
@@ -2574,6 +2584,7 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
                     &mut operation,
                     None,
                     crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+                    crate::controller::move_session::MoveSourceRelay::default(),
                 )
                 .await;
             channels.shutdown.shutdown().await.unwrap();
