@@ -405,7 +405,6 @@ fn validate_action_against(
             at: _,
             branch: _,
             base: _,
-            expected_runtime_identity: _,
             subagents: _,
         } => {
             if !workspace_id.is_empty() {

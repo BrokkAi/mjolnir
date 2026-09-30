@@ -95,8 +95,6 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_runtime_identity: Option<String>,
     /// Unique intent for a user-requested Resume/Restart; recovery preserves it in the relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_resume_request: Option<String>,
@@ -367,7 +365,16 @@ impl WorkerLaunchConfig {
     pub fn read(path: &Path) -> Result<Self> {
         let body = std::fs::read(path)
             .with_context(|| format!("read worker launch config {}", path.display()))?;
-        let mut launch: Self = serde_json::from_slice(&body).with_context(|| {
+        let parse = || -> serde_json::Result<Self> {
+            let mut value: serde_json::Value = serde_json::from_slice(&body)?;
+            // Shipped workers keep launch.json across upgrades. The removed
+            // constraint has no effect, but must not block loading that file.
+            if let Some(fields) = value.as_object_mut() {
+                fields.remove("expected_runtime_identity");
+            }
+            serde_json::from_value(value)
+        };
+        let mut launch: Self = parse().with_context(|| {
             format!("parse worker launch config {} with worker build {}", path.display(), crate::worker_build::BUILD_ID)
         }).map_err(|error| {
             if error.root_cause().to_string().contains("unknown field") {
@@ -530,6 +537,22 @@ mod tests {
         std::fs::write(&path, b"not JSON").unwrap();
         let error = format!("{:#}", WorkerLaunchConfig::read(&path).unwrap_err());
         assert!(!error.contains("older than the daemon"), "{error}");
+    }
+
+    #[test]
+    fn saved_launch_drops_the_retired_runtime_constraint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("launch.json");
+        let mut value = launch_json();
+        value["expected_runtime_identity"] = serde_json::json!("mj-runtime-v1:retired");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let launch = WorkerLaunchConfig::read(&path).unwrap();
+        assert_eq!(launch.session_id, "session");
+        assert_eq!(launch.bridge_command, Path::new("codex-acp"));
+        launch.write(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("expected_runtime_identity").is_none());
     }
 
     #[test]

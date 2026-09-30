@@ -51,7 +51,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
-        expected_runtime_identity: None,
         session_id: SESSION_ID.into(),
         harness: HarnessKind::Codex,
         harness_home: profile_home.into(),
@@ -6705,13 +6704,20 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
     std::fs::create_dir_all(&root).unwrap();
-    // The runtime identity probe runs this, so preparation takes about a second.
-    let slow_harness = temp.path().join("slow-harness");
-    std::fs::write(&slow_harness, "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
+    // Selecting a built-in Codex bridge probes its version before ACP starts.
+    let slow_harness = temp.path().join("codex-acp");
+    std::fs::write(&slow_harness, format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 1; echo '@brokkai/codex-acp {}'; exit 0; fi\nexit 1\n",
+        mj_core::harness_runtime::CODEX_ACP_VERSION
+    )).unwrap();
     std::fs::set_permissions(&slow_harness, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut config = launch_config("profile-home");
-    config.bridge_command = slow_harness;
+    config.bridge_command = "codex-acp".into();
+    config.environment.insert(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", temp.path().display()),
+    );
     config.cwd = temp.path().to_owned();
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));

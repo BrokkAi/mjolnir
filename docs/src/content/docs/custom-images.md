@@ -46,8 +46,8 @@ one, Codex and Claude Code install Mjolnir's pinned packages into a leased cache
 using `npm ci`. This requires Node.js 22+ and npm on the target PATH. Codex also
 uses this installation when the image's bridge version differs from Mjolnir's
 pin; Claude accepts the image's installed bridge. Selection and installation
-finish before the worker records runtime identity or starts an ACP session. The
-worker identifies and executes the same resolved bridge and provider.
+finish before the worker starts an ACP session. The worker executes the resolved
+bridge and provider.
 
 Kimi Code and Grok Build have no npm bridge:
 Mjolnir runs their official installer with `curl` piped to Bash instead, which
@@ -55,8 +55,8 @@ needs both tools in the image.
 
 Baking the bridges in, the way the reference image does, avoids that
 installation cost. Codex images should install the bridge version pinned by
-Mjolnir and set `CODEX_PATH` to the installed Codex executable so both the bridge
-and provider can be identified.
+Mjolnir and set `CODEX_PATH` to the installed Codex executable so the bridge
+runs the selected provider.
 
 Mjolnir-owned worker and bridge commands use non-login shells and do not source
 `/etc/profile` or user dotfiles. Images must therefore expose required tools on

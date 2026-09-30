@@ -884,6 +884,26 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;"))?;
     }
 
+    // Breaking: removes the saved runtime constraint; older daemons still
+    // read and write it. Historical receipts remain readable in event history.
+    if version < 66 {
+        let drop_column = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "expected_runtime_identity",
+        )? {
+            "ALTER TABLE sessions DROP COLUMN expected_runtime_identity;"
+        } else {
+            ""
+        };
+        connection.execute_batch(&format!("BEGIN IMMEDIATE;
+            {drop_column}
+            UPDATE schema_compatibility SET minimum_compatible_version = 66 WHERE singleton = 1;
+            INSERT INTO schema_migrations(version, applied_at) VALUES (66, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+            PRAGMA user_version = 66;
+            COMMIT;"))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1136,9 +1156,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 65 removes review orchestration and the
-    /// session incarnation fence.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 65;
+    /// `SCHEMA_VERSION`. Migration 66 removes the saved runtime constraint.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 66;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

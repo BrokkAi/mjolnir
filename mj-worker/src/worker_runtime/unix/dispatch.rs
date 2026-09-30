@@ -446,14 +446,12 @@ pub(crate) fn record_runtime_event(
             ..
         } => {
             crate::worker_runtime::record_startup_step(relay.root(), "acp-initialized");
-            let runtime = relay.initialized_runtime_identity(agent_info.as_ref())?;
             relay.record_observation(RelayObservation::AgentInitialized {
                 protocol_version,
                 capabilities,
                 agent_info,
-                runtime,
+                runtime: None,
             })?;
-            relay.verify_runtime_identity()?;
             relay.set_steering_supported(steering_supported);
             relay.set_automatic_steering(
                 steering_supported == Some(true) && steering_returns_idle_input,

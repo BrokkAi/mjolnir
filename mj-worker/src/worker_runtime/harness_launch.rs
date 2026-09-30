@@ -1,41 +1,21 @@
-//! Select the concrete executable before identifying or starting a harness.
+//! Select the concrete executable before starting a harness.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::{RuntimeIdentity, npm_bridge};
+use mj_core::harness_runtime::npm_bridge;
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
-use super::{AcpSupervisorSpec, harness, runtime_identity};
+use super::{AcpSupervisorSpec, harness};
 
 /// Keep this preparation alive until the supervisor holds its installation lease.
 pub struct PreparedHarnessLaunch {
     pub spec: AcpSupervisorSpec,
     pub(crate) environment: BTreeMap<String, String>,
-    harness: HarnessKind,
     pub(crate) managed: Option<harness::ManagedHarness>,
-}
-
-impl PreparedHarnessLaunch {
-    /// Inspect exactly the executable and environment selected for the supervisor.
-    pub async fn runtime_identity(&self) -> Result<RuntimeIdentity> {
-        let command = self.spec.command.clone();
-        let environment = self.environment.clone();
-        let harness = self.harness;
-        let root = self
-            .managed
-            .as_ref()
-            .and_then(|managed| managed.lease_path.parent())
-            .map(std::path::Path::to_path_buf);
-        tokio::task::spawn_blocking(move || {
-            runtime_identity::inspect(harness, &command, &environment, root.as_deref())
-        })
-        .await
-        .context("runtime identity inspection task failed")
-    }
 }
 
 pub async fn prepare_harness_launch(
@@ -77,7 +57,7 @@ pub async fn prepare_harness_launch(
     {
         let search_environment = environment.clone();
         let selected = tokio::task::spawn_blocking(move || {
-            runtime_identity::find_command(Path::new(bridge.command), &search_environment)
+            find_command(Path::new(bridge.command), &search_environment)
         })
         .await
         .context("find target bridge task failed")??;
@@ -132,9 +112,8 @@ pub async fn prepare_harness_launch(
         } else {
             spec.command.clone()
         };
-        spec.command = runtime_identity::resolve_command(&command, &environment)?;
-        // Freeze the explicit provider selection as well as the bridge. Unknown
-        // provider metadata still yields an unavailable identity during inspection.
+        spec.command = resolve_command(&command, &environment)?;
+        // Freeze the explicit provider selection as well as the bridge.
         if harness == HarnessKind::Codex
             && let Some(provider) = environment
                 .get("CODEX_PATH")
@@ -146,7 +125,7 @@ pub async fn prepare_harness_launch(
             } else {
                 provider.to_path_buf()
             };
-            if let Some(provider) = runtime_identity::find_command(&provider, &environment)? {
+            if let Some(provider) = find_command(&provider, &environment)? {
                 let provider = provider.to_string_lossy().into_owned();
                 spec.environment
                     .insert("CODEX_PATH".into(), provider.clone());
@@ -160,7 +139,6 @@ pub async fn prepare_harness_launch(
     Ok(PreparedHarnessLaunch {
         spec,
         environment,
-        harness,
         managed,
     })
 }
@@ -208,6 +186,40 @@ async fn link_build_cache_configuration(environment: &BTreeMap<String, String>) 
     })
     .await
     .context("mbx configuration link task failed")?
+}
+
+fn resolve_command(command: &Path, environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    find_command(command, environment)?
+        .context("runtime command is not executable on the selected PATH")
+}
+
+fn find_command(command: &Path, environment: &BTreeMap<String, String>) -> Result<Option<PathBuf>> {
+    let selected = if command.is_absolute() {
+        command.to_path_buf()
+    } else {
+        ensure!(
+            command.components().count() == 1,
+            "relative runtime command is ambiguous"
+        );
+        let selected = std::env::split_paths(
+            environment
+                .get("PATH")
+                .context("runtime PATH is unavailable")?,
+        )
+        .map(|directory| directory.join(command))
+        .find(|path| super::harness::entrypoint_is_executable(path));
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        selected
+    };
+    if !super::harness::entrypoint_is_executable(&selected) {
+        return Ok(None);
+    }
+    selected
+        .canonicalize()
+        .map(Some)
+        .context("resolve selected runtime command")
 }
 
 #[cfg(all(test, unix))]

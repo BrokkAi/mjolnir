@@ -947,7 +947,6 @@ impl ReviewerRole {
             )
         };
         let spec = LaunchSpec {
-            runtime_constraint: None,
             clear_context_request: None,
             context_restore: None,
             goal_recovery: Default::default(),

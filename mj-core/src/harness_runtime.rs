@@ -15,7 +15,7 @@ pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.8.1";
 pub const MUSE_VERSION: &str = "1.4.1-R4503.1";
 
-/// The built-in npm launcher, selected on the worker before runtime inspection.
+/// The built-in npm launcher, selected on the worker before ACP startup.
 #[derive(Clone, Copy)]
 pub struct NpmBridge {
     pub command: &'static str,
@@ -127,7 +127,7 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
 }
 use serde::{Deserialize, Serialize};
 
-/// Public provenance of a runtime inspected on its executing target.
+/// Legacy receipt shapes retained to decode journals and events from shipped releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProvenance {
@@ -142,7 +142,7 @@ pub struct RuntimeComponent {
     pub sha256: Option<String>,
 }
 
-/// Comparison scope excludes model, effort, credentials, homes, and environment.
+/// Historical runtime identity; new workers no longer inspect installations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeIdentity {
     pub id: Option<String>,
@@ -153,57 +153,6 @@ pub struct RuntimeIdentity {
     pub unavailable_reason: Option<String>,
 }
 
-impl RuntimeIdentity {
-    pub fn with_reported_agent(
-        mut self,
-        agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
-    ) -> anyhow::Result<Self> {
-        self.components.push(RuntimeComponent {
-            name: "acp_reported_agent".into(),
-            version: agent_info.map(|info| format!("{} {}", info.name, info.version)),
-            sha256: None,
-        });
-        self.refresh_id()?;
-        Ok(self)
-    }
-
-    pub fn refresh_id(&mut self) -> anyhow::Result<()> {
-        use sha2::Digest;
-        self.components.sort_by(|a, b| a.name.cmp(&b.name));
-        self.id = if self.unavailable_reason.is_some() {
-            None
-        } else {
-            let body = serde_json::to_vec(&(
-                1,
-                self.harness,
-                &self.platform,
-                self.provenance,
-                &self.components,
-            ))?;
-            Some(format!(
-                "mj-runtime-v1:{}",
-                crate::hex::lower_hex(sha2::Sha256::digest(body))
-            ))
-        };
-        Ok(())
-    }
-
-    pub fn require(&self, expected: &str) -> anyhow::Result<()> {
-        match self.id.as_deref() {
-            Some(actual) if actual == expected => Ok(()),
-            Some(actual) => anyhow::bail!(
-                "runtime identity mismatch: expected {expected}, resolved {actual}; discover the current runtime and explicitly update the selection"
-            ),
-            None => anyhow::bail!(
-                "runtime identity unavailable: {}; select a runtime with known provenance before requiring an identity",
-                self.unavailable_reason
-                    .as_deref()
-                    .unwrap_or("target runtime could not be identified")
-            ),
-        }
-    }
-}
-
 /// One immutable initialization, identified by its position in the worker journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeReceipt {
@@ -211,14 +160,4 @@ pub struct RuntimeReceipt {
     pub identity: RuntimeIdentity,
     pub event_ordinal: u64,
     pub observed_at_ms: i64,
-}
-
-pub fn validate_expected_identity(identity: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !identity.is_empty()
-            && identity.len() <= 256
-            && identity.bytes().all(|byte| byte.is_ascii_graphic()),
-        "expected runtime identity must be a nonempty comparison ID of at most 256 ASCII characters"
-    );
-    Ok(())
 }

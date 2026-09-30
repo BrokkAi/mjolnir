@@ -384,8 +384,6 @@ pub struct CreateSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_runtime_identity: Option<String>,
     /// Omitted reuses the last accepted top-level session choice.
     #[serde(
         default,
@@ -2173,8 +2171,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Session creation names its starting selection `at`, `branch` and `base`.
-pub const PROTOCOL_VERSION: u32 = 44;
+// Session creation no longer accepts a runtime identity constraint.
+pub const PROTOCOL_VERSION: u32 = 45;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
