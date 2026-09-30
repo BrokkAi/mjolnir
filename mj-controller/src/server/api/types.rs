@@ -30,6 +30,9 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    /// Tasks currently observed by the daemon, including their stop capability.
+    #[serde(default)]
+    pub background_tasks: Vec<crate::server::ViewerBackgroundTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<mj_core::assessment::Summary>,
     #[serde(default)]
@@ -89,6 +92,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            background_tasks: session.background_tasks.clone(),
             assessment: None,
             subagents: session.subagents.clone(),
             background_work: None,
@@ -117,6 +121,12 @@ impl From<&ViewerSession> for ApiSession {
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopBackgroundTaskRequest {
+    pub background_task_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -680,7 +680,89 @@ fn app_with_background_stop_receiver(
     )
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.set_background_task_stop_tx(stop_tx);
+    options.set_api_token("test-api-token".into());
     (router(options), stop_rx)
+}
+
+#[tokio::test]
+async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
+    let (app, mut requests) = app_with_background_stop_receiver(true);
+    let body = r#"{"background_task_id":"terminal:background-1"}"#;
+    let path = "/api/v1/sessions/session-1/background-tasks/stop";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()[api::API_VERSION_HEADER], "1");
+    assert!(requests.try_recv().is_err());
+
+    for route in ["/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header("authorization", "Bearer test-api-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session = if route.ends_with("session-1") {
+            &json
+        } else {
+            &json["sessions"][0]
+        };
+        assert_eq!(
+            session["background_tasks"][0]["id"],
+            "terminal:background-1"
+        );
+        assert_eq!(session["background_tasks"][0]["can_stop"], true);
+    }
+
+    let response = tokio::spawn(
+        app.clone().oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    );
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.background_task_id, "terminal:background-1");
+    assert!(
+        !response.is_finished(),
+        "HTTP acknowledgement must wait for the actor"
+    );
+    request.reply.send(Ok(())).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    let (app, mut requests) = app_with_background_stop_receiver(false);
+    let response = app
+        .oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(requests.try_recv().is_err());
 }
 
 #[tokio::test]
