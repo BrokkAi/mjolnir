@@ -6,15 +6,23 @@ the current bundled questions (`mj-core/src/activity/verdict_questions.json`) to
 TypeSafe directly, three times each, and writes `results.jsonl` plus `report.md`
 under --output. The report compares the model's answers and the resulting
 Mjolnir action with each fixture's `expected`, per category. It never runs in
-CI. The key comes from TYPESAFE_API_KEY or ~/.secrets/typesafe_api_key and is
+CI. Input detection and false required-input alerts are also scored separately
+at the UI's 0.85 threshold; cases marked context.strict_input_scoring=false are
+excluded from that count. The key comes from TYPESAFE_API_KEY or ~/.secrets/typesafe_api_key and is
 never printed. Standard library only.
+
+Use --questions to compare an alternative prompt. Questions and labeled cases
+are frozen before requests; resuming with changed questions or fixtures fails.
+An offline --report uses those snapshots, so later edits cannot relabel a run.
 
     python3 scripts/jev-scenarios-eval.py --output /mnt/optane/mj-jev-scenarios/results-<stamp>
     python3 scripts/jev-scenarios-eval.py --only S01,P04 --repeats 1 --output /tmp/x
+    python3 scripts/jev-scenarios-eval.py --questions /path/candidate.json --only D01,D05 --output /mnt/optane/jev-candidate
     python3 scripts/jev-scenarios-eval.py --report /mnt/optane/mj-jev-scenarios/results-<stamp>   # rebuild report offline
 """
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import sys
@@ -178,9 +186,11 @@ def ask(key, questions, evidence):
 
 def run(args):
     key = api_key()
-    questions = json.loads(QUESTIONS.read_text())
+    questions = json.loads(args.questions.read_text())
     fixtures = load_fixtures(args.only)
-    args.output.mkdir(parents=True, exist_ok=True)
+    if not fixtures:
+        raise ValueError("no fixtures selected")
+    prepare_run(args.output, questions, fixtures)
     results_path = args.output / "results.jsonl"
     done = set()
     if results_path.exists():
@@ -201,18 +211,49 @@ def run(args):
             out.flush()
             summary = record.get("action") or record.get("error")
             print(f"{fixture['id']} #{repeat}: {summary}", flush=True)
-    (args.output / "questions.json").write_text(json.dumps(questions, indent=2) + "\n")
     report(args)
 
 
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def prepare_run(output, questions, fixtures):
+    """Freeze prompts and labeled cases before sending requests; never mix experiments."""
+    manifest = {
+        "model": "jev-latest",
+        "endpoint": ENDPOINT,
+        "questions_sha256": digest(questions),
+        "fixtures_sha256": digest(fixtures),
+        "evidence_sha256": {f["id"]: digest(fit_to_wire(f["evidence"])) for f in fixtures},
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / "run.json"
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text()) != manifest:
+            raise ValueError("prompt or fixtures changed; use a new output directory")
+        for name, expected in (("questions.json", questions), ("fixtures.json", fixtures)):
+            if json.loads((output / name).read_text()) != expected:
+                raise ValueError(f"{name} differs from the frozen experiment; use a new output directory")
+    elif (output / "results.jsonl").exists():
+        raise ValueError("existing results have no experiment manifest; use a new output directory")
+    else:
+        (output / "questions.json").write_text(json.dumps(questions, indent=2) + "\n")
+        (output / "fixtures.json").write_text(json.dumps(fixtures, indent=2) + "\n")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
 def report(args):
-    fixtures = {f["id"]: f for f in load_fixtures(None)}
+    snapshot = args.output / "fixtures.json"
+    fixtures = {f["id"]: f for f in (json.loads(snapshot.read_text()) if snapshot.exists() else load_fixtures(None))}
     by_id = defaultdict(list)
     for line in (args.output / "results.jsonl").read_text().splitlines():
         record = json.loads(line)
         by_id[record["id"]].append(record)
     rows = []
     categories = defaultdict(lambda: {"n": 0, "axes_agree": 0, "above": 0, "action_ok": 0, "wrong_high": 0, "errors": 0})
+    inputs = defaultdict(lambda: {"n": 0, "agree": 0, "agree_high": 0, "detected": 0, "missed": 0, "false_required": 0, "errors": 0})
+    input_unscored = 0
     for identity in sorted(by_id):
         fixture = fixtures.get(identity)
         if not fixture:
@@ -221,11 +262,27 @@ def report(args):
         stats = categories[fixture["category"]]
         for record in by_id[identity]:
             stats["n"] += 1
+            input_stats = inputs[expected["input"]] if fixture.get("context", {}).get("strict_input_scoring", True) else None
+            if input_stats is None:
+                input_unscored += 1
+            else:
+                input_stats["n"] += 1
             if "verdict" not in record:
                 stats["errors"] += 1
+                if input_stats is not None:
+                    input_stats["errors"] += 1
                 rows.append((identity, fixture["category"], record["repeat"], "error", record.get("error"), "", "", ""))
                 continue
             verdict = record["verdict"]
+            predicted_input = verdict["input"]
+            input_agrees = predicted_input["choice"] == expected["input"]
+            required_high = predicted_input["choice"] == "required" and predicted_input["confidence"] >= ACT_CONFIDENCE
+            if input_stats is not None:
+                input_stats["agree"] += input_agrees
+                input_stats["agree_high"] += input_agrees and predicted_input["confidence"] >= ACT_CONFIDENCE
+                input_stats["detected"] += expected["input"] == "required" and required_high
+                input_stats["missed"] += expected["input"] == "required" and not required_high
+                input_stats["false_required"] += expected["input"] != "required" and required_high
             agree = all(verdict[axis]["choice"] == expected[axis] for axis in ("failure", "input", "work"))
             above = all(verdict[axis]["confidence"] >= ACT_CONFIDENCE for axis in ("failure", "input", "work"))
             act = record["action"]
@@ -241,6 +298,15 @@ def report(args):
                     agree = False
             rows.append((identity, fixture["category"], record["repeat"], cells, act, expected["action"], "agree" if agree else "differ", "WRONG" if wrong else ""))
     lines = ["# Jev scenario replay", "", f"Results: `{args.output / 'results.jsonl'}`", ""]
+    lines += [
+        "Input is scored independently of failure and work. Detection uses the UI's 0.85 threshold. Errors are reported separately and count as unsuccessful requests.",
+        f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.", "",
+        "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required >= 0.85 | errors |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for label, s in sorted(inputs.items()):
+        lines.append(f"| {label} | {s['n']} | {s['agree']} | {s['agree_high']} | {s['detected']} | {s['missed']} | {s['false_required']} | {s['errors']} |")
+    lines += [""]
     lines += ["| category | requests | axes agree | agree and all >= 0.85 | action as expected | wrong action | errors |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for category, s in sorted(categories.items()):
         lines.append(f"| {category} | {s['n']} | {s['axes_agree']} | {s['above']} | {s['action_ok']} | {s['wrong_high']} | {s['errors']} |")
@@ -258,6 +324,7 @@ def main():
     parser.add_argument("--output", type=Path, help="directory for results.jsonl and report.md")
     parser.add_argument("--report", type=Path, help="rebuild report.md from an existing results directory, no requests")
     parser.add_argument("--only", help="comma-separated fixture ids")
+    parser.add_argument("--questions", type=Path, default=QUESTIONS, help="alternative question bundle; saved with results")
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
     args.only = set(args.only.split(",")) if args.only else None

@@ -1,0 +1,240 @@
+{
+  "id": "D03",
+  "title": "Histogram answered; ticket filtering choice remains underspecified",
+  "category": "ambiguous-next-step-after-analysis",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "cf1a32d7fcf1b32a5bbfbd247604a7a3",
+    "session_title": "bifrost-vector via claude",
+    "decision": "assessment-cf1a32d7fcf1b32a5bbfbd247604a7a3-1832",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T15:49:59.961Z",
+    "assessed_at": "2026-09-30T16:18:28.489Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "superseded",
+    "recorded_reason": "user_or_lifecycle_action",
+    "note": "The user had already authorized filing the ticket and supplying the two lists. They then asked whether to filter small pairs; after giving the histogram and recommendation, the assistant asks which list to include in the ticket. The answer is needed to finish the authorized artifact."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:prompt-7276f1a6c916302aa7013d236eef13fc",
+          "role": "user",
+          "text": "i want to build the equivalent of SSCD duplicate detection with a high quality model and a high quality ann index\n\ncreate a branch `dupecop` based on bifrost from before I removed its vector embedding code, and switch Muninn model out for its parent, voyage 4 nano\n\nembed actual current bifrost (../bifrost) using that code, it's quite good at pipelining the embed, get this moving first in a subagent because it will take probably a few hours, pin to the B5000 GPU using UUID, make sure nvidia-smi shows B5000 in use. time this.\n\nwhile that works, update ../rvector to remove nvq and use rq8 like bifrost\n\nthen index the bifrost rq8 embeddings using rvector, i think we probably we need an ordinal generator and a new table in the bifrost db. time the ingest too. remember that rvector is designed for multithreaded ingest, you can go balls to the wall here with rayon or we.\n\nthen query the index for the closest 10 matches for each function and retain the top 100 pairs globally. again, all-cores multithreaded and time it.\n\nfinally, ask codex exec with luna 6 model, high reasoning, to evaluate whether those functions violate DRY and should be combined, write a report containing each pair as jsonl, the verdict, and the reasoning.\n\nclear?"
+        },
+        {
+          "id": "msg_011CfZ2vGfRoAGt1Q4UhHYSj",
+          "role": "assistant",
+          "text": "Found `codex` under nvm (`~/.nvm/versions/node/v24.15.0/bin/codex`), so the last step is not blocked. I'm waiting for both agents now."
+        },
+        {
+          "id": "user:prompt-5e054c38cb21c7166fa3654f930243a6",
+          "role": "user",
+          "text": "interrupted, sorry, you'll have to restart the subagents"
+        },
+        {
+          "id": "msg_011CfZ3DgcJpvxk2Bu4uqvUV",
+          "role": "assistant",
+          "text": "Nothing was left over. Both worktrees are clean, no process from the old agents is still running, and the PRO 5000 is idle (205 MiB used, 0%). I'm restarting both agents with the same tasks."
+        },
+        {
+          "id": "msg_011CfZ5WUspc9bK4e43AFFhx",
+          "role": "assistant",
+          "text": "Found two problems with how the old code builds each embedded document. I'm checking one more detail before I decide what to do."
+        },
+        {
+          "id": "msg_011CfZ5WwEqX5eNDso51Jzxw",
+          "role": "assistant",
+          "text": "A quick check: this cache file existed before today (the lock file is dated Aug 25). So old Muninn vectors may be mixed in with the new ones."
+        },
+        {
+          "id": "msg_011CfZ9dBF57XTD2mpyGakBA",
+          "role": "assistant",
+          "text": "While that runs, two choices affect which pairs go to codex. You know better than I do which pairs are worth reviewing:"
+        },
+        {
+          "id": "msg_011CfZgk1rLE4rth9QJ6bYpg",
+          "role": "assistant",
+          "text": "Changed to the top 1,000 pairs with no size filter; exact duplicates stay in their own file. While the index builds, I'm checking the `codex exec` options for the review step."
+        },
+        {
+          "id": "msg_011CfZiGaiy7dDVTf2jhzb7Z",
+          "role": "assistant",
+          "text": "Writing the codex review script now."
+        },
+        {
+          "id": "msg_011CfZiJ4FCmPuGvAj4yaQZ7",
+          "role": "assistant",
+          "text": "Pilot on 3 pairs to check the model name, the schema and the time per call:"
+        },
+        {
+          "id": "msg_011CfZiNdGgHxNyhxNzEaHUg",
+          "role": "assistant",
+          "text": "While the review runs, I'm looking into the ingest core count. First, how busy the host is:"
+        },
+        {
+          "id": "msg_011CfZiQ9h3TFAWiX2iw3dog",
+          "role": "assistant",
+          "text": "The review is running with no errors so far. Meanwhile I'm committing the script."
+        },
+        {
+          "id": "msg_011CfZiQjbUrMYDP2fTxXqrX",
+          "role": "assistant",
+          "text": "The script is committed as `a9b9bf0a3`. The review run will notify me when it finishes, and then I'll summarize the verdicts.\n\n`★ Insight ─────────────────────────────────────`\n- The pilot's top pairs, such as `append_record` in two fuzzer binaries and `*_analyzer_with_files` in two test suites, are copy-pasted helpers in separate test or binary targets. Similarity search finds them easily. Whether to combine them depends on crate boundaries, which is why each codex session gets read access to the repository.\n- The ANN search took 5.3 s and ingest took 101 s. Building the graph dominates the cost, because each insert does a beam search plus neighbor pruning over 2 KB rq8 codes.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "msg_011CfZk4xwqkv54p4CBNzAH1",
+          "role": "assistant",
+          "text": "All steps have run. The report is `/home/jonathan/Projects/bifrost-vector/.dupecop/dry_review.jsonl`: 1,000 pairs, each with both sides' locations and source, plus the verdict and reasoning. Codex said **combine** for 594 pairs and **keep_separate** for 406. It never answered \"uncertain\".\n\n| Step | Wall time | Notes |\n|---|---|---|\n| Embed `../bifrost` @ `7ccc03304` | **3 min 36 s** | 79,267 functions, 75,321 distinct vectors, 2048 dimensions, rq8. The PRO 5000 was at 88–98% utilization. |\n| rvector ingest | **101 s** | Almost all of it is graph build. Reading from SQLite took 0.2 s. |\n| Top-10 search, all functions | **5.3 s** for the search itself; 12 s for the whole process | 14,290 queries/s. Recall@10 was 0.9997 against brute force on 1,000 sample queries. |\n| Codex review (gpt-6-luna, high effort, 24 in parallel) | **21 min 46 s** | About 31 s per pair; no failures. |\n\nWhat to know about the results:\n\n- **You were right about the top 1,000.** The combine rate barely falls with rank: 55% in the top 100, 60% in ranks 101–500, 60% in ranks 501–1,000. The 1,000th pair still scores 0.9865, so more real duplicates are probably below the cutoff.\n- **Most combine verdicts are in tests.** 332 pairs have both sides in test or fixture code, and codex said combine for 251 of them. Typical cases are copy-pasted setup helpers such as `java_analyzer_with_files`.\n- **Most keep_separate verdicts cite crate boundaries.** A typical reason is \"sharing would need a cross-crate test-support dependency or a wider public API for five lines\". Some are trait-adapter methods that are one line each.\n- **Exact duplicates are separate.** The 1,803 groups with byte-identical source are in `.dupecop/exact_duplicate_groups.jsonl`. They were not sent to codex.\n\nChanges I made to your plan along the way:\n\n- **What gets embedded.** The old code prefixed each document with `{file_path}/{function}`, which makes functions in the same file look alike. It also merged every definition that shares an fq_name into one document; for example, 12 `natural_identity` bodies had one vector. Each definition is now embedded as its own source only, at the full 2048 dimensions instead of 512.\n- **rvector fixes.** Besides replacing NVQ with fastrq rq8 and adding `search_rq8`, the agent fixed a bug in the visited-node table of graph search. The table could forget visited nodes, so search looped forever. The first full query run reached 62 GB of memory before the fix.\n\nStill open:\n\n- **Ingest used only about 15 of 120 cores on average (unknown cause).** The host load average was 96–218 from other sessions, so this could be contention with that work. It could also be a lock bottleneck inside rvector's insert path. It needs a new measurement on a quiet host.\n- **Nothing was pushed.** Commits are local on `dupecop` (up to `a9b9bf0a3`) and on rvector `master` (up to `197882fe7`). rvector's `cargo test --workspace` fails to link the sqlite-rvector tests because the system has no `-lsqlite3`. That failure existed before these changes; the rvector crate's own tests pass.\n- **The Bifrost cache metadata is stale.** The `cache_state` in the target cache still records the old document format. If the regular semantic indexer opens this cache, it will treat the rows as stale and rebuild them. Reading the rows with SQL is not affected.\n\nTo rank more pairs, edit `crates/dupecop/sql/top1000_pairs.sql` and re-run `review_pairs.py`. The script skips pairs it has already reviewed."
+        },
+        {
+          "id": "user:prompt-3c02d07f4b93387b7aa468c4fd05f9f1",
+          "role": "user",
+          "text": "how should we fix the luna analysis to recognize that cross-crate refactoring is in scope? or do you think it's right and it's not worth bothering with"
+        },
+        {
+          "id": "msg_011CfZsQBra32CK9BW9zTu5H",
+          "role": "assistant",
+          "text": "Luna is partly right. The verdicts that matter are wrong for a fixable reason: Luna does not know how this repository shares code across crates. The fix is worth making, and it is cheap.\n\n**Where it is right.** 175 of the 406 `keep_separate` verdicts mention crate boundaries. Most of those pairs are trivial field accessors or one-line trait adapters, such as `#332` (a Go builder and a JVM builder) and `#744` (policy and flow). In those cases the crate boundary is only a second reason, and \"keep separate\" would be correct without it.\n\n**Where it is wrong.** 109 `keep_separate` pairs are 8 lines or longer on both sides. 35 of them are rejected mainly because of the boundary, and these are the cases that matter:\n- **Test fixture helpers**, copied between a crate's unit tests and the root integration suites. Examples: the ZIP writers (`#89`, `#105`, `#137`), rustdoc `Function` and `Item` defaults (`#23`, `#111`), the gem archive layout (`#27`), and a 29-line git fixture (`#51`). Luna's reasoning is always the same: sharing \"would require a new test-support crate or awkward cross-harness infrastructure\". That is false for this repo. `../bifrost/test-support/` already exists and is included by `#[path]` from many crates, and there are `test-support` Cargo features for analysis, mcp, policy and rql (`Cargo.toml:181`). Your CLAUDE.md even says \"take shared harness code from `test-support/`\". Luna never looked.\n- **Production logic.** In `#19`, 32 lines of Ruby scope-exit rules are copied between `bifrost-analysis/.../get_definition/ruby.rs` and `bifrost-ruby/src/graph/extractor.rs`. Luna agrees that it is \"the same Ruby scope-exit rules\" and still keeps them separate because of the crate boundary. That is the kind of duplication this whole exercise is meant to find.\n\n**Recommended prompt changes:**\n1. State that refactoring across crates is in scope. A crate boundary is not a reason to keep code separate unless the dependency graph rules out every shared location.\n2. Name the mechanisms: `test-support/` with `#[path]` and the `test-support` features for test code. For production code, the lowest crate that both sides already depend on (`bifrost-core` is at the bottom), within the limits of `scripts/public/check-workspace-dependencies.mjs`.\n3. Split the judgment into separate output fields: `duplicated_knowledge` (bool), `shared_location` (string), then `verdict`. Right now one answer mixes \"is this the same knowledge?\" with \"is sharing it convenient?\". With separate fields, we can see which of the two drove each rejection.\n\n**Cost.** Re-running the 406 `keep_separate` pairs with the revised prompt takes about 9 minutes at 24 in parallel. The 594 `combine` verdicts do not need a re-run, because loosening the boundary rule can only turn \"keep\" into \"combine\". I'd guess a few dozen verdicts flip, mostly test fixtures plus a few production pairs like `#19`, but that is an estimate, not a measurement.\n\n`★ Insight ─────────────────────────────────────`\n- An LLM judge without repository context falls back to generic ideas about cost, such as \"a new crate is expensive\". Here the sharing mechanism already exists and is written down in CLAUDE.md, so giving Luna that fact removes the objection instead of arguing with it.\n- Separating \"is this duplicated knowledge\" from \"where would the shared code live\" is a common way to make judge output checkable. You can disagree with one field without having to re-read the whole reasoning.\n`─────────────────────────────────────────────────`\n\nShould I make the prompt change and re-run the 406?"
+        },
+        {
+          "id": "user:prompt-35935d809c35e2062cc501637febf28b",
+          "role": "user",
+          "text": "let's do 1 and 3. #2 is too project-specific imo. don't rerun yet"
+        },
+        {
+          "id": "msg_011CfZsadYS9pmpNzZT7wnMm",
+          "role": "assistant",
+          "text": "I made changes 1 and 3 and committed them as `8c4e30264`. Nothing has been re-run.\n\n**Change 1: cross-crate refactoring is in scope.** The prompt now says that refactoring across crates, packages and modules is in scope, and that a boundary is not by itself a reason to keep code separate. The model may give `shared_location: null` only when it can name a dependency cycle or another hard constraint. I removed \"crate/publication boundaries make sharing wrong\" from the `keep_separate` definition. The wording is general and does not mention `test-support/` or any other Bifrost path.\n\n**Change 3: separate fields.** The output schema now has `duplicated_knowledge` (bool) and `shared_location` (string or null), then `verdict` and `reasoning`. `combine` is defined as `duplicated_knowledge` true and a non-null location.\n\nThree things to know before the re-run:\n\n- **One remaining gap.** `keep_separate` still allows \"coupling that outweighs the duplication\". That is correct for trivial accessors, but Luna could use it to bring back the crate-boundary argument in other words. With the separate fields you will see it directly: the tell-tale pattern is `duplicated_knowledge: true` with a non-null location and still `keep_separate`.\n- **The schema is untested.** I have not confirmed that `codex exec --output-schema` accepts the nullable `[\"string\", \"null\"]` type. A one-pair smoke run would show that in about 30 s.\n- **The re-run needs a new output path.** Results are stored per pair ID in `.dupecop/dry_review.d/`, so writing to the same report would reuse the old verdicts. Use a new report path, with an input file filtered to the 406 `keep_separate` pairs, e.g. `jq -c 'select(.verdict==\"keep_separate\")' .dupecop/dry_review.jsonl`. The extra fields in those rows do not affect the script."
+        },
+        {
+          "id": "user:prompt-d83467db59b86ffcb5bba3c11d26d66b",
+          "role": "user",
+          "text": "go ahead and rerun to a new output path, and combine with the original combine; create a bifrost ticket and attach the exact-duplicate and to-combine lists\n\nonce you're just waiting on luna, profile and fix the rvector ingest"
+        },
+        {
+          "id": "msg_011CfZsqZL5xFDEULLc65VBV",
+          "role": "assistant",
+          "text": "The re-run has started. While it runs, I'm handing the ingest investigation to the rvector agent, which already knows the insert path and the `dupecop` tool:"
+        },
+        {
+          "id": "msg_011CfZsusaoZ2KCNwSmaLV65",
+          "role": "assistant",
+          "text": "A secret gist it is. I'll create it once the re-run finishes. The re-run should take about 8 minutes, and the rvector agent is working on ingest in parallel."
+        },
+        {
+          "id": "user:prompt-45b53782bef51af1a3ad1374a49e92dc",
+          "role": "user",
+          "text": "what's the histogram of loc in our original combine verdicts? are the small ones generally flagging something useful? or should we filter to >= N loc"
+        },
+        {
+          "id": "msg_011CfZtViDgnFeSjfwiyJwtL",
+          "role": "assistant",
+          "text": "No, I would not add a lines-of-code filter. Luna already filters tiny functions: it approved only 14% of pairs of 1–3 lines, compared with about 75–85% for pairs of 6 lines or more. Most small pairs it did approve are useful.\n\nLines per pair, measured on the shorter side, for the 594 original `combine` verdicts:\n\n| Lines | combine | all pairs | combine rate |\n|---|---|---|---|\n| 1–3 | 32 | 232 | 14% |\n| 4–5 | 28 | 54 | 52% |\n| 6–7 | 198 | 269 | 74% |\n| 8–10 | 95 | 156 | 61% |\n| 11–15 | 70 | 83 | 84% |\n| 16–25 | 82 | 97 | 85% |\n| 26–50 | 82 | 100 | 82% |\n| 51+ | 7 | 9 | 78% |\n\nIn a random sample of 10 `combine` pairs with 5 lines or fewer, most flag something real:\n- **Duplication across languages (useful).** `get_source` is copied per language analyzer (`#428`). `first_named_child` has 5 copies across the Java and C++ semantic modules (`#477`). `local_declaration_value` has 5 copies across C# and C++ (`#248`).\n- **An override that repeats the default (useful; delete it).** `#128`: a JS/TS fake repeats `IAnalyzer::import_statements`'s default body word for word.\n- **The same rule under two names (useful but minor).** `#885`: `same_byte_range` and `same_range`.\n- **Test helpers repeated across issue tests (low value but harmless).** `#720` (`findings`), `#118` (`string_type`), `#177`, `#589`.\n- **Generated code (noise).** `#450`: two validators in `_generated_query_models.py`. They can only be fixed in the generator.\n\nSo a filter on N lines would mostly drop the cross-language cases, which are among the most useful small findings. What separates useful from noisy here is how many copies there are and whether the code is generated, not size. If you want to cut noise, I suggest:\n- Exclude generated files, for example `_generated_*`.\n- Optionally, for pairs of 5 lines or fewer, keep them only when there are at least 3 copies across both sides. `#428`, `#477` and `#248` all pass that test; the two-copy test helpers do not.\n\nOne caution: the 6–7 line bucket is the largest (198). I have not sampled it separately, so I don't know how much of it is boilerplate repeated per language versus test setup.\n\nThe re-run of the 406 `keep_separate` pairs is also done (8 min 24 s, no failures). I have not merged it or filed the ticket yet, because your answer here may change what goes into the to-combine list. Should I file the ticket unfiltered, or apply one of the filters above first?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "what's the histogram of loc in our original combine verdicts? are the small ones generally flagging something useful? or should we filter to >= N loc",
+    "assistant_text_tail": "No, I would not add a lines-of-code filter. Luna already filters tiny functions: it approved only 14% of pairs of 1–3 lines, compared with about 75–85% for pairs of 6 lines or more. Most small pairs it did approve are useful.\n\nLines per pair, measured on the shorter side, for the 594 original `combine` verdicts:\n\n| Lines | combine | all pairs | combine rate |\n|---|---|---|---|\n| 1–3 | 32 | 232 | 14% |\n| 4–5 | 28 | 54 | 52% |\n| 6–7 | 198 | 269 | 74% |\n| 8–10 | 95 | 156 | 61% |\n| 11–15 | 70 | 83 | 84% |\n| 16–25 | 82 | 97 | 85% |\n| 26–50 | 82 | 100 | 82% |\n| 51+ | 7 | 9 | 78% |\n\nIn a random sample of 10 `combine` pairs with 5 lines or fewer, most flag something real:\n- **Duplication across languages (useful).** `get_source` is copied per language analyzer (`#428`). `first_named_child` has 5 copies across the Java and C++ semantic modules (`#477`). `local_declaration_value` has 5 copies across C# and C++ (`#248`).\n- **An override that repeats the default (useful; delete it).** `#128`: a JS/TS fake repeats `IAnalyzer::import_statements`'s default body word for word.\n- **The same rule under two names (useful but minor).** `#885`: `same_byte_range` and `same_range`.\n- **Test helpers repeated across issue tests (low value but harmless).** `#720` (`findings`), `#118` (`string_type`), `#177`, `#589`.\n- **Generated code (noise).** `#450`: two validators in `_generated_query_models.py`. They can only be fixed in the generator.\n\nSo a filter on N lines would mostly drop the cross-language cases, which are among the most useful small findings. What separates useful from noisy here is how many copies there are and whether the code is generated, not size. If you want to cut noise, I suggest:\n- Exclude generated files, for example `_generated_*`.\n- Optionally, for pairs of 5 lines or fewer, keep them only when there are at least 3 copies across both sides. `#428`, `#477` and `#248` all pass that test; the two-copy test helpers do not.\n\nOne caution: the 6–7 line bucket is the largest (198). I have not sampled it",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 1.0
+    },
+    "input": {
+      "choice": "required",
+      "confidence": 0.5299999713897705
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.6899999976158142
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.7099999785423279
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "input-axis real-turn mining sample",
+    "judgment": "independent evidence label; Jev verdict retained separately",
+    "next": "n/a",
+    "input_rationale": "The user had already authorized filing the ticket and supplying the two lists. They then asked whether to filter small pairs; after giving the histogram and recommendation, the assistant asks which list to include in the ticket. The answer is needed to finish the authorized artifact."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T16:18:28.493Z",
+        "kind": "user",
+        "text": "i guess we should also have luna filter the exact dupes first too then right?"
+      },
+      {
+        "at": "2026-09-30T16:18:37.350Z",
+        "kind": "agent",
+        "text": "Yes. The exact duplicates have the same mix of content as the small near-duplicates, and identical text does not by itself mean the copies should be combined. What we know about them:  - 1,803 groups,"
+      },
+      {
+        "at": "2026-09-30T16:19:24.088Z",
+        "kind": "user",
+        "text": "do it. (try 32 in parallel)"
+      },
+      {
+        "at": "2026-09-30T16:19:37.019Z",
+        "kind": "agent",
+        "text": "202 of the 1,000 pairs, but only 1 exact group, touch `_generated_` files. I'll exclude those. Now restructuring the script so pairs and groups share the codex runner:"
+      },
+      {
+        "at": "2026-09-30T16:19:42.932Z",
+        "kind": "agent",
+        "text": "Now rewriting the file around a shared runner, with separate prompts for pairs and groups:"
+      },
+      {
+        "at": "2026-09-30T16:20:08.418Z",
+        "kind": "agent",
+        "text": "Both prompts render correctly. Launching the exact-group review, with 32 in parallel and generated files excluded:"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "cf1a32d7fcf1b32a5bbfbd247604a7a3"
+  }
+}

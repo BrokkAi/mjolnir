@@ -1,0 +1,426 @@
+{
+  "id": "D10",
+  "title": "Schema change held pending a primary decision",
+  "category": "declarative-decision-handoff",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "14ef33c8073e63ec721c68fe5aeb9bc5",
+    "session_title": "go-inverse-provider",
+    "decision": "assessment-14ef33c8073e63ec721c68fe5aeb9bc5-21787",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-30T13:01:46.973Z",
+    "assessed_at": "2026-09-30T14:02:16.641Z",
+    "recorded_action": "await_input",
+    "recorded_status": "superseded",
+    "recorded_reason": "turn_or_lifecycle_changed",
+    "note": "The implementation choice is explicitly handed to “the primary,” and the subsequent context shows a primary decision. This is an agent-to-coordinator handback, not a current request for end-user input."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_0ebca0860d30daa8016abcdcd8c9d087d29b7ea77fedf142ef",
+          "role": "assistant",
+          "text": "The corrected detached run is still active and has not produced a test result yet. I’m continuing the wait; once this query-plan test finishes, I’ll queue the remaining Cargo validation without interrupting this build."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcdd3339c487d291c36394ca42483f",
+          "role": "assistant",
+          "text": "The latest log says Cargo is blocked on the build-directory lock, matching the Java-lane artifact wait you described. I’m leaving both builds alone and waiting for the lock owner to finish."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcdd7234e487d2a19b4c4f875ec5d0",
+          "role": "assistant",
+          "text": "The recursive CTE query-plan test now passes and confirms both required indexes are used. The three new transitive fixtures still fail, so I’m source-adjudicating those failures and correcting the provider before moving on to broad validation."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcde0c890087d2ab9584f58a710159",
+          "role": "assistant",
+          "text": "I’ve narrowed the failure to either candidate enumeration or forward confirmation and added temporary test-only traces to distinguish them. The focused method case is compiling/running now; the earlier EXPLAIN receipt already verifies the transitive package walk itself executes."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcdedb1cc087d297ce868e729e7d3b",
+          "role": "assistant",
+          "text": "The second focused run is rebuilding the analysis crate after Mbx discarded another oversized incremental cache; it has not reached the test yet. I’m keeping the job alive and waiting for its resolver trace."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcdf4ae73887d2ab0e609a1ba90fef",
+          "role": "assistant",
+          "text": "The rebuilt crate is still compiling with no new diagnostics. The exact query plan has already shown closure membership and name filtering use the expected indexes; this trace is to learn why the selected resolver leaves the transitive method site unbound."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcdfbe3d8487d2b845928841728a29",
+          "role": "assistant",
+          "text": "The cache rebuild has taken a few minutes, but the run remains in Cargo’s compile phase and the log shows no error. I’m continuing to wait on that job rather than starting another build against the same cache."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce02b449087d28b681135ebe78a84",
+          "role": "assistant",
+          "text": "There’s still no new compiler output, just the same in-progress crate build. I’m holding to the owner’s instruction to wait; once this job completes, the remaining Cargo checks can reuse the compiled artifacts."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce047395087d2a80cc7f15e7fa8ee",
+          "role": "assistant",
+          "text": "The trace proves recursive discovery is correct: it finds the `c/c.go` member site. Forward confirmation stays incomplete because the selected Go facts have no possible receiver values for `b.Get()`’s callable result, so the site cannot yet be safely published. I’m checking existing Go resolver support and the incumbent behavior before deciding whether this is a local fixture issue or a missing forward-resolution capability."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce19154c887d29fdc1be075858587",
+          "role": "assistant",
+          "text": "I replaced the temporary traces with a test-only candidate-path receipt. The three regression tests now require the transitive package’s site to appear in the candidate set and require an explicit resolution-incomplete result whenever forward confirmation cannot establish the target. The focused suite is rebuilding now."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce1f9de6087d2a8f5b09efe24039a",
+          "role": "assistant",
+          "text": "Cargo is rebuilding the test binary and has emitted no error so far. I’m waiting for the regression assertions and the populated `EXPLAIN QUERY PLAN` output to complete."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce26488c887d2ae080959c6143ff1",
+          "role": "assistant",
+          "text": "The crate build is taking longer than its earlier incremental runs, but the log still shows only the compile step. I’m maintaining the wait and not launching another Cargo job."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce3ff198887d28b889834221905fc",
+          "role": "assistant",
+          "text": "I found the alias case’s remaining omission: qualified terminal references can be indexed under `resolution_qualified_routes` rather than the ordinary spelling identity. Candidate SQL now admits qualified-route and prefixed-root matches through their existing indexes, while still using the per-blob identity index. The focused suite is rebuilding against this addition."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce467fd4487d2b6908f07e2dc7de4",
+          "role": "assistant",
+          "text": "The modified SQL invalidated more of the shared build than a single crate, so Cargo is recompiling core and language crates as well. The job remains active; I’m waiting for the focused test result and plan output."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce4f2e51487d292f0827a59727885",
+          "role": "assistant",
+          "text": "The build is still processing the dependency graph, with the analysis crate the final visible compile target. No errors have appeared; I’m continuing to wait for test execution."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce58737dc87d29cba97573dedcd8e",
+          "role": "assistant",
+          "text": "The analysis crate compile is still underway, likely due Mbx rebuilding after its oversized incremental state. I’m keeping the same detached job and waiting for its exit receipt."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce613aeec87d2a372e30cee4c44bc",
+          "role": "assistant",
+          "text": "This rebuild is materially slower than the earlier test-only compiles, but it has not reported an error or exited. I’m continuing the instructed wait rather than starting validation jobs that would contend for the same Cargo build directory."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce67e47dc87d2accd4a948aac51d2",
+          "role": "assistant",
+          "text": "The same build remains active with no additional output or failure. Once it finishes, I’ll use its result to verify whether the new qualified-route predicate recovers the alias case and whether the test confirms both SQL indexes."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce82b43a487d29da09bbaee49f7f0",
+          "role": "assistant",
+          "text": "Methods and promoted members now pass their candidate-closure assertions. The alias terminal still has no candidate in `c`; I’ve added a one-run diagnostic comparing ordinary lookup identities, qualified routes, root demands, and stored root-route terminal spellings to identify the existing structured row that carries it."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce8b7ced887d2a01d21bf6caaff58",
+          "role": "assistant",
+          "text": "The alias diagnostic is still compiling the analysis crate and hasn’t emitted test output yet. I’m keeping the wait active; this is the last focused investigation before I either use the existing rows or hand the specific schema question back to the primary."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce943f77c87d2bd8ab47d38e80bbc",
+          "role": "assistant",
+          "text": "Compilation is still active with no errors. Once this trace completes, I can make a bounded decision about the alias name’s persisted lookup representation instead of extending the schema by guesswork."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abce9880b5487d2b5d2c190b60ddad5",
+          "role": "assistant",
+          "text": "The diagnostic build continues to wait in the analysis-crate compile stage. I’m following the explicit instruction to let Mbx finish and won’t stop this job."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcead285dc87d29bd4edaee5c46a09",
+          "role": "assistant",
+          "text": "The diagnostic confirms `c/c.go` has no matching row in the generic lookup identity, qualified-route, or root-demand indexes for `T`; those indexes do find `b/b.go`’s `a.T` use. This is the schema-boundary case from your instruction, so I won’t add a new row or index without the primary’s decision. I’ll still run the independent requested validation and return the exact evidence and question."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abceb441e7087d282168529c29e3a22",
+          "role": "assistant",
+          "text": "The requested `test(/go/)` run is active and has not completed compilation yet. I’m waiting on that detached run; the three transitive tests will now distinguish the two resolved candidate classes from the remaining alias-row gap."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcebcd6c1c87d2b7badeb801db126a",
+          "role": "assistant",
+          "text": "Cargo is still rebuilding the analysis test target with no error output. The full Go suite remains in the same active job, and I’m keeping it running."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abced200f5887d28d382b1d7241e1e6",
+          "role": "assistant",
+          "text": "I adjusted the new usage tests to inspect partial hits and explicitly account for missing external-test package context, with comparisons requiring any legacy-only sites to be confined to the external test file. The full Go scope is running again now; the qualified-type alias candidate remains the outstanding failure."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abced8fb7dc87d2ba5291e22f2d8dad",
+          "role": "assistant",
+          "text": "Mbx again dropped 7.9 GiB of oversized incremental state, so this pass is rebuilding the analysis crate. No compile or test failure is reported yet; I’m waiting on it."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcee1d347887d2a3608c215360cbcf",
+          "role": "assistant",
+          "text": "The crate rebuild is still active and quiet. The first broad Go pass completed 411/414 tests, with the two external-context tests now adjusted; this rerun will tell us whether those were the only additional failures."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abceea45be487d2ae4f340fd428f03f",
+          "role": "assistant",
+          "text": "The validation remains in the analysis-crate compile phase. I’m continuing the wait per the lane instructions and will start the requested parity and Clippy checks after this run releases Cargo’s build lock."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcef7036bc87d2adce9bb728238383",
+          "role": "assistant",
+          "text": "No new output or failure has appeared; Mbx still owns the compile wait. I’m keeping the job intact until its exit file is written."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf0188ca487d2bba5083ceb6024ac",
+          "role": "assistant",
+          "text": "This analysis-crate rebuild has exceeded the earlier compile times, but the detached process remains in the prescribed wait. I’m still following the primary’s instruction to let it complete without canceling anything."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf117742087d28e3540a11a5feaed",
+          "role": "assistant",
+          "text": "The usage differential tests now include native unproven sites as structured evidence while retaining an explicit incomplete status. Their focused rerun is compiling; this should separate missing external inventory from the confirmed in-workspace sites."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf1817ba087d2a38023113f446e38",
+          "role": "assistant",
+          "text": "The analysis test binary is still rebuilding, with no compiler errors. I’m waiting for these two focused checks before deciding whether the full Go suite needs another pass."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf326ae3c87d2a27c12d5dee5895d",
+          "role": "assistant",
+          "text": "The last usage difference was source-adjudicated to the receiver type `Widget` inside its own method declaration: the incumbent classifies it as `SelfReceiver`. I updated native usage classification for a self-owned Go type reference and am rerunning the differential tests."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf3b5244487d2b33f4f61d0ee0a25",
+          "role": "assistant",
+          "text": "Mbx again discarded the oversized incremental state, so the native classification change triggered another crate rebuild. The focused comparison is still active with no compiler errors."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf43cad8487d2983ff18a6d2e3790",
+          "role": "assistant",
+          "text": "The comparison job remains quiet in the rebuild stage. I’m keeping it running and waiting for the parity result before launching the broader workspace checks."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf54ff4a087d2b914fc51fcc28bcd",
+          "role": "assistant",
+          "text": "I updated the differential to compare source ranges separately from hit kinds, with the known `Widget` receiver-site classification recorded as its own exact, source-verified difference. The focused rerun is building that assertion now."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf5ca035c87d290342aa8196dcf8e",
+          "role": "assistant",
+          "text": "The recursive import-closure correction is in place, and the method-through-intermediate-package and promoted-member fixtures are covered. The alias case exposes a second gap: the selected Go lookup rows do not currently index the `b.T` terminal use, so I’m finishing independent validation and will report the specific storage question without adding schema on my own."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf6176ad087d2b8b7476ff7977113",
+          "role": "assistant",
+          "text": "The Go scope now builds cleanly and runs 414 tests: 413 pass, with only the expected alias re-export regression failing because package C has no persisted lookup identity for the `b.T` site. I’m collecting the query-plan evidence and then running the required root parity and Clippy checks; the method and promoted-member closure paths are included in the passing set."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf67eb9e487d2b6ac722cba082210",
+          "role": "assistant",
+          "text": "The populated plan confirms the intended access paths: SQLite executes a recursive importer step through `idx_go_package_imports_target`, and candidate filtering uses the existing per-blob identity, qualified-route, and root-terminal indexes. The two root issue parity modules are still running; I’ll start the Go usage graph module after they finish so the shared build cache stays orderly."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf70313bc87d2b852f23514a2ed74",
+          "role": "assistant",
+          "text": "The root issue run reached full root-workspace dependency compilation and has not emitted test results yet; it appears to be waiting around the shared artifact path mentioned earlier. I’m leaving it alone and continuing to wait on its recorded exit file, as requested."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf785e43887d2b7cb517789678db7",
+          "role": "assistant",
+          "text": "The plan receipt is captured with the recursive CTE, all three lookup-index seeks, and a passing populated-store test. The root suite process still has no completion marker, so I’m continuing to wait on that detached validation and will not launch another Cargo job over it."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf844484487d29092369b84fb9aac",
+          "role": "assistant",
+          "text": "I’ve confirmed the alias failure is specifically a discovery-row gap: for the `c/c.go` `b.T` type use, the populated store has no matching generic lookup identity, qualified route, or root-terminal demand row. The compiler-valid fixture and query diagnostics are in `/tmp`; the pending root compilation remains unchanged."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf8c5411c87d292488220acd5c1c2",
+          "role": "assistant",
+          "text": "The root issue validation remains inside its first root-suite compile, with no new compiler output or exit status. I’m honoring the instruction to keep waiting; once it produces a receipt, I’ll run the remaining requested Cargo checks sequentially."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf974d03087d2a0db32b15b700973",
+          "role": "assistant",
+          "text": "The passing native/legacy comparison covers `Widget`, `Name`, `Run`, and `NewWidget`; it source-adjudicates the receiver-type classification difference and marks legacy-only external-test-package sites incomplete because that selected context is unavailable. Method and promoted-member transitive tests pass; the type-alias case remains the lone Go-scope failure."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcf98cf8ec87d2ab3285edab030a9b",
+          "role": "assistant",
+          "text": "The root issue suite finished compiling but failed before running tests: both requested modules import the native test-support seam through a path that the facade does not export. I’m checking the existing root integration-test support wiring and will make the smallest test-only path correction before retrying; the underlying analysis-crate Go scope remains 413/414."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcfa59cf3487d2b2c0e2a0407ae882",
+          "role": "assistant",
+          "text": "The facade re-exports the analyzer API but not this private differential seam. The root integration suites already depend on `brokk-bifrost-analysis` with its `test-support` feature, so I’m switching those three test imports to that direct dev-dependency path; no production API changes are needed."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcfbb96b8c87d2a6d980be256edc44",
+          "role": "assistant",
+          "text": "The root comparisons revealed their inline projects had never published selected Go resolution facts, so the native reader correctly returned no candidates. I’ve added a test-support-only helper to persist those fixture files and wired the three parity fixtures through it; I’m rerunning the issue suite against a genuinely populated store."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcfc70e3ac87d2a720457cc8db4ed9",
+          "role": "assistant",
+          "text": "The persisted-fixture root run has moved into recompiling the facade and analysis crate; no test result is available yet. Once it completes, I’ll apply the same persistence setup to the usage-graph comparison, then run the two Clippy modes."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abcfe22385087d287be008ccdf0b149",
+          "role": "assistant",
+          "text": "The persisted issue-suite tests still differ from the incumbent: the native provider omits the `new(PackageURL(p))` type site and the `r.ents = rows` field write, while the `Widget` comparison currently returns no native sites. I’m capturing the provider’s completeness reasons and exact edge inventory now so each difference can be tied to the source structure rather than guessed from offsets."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd0098dbf887d28605220109a1e444",
+          "role": "assistant",
+          "text": "The issue 3209 comparisons now pass by recognizing their only native omissions as the exact `new(PackageURL(p))` conversion and `r.ents = rows` write sites; the provider marks both inventories incomplete with enumeration and resolution reasons. In #3066, the only remaining site difference is the same-package `New()` call inside `pkg/pkg_test.go`; I’m pinning that exact path and range under the native incomplete diagnostic."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd01b5474c87d284a4c0ea712fd39b",
+          "role": "assistant",
+          "text": "Both root issue modules now pass all three tests. Their comparison asserts preserve site sets from unproven results and mark the exact legacy-only Go 1.26 conversion, field write, internal-test call, and promoted method-call sites as incomplete rather than complete absences. I’m running the requested `usages_go_graph_test` module next."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd02affe8087d290a8949184fcb7f4",
+          "role": "assistant",
+          "text": "The full `usages_go_graph_test` module now passes 37/37. Its native comparison includes both proven and unproven site evidence and source-adjudicates the direct `util.Helper()` case as incomplete when the selected provider cannot confirm it. I’m moving to the required Clippy checks."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd036fac3087d28f9eb300836e03cb",
+          "role": "assistant",
+          "text": "The analysis-crate Clippy check passes with `-D warnings`. Workspace Clippy is now checking the full all-targets/all-features set; I’m waiting for its exit before final Go-scope and formatting receipts."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd03e6377c87d2be9ff9547a47e0d8",
+          "role": "assistant",
+          "text": "Workspace Clippy has reached the analysis crate after compiling/checking the shared language crates, but the log has not advanced to further output. I’m keeping the detached check alive and waiting rather than interrupting its shared compiler activity."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd046b021887d2a3273b0811776ee8",
+          "role": "assistant",
+          "text": "Workspace Clippy passes across all targets and features with warnings denied. The root issue parity suite now passes 3/3, including its explicit incomplete-result adjudications, and the full root Go usage graph module passes 37/37. I’m rerunning the analysis-crate Go scope against the final source state, where the alias case is still blocked on the missing durable lookup identity."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd05671dfc87d2b39905a0155cae4f",
+          "role": "assistant",
+          "text": "The final Go scope is back in analysis-crate compilation and has not started its test list yet. The previously completed Clippy checks and root parity receipts remain clean; I’m waiting for this exact detached Go run to finish."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd0630a08487d2b9f27560b79294e6",
+          "role": "assistant",
+          "text": "The compiler log remains at the analysis crate, consistent with the shared-artifact wait the primary called out. I’m keeping this run in place and will report its test totals once nextest starts."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd06f5a9e087d2ab0b41334eff02b7",
+          "role": "assistant",
+          "text": "The detached Go-scope run is still waiting at the same analysis-crate build line; there’s no failure or exit marker yet. I’m continuing to wait on it, as requested, and have not started any competing Cargo job."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd076a22d887d29fe31572b2f9c288",
+          "role": "assistant",
+          "text": "There’s still no change to the detached Go build log or exit file. All independent requested validation is complete; this Go scope is the remaining running check, and I’m preserving it until it reports its outcome."
+        },
+        {
+          "id": "msg_0ebca0860d30daa8016abd08381f6887d2b65fddd2ae5ac683",
+          "role": "assistant",
+          "text": "Committed **b13f1d70d** with the transitive import-closure correction and source-adjudicated parity tests. The root issue suite passes 3/3, the root Go usage module passes 37/37, both Clippy checks and formatting pass, and all three Go fixtures build.\n\nThe analysis Go scope passes 413/414. Its sole failure is the type-alias case: `c/c.go`’s `b.T` site has no row in the current indexed lookup families. I handed the primary the row evidence and asked whether to extend an existing generic lookup row or add a durable source-terminal row. No schema change was made pending that decision."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "rts only b and writes b.T, which names a.T.\nThe current query would miss these sites and still report a complete inventory, which is a false absence.\nRule to implement: an unexported target (Go spec 'Exported identifiers': not starting with an uppercase letter; read it from the declaration's structured name, not from source text) is visible only inside its own package, so keep same-package candidates only. An exported target uses the reverse TRANSITIVE import closure of its package (recursive CTE over go_package_imports using idx_go_package_imports_target), plus same package, within the selected context, with the per-blob lookup-identity index filtering by spelling as today. External test packages and transient placements participate as now. Add regression tests for the method-through-intermediate-package, promoted-member, and alias-re-export cases (compiler-check each fixture with `go build` in /tmp), and a populated query-plan check for the recursive CTE. Then finish the validation from my previous message.",
+    "assistant_text_tail": "Committed **b13f1d70d** with the transitive import-closure correction and source-adjudicated parity tests. The root issue suite passes 3/3, the root Go usage module passes 37/37, both Clippy checks and formatting pass, and all three Go fixtures build.\n\nThe analysis Go scope passes 413/414. Its sole failure is the type-alias case: `c/c.go`’s `b.T` site has no row in the current indexed lookup families. I handed the primary the row evidence and asked whether to extend an existing generic lookup row or add a durable source-terminal row. No schema change was made pending that decision.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 1.0
+    },
+    "input": {
+      "choice": "required",
+      "confidence": 0.8700000047683716
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.8199999928474426
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.6100000143051147
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "unclear",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "uncertain",
+    "wrong_actions": []
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "input-axis real-turn mining sample",
+    "judgment": "independent evidence label; Jev verdict retained separately",
+    "next": "n/a",
+    "input_rationale": "The implementation choice is explicitly handed to “the primary,” and the subsequent context shows a primary decision. This is an agent-to-coordinator handback, not a current request for end-user input."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T14:02:07.241Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-30T14:02:16.516Z",
+        "kind": "user",
+        "text": "Primary decision on b13f1d70d: no new table. Qualified package-member references (`util.Helper()`, `b.T`, `pkg.Widget{}`) are the main cross-package reference form in Go, and the finding that they hav"
+      },
+      {
+        "at": "2026-09-30T14:02:28.447Z",
+        "kind": "agent",
+        "text": "I’ll trace one real qualified-type fixture through Go fact production and shared row preparation first, then make the narrowest fix in the producer or preparation path. I’ll inspect the concurrent Go-"
+      },
+      {
+        "at": "2026-09-30T14:03:20.246Z",
+        "kind": "agent",
+        "text": "I’ll trace one real qualified reference through the Go producer and shared preparation first, then make the smallest producer-side fix that preserves the concurrent container-projection work. I’ll kee"
+      },
+      {
+        "at": "2026-09-30T14:11:45.433Z",
+        "kind": "agent",
+        "text": "The producer already emits a structured root reference for qualified type syntax and a qualified route for selector members. I’m checking why the alias regression fixture produced no persisted identit"
+      },
+      {
+        "at": "2026-09-30T14:22:33.265Z",
+        "kind": "agent",
+        "text": "I found one concrete producer omission: Go assignment lowering visits right-hand expressions but does not lower selector targets on the left, so `r.ents = rows` has no reference site to index. I’m als"
+      }
+    ],
+    "strict_input_scoring": false,
+    "session_group": "14ef33c8073e63ec721c68fe5aeb9bc5"
+  }
+}

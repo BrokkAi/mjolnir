@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Offline tests for the Python port of the Jev action policy in jev-scenarios-eval.py.
+"""Offline tests for Jev action policy, frozen experiments, and input scoring.
 
 Run: python3 scripts/jev-scenarios-eval.test.py
 The cases mirror `mj-core/src/assessment.rs` tests so the two policies cannot drift.
 """
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location("eval", Path(__file__).with_name("jev-scenarios-eval.py"))
 module = importlib.util.module_from_spec(spec)
@@ -19,6 +22,64 @@ def verdict(failure=("none", 0.95), input_=("none", 0.95), work=("finished", 0.9
         "input": {"choice": input_[0], "confidence": input_[1]},
         "work": {"choice": work[0], "confidence": work[1]},
     }
+
+
+class Experiments(unittest.TestCase):
+    @staticmethod
+    def fixture(identity="D01", input_="required"):
+        return {
+            "id": identity,
+            "category": "decision",
+            "evidence": {"assistant_text_tail": "Choose a destination.", "background_commands": 1},
+            "expected": {"failure": "none", "input": input_, "work": "waiting", "action": "await_input" if input_ == "required" else "wait"},
+        }
+
+    def test_resume_accepts_identical_experiment_and_rejects_changed_prompt_or_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            fixtures = [self.fixture()]
+            questions = {"input": {"instructions": "Classify the user request."}}
+            module.prepare_run(output, questions, fixtures)
+            (output / "results.jsonl").write_text('{"id":"D01","repeat":0}\n')
+            module.prepare_run(output, questions, fixtures)
+            with self.assertRaisesRegex(ValueError, "new output directory"):
+                module.prepare_run(output, {"input": {"instructions": "Changed prompt"}}, fixtures)
+            changed = json.loads(json.dumps(fixtures))
+            changed[0]["evidence"]["assistant_text_tail"] = "No decision remains."
+            with self.assertRaisesRegex(ValueError, "new output directory"):
+                module.prepare_run(output, questions, changed)
+
+    def test_existing_unidentified_results_cannot_be_resumed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "results.jsonl").write_text("{}\n")
+            with self.assertRaisesRegex(ValueError, "no experiment manifest"):
+                module.prepare_run(output, {}, [self.fixture()])
+
+    def test_report_measures_input_detection_independently_and_exposes_control_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            fixtures = [self.fixture("frozen-required"), self.fixture("frozen-control", "none")]
+            ambiguous = self.fixture("frozen-ambiguous", "unclear")
+            ambiguous["context"] = {"strict_input_scoring": False}
+            fixtures.append(ambiguous)
+            module.prepare_run(output, {}, fixtures)
+            records = [
+                {"id": "frozen-required", "repeat": 0, "verdict": verdict(input_=("required", 0.41)), "action": "uncertain"},
+                {"id": "frozen-required", "repeat": 1, "verdict": verdict(input_=("required", 0.85), failure=("unclear", 0.3)), "action": "await_input"},
+                {"id": "frozen-required", "repeat": 2, "error": "HTTP 503"},
+                {"id": "frozen-control", "repeat": 0, "verdict": verdict(input_=("required", 0.99)), "action": "await_input"},
+                {"id": "frozen-ambiguous", "repeat": 0, "verdict": verdict(input_=("required", 0.99)), "action": "await_input"},
+            ]
+            (output / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+            module.report(SimpleNamespace(output=output))
+            report = (output / "report.md").read_text()
+            # The 0.41 answer agrees on the choice but does not notify; failure
+            # uncertainty does not invalidate a confident required-input answer.
+            self.assertIn("| required | 3 | 2 | 1 | 1 | 1 | 0 | 1 |", report)
+            self.assertIn("| none | 1 | 0 | 0 | 0 | 0 | 1 | 0 |", report)
+            self.assertIn("Ambiguous cases excluded from strict input counts: 1 requests.", report)
+            self.assertNotIn("| unclear |", report)
 
 
 class ActionPolicy(unittest.TestCase):
