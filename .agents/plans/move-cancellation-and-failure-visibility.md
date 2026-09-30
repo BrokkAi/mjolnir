@@ -20,6 +20,7 @@ Private paths and credentials must not enter the public error for a live session
 - [x] (2026-09-30) Focused tests passed: two outcome tests, one ACP/relay cancellation test, and both controller Close regressions.
 - [x] (2026-09-30) Commit the fix separately as 4cd9c35e; integrate upstream in e9022119.
 - [x] (2026-09-30) Complete full dev tests and all-targets Clippy before publication; formatting, docs, and all 70 browser unit tests also pass.
+- [ ] Validate the subsequent integration of upstream 91929a04 (profile defaults and wizards), then publish to origin/master.
 
 ## Surprises & Discoveries
 
@@ -64,6 +65,11 @@ All-targets Clippy with warnings denied completed successfully. Publication uses
 the configured upstream `origin/master`; #1137 can be closed after that push.
 The last plan-recording commit changes only this document and reuses validation
 of the identical Rust source tree.
+
+Before publication, upstream advanced again to 91929a04. The next integration
+also changes Rust, Cargo dependencies, docs, and the browser, so repeat the full
+checks for that combined tree. This repetition is required by new source changes,
+not by the plan-only validation record. The fix itself remains 4cd9c35e.
 
 ## Context and Orientation
 
@@ -177,3 +183,6 @@ branch after the separate fix commit and validate the combined result.
 
 Revision note (2026-09-30): record passing combined validation and the separate
 implementation commit. Only the two original timing edits remain uncommitted.
+
+Revision note (2026-09-30): publication found another concurrent upstream batch;
+merge it without changing branches and validate the new combination.
