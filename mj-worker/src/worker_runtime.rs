@@ -391,6 +391,9 @@ pub use unix::{
     seed_container_github_token,
 };
 
+#[cfg(all(test, unix))]
+pub(crate) use unix::record_runtime_event;
+
 #[cfg(not(unix))]
 pub async fn run_daemon(
     _root: std::path::PathBuf,

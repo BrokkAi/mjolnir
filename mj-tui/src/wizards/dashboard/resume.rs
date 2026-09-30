@@ -21,11 +21,7 @@ impl DashboardState {
                     return self.advance_resume_wizard(wizard);
                 }
                 wizard.form.get_mut().focus(step_initial(wizard.step));
-                let action = if wizard.resource_allocation.is_some() {
-                    DashboardAction::None
-                } else {
-                    self.prepare_wizard_target(&mut wizard)
-                };
+                let action = self.initialize_wizard_resources(&mut wizard);
                 self.mode = Mode::Resume(wizard);
                 action
             }
@@ -36,16 +32,14 @@ impl DashboardState {
                     self.mode = Mode::Resume(wizard);
                     return DashboardAction::None;
                 }
-                if matches!(
-                    self.config.targets[&target_id],
-                    TargetTemplate::AwsEc2 { .. }
-                ) && wizard.resource_allocation.is_none()
+                if target_is_sized(&self.config.targets[&target_id])
+                    && wizard.resource_allocation.is_none()
                 {
                     self.notices.set(
                         wizard
                             .sizing_error
                             .clone()
-                            .unwrap_or_else(|| "EC2 sizes are still loading.".into()),
+                            .unwrap_or_else(|| "Resource sizing is not ready.".into()),
                     );
                     self.mode = Mode::Resume(wizard);
                     return DashboardAction::None;
@@ -55,7 +49,11 @@ impl DashboardState {
                     .cloned()
                     .unwrap_or_default();
                 wizard.mounts.history_index = 0;
-                wizard.step = WizardStep::Review;
+                wizard.step = if wizard.skips_review() {
+                    WizardStep::Launching
+                } else {
+                    WizardStep::Review
+                };
                 wizard.form.get_mut().focus(WizardControl::Submit);
                 if wizard.moving {
                     let profile_id = profiles
@@ -64,11 +62,17 @@ impl DashboardState {
                         .expect("move wizard is only opened with a compatible profile");
                     return self.request_move_preparation_for_review(wizard, profile_id);
                 }
+                if wizard.skips_review() {
+                    let profile = wizard.destination_profile(self);
+                    return self.preflight_resume_session_action(wizard, profile);
+                }
                 self.mode = Mode::Resume(wizard);
                 DashboardAction::None
             }
             WizardStep::Bundle => unreachable!("resume does not select a bundle"),
-            WizardStep::Review => unreachable!("review input is handled before picker navigation"),
+            WizardStep::Review | WizardStep::Launching => {
+                unreachable!("review input is handled before picker navigation")
+            }
             WizardStep::MoveFiles => unreachable!("Move file input is handled separately"),
             WizardStep::Mounts => unreachable!("mount input is handled before picker navigation"),
             WizardStep::NewBundle => unreachable!("resume does not create bundles"),
@@ -124,11 +128,10 @@ impl DashboardState {
             return None;
         };
         if !wizard.moving
-            || wizard.step != WizardStep::Review
+            || !matches!(wizard.step, WizardStep::Review | WizardStep::Launching)
             || wizard.preparing
             || wizard.preparation.is_some()
             || wizard.preparation_error.is_some()
-            || (wizard.subagent_choice_applies(self) && wizard.subagents.error().is_some())
         {
             return None;
         }
@@ -198,6 +201,7 @@ impl DashboardState {
                     ResumeQueueDisposition::Start
                 }),
             };
+            wizard.form.get_mut().set_submission_pending(true);
             self.mode = Mode::Resume(wizard);
             return action;
         }
@@ -230,6 +234,7 @@ impl DashboardState {
             self.mode = Mode::Resume(wizard);
             return DashboardAction::None;
         }
+        wizard.preflight_error = None;
         self.resume_preflight_generation = Some(self.session_preflight_generation());
         let launch = DashboardAction::ResumeSession {
             workspace_id: wizard.workspace_id.clone(),
@@ -285,6 +290,17 @@ impl DashboardState {
         self.resume_preflight_generation == Some(self.session_preflight_generation())
     }
 
+    /// Keep a failed check visible until the user explicitly retries it.
+    pub fn fail_resume_preflight(&mut self, error: String) {
+        if let Mode::Resume(wizard) = &mut self.mode {
+            wizard.preflight_error = Some(error.clone());
+            wizard.form.get_mut().focus(WizardControl::Submit);
+            wizard.form.get_mut().set_submission_pending(false);
+        }
+        self.notices.set(error);
+        self.end_resume_preflight();
+    }
+
     /// Ends a live resume's check that has failed, so Resume can start
     /// another, and moves the generation on so that any other result sent
     /// under the same generation is dropped. The other results end the
@@ -309,13 +325,18 @@ impl DashboardState {
         };
         if !wizard.moving
             || wizard.session_id != session_id
-            || wizard.step != WizardStep::Review
+            || !matches!(wizard.step, WizardStep::Review | WizardStep::Launching)
             || !wizard.preparing
             || wizard.preparation_request_id != Some(request_id)
         {
             return false;
         }
-        wizard.resource_allocation = preparation.selection.resource_allocation.clone();
+        if wizard.resource_allocation != preparation.selection.resource_allocation {
+            wizard.resource_allocation = preparation.selection.resource_allocation.clone();
+            wizard
+                .resource_editor
+                .reset(wizard.resource_allocation.as_ref());
+        }
         if let Some(assessment) = &preparation.workspace
             && !wizard.files.reviewed
         {
@@ -344,7 +365,7 @@ impl DashboardState {
         };
         if !wizard.moving
             || wizard.session_id != session_id
-            || wizard.step != WizardStep::Review
+            || !matches!(wizard.step, WizardStep::Review | WizardStep::Launching)
             || !wizard.preparing
             || wizard.preparation_request_id != Some(request_id)
         {
@@ -354,6 +375,7 @@ impl DashboardState {
         wizard.preparation = None;
         wizard.preparation_request_id = None;
         wizard.preparation_error = Some(error);
+        wizard.form.get_mut().focus(WizardControl::Submit);
         true
     }
 

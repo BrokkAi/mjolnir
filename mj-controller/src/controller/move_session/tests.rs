@@ -55,6 +55,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
             home: home.to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -451,7 +452,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "delegation policy the destination harness cannot run",
             mj_core::state::MoveSelection {
-                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                subagents: Some(mj_core::subagent::SubagentPolicy::None),
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -461,6 +462,20 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 resource_allocation: None,
             },
             "supported only by Claude and Codex",
+        ),
+        (
+            "retired multi-model delegation",
+            mj_core::state::MoveSelection {
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                session_id: session_id.into(),
+                profile_id: Some("codex".into()),
+                target_template_id: Some("podman".into()),
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            "no longer available",
         ),
     ];
 
@@ -1135,6 +1150,91 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
 
 #[cfg(unix)]
 #[test]
+fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry() {
+    let name =
+        test_name("move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry");
+    if !isolated_test_child(&name, "MJ_MOVE_OUTCOME_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let session = checkpoint_test_session(MOVE_QUEUE_SESSION_ID);
+    crate::database::save_session(&session).unwrap();
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State::default(),
+    };
+    controller
+        .state
+        .sessions
+        .insert(session.id.clone(), session.clone());
+    let mut operation = source_recovery_operation(&session);
+    let outcome = controller
+        .finish_move_result(
+            &mut operation,
+            Err(anyhow::anyhow!("private-token at /private/worker")),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    assert_eq!(outcome.outcome, "failed");
+    assert_eq!(operation.error, outcome.error);
+    let reopened = crate::database::load_state().unwrap();
+    let record = &reopened.sessions[&session.id];
+    assert_eq!(record.state, SessionState::Running);
+    let snapshot =
+        crate::server::ViewerSnapshot::from_config_state(&controller.config, &reopened, 1);
+    let public = crate::server::api::ApiSession::from(&snapshot.sessions[0]);
+    assert!(public.has_error);
+    let message = public.error.unwrap();
+    assert!(message.contains("checkpointing and suspending the source"));
+    assert!(message.contains(&operation.operation_id));
+    assert!(message.contains(outcome.recovery.as_deref().unwrap()));
+    assert!(!message.contains("private-token"));
+    assert!(!message.contains("/private/worker"));
+    assert_eq!(
+        controller.state.sessions[&session.id].last_error,
+        record.last_error
+    );
+    controller
+        .finish_move_result(
+            &mut operation,
+            Ok(()),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    let reopened = crate::database::load_state().unwrap();
+    assert_eq!(reopened.sessions[&session.id].last_error, None);
+    assert_eq!(
+        crate::database::load_move_operation(&session.id)
+            .unwrap()
+            .unwrap()
+            .error,
+        None
+    );
+
+    // Completing a Move must not clear another operation's error.
+    controller
+        .state
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .last_error = Some("another failure".into());
+    controller
+        .finish_move_result(
+            &mut operation,
+            Ok(()),
+            &RefusingExecutor("Move outcome must not execute a command"),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&session.id]
+            .last_error
+            .as_deref(),
+        Some("another failure")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode() {
     let name = test_name(
         "move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_its_mode",
@@ -1762,6 +1862,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     home: home.clone(),
                     environment: Default::default(),
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                 },
             );
@@ -2003,6 +2104,14 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         .managed_worktree
         .unwrap();
     owned.kind = mj_core::state::ManagedCheckoutKind::Clone;
+    // An omitted Move override keeps a legacy policy even when the destination
+    // profile defaults to Native.
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     // The original seed repository is gone, but the session's independent
     // clone still exists under its recorded owner path.
     let project = checkout.with_file_name("retained-project");
@@ -2103,10 +2212,20 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         !worker_root.join("profile").join("source-only.txt").exists(),
         "the previous profile home must be gone"
     );
+    let staged_settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
-        br#"{"profile":"destination"}"#,
+        staged_settings["profile"], "destination",
         "the destination profile must be staged in its place"
+    );
+    assert!(
+        staged_settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("mcp__mj-agents__list_profiles")),
+        "legacy multi-model delegation retains its profile discovery tool"
     );
     assert!(destination_home.join("settings.json").is_file());
     let ownership: serde_json::Value =
@@ -2130,6 +2249,17 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     assert_eq!(moved.state, SessionState::Running);
     assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
     assert_eq!(moved.target, source_target);
+    assert_eq!(
+        moved.subagents,
+        Some(mj_core::subagent::SubagentPolicy::AllModels)
+    );
+    assert_eq!(
+        crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap()
+            .subagents,
+        moved.subagents
+    );
     // Same harness, so the archived native session carries the conversation.
     assert_eq!(moved.native_session_id.as_deref(), Some("native-session"));
 

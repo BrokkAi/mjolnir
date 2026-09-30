@@ -109,18 +109,11 @@ impl RuntimeState {
         let supplied = request.subagents.clone();
         let (config, policy) = blocking(move || {
             let controller = Controller::load()?;
-            let kind = controller
+            let profile = controller
                 .config
                 .enabled_profile(&parent)
-                .context("parent profile unavailable")?
-                .kind;
-            let policy = supplied.unwrap_or_else(|| {
-                if kind.supports_delegation_tools() {
-                    controller.state.last_subagent_policy.clone()
-                } else {
-                    Default::default()
-                }
-            });
+                .context("parent profile unavailable")?;
+            let policy = supplied.unwrap_or_else(|| profile.subagents.clone());
             Ok((controller.config, policy))
         })
         .await?;
@@ -293,6 +286,74 @@ impl RuntimeState {
 #[cfg(test)]
 mod delegation_replay_tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
+
+    #[tokio::test]
+    async fn multi_model_creation_is_refused_before_registration_or_provisioning() {
+        const CHILD: &str = "MJ_TEST_MULTI_MODEL_CREATION_REFUSAL";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "multi_model_creation_is_refused_before_registration_or_provisioning",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "multi-model-creation-refusal")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut config = mj_core::config::Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: mj_core::config::data_dir().join("missing-profile-home"),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                subagents: mj_core::subagent::SubagentPolicy::Native,
+            },
+        );
+        config.save().unwrap();
+        let workspace = crate::database::create_workspace("legacy delegation").unwrap();
+        let mut legacy = crate::daemon::tests::runtime_test_session(
+            "legacy-parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        legacy.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+        crate::database::save_session(&legacy).unwrap();
+        let runtime = crate::daemon::tests::test_runtime_state();
+        let request = mj_client::daemon::CreateSessionRequest {
+            create_managed_worktree: None,
+            at: None,
+            branch: None,
+            base: None,
+            subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+            initial_prompt: None,
+            workspace_id: workspace.id,
+            profile_id: "codex".into(),
+            bundle_id: "missing-bundle".into(),
+            project_directory: None,
+            target_template_id: "missing-target".into(),
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+            title: "must not register".into(),
+            session_title_override: None,
+        };
+        let error = runtime
+            .start_create_session(request)
+            .await
+            .expect_err("a refusal");
+        let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
+        assert!(refusal.message().contains("no longer available"));
+        assert!(runtime.active_lifecycles().is_empty());
+        let state = crate::database::load_state().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[&legacy.id], legacy);
+    }
 
     #[tokio::test]
     async fn replayed_spawn_does_not_reprovision_an_existing_child() {

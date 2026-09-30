@@ -202,6 +202,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
             crate::palette::render_palette(frame, area, dashboard, palette, &mut surfaces)
         }
         Mode::Setup(dialog) => crate::setup::render_setup(frame, area, dialog, &mut surfaces),
+        Mode::Welcome(dialog) => {
+            crate::welcome::render_welcome(frame, area, dashboard, dialog, &mut surfaces)
+        }
         Mode::Dashboard => {}
     }
     dashboard.render_dialog_confirmation(frame, area, &mut surfaces);

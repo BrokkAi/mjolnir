@@ -220,10 +220,8 @@ impl Controller {
         if profile.kind == HarnessKind::Muse {
             let multiple_roots = !parent.additional_mounts.is_empty()
                 || (parent.project_directory.is_none()
-                    && self
-                        .config
-                        .bundles
-                        .get(&parent.bundle_id)
+                    && parent
+                        .project_bundle(&self.config)
                         .is_some_and(|bundle| bundle.repositories.len() > 1));
             ensure!(
                 !multiple_roots,
@@ -241,6 +239,7 @@ impl Controller {
         )?;
         let created_at = now();
         let session = SessionRecord {
+            project: parent.project.clone(),
             target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
             launch_base: None,
             launch_branch: None,

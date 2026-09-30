@@ -11,7 +11,7 @@
 //! holds it; whoever needs the image waits on it.
 //!
 //! The lock also holds a file lock in the instance's data directory, because
-//! `mj setup` and `mj doctor --smoke` run their smoke test in their own
+//! `mj doctor --smoke` runs its smoke test in its own
 //! process while the daemon may be downloading the same image. Two engines
 //! pulling one image at once can fail to extract a layer.
 
@@ -277,7 +277,7 @@ mod tests {
         drop(held);
     }
 
-    /// `mj setup` runs its smoke test in its own process while the daemon may
+    /// `mj doctor --smoke` runs its smoke test in its own process while the daemon may
     /// be downloading the same image. The file lock makes it wait, as a
     /// thread of the daemon would: two locks with the same file stand for the
     /// two processes.

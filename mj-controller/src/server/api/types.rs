@@ -30,6 +30,9 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    /// Tasks currently observed by the daemon, including their stop capability.
+    #[serde(default)]
+    pub background_tasks: Vec<crate::server::ViewerBackgroundTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<mj_core::assessment::Summary>,
     #[serde(default)]
@@ -65,9 +68,9 @@ pub struct ApiSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_state: Option<mj_core::activity::ActivityState>,
     pub has_error: bool,
-    /// Why a launch failed, for a session in the error state. Absent
-    /// otherwise: raw runtime error text is deliberately not published for a
-    /// running session. Why a *turn* failed travels in `last_turn_diagnostic`,
+    /// A launch failure or a safe lifecycle failure, including a failed Move.
+    /// Raw runtime error text is deliberately not published for a running
+    /// session. Why a *turn* failed travels in `last_turn_diagnostic`,
     /// which a single-session query fills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -89,6 +92,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            background_tasks: session.background_tasks.clone(),
             assessment: None,
             subagents: session.subagents.clone(),
             background_work: None,
@@ -117,6 +121,12 @@ impl From<&ViewerSession> for ApiSession {
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopBackgroundTaskRequest {
+    pub background_task_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,7 +181,7 @@ pub struct StartSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Omitted reuses the last accepted top-level session choice.
+    /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default)]

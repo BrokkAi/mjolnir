@@ -128,6 +128,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/preflight/resume", post(preflight_resume))
         .route("/api/paths/complete", post(complete_path))
         .route("/api/projects/discover", post(discover_projects))
+        .route("/api/projects", get(read_projects).post(refresh_projects))
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(

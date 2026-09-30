@@ -29,6 +29,7 @@ pub use scrollbar::{
 };
 pub use text_layout::{
     Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,
+    wrap_lines,
 };
 
 /// A path field with the standard readline editing and cursor behavior, plus
@@ -90,7 +91,7 @@ impl PathField {
             let title = if input.completion_truncated() {
                 " first 50 matches \u{b7} keep typing "
             } else {
-                " matches \u{b7} \u{2191}/\u{2193} select \u{b7} Enter accept "
+                " matches "
             };
             let longest = candidates
                 .iter()

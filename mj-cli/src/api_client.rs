@@ -627,6 +627,19 @@ impl ApiClient {
         .await
         .map(|_| ())
     }
+
+    pub(crate) async fn stop_background_task(&self, session_id: &str, task_id: &str) -> Result<()> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/sessions/{session_id}/background-tasks/stop")))
+                .json(&mj_controller::server::api::StopBackgroundTaskRequest {
+                    background_task_id: task_id.to_owned(),
+                })
+                .timeout(REQUEST_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 /// The HTTP client for the daemon API. With a pin it trusts only the

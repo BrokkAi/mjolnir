@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 68;
+const SCHEMA_VERSION: i64 = 69;
 
 mod session_move;
 pub use session_move::*;
@@ -80,9 +80,15 @@ mod values;
 use values::*;
 mod profile_cache;
 pub use profile_cache::*;
+mod projects;
+pub(crate) use projects::*;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) fn test_session(id: &str, bundle: &str) -> SessionRecord {
+    tests::session(id, bundle)
+}
 
 mod quota_cache;
 pub(crate) use quota_cache::*;

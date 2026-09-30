@@ -36,11 +36,7 @@ impl DashboardState {
                     return self.advance_new_wizard(wizard);
                 }
                 wizard.form.get_mut().focus(step_initial(wizard.step));
-                let action = if wizard.resource_allocation.is_some() {
-                    DashboardAction::None
-                } else {
-                    self.prepare_wizard_target(&mut wizard)
-                };
+                let action = self.initialize_wizard_resources(&mut wizard);
                 self.mode = Mode::New(wizard);
                 action
             }
@@ -62,14 +58,12 @@ impl DashboardState {
                     .targets
                     .get(&target_template_id)
                     .expect("selected target index is present in config");
-                if matches!(target, TargetTemplate::AwsEc2 { .. })
-                    && wizard.resource_allocation.is_none()
-                {
+                if target_is_sized(target) && wizard.resource_allocation.is_none() {
                     self.notices.set(
                         wizard
                             .sizing_error
                             .clone()
-                            .unwrap_or_else(|| "EC2 sizes are still loading.".into()),
+                            .unwrap_or_else(|| "Resource sizing is not ready.".into()),
                     );
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;
@@ -130,7 +124,9 @@ impl DashboardState {
                 DashboardAction::None
             }
             WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
-            WizardStep::Review => unreachable!("review input is handled before picker navigation"),
+            WizardStep::Review | WizardStep::Launching => {
+                unreachable!("review input is handled before picker navigation")
+            }
             WizardStep::Mounts => unreachable!("mount input is handled before picker navigation"),
             WizardStep::NewBundle => unreachable!("bundle input is handled above"),
             WizardStep::ProjectDirectory => {
@@ -159,10 +155,6 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
-        if wizard.subagent_choice_applies(&self.config) && wizard.subagents.error().is_some() {
-            self.mode = Mode::New(wizard);
-            return DashboardAction::None;
-        }
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         if !is_bare_project_target(&self.config.targets[&target_template_id]) {
             if wizard.remote_repositories.is_some() && wizard.remote_preflight_error.is_none() {
@@ -195,11 +187,73 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
-        if let Some(action) = self.take_subagent_discovery() {
+        if let Some(action) = self.take_setup_subagent_choices() {
             return Some(action);
+        }
+        if matches!(&self.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile)
+            || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Profile)
+        {
+            let action = self.skip_initial_profile();
+            if action != DashboardAction::None {
+                return Some(action);
+            }
         }
         if let Some(action) = self.take_stale_move_preparation() {
             return Some(action);
+        }
+        // A sole raw target whose readiness just arrived needs no selector.
+        let skip_target = match &self.mode {
+            Mode::New(wizard) => {
+                wizard.step == WizardStep::Target && self.lone_target(wizard).is_some()
+            }
+            Mode::Resume(wizard) => {
+                wizard.step == WizardStep::Target && self.lone_target(wizard).is_some()
+            }
+            _ => false,
+        };
+        if skip_target {
+            let action = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+                Mode::New(mut wizard) => {
+                    self.skip_target_step(&mut wizard);
+                    self.advance_new_wizard(wizard)
+                }
+                Mode::Resume(mut wizard) => {
+                    self.skip_target_step(&mut wizard);
+                    self.advance_resume_wizard(wizard)
+                }
+                _ => unreachable!(),
+            };
+            if action != DashboardAction::None {
+                return Some(action);
+            }
+        }
+        let auto_submit = match &self.mode {
+            Mode::New(wizard) => {
+                wizard.step == WizardStep::Launching
+                    && wizard.selected_worktree_options(&self.config).is_some()
+                    && !wizard.remote_preflight_in_flight
+                    && wizard.remote_preflight_error.is_none()
+            }
+            Mode::Resume(wizard) => {
+                wizard.step == WizardStep::Launching
+                    && wizard.moving
+                    && wizard.preparation.is_some()
+                    && !wizard.preparing
+                    && wizard.preparation_error.is_none()
+                    && !wizard.form.borrow().submission_pending()
+            }
+            _ => false,
+        };
+        if auto_submit {
+            let action = match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+                Mode::New(wizard) => self.preflight_create_session_action(wizard),
+                Mode::Resume(wizard) => {
+                    let profile = wizard.destination_profile(self);
+                    self.preflight_resume_session_action(wizard, profile)
+                }
+                _ => unreachable!(),
+            };
+            return (action != DashboardAction::None).then_some(action);
         }
         // Checks start on the first step so they are usually done by the time
         // the target step needs them.
@@ -221,7 +275,7 @@ impl DashboardState {
         let Mode::New(wizard) = &self.mode else {
             return None;
         };
-        if wizard.step != WizardStep::Review
+        if !matches!(wizard.step, WizardStep::Review | WizardStep::Launching)
             || wizard.remote_preflight_in_flight
             || wizard.remote_repositories.is_some()
             || wizard.remote_preflight_error.is_some()
@@ -262,9 +316,11 @@ impl DashboardState {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
-            subagents: wizard
-                .subagent_choice_applies(&self.config)
-                .then(|| wizard.subagents.policy.clone()),
+            subagents: Some(
+                self.config.profiles[&nth_enabled_profile(&self.config, wizard.profile)]
+                    .subagents
+                    .clone(),
+            ),
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree

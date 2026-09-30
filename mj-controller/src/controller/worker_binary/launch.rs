@@ -298,7 +298,7 @@ impl Controller {
         let bundle = session
             .project_directory
             .is_none()
-            .then(|| self.config.bundles.get(&session.bundle_id))
+            .then(|| session.project_bundle(&self.config))
             .flatten();
         let target = session.target_runtime_settings(&self.config)?;
         let subagent = self.state.subagents.get(session_id);
@@ -364,7 +364,7 @@ impl Controller {
             let parent_bundle = parent
                 .project_directory
                 .is_none()
-                .then(|| self.config.bundles.get(&parent.bundle_id))
+                .then(|| parent.project_bundle(&self.config))
                 .flatten();
             let (parent_launch, _, _) = worker_launch_config(
                 parent,
@@ -453,7 +453,7 @@ impl Controller {
         let bundle = session
             .project_directory
             .is_none()
-            .then(|| self.config.bundles.get(&session.bundle_id))
+            .then(|| session.project_bundle(&self.config))
             .flatten();
         let workspace = if let Some(project_directory) = &session.project_directory {
             (project_directory.to_string_lossy().into_owned(), Vec::new())

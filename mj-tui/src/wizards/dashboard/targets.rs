@@ -280,17 +280,84 @@ impl DashboardState {
         true
     }
 
+    /// Capacity samples validate the same draft as keystrokes; they never
+    /// replace typed values with a silently clamped allocation.
+    pub(crate) fn refresh_wizard_resource_limits(&mut self, affected: &[String]) {
+        let (index, initialized) = match &self.mode {
+            Mode::New(wizard) => (wizard.target, wizard.resource_editor.target_id.is_some()),
+            Mode::Resume(wizard) => (wizard.target, wizard.resource_editor.target_id.is_some()),
+            _ => return,
+        };
+        let id = nth_key(&self.config.targets, index);
+        if !initialized
+            || !affected.contains(&id)
+            || !mj_core::config::is_container_target(&self.config.targets[&id])
+        {
+            return;
+        }
+        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+            Mode::New(mut wizard) => {
+                self.refresh_resource_draft(&mut wizard);
+                self.mode = Mode::New(wizard);
+            }
+            Mode::Resume(mut wizard) => {
+                self.refresh_resource_draft(&mut wizard);
+                self.mode = Mode::Resume(wizard);
+            }
+            _ => unreachable!("checked wizard mode"),
+        }
+    }
+
+    fn refresh_resource_draft<W: WizardDraft>(&mut self, wizard: &mut W) {
+        let before = wizard.resource_allocation().cloned();
+        self.validate_wizard_resources(wizard);
+        if wizard.resource_allocation() != before.as_ref() {
+            wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
+            if wizard.resource_allocation().is_none() && wizard.step() != WizardStep::Profile {
+                wizard.set_step(WizardStep::Target);
+                wizard.form_mut().focus(WizardControl::ResourceCpu);
+            }
+        }
+    }
+
+    pub(super) fn initialize_wizard_resources<W: WizardDraft>(
+        &self,
+        wizard: &mut W,
+    ) -> DashboardAction {
+        let target_id = nth_key(&self.config.targets, wizard.target());
+        if wizard.resource_editor().target_id.as_deref() == Some(&target_id) {
+            return DashboardAction::None;
+        }
+        if let Some(allocation) = wizard.resource_allocation().cloned() {
+            let editor = wizard.resource_editor_mut();
+            editor.reset(Some(&allocation));
+            editor.target_id = Some(target_id.clone());
+            if mj_core::config::is_container_target(&self.config.targets[&target_id]) {
+                self.validate_wizard_resources(wizard);
+            }
+            DashboardAction::None
+        } else {
+            self.prepare_wizard_target(wizard)
+        }
+    }
+
     pub(super) fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {
         let previous = wizard.previous_allocation(self);
         let target_index = wizard.target();
         let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
-        self.prepare_target(
+        let action = self.prepare_target(
             target_index,
             aws_options,
             allocation,
             sizing_error,
             previous,
-        )
+        );
+        let allocation = wizard.resource_allocation().cloned();
+        let target_id = nth_key(&self.config.targets, target_index);
+        let editor = wizard.resource_editor_mut();
+        editor.reset(allocation.as_ref());
+        editor.target_id = Some(target_id);
+        action
     }
 
     fn prepare_target(
@@ -315,9 +382,6 @@ impl DashboardState {
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. } => {
                 let limits = self.host_limits(&target_id);
-                if limits.is_none() {
-                    *sizing_error = Some("host totals unavailable; + disabled".into());
-                }
                 let remembered = container_size_host(target)
                     .and_then(|host| self.state.container_sizes.get(host));
                 let (cpus, memory_bytes) = match previous {
@@ -351,7 +415,7 @@ impl DashboardState {
         }
     }
 
-    fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
+    pub(in crate::wizards) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
         self.capacity_details
             .values()
             .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))
@@ -359,10 +423,21 @@ impl DashboardState {
             .map(|usage| (usage.logical_cores, usage.memory_total_bytes))
     }
 
-    pub(super) fn adjust_wizard_resources<W: WizardDraft>(&self, wizard: &mut W, code: KeyCode) {
+    pub(super) fn validate_wizard_resources<W: WizardDraft>(&self, wizard: &mut W) {
         let target_id = nth_key(&self.config.targets, wizard.target());
-        let limits = self.host_limits(&target_id);
-        let (aws_options, allocation, _) = wizard.sizing_mut();
-        adjust_resources(allocation, aws_options.get(&target_id), limits, code);
+        let result = wizard
+            .resource_editor()
+            .allocation(self.host_limits(&target_id));
+        let (_, allocation, error) = wizard.sizing_mut();
+        match result {
+            Ok(value) => {
+                *allocation = Some(value);
+                *error = None;
+            }
+            Err(reason) => {
+                *allocation = None;
+                *error = Some(reason);
+            }
+        }
     }
 }

@@ -1556,6 +1556,108 @@ fn project_memory_replica_accepts_an_ssh_home_relative_path() {
     assert!(resolve_home_relative_target_path(Path::new("../memory")).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn checkpoints_collect_memory_through_a_legacy_worker_profile_link() {
+    for states_home in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut spec, _) = fixture(temp.path());
+        let installed_home = spec.harness_home.clone();
+        let memory = installed_home.join("projects/legacy/memory");
+        fs::create_dir_all(&memory).unwrap();
+        let body = "legacy memory survives upgrade\n".repeat(4096);
+        assert!(body.len() > 64 * 1024);
+        fs::write(memory.join("MEMORY.md"), &body).unwrap();
+        let mut launch = json!({
+            "harness": "codex",
+            "environment": { "CODEX_HOME": installed_home },
+            "project_memory": { "root": memory },
+            "force_unrestricted_mode": true
+        });
+        if states_home {
+            launch["harness_home"] = json!(installed_home);
+        }
+        fs::write(
+            spec.relay_root.join("launch.json"),
+            serde_json::to_vec(&launch).unwrap(),
+        )
+        .unwrap();
+        spec.harness_home = spec.relay_root.join("profile");
+        std::os::unix::fs::symlink(&installed_home, &spec.harness_home).unwrap();
+
+        export_checkpoint(&spec).unwrap();
+        let legacy = read_archive_verified(&spec.output_path).unwrap();
+        assert!(legacy.manifest.payloads.iter().any(|descriptor| {
+            matches!(&descriptor.role, PayloadRole::NativeArtifact { relative_path }
+                if relative_path == Path::new("projects/legacy/memory/MEMORY.md"))
+                && legacy.payload(descriptor).unwrap() == body.as_bytes()
+        }));
+
+        let stage_path = spec.relay_root.join("checkpoint-stage");
+        capture_checkpoint(
+            &CheckpointCaptureSpec {
+                protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+                session: spec.session.clone(),
+                target: spec.target.clone(),
+                bundle: spec.bundle.clone(),
+                relay_root: spec.relay_root.clone(),
+                harness_home: spec.harness_home.clone(),
+                workspace_root: spec.workspace_root.clone(),
+                repositories: spec.repositories.clone(),
+                allow_empty_native: false,
+                stage_path: stage_path.clone(),
+                refresh_existing: false,
+            },
+            &SystemGit,
+        )
+        .unwrap();
+        let packed_path = spec.relay_root.join("packed.zip");
+        pack_checkpoint(&CheckpointPackSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            relay_root: spec.relay_root.clone(),
+            stage_path,
+            canonical_session: spec.canonical_session.clone(),
+            output_path: packed_path.clone(),
+        })
+        .unwrap();
+        let packed = read_archive_verified(&packed_path).unwrap();
+        assert_eq!(packed.manifest, legacy.manifest);
+        assert_eq!(packed.payloads, legacy.payloads);
+
+        // Accepting the home alias must not relax the memory containment rule.
+        let outside = temp.path().join("outside-memory");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("MEMORY.md"), "must not be archived").unwrap();
+        launch["project_memory"]["root"] = json!(outside);
+        fs::write(
+            spec.relay_root.join("launch.json"),
+            serde_json::to_vec(&launch).unwrap(),
+        )
+        .unwrap();
+        let error = export_checkpoint(&spec).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the harness home"));
+    }
+}
+
+#[test]
+fn checkpoint_refuses_a_home_different_from_the_installed_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let other = temp.path().join("another-home");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(
+        spec.relay_root.join("launch.json"),
+        serde_json::to_vec(&json!({ "harness_home": other })).unwrap(),
+    )
+    .unwrap();
+    let error = export_checkpoint(&spec).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("does not match the installed worker"),
+        "{error:#}"
+    );
+    assert!(!spec.output_path.exists());
+}
+
 #[test]
 fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
     let temp = tempfile::tempdir().unwrap();

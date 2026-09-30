@@ -437,6 +437,7 @@ fn event_digest(value: u64) -> String {
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -686,6 +687,18 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
         UPDATE sessions SET expected_runtime_identity = 'mj-runtime-v1:saved';
+        ALTER TABLE sessions DROP COLUMN project_json;
+        DROP TRIGGER project_discovery_insert;
+        DROP TRIGGER project_discovery_update;
+        DROP TABLE project_discovery_failures;
+        DROP TABLE project_discovery_changes;
+        DROP TABLE project_discovery_progress;
+        DROP TABLE project_session_aliases;
+        DROP TABLE project_aliases;
+        DROP TABLE project_catalog;
+        DROP TABLE project_locations;
+        DROP TABLE project_seed_homes;
+        DROP TABLE project_seed_failures;
         DELETE FROM schema_migrations WHERE version >= 66;
         UPDATE schema_compatibility SET minimum_compatible_version = 65;
         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
@@ -3111,7 +3124,7 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
     assert!(
         search_prompts_from(
             &database,
-            "session-1",
+            "other-session",
             "project-1",
             HistoryScope::Project,
             "fix"
@@ -3130,6 +3143,19 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
         .unwrap()
         .len(),
         1
+    );
+    assert_eq!(
+        search_prompts_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::Project,
+            "fix"
+        )
+        .unwrap()
+        .len(),
+        1,
+        "the old worker ID follows its own rebound context"
     );
     // Recording under the new bundle now succeeds where it would have been
     // refused as a bundle mismatch.
@@ -5716,7 +5742,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     assert!(floor >= 53, "builds predating parked sessions are refused");
     let triggers: i64 = connection
         .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'",
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN ('api_session_error_updated','api_session_error_inserted')",
             [],
             |row| row.get(0),
         )

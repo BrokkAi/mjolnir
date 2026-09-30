@@ -8,8 +8,7 @@ use mj_core::config::Config;
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::state::{
     MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary, MoveOperation,
-    SessionRecord, SessionResourceAllocation, State, TranscriptBody, TranscriptItem,
-    normalize_session_title,
+    SessionRecord, State, TranscriptBody, TranscriptItem, normalize_session_title,
 };
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
@@ -17,8 +16,7 @@ use mj_client::quota::ProfileQuota;
 use mj_core::targets::{DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage};
 use mj_transcript::transcript::{materialized_content_text, materialized_tool_diffstats};
 
-use crate::wizards::clamp_resources;
-use crate::{DashboardState, Mode, SessionOperationKind, nth_key};
+use crate::{DashboardState, SessionOperationKind};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionOperationDisplay {
@@ -30,6 +28,8 @@ pub(crate) struct SessionOperationDisplay {
     /// uncancellable at its atomic commit boundary.
     pub(crate) cancellable: bool,
     pub(crate) started_at_epoch_seconds: u64,
+    /// The operation owns its preview until completion, even when a state
+    /// publication temporarily omits a newly registered session.
     pub(crate) placeholder: Option<SessionRecord>,
     /// Launch stages currently in flight and when each began. More than one
     /// entry means independent setup lanes are overlapping.
@@ -637,6 +637,7 @@ impl DashboardState {
         }
         state.sessions = rows;
         self.state = state;
+        self.apply_operation_projection();
         if self.navigation.retain_sessions(|id| {
             crate::dashboard_conversation::session_belongs_in_layout(
                 &self.state,
@@ -648,7 +649,6 @@ impl DashboardState {
             self.reconcile_pins();
             self.mark_layout_modified();
         }
-        self.apply_operation_projection();
         for (id, record) in changed {
             self.release_finished_conversation(&id);
             if let Some(record) = record {
@@ -793,6 +793,7 @@ impl DashboardState {
         operation_id: Option<String>,
         cancellable: bool,
     ) {
+        let placeholder = placeholder.or_else(|| self.state.sessions.get(&session_id).cloned());
         self.session_operations.insert(
             session_id,
             SessionOperationDisplay {
@@ -848,12 +849,16 @@ impl DashboardState {
     }
 
     pub fn finish_session_operation(&mut self, session_id: &str) {
-        self.session_operations.remove(session_id);
-        if self
-            .state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.id.starts_with("pending-"))
+        let preview_finished = self
+            .session_operations
+            .remove(session_id)
+            .is_some_and(|operation| operation.placeholder.is_some());
+        if (preview_finished && !self.durable_records.contains_key(session_id))
+            || self
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| session.id.starts_with("pending-"))
         {
             self.state.sessions.remove(session_id);
         }
@@ -980,7 +985,7 @@ impl DashboardState {
         result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
         sampled_at_epoch_seconds: u64,
     ) {
-        let (affected_targets, limits) = {
+        let affected_targets = {
             let Some(detail) = self.capacity_details.get_mut(target_id) else {
                 return;
             };
@@ -994,44 +999,9 @@ impl DashboardState {
                 }
                 Err(error) => detail.probe_error = Some(error),
             }
-            let affected_targets = detail.target.target_ids.clone();
-            let limits = detail
-                .usage
-                .as_ref()
-                .map(|usage| (usage.logical_cores, usage.memory_total_bytes));
-            (affected_targets, limits)
+            detail.target.target_ids.clone()
         };
-        if let Some(limits) = limits {
-            match &mut self.mode {
-                Mode::New(wizard) => {
-                    let selected = nth_key(&self.config.targets, wizard.target);
-                    if affected_targets.contains(&selected)
-                        && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-                            &wizard.resource_allocation
-                    {
-                        let (cpus, memory_bytes) =
-                            clamp_resources(*cpus, *memory_bytes, Some(limits));
-                        wizard.resource_allocation =
-                            Some(SessionResourceAllocation::Container { cpus, memory_bytes });
-                        wizard.sizing_error = None;
-                    }
-                }
-                Mode::Resume(wizard) => {
-                    let selected = nth_key(&self.config.targets, wizard.target);
-                    if affected_targets.contains(&selected)
-                        && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-                            &wizard.resource_allocation
-                    {
-                        let (cpus, memory_bytes) =
-                            clamp_resources(*cpus, *memory_bytes, Some(limits));
-                        wizard.resource_allocation =
-                            Some(SessionResourceAllocation::Container { cpus, memory_bytes });
-                        wizard.sizing_error = None;
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.refresh_wizard_resource_limits(&affected_targets);
     }
 
     pub fn begin_capacity_refresh(&mut self) {

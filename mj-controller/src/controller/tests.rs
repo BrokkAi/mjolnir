@@ -23,6 +23,7 @@ fn registration_config() -> Config {
             home: PathBuf::from("/home/dev/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -456,6 +457,82 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
+    let checkout = super::test_support::committed_repository();
+    let worktree_parent = tempfile::tempdir().unwrap();
+    let worktree = worktree_parent.path().join("linked");
+    let git = |path: &Path, args: &[&str]| {
+        let mut command = CommandSpec::new("git", args.iter().copied());
+        command.cwd = Some(path.to_owned());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(
+        checkout.path(),
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+    git(
+        checkout.path(),
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "git@github.com:main-owner/app.git",
+        ],
+    );
+    git(
+        checkout.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    git(
+        checkout.path(),
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.pushurl",
+            "git@github.com:feature-owner/app.git",
+        ],
+    );
+    let mut config = Config::default();
+    let main_id =
+        create_quick_bundle_in_config(&mut config, checkout.path().to_str().unwrap()).unwrap();
+    let linked_id =
+        create_quick_bundle_in_config(&mut config, worktree.join("nested").to_str().unwrap())
+            .unwrap();
+    assert_eq!(linked_id, main_id);
+    assert_eq!(config.bundles.len(), 1);
+    let source = config.bundles[&linked_id].primary().unwrap();
+    assert_eq!(
+        source.local.as_deref(),
+        Some(worktree.canonicalize().unwrap().as_path())
+    );
+    let resolved = mj_core::remote_git::resolve_repository(source, &ProcessExecutor).unwrap();
+    assert_eq!(resolved.fetch_url, "https://github.com/acme/app.git");
+    assert!(
+        resolved
+            .push_urls
+            .contains(&"git@github.com:feature-owner/app.git".to_owned())
+    );
+}
+
+#[test]
 fn bundle_creation_rejects_duplicate_normalized_sources_atomically() {
     let mut config = Config::default();
     let before = config.clone();
@@ -817,13 +894,13 @@ fn registration_saves_the_initial_task_before_provisioning() {
 const UNPERSISTABLE_SESSION_CHILD: &str = "MJ_TEST_UNPERSISTABLE_SESSION_CHILD";
 
 #[test]
-fn missing_bundle_does_not_block_controller_or_other_sessions() {
+fn removing_a_saved_project_keeps_accepted_session_definitions() {
     const CHILD: &str = "MJ_TEST_MISSING_BUNDLE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             CHILD,
-            "missing_bundle_does_not_block_controller_or_other_sessions",
+            "removing_a_saved_project_keeps_accepted_session_definitions",
             directory.path(),
         );
         return;
@@ -867,8 +944,20 @@ fn missing_bundle_does_not_block_controller_or_other_sessions() {
             .is_none()
     );
     let issue = loaded.reconnect_command(&affected).unwrap_err().to_string();
-    assert!(issue.contains("missing bundle"), "{issue}");
-    assert!(issue.contains("config.toml"), "{issue}");
+    assert!(issue.contains("session has no target"), "{issue}");
+    assert!(
+        loaded.state.sessions[&affected]
+            .configuration_issue(&loaded.config)
+            .is_none()
+    );
+    assert_eq!(
+        loaded.state.sessions[&affected]
+            .project
+            .as_ref()
+            .unwrap()
+            .bundle,
+        bundle
+    );
     // Loading must not turn a configuration problem into a persisted lifecycle failure.
     assert_eq!(
         loaded.state.sessions[&affected],
@@ -2044,4 +2133,86 @@ fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
         refusal.message()
     );
     assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+}
+
+#[test]
+fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
+    use mj_core::subagent::SubagentPolicy;
+    const MARKER: &str = "MJ_TEST_PROFILE_SUBAGENT_DEFAULT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_defaults_to_profile_policy_instead_of_the_last_session",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State {
+            last_subagent_policy: SubagentPolicy::AllModels,
+            ..Default::default()
+        },
+    };
+    let native = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "native",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&native].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    controller
+        .config
+        .profiles
+        .get_mut("codex")
+        .unwrap()
+        .subagents = fixed.clone();
+    let single = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "single",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&single].subagents,
+        Some(fixed.clone())
+    );
+    let mut override_options = launch_options(Vec::new());
+    override_options.subagents = Some(SubagentPolicy::Native);
+    let overridden = controller
+        .register_session_with_resources("codex", "project", "podman", "override", override_options)
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&overridden].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    let mut disabled_options = launch_options(Vec::new());
+    disabled_options.subagents = Some(SubagentPolicy::None);
+    let disabled = controller
+        .register_session_with_resources("codex", "project", "podman", "disabled", disabled_options)
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&disabled].subagents,
+        Some(SubagentPolicy::None)
+    );
+    assert_eq!(controller.config.profiles["codex"].subagents, fixed);
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&native].subagents,
+        Some(SubagentPolicy::Native)
+    );
 }

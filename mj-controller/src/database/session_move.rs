@@ -64,6 +64,36 @@ pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     })
 }
 
+/// Publish a Move result and its session message as one committed outcome.
+/// Update only the message fields; other owners may have changed the session.
+pub fn save_move_outcome(operation: &MoveOperation, last_error: Option<&str>) -> Result<()> {
+    let operation = operation.clone();
+    let last_error = last_error.map(str::to_owned);
+    submit_database_write("save_move_outcome", move |connection| {
+        save_move_outcome_with(connection, &operation, last_error.as_deref())
+    })
+}
+
+fn save_move_outcome_with(
+    connection: &mut Connection,
+    operation: &MoveOperation,
+    last_error: Option<&str>,
+) -> Result<()> {
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    save_move_operation_with(&tx, operation)?;
+    let updated = tx.execute(
+        "UPDATE sessions SET last_error=?2, updated_at=?3 WHERE session_id=?1",
+        params![
+            operation.selection.session_id,
+            last_error,
+            operation.updated_at
+        ],
+    )?;
+    anyhow::ensure!(updated == 1, "Move outcome session is missing");
+    tx.commit()?;
+    Ok(())
+}
+
 pub(super) fn save_move_operation_with(
     connection: &Connection,
     operation: &MoveOperation,
@@ -296,6 +326,58 @@ mod tests {
             updated_at: session.updated_at.clone(),
             error: None,
         }
+    }
+
+    #[test]
+    fn move_outcome_commits_the_message_with_the_result_and_rolls_back_both_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        let mut session = super::super::tests::session("moving", "project");
+        session.draft_input = "a concurrent draft".into();
+        save_session_to(&path, &session).unwrap();
+        let mut connection = open(&path).unwrap();
+        let mut intent = operation(&session);
+        save_move_operation_with(&connection, &intent).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER refuse_move_message BEFORE UPDATE OF last_error ON sessions
+             BEGIN SELECT RAISE(ABORT, 'message write failed'); END;",
+            )
+            .unwrap();
+        intent.phase = MovePhase::Failed;
+        intent.error = Some("private diagnostic".into());
+        assert!(save_move_outcome_with(&mut connection, &intent, Some("public message")).is_err());
+        assert_eq!(
+            load_move_operation_with(&connection, &session.id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            MovePhase::Preparing
+        );
+        assert_eq!(
+            load_state_from(&path).unwrap().sessions[&session.id].last_error,
+            None
+        );
+        connection
+            .execute_batch("DROP TRIGGER refuse_move_message")
+            .unwrap();
+        save_move_outcome_with(&mut connection, &intent, Some("public message")).unwrap();
+        drop(connection);
+        let restored = load_state_from(&path).unwrap();
+        assert_eq!(
+            restored.sessions[&session.id].last_error.as_deref(),
+            Some("public message")
+        );
+        assert_eq!(
+            restored.sessions[&session.id].draft_input,
+            "a concurrent draft"
+        );
+        assert_eq!(
+            load_move_operation_with(&open_reader(&path).unwrap(), &session.id)
+                .unwrap()
+                .unwrap(),
+            intent
+        );
     }
 
     #[test]

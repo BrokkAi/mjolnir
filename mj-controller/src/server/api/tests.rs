@@ -1597,6 +1597,63 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
 }
 
 #[tokio::test]
+async fn start_accepts_native_and_none_and_returns_the_multi_model_refusal() {
+    use mj_core::subagent::SubagentPolicy;
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let (config, _) = sample_config_state();
+    for (mode, expected) in [
+        ("native", SubagentPolicy::Native),
+        ("none", SubagentPolicy::None),
+        ("all_models", SubagentPolicy::AllModels),
+    ] {
+        let extra = format!(r#","subagents":{{"mode":"{mode}"}}"#);
+        let response = tokio::spawn(app.clone().oneshot(start_request(start_body(&extra))));
+        let request = actions.recv().await.unwrap();
+        let ControllerAction::New {
+            profile_id,
+            subagents,
+            ..
+        } = &request.action
+        else {
+            panic!("expected a New action");
+        };
+        assert_eq!(subagents.as_ref(), Some(&expected));
+        let validation = crate::controller::profile_config::validate_session_subagent_policy(
+            &config,
+            profile_id,
+            subagents.as_ref().unwrap(),
+        )
+        .await;
+        let outcome = match validation {
+            Ok(()) => ActionOutcome::Accepted {
+                session_id: Some("session-2".into()),
+            },
+            Err(error) => ActionOutcome::Refused(
+                mj_core::refusal::Refusal::of(&error)
+                    .expect("a policy refusal")
+                    .clone(),
+            ),
+        };
+        request.reply.send(outcome).unwrap();
+        let response = response.await.unwrap().unwrap();
+        if expected == SubagentPolicy::AllModels {
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let error = json_body(response).await;
+            let message = error["error"].as_str().unwrap();
+            assert!(message.contains("no longer available"), "{message}");
+            assert!(
+                message.contains("native, single_model, or none"),
+                "{message}"
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+    }
+    assert_eq!(backend.followups.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn start_forwards_the_base_to_the_controller() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
@@ -3010,6 +3067,7 @@ fn a_running_session_publishes_safe_lifecycle_failures_from_current_and_older_re
     let (config, mut state) = sample_config_state();
     for prefix in [
         mj_core::state::CLOSE_FAILURE_PREFIX,
+        mj_core::state::MOVE_FAILURE_PREFIX,
         mj_core::state::DESTRUCTION_FAILURE_PREFIX,
         "the close did not finish",
     ] {

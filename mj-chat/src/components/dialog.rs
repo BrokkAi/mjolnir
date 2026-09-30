@@ -116,6 +116,10 @@ impl<K: Copy + Eq> Dialog<K> {
     }
 
     /// Prevents duplicate submission while a supervised operation is pending.
+    pub fn submission_pending(&self) -> bool {
+        self.submission_pending
+    }
+
     pub fn set_submission_pending(&mut self, pending: bool) {
         self.submission_pending = pending;
     }
@@ -463,6 +467,17 @@ pub struct DialogLayout {
     pub actions: Rect,
 }
 impl DialogShell {
+    /// One cell of padding inside the top and side borders, none at the bottom.
+    /// Reserve a status row with `layout(inner, 1)` for the gap above actions.
+    pub fn padded_inner(popup: Rect) -> Rect {
+        let inner = popup.inner(ratatui::layout::Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let top = inner.height.min(1);
+        Rect::new(inner.x, inner.y + top, inner.width, inner.height - top)
+    }
+
     pub fn layout(inner: Rect, status_rows: u16) -> DialogLayout {
         let footer = inner.height.min(1);
         let status = status_rows.min(inner.height.saturating_sub(footer));

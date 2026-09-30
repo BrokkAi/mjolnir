@@ -3102,6 +3102,61 @@ fn saved_config(dialog: &mut SetupDialog) -> Config {
     }
 }
 
+#[test]
+fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
+    const CHILD: &str = "MJ_TEST_SETTINGS_INSTANCE_CHILD";
+    const INSTANCE: &str = "settings-1153";
+    if std::env::var_os(CHILD).is_none() {
+        // Instance selection is process-wide: exercise a named instance in
+        // its own process rather than changing the other tests' environment.
+        let output = mj_core::subprocess::run_with_input(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "setup::tests::named_instance_settings_preserve_the_default_and_explicit_web_listener",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("MJ_INSTANCE", INSTANCE),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let default = mj_core::config::default_phone_bind_for(Some(INSTANCE));
+    for bind in [&default, &"127.0.0.1:39777".to_owned()] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.config.phone = mj_core::config::PhoneConfig::default();
+        dashboard.config.phone.bind.clone_from(bind);
+        if bind == &default {
+            assert!(
+                serde_json::to_value(&dashboard.config)
+                    .unwrap()
+                    .get("phone")
+                    .is_none()
+            );
+        }
+        dashboard.begin_setup();
+        let rendered = drawn(&mut dashboard, 140, 48).join("\n");
+        assert!(rendered.contains(&format!("On · {bind}")), "{rendered}");
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            !dialog.is_dirty(),
+            "opening Settings must preserve defaults"
+        );
+        dialog.draft["keys"]["prefix"] = json!("ctrl+]");
+        let saved = saved_config(dialog);
+        assert_eq!(&saved.phone.bind, bind);
+        assert_eq!(saved.keys.prefix, "ctrl+]");
+    }
+}
+
 /// The numeric settings are edited as text but saved as numbers, "Use
 /// default" puts the default back, and text that is not a number is refused
 /// under the field without losing the draft. Launch campaign finding C-23.
@@ -3450,4 +3505,123 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
             && !line.contains("Enabled by default")),
         "{lines:#?}"
     );
+}
+
+#[test]
+fn profile_setup_edits_native_or_one_model_and_saves_policy() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut dialog = SetupDialog::new(&config());
+    assert!(!dialog.is_dirty());
+    dialog.path = vec!["profiles".into(), "claude-1".into(), "subagents".into()];
+    assert_eq!(dialog.keys(), vec!["mode"]);
+    dialog.open_selected();
+    assert_eq!(
+        dialog.editor.as_ref().unwrap().choices,
+        vec![json!("native"), json!("single_model")]
+    );
+    dialog.editor.as_mut().unwrap().selected = 1;
+    dialog.apply_editor(false).unwrap();
+    assert!(matches!(dialog.save(), DashboardAction::None));
+    assert!(
+        dialog
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("select a subagent model")
+    );
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    dialog.take_subagent_choices().unwrap();
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![choice("chosen")],
+            efforts: vec![],
+            unavailable: vec![],
+        }));
+    dialog.selected = dialog.keys().iter().position(|key| key == "model").unwrap();
+    dialog.open_selected();
+    dialog.editor.as_mut().unwrap().selected = 1;
+    dialog.apply_editor(false).unwrap();
+    dialog.take_subagent_choices().unwrap();
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![choice("chosen")],
+            efforts: vec![choice("high")],
+            unavailable: vec![],
+        }));
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "effort")
+        .unwrap();
+    dialog.open_selected();
+    dialog.editor.as_mut().unwrap().selected = 1;
+    dialog.apply_editor(false).unwrap();
+    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
+        panic!("{:?}", dialog.notice)
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    assert_eq!(
+        saved.profiles["claude-1"].subagents,
+        SubagentPolicy::SingleModel {
+            model: "chosen".into(),
+            effort: Some("high".into())
+        }
+    );
+    assert_eq!(saved.profiles["codex-1"].subagents, SubagentPolicy::Native);
+    let mut reopened = SetupDialog::new(&saved);
+    reopened.path = vec!["profiles".into(), "claude-1".into(), "subagents".into()];
+    reopened.open_selected();
+    reopened.apply_editor(false).unwrap();
+    assert_eq!(
+        config_from_draft(reopened.draft).unwrap().profiles["claude-1"].subagents,
+        saved.profiles["claude-1"].subagents
+    );
+}
+
+#[test]
+fn profile_subagent_discovery_uses_unsaved_draft_and_rejects_stale_replies() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", Some("claude-1"));
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    dialog.path.push("subagents".into());
+    dialog.draft["profiles"]["claude-1"]["subagents"] =
+        json!({"mode":"single_model","model":"chosen","effort":null});
+    let Some(DashboardAction::DiscoverSubagentOptions {
+        id, config, model, ..
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("discovery")
+    };
+    assert_eq!(model.as_deref(), Some("chosen"));
+    let draft: Config = serde_json::from_str(&config).unwrap();
+    assert!(matches!(
+        draft.profiles["claude-1"].subagents,
+        mj_core::subagent::SubagentPolicy::SingleModel { .. }
+    ));
+    assert!(dashboard.take_prerequisite_check().is_none());
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    dialog.draft["profiles"]["claude-1"]["subagents"]["model"] = json!("next");
+    let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("next discovery")
+    };
+    dashboard.apply_subagent_options(id, Ok(Default::default()));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(dialog.subagent_choices.as_ref().unwrap().result.is_none());
+    dashboard.apply_subagent_options(next, Err("offline".into()));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(dialog.notice.as_ref().unwrap().contains("offline"));
 }

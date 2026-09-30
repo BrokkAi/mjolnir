@@ -30,6 +30,7 @@ pub mod update;
 mod worker_binary;
 mod worker_restart;
 mod worktree;
+pub(crate) use worktree::RemoteGitExecutor;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -43,10 +44,7 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
-use crate::import::{
-    RepositoryIdentity, bundle_matches, configured_bundle_for_local, configured_bundle_for_origin,
-    setup_style_id,
-};
+use crate::import::{RepositoryIdentity, bundle_matches, setup_style_id};
 use crate::setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
@@ -224,16 +222,7 @@ impl std::error::Error for QuickBundleFailure {
 pub fn create_quick_bundle(
     source: &str,
 ) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
-    let (config, bundle_id) = Config::update(|config| {
-        create_quick_bundle_in_config(config, source)
-            .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))
-    })
-    .map_err(|error| {
-        error
-            .downcast::<QuickBundleFailure>()
-            .unwrap_or_else(QuickBundleFailure::Persistence)
-    })?;
-    Ok(QuickBundleCreation { config, bundle_id })
+    create_bundle_from_sources(&[source.to_owned()])
 }
 
 /// Add a quick bundle to an already-loaded config. The helper still performs
@@ -241,33 +230,7 @@ pub fn create_quick_bundle(
 /// that persist a config should use [`create_quick_bundle`] so concurrent saves
 /// cannot clobber one another.
 pub fn create_quick_bundle_in_config(config: &mut Config, source: &str) -> Result<String> {
-    let source = interpret_repository_source(source)?;
-    let existing = match &source.kind {
-        RepositorySourceKind::Local(root) => configured_bundle_for_local(config, root),
-        RepositorySourceKind::Github(repository) => {
-            configured_bundle_for_origin(config, repository)
-        }
-    };
-    if let Some(existing) = existing {
-        return Ok(existing);
-    }
-    let repository_id = setup_style_id(&source.name);
-    let mut bundle_id = repository_id.clone();
-    for suffix in 2_u32.. {
-        if !config.bundles.contains_key(&bundle_id) {
-            break;
-        }
-        bundle_id = format!("{repository_id}-{suffix}");
-    }
-    config.bundles.insert(
-        bundle_id.clone(),
-        ProjectBundle {
-            primary_repo: repository_id.clone(),
-            repositories: vec![source.into_project_repository(repository_id.clone())],
-        },
-    );
-    config.validate()?;
-    Ok(bundle_id)
+    create_bundle_from_sources_in_config(config, &[source.to_owned()])
 }
 
 /// Create one bundle from one or more local repositories or GitHub sources.
@@ -280,8 +243,57 @@ pub fn create_bundle_from_sources(
     sources: &[String],
 ) -> std::result::Result<QuickBundleCreation, QuickBundleFailure> {
     let (config, bundle_id) = Config::update(|config| {
-        create_bundle_from_sources_in_config(config, sources)
-            .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))
+        let previous = config.bundles.clone();
+        let id = create_bundle_from_sources_in_config(config, sources)
+            .map_err(|error| anyhow::Error::new(QuickBundleFailure::InvalidSource(error)))?;
+        if let Some(old) = previous.get(&id)
+            && config.bundles.get(&id) != Some(old)
+        {
+            let accepted = crate::project_catalog::snapshot(
+                old,
+                &targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(
+                    15,
+                )),
+                true,
+            )?;
+            crate::database::store_catalog_project(&id, &accepted, true)?;
+        }
+        let project = crate::project_catalog::snapshot(
+            config
+                .bundles
+                .get(&id)
+                .context("created project is missing")?,
+            &targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15)),
+            false,
+        )?;
+        let canonical = crate::database::store_catalog_project(&id, &project, true)?;
+        if canonical != id {
+            let mut saved = crate::database::read_project_catalog()?
+                .projects
+                .into_iter()
+                .find(|entry| entry.bundle_id == canonical)
+                .context("canonical project is missing")?
+                .project;
+            for repository in &mut saved.bundle.repositories {
+                let identity = saved
+                    .identities
+                    .get(&repository.id)
+                    .context("canonical repository identity is missing")?;
+                if let Some(source) = project.bundle.repositories.iter().find(|source| {
+                    project.identities.get(&source.id) == Some(identity)
+                        && source.destination == repository.destination
+                }) {
+                    repository.local = source.local.clone();
+                    repository.github = source.github.clone();
+                }
+            }
+            config
+                .bundles
+                .insert(canonical.clone(), saved.bundle.clone());
+            config.bundles.remove(&id);
+            crate::database::store_catalog_project(&canonical, &saved, true)?;
+        }
+        Ok(canonical)
     })
     .map_err(|error| {
         error
@@ -307,6 +319,7 @@ pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
         );
         config.validate()
     })?;
+    crate::database::hide_catalog_project(bundle_id)?;
     Ok(config)
 }
 
@@ -332,7 +345,24 @@ pub fn create_bundle_from_sources_in_config(
         }
     }
 
-    if let Some(existing) = exact_configured_bundle(config, &sources) {
+    if let Some(existing) = exact_configured_bundle(config, &sources)? {
+        let bundle = config
+            .bundles
+            .get_mut(&existing)
+            .expect("matched project exists");
+        // Local selection carries its own fetch/push settings. Keep the saved
+        // repository IDs and layout; earlier sessions hold accepted snapshots.
+        for repository in &mut bundle.repositories {
+            let identity = crate::import::configured_repository_identity(repository)?
+                .context("configured identity is missing")?;
+            if let Some(source) = sources.iter().find(|source| {
+                source.identity == identity && matches!(source.kind, RepositorySourceKind::Local(_))
+            }) && let RepositorySourceKind::Local(root) = &source.kind
+            {
+                repository.local = Some(root.clone());
+                repository.github = None;
+            }
+        }
         return Ok(existing);
     }
 
@@ -377,17 +407,12 @@ struct InterpretedRepositorySource {
     display_name: String,
     name: String,
     kind: RepositorySourceKind,
+    identity: RepositoryIdentity,
 }
 
 impl InterpretedRepositorySource {
     fn identity(&self) -> RepositoryIdentity {
-        match &self.kind {
-            RepositorySourceKind::Github(repository) => RepositoryIdentity::Github(
-                repository.owner.to_ascii_lowercase(),
-                repository.repository.to_ascii_lowercase(),
-            ),
-            RepositorySourceKind::Local(root) => RepositoryIdentity::Local(root.clone()),
-        }
+        self.identity.clone()
     }
 
     fn into_project_repository(self, id: String) -> ProjectRepository {
@@ -418,16 +443,20 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     let expanded = mj_core::path_input::expand_local(Path::new(source))?;
     let candidate = expanded.as_path();
     if candidate.exists() {
-        let root = mj_core::local_git::canonical_repository(candidate)?;
-        let name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("local repository has no usable directory name")?
-            .to_owned();
+        let resolved = mj_core::repository::resolve_directory(
+            candidate,
+            None,
+            &mj_core::targets::CancellableProcessExecutor::with_timeout(
+                std::time::Duration::from_secs(8),
+            ),
+        )?;
+        let identity = resolved.identity;
+        let name = identity.name();
         return Ok(InterpretedRepositorySource {
             display_name: source.to_owned(),
             name,
-            kind: RepositorySourceKind::Local(root),
+            identity,
+            kind: RepositorySourceKind::Local(resolved.checkout_root),
         });
     }
     if candidate.is_absolute() || source.starts_with('.') || source.starts_with('~') {
@@ -439,6 +468,10 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     Ok(InterpretedRepositorySource {
         display_name: source.to_owned(),
         name: repository.repository.clone(),
+        identity: RepositoryIdentity::Github(
+            repository.owner.to_ascii_lowercase(),
+            repository.repository.to_ascii_lowercase(),
+        ),
         kind: RepositorySourceKind::Github(repository),
     })
 }
@@ -446,23 +479,49 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
 fn exact_configured_bundle(
     config: &Config,
     requested: &[InterpretedRepositorySource],
-) -> Option<String> {
+) -> Result<Option<String>> {
     let requested_identities = requested
         .iter()
         .map(InterpretedRepositorySource::identity)
         .collect::<BTreeSet<_>>();
-    let primary = requested.first()?.identity();
-    config.bundles.iter().find_map(|(id, bundle)| {
+    let primary = requested
+        .first()
+        .context("no repository sources")?
+        .identity();
+    let mut used = BTreeSet::new();
+    let requested_layout = requested
+        .iter()
+        .map(|source| {
+            let id = unique_id(&setup_style_id(&source.name), |id| used.contains(id));
+            used.insert(id.clone());
+            (source.identity(), PathBuf::from(id))
+        })
+        .collect::<BTreeSet<_>>();
+    for (id, bundle) in &config.bundles {
         if bundle.repositories.len() != requested.len()
             || bundle
                 .repositories
                 .iter()
                 .any(|repository| repository.git_ref.is_some())
         {
-            return None;
+            continue;
         }
-        bundle_matches(bundle, &requested_identities, &primary).then(|| id.clone())
-    })
+        let layout = bundle
+            .repositories
+            .iter()
+            .map(|repo| {
+                Ok((
+                    crate::import::configured_repository_identity(repo)?
+                        .context("configured identity is missing")?,
+                    repo.destination.clone(),
+                ))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if layout == requested_layout && bundle_matches(bundle, &requested_identities, &primary)? {
+            return Ok(Some(id.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
@@ -755,6 +814,25 @@ impl Controller {
         title: impl Into<String>,
         options: SessionLaunchOptions,
     ) -> Result<String> {
+        self.register_session_with_executor(
+            profile_id,
+            bundle_id,
+            target_id,
+            title,
+            options,
+            &targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15)),
+        )
+    }
+
+    fn register_session_with_executor(
+        &mut self,
+        profile_id: &str,
+        bundle_id: &str,
+        target_id: &str,
+        title: impl Into<String>,
+        options: SessionLaunchOptions,
+        executor: &impl CommandExecutor,
+    ) -> Result<String> {
         let SessionLaunchOptions {
             create_managed_worktree,
             at,
@@ -857,17 +935,41 @@ impl Controller {
                 profile.kind.display_name()
             );
         }
-        if let Some(bundle) = bundle {
-            for repository in &bundle.repositories {
-                mj_core::remote_git::resolve_repository(
-                    repository,
-                    &targets::CancellableProcessExecutor::with_timeout(
-                        std::time::Duration::from_secs(15),
-                    ),
-                )
-                .with_context(|| format!("repository {:?}", repository.id))?;
+        let (bundle_id, project) = if let Some(bundle) = bundle {
+            let project = crate::project_catalog::snapshot(bundle, executor, true)?;
+            let canonical = crate::database::store_catalog_project(bundle_id, &project, true)?;
+            (canonical, Some(project))
+        } else if let Some(directory) = project_directory.as_deref() {
+            let git = match template {
+                TargetTemplate::LocalBare => {
+                    executor
+                        .execute(
+                            &targets::CommandSpec::new(
+                                "git",
+                                [
+                                    "-C",
+                                    &directory.to_string_lossy(),
+                                    "rev-parse",
+                                    "--is-inside-work-tree",
+                                ],
+                            )
+                            .purpose("inspect raw project repository"),
+                        )?
+                        .status
+                        == 0
+                }
+                _ => true,
+            };
+            if git {
+                let (id, project) =
+                    crate::project_catalog::accept_directory(template, directory, executor)?;
+                (id, Some(project))
+            } else {
+                (bundle_id.to_owned(), None)
             }
-        }
+        } else {
+            (bundle_id.to_owned(), None)
+        };
         validate_resource_allocation(template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref());
@@ -878,6 +980,7 @@ impl Controller {
         let id = new_session_id()?;
         let now = now();
         let record = SessionRecord {
+            project,
             target_runtime: Some(template.into()),
             build_cache: None,
             create_managed_worktree,
@@ -885,13 +988,7 @@ impl Controller {
             launch_branch,
             checkout,
             publication: None,
-            subagents: Some(subagents.unwrap_or_else(|| {
-                if profile.kind.supports_delegation_tools() {
-                    self.state.last_subagent_policy.clone()
-                } else {
-                    Default::default()
-                }
-            })),
+            subagents: Some(subagents.unwrap_or_else(|| profile.subagents.clone())),
             archived: false,
             container_cpus: None,
             container_memory: None,
@@ -905,7 +1002,7 @@ impl Controller {
             title: title.into(),
             harness_kind: profile.kind,
             last_profile: profile_id.to_string(),
-            bundle_id: bundle_id.to_string(),
+            bundle_id,
             project_directory,
             managed_worktree: None,
             target_template_id: target_id.to_string(),

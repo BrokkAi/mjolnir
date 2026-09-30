@@ -384,7 +384,7 @@ pub struct CreateSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Omitted reuses the last accepted top-level session choice.
+    /// Omitted uses the selected profile's subagent setting.
     #[serde(
         default,
         alias = "mjolnir_subagents",
@@ -542,6 +542,13 @@ pub enum DaemonAction {
     },
     /// Search the user's SessionWiki index. An empty query lists the most
     /// recent sessions.
+    ProjectCatalog {
+        refresh: bool,
+        retry: bool,
+    },
+    CreateProject {
+        sources: Vec<String>,
+    },
     WikiSearch {
         query: String,
         limit: usize,
@@ -606,6 +613,9 @@ pub enum DaemonAction {
     SubagentOptions {
         profile: String,
         model: Option<String>,
+        /// Setup can probe an unsaved draft without changing live settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<Box<Config>>,
     },
     RenameProfile {
         old_id: String,
@@ -791,6 +801,8 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    ProjectCatalog(mj_core::project_catalog::ProjectCatalogView),
+    ProjectCreated(mj_core::project_catalog::SavedProject),
     SessionTextMatches(Vec<SessionTextMatch>),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
@@ -1273,9 +1285,14 @@ impl DaemonClient {
         &mut self,
         profile: String,
         model: Option<String>,
+        config: Option<Config>,
     ) -> Result<mj_core::subagent::SubagentOptions> {
         match self
-            .request(DaemonAction::SubagentOptions { profile, model })
+            .request(DaemonAction::SubagentOptions {
+                profile,
+                model,
+                config: config.map(Box::new),
+            })
             .await?
         {
             DaemonReply::SubagentOptions(options) => Ok(options),
@@ -1626,6 +1643,33 @@ impl DaemonClient {
     /// empty and best match first otherwise. The reply carries the state of
     /// the index as well as the rows, so a caller can say the first build is
     /// still running.
+    pub async fn project_catalog(
+        &mut self,
+        refresh: bool,
+        retry: bool,
+    ) -> Result<mj_core::project_catalog::ProjectCatalogView> {
+        match self
+            .request(DaemonAction::ProjectCatalog { refresh, retry })
+            .await?
+        {
+            DaemonReply::ProjectCatalog(view) => Ok(view),
+            other => bail!("unexpected project catalog reply: {other:?}"),
+        }
+    }
+
+    pub async fn create_project(
+        &mut self,
+        sources: Vec<String>,
+    ) -> Result<mj_core::project_catalog::SavedProject> {
+        match self
+            .request(DaemonAction::CreateProject { sources })
+            .await?
+        {
+            DaemonReply::ProjectCreated(project) => Ok(project),
+            other => bail!("unexpected project creation reply: {other:?}"),
+        }
+    }
+
     pub async fn wiki_search(&mut self, query: String, limit: usize) -> Result<WikiSearchPage> {
         match self
             .request(DaemonAction::WikiSearch { query, limit })
@@ -2191,10 +2235,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Subagent model discovery runs in the daemon that owns the profile cache.
-// Session creation no longer accepts a runtime identity constraint.
-// Failed startup retains target ownership until process teardown completes.
-pub const PROTOCOL_VERSION: u32 = 47;
+// The daemon serves project discovery and durable failed-startup cleanup together.
+pub const PROTOCOL_VERSION: u32 = 49;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2322,21 +2364,52 @@ mod tests {
             }))
             .unwrap();
         let expected = serde_json::to_value(&options).unwrap();
+        let mut draft = Config::default();
+        draft.profiles.insert(
+            "codex".into(),
+            serde_json::from_value(serde_json::json!({
+                "kind": "codex", "home": "/unsaved/profile",
+                "subagents": {"mode": "single_model", "model": "gpt-6-luna", "effort": "high"}
+            }))
+            .unwrap(),
+        );
+        let expected_draft = serde_json::to_value(&draft).unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            for model in [None, Some("gpt-6-luna".to_owned())] {
+            for (index, model) in [
+                None,
+                Some("gpt-6-luna".to_owned()),
+                Some("gpt-6-luna".to_owned()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                 assert_eq!(request.token, "subagent-discovery-test");
-                assert!(matches!(request.action,
-                    DaemonAction::SubagentOptions { profile, model: requested }
-                        if profile == "codex" && requested == model
-                ));
+                let DaemonAction::SubagentOptions {
+                    profile,
+                    model: requested,
+                    config,
+                } = request.action
+                else {
+                    panic!("unexpected discovery request")
+                };
+                assert_eq!(profile, "codex");
+                assert_eq!(requested, model);
+                assert_eq!(
+                    serde_json::to_value(config).unwrap(),
+                    if index == 1 {
+                        expected_draft.clone()
+                    } else {
+                        serde_json::Value::Null
+                    }
+                );
                 write_frame(
                     &mut stream,
                     &ResponseEnvelope {
                         protocol_version: request.protocol_version,
                         request_id: request.request_id,
-                        result: if model.is_none() {
+                        result: if index != 2 {
                             Ok(DaemonReply::SubagentOptions(options.clone()))
                         } else {
                             Err("profile discovery cancelled".into())
@@ -2348,10 +2421,18 @@ mod tests {
             }
         });
         let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let discovered = client.subagent_options("codex".into(), None).await.unwrap();
+        let discovered = client
+            .subagent_options("codex".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
+        let discovered = client
+            .subagent_options("codex".into(), Some("gpt-6-luna".into()), Some(draft))
+            .await
+            .unwrap();
         assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
         let error = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()))
+            .subagent_options("codex".into(), Some("gpt-6-luna".into()), None)
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "profile discovery cancelled");

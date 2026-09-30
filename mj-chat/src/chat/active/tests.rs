@@ -1071,6 +1071,7 @@ const CONTEXT_TEST_WORKSPACE: &str = "workspace-for-chat-session-context-tests";
 
 fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -1122,6 +1123,7 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                         home: std::path::PathBuf::from("/profiles").join(id),
                         environment: Default::default(),
                         context_window_bytes: None,
+                        subagents: Default::default(),
                         guardian_review_model: None,
                     },
                 )

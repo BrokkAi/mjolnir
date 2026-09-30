@@ -282,6 +282,13 @@ pub fn scan_codex_sessions(
 }
 
 pub(super) fn codex_indexed_sessions(home: &Path) -> Result<Option<Vec<LocatedCodexSession>>> {
+    codex_indexed_sessions_limited(home, usize::MAX)
+}
+
+pub(super) fn codex_indexed_sessions_limited(
+    home: &Path,
+    limit: usize,
+) -> Result<Option<Vec<LocatedCodexSession>>> {
     let database = home.join("state_5.sqlite");
     if !database.is_file() {
         return Ok(None);
@@ -308,7 +315,8 @@ pub(super) fn codex_indexed_sessions(home: &Path) -> Result<Option<Vec<LocatedCo
          WHERE source IN ('cli', 'vscode') \
            AND preview <> '' \
            AND rollout_path IS NOT NULL \
-         ORDER BY updated_at DESC, id DESC"
+         ORDER BY updated_at DESC, id DESC LIMIT {}",
+        i64::try_from(limit).unwrap_or(i64::MAX)
     );
     let Ok(mut statement) = connection.prepare(&query) else {
         return Ok(None);

@@ -3462,6 +3462,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
@@ -3529,6 +3530,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         home: std::path::PathBuf::from(home),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let local = TargetLocator::LocalBare {

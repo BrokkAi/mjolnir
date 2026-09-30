@@ -40,7 +40,7 @@ use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 
 use mj_controller::controller::Controller;
-use mj_controller::setup::{SetupOutcome, run_setup_dialog};
+use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
 use ratatui::Terminal;
@@ -97,7 +97,7 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
-    /// Discover local agent homes and create an initial Mjolnir configuration.
+    /// Rerun agent and repository discovery, preserving existing configuration.
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
     Import(ImportArgs),
@@ -153,6 +153,8 @@ enum Command {
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
+    /// Stop a session's background task, or all tasks the worker can stop.
+    StopTask(api_commands::StopTaskArgs),
     /// Print the API base URL and where its bearer token lives.
     ApiInfo(api_commands::ApiInfoArgs),
     /// Discover available models and efforts for a profile.
@@ -525,6 +527,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Resume(_)) => "resume",
         Some(Command::InterruptTurn(_)) => "interrupt-turn",
+        Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
@@ -693,6 +696,9 @@ async fn run_command(
                 .map(|()| DashboardExit::Normal)
         }
         Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::StopTask(args)) => api_commands::stop_task(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Models(args)) => api_commands::models(args)
@@ -1131,7 +1137,6 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
-    dashboard::initialize_first_run_config().await?;
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
     let selected = if let Some(resume) = &resume
@@ -1838,9 +1843,7 @@ fn setup(args: SetupArgs) -> Result<()> {
             print!("{}", mj_controller::doctor::setup_instructions(platform));
             Ok(())
         }
-        None => match run_setup_dialog(&config_path())? {
-            SetupOutcome::Written | SetupOutcome::Cancelled => Ok(()),
-        },
+        None => run_setup_command(&config_path()),
     }
 }
 
@@ -2283,6 +2286,7 @@ mod tests {
                 home: PathBuf::from("/home/user/.claude"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -2451,6 +2455,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,

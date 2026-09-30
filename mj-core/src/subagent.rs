@@ -20,12 +20,32 @@ pub enum SubagentPolicy {
 }
 
 impl SubagentPolicy {
-    pub const LABELS: [&str; 4] = [
-        "Native",
-        "Mjolnir, all models",
-        "Mjolnir, single model",
-        "None",
-    ];
+    pub fn is_native(&self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    /// Profile setup offers native delegation or one explicitly chosen model.
+    /// Legacy session policies remain readable, and children still use None.
+    pub fn validate_profile(&self, kind: crate::config::HarnessKind) -> anyhow::Result<()> {
+        match self {
+            Self::Native => Ok(()),
+            Self::SingleModel { model, effort } => {
+                anyhow::ensure!(
+                    kind.supports_delegation_tools(),
+                    "Mjolnir subagents require a Claude or Codex profile"
+                );
+                anyhow::ensure!(!model.trim().is_empty(), "select a subagent model");
+                anyhow::ensure!(
+                    effort.as_ref().is_none_or(|value| !value.trim().is_empty()),
+                    "subagent effort cannot be empty"
+                );
+                Ok(())
+            }
+            Self::AllModels | Self::None => {
+                anyhow::bail!("profile subagents must be native or single_model")
+            }
+        }
+    }
 
     pub fn uses_mjolnir(&self) -> bool {
         matches!(self, Self::AllModels | Self::SingleModel { .. })
@@ -33,27 +53,6 @@ impl SubagentPolicy {
 
     pub fn suppresses_native(&self) -> bool {
         !matches!(self, Self::Native)
-    }
-
-    pub fn index(&self) -> usize {
-        match self {
-            Self::Native => 0,
-            Self::AllModels => 1,
-            Self::SingleModel { .. } => 2,
-            Self::None => 3,
-        }
-    }
-
-    pub fn at_index(index: usize) -> Self {
-        match index {
-            1 => Self::AllModels,
-            2 => Self::SingleModel {
-                model: String::new(),
-                effort: None,
-            },
-            3 => Self::None,
-            _ => Self::Native,
-        }
     }
 
     pub fn parent_role(&self) -> Option<SubagentMcpRole> {
@@ -103,7 +102,7 @@ pub fn deserialize_launch_policy<'de, D: serde::Deserializer<'de>>(
     Ok(deserialize_optional_policy(deserializer)?.unwrap_or_default())
 }
 
-pub const PROFILE_HELP: &str = "Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
+pub const PROFILE_HELP: &str = "Configure the fixed subagent model and effort in Settings → Agent Profiles → a profile → Sub-agents, or override them for a new session with --subagent-model and --subagent-effort. Mjolnir chooses an eligible profile offering that selection by remaining quota. Configure additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
 
 /// Choices before a parent session exists, using the same eligibility as spawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

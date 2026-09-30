@@ -115,6 +115,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
@@ -161,6 +162,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         sessions: [(
             "session-1".into(),
             SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,
@@ -680,7 +682,89 @@ fn app_with_background_stop_receiver(
     )
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.set_background_task_stop_tx(stop_tx);
+    options.set_api_token("test-api-token".into());
     (router(options), stop_rx)
+}
+
+#[tokio::test]
+async fn api_background_task_stop_authenticates_and_reuses_task_admission() {
+    let (app, mut requests) = app_with_background_stop_receiver(true);
+    let body = r#"{"background_task_id":"terminal:background-1"}"#;
+    let path = "/api/v1/sessions/session-1/background-tasks/stop";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()[api::API_VERSION_HEADER], "1");
+    assert!(requests.try_recv().is_err());
+
+    for route in ["/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(route)
+                    .header("authorization", "Bearer test-api-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session = if route.ends_with("session-1") {
+            &json
+        } else {
+            &json["sessions"][0]
+        };
+        assert_eq!(
+            session["background_tasks"][0]["id"],
+            "terminal:background-1"
+        );
+        assert_eq!(session["background_tasks"][0]["can_stop"], true);
+    }
+
+    let response = tokio::spawn(
+        app.clone().oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    );
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.background_task_id, "terminal:background-1");
+    assert!(
+        !response.is_finished(),
+        "HTTP acknowledgement must wait for the actor"
+    );
+    request.reply.send(Ok(())).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+
+    let (app, mut requests) = app_with_background_stop_receiver(false);
+    let response = app
+        .oneshot(
+            Request::post(path)
+                .header("authorization", "Bearer test-api-token")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(requests.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -3465,6 +3549,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
@@ -5022,7 +5107,7 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
         "{}\n{}\n{}",
-        viewer_source("function subagentChoiceApplies(", "const SUBAGENT_MODES"),
+        viewer_source("function profileSubagents(", "function targetIsBare("),
         viewer_source(
             "function workingChildCount(",
             "function sessionInWorkspace("
@@ -5047,10 +5132,12 @@ function sessionById(id) { return sessions[id]; }
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
 assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
-draft.subagents = { mode: "all_models" };
-assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"all_models"}', "a changed policy must be sent");
+snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
+assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"single_model","model":"chosen","effort":"high"}', "the destination profile policy must be sent");
 draft.profileId = "kimi";
-assert(moveSubagentChange(draft) === null, "a harness without delegation tools sends no policy");
+assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
+draft.storedSubagents = { mode: "all_models" };
+assert(moveSubagentChange(draft).mode === "native", "a native destination resets a previous Mjolnir policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
 "#;
     run_viewer_script(

@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use mj_chat::chat::wrap_styled_line;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, TabStrip, TextField};
+use mj_chat::components::{DialogShell, wrap_lines};
 use mj_chat::theme;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use mj_client::daemon::{
     WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
@@ -1946,29 +1946,30 @@ fn preview_height(inner: Rect) -> u16 {
 /// The dialog body split into its bands: tabs, search, list, preview, footer.
 /// The preview band is present only when the dialog has something to show in
 /// it, so the list keeps the whole height when it does not.
-fn resume_bands(inner: Rect, preview: bool) -> std::rc::Rc<[Rect]> {
+fn resume_bands(inner: Rect, preview: bool) -> Vec<Rect> {
     let mut constraints = vec![
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1), // tabs, gap
+        Constraint::Length(1),
+        Constraint::Length(1), // search, gap
         Constraint::Min(5),
+        Constraint::Length(1), // list, gap
     ];
     if preview {
         constraints.push(Constraint::Length(preview_height(inner)));
+        constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(4));
-    Layout::default()
+    let bands = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(inner)
+        .split(inner);
+    bands.iter().step_by(2).copied().collect()
 }
 
 pub(crate) fn resume_sessions_pane(area: Rect, preview: bool) -> Rect {
     let popup = centered_rect(84, 24, area);
-    let inner = popup.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
-    resume_bands(inner, preview)[2]
+    resume_bands(DialogShell::padded_inner(popup), preview)[2]
 }
 
 pub(crate) fn render_resume_dialog(
@@ -1979,10 +1980,10 @@ pub(crate) fn render_resume_dialog(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = centered_modal(frame, surfaces, 84, 24, area);
-    let inner = theme::modal().inner(popup);
+    let inner = DialogShell::padded_inner(popup);
     let preview = dialog.preview_body(dashboard.resume_rows());
     let bands = resume_bands(inner, preview.is_some());
-    let rows = bands.as_ref();
+    let rows = &bands;
     // The footer is the last band whether or not a preview sits above it.
     let footer_band = rows[rows.len() - 1];
 
@@ -2209,18 +2210,6 @@ pub(crate) fn render_resume_dialog(
             Style::default().fg(theme::palette().warning),
         ));
     }
-    footer.push(Line::styled(
-        match dialog.tab {
-            ResumeTab::Live => "Enter opens · ←/→ tabs · / searches · Tab moves · a/b/w/i/d filter",
-            ResumeTab::Hel => "Enter resumes · Delete destroys · ←/→ tabs · / searches · Tab moves",
-            ResumeTab::Import if selected.is_some_and(|row| row.unavailable_reason.is_some()) => {
-                "←/→ tabs · / searches · Tab moves"
-            }
-            ResumeTab::Import => "Enter imports · ←/→ tabs · / searches · Tab moves",
-            ResumeTab::Archive => "Enter restores · ←/→ tabs · / searches · Tab moves",
-        },
-        Style::default().fg(theme::palette().muted),
-    ));
     let mut buttons = vec![(ResumeFocus::Cancel, "Cancel", true)];
     let unavailable_import = selected
         .filter(|row| matches!(row.key, ResumeRowKey::Native(..)))
@@ -2253,16 +2242,19 @@ pub(crate) fn render_resume_dialog(
     // Keep the unavailable explanation visible when the action row would overflow.
     let split_actions = unavailable_import.is_some() && footer_band.width < 68;
     let action_height = if split_actions { 2 } else { 1 };
+    let footer = wrap_lines(footer, footer_band.width);
+    let note_height =
+        (footer.len() as u16).min(footer_band.height.saturating_sub(action_height + 1));
     let note_area = Rect::new(
         footer_band.x,
-        footer_band.y,
+        footer_band
+            .bottom()
+            .saturating_sub(action_height + 1 + note_height),
         footer_band.width,
-        footer_band.height.saturating_sub(action_height),
+        note_height,
     );
     frame.render_widget(
-        Paragraph::new(footer)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(footer).alignment(Alignment::Center),
         note_area,
     );
     let button_area = Rect::new(
@@ -2528,10 +2520,10 @@ fn hit_transcript_lines(transcript: &WikiHitTranscript) -> (Vec<Line<'static>>, 
 /// the pane's left edge.
 fn wrap_preview_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
-    lines
-        .iter()
-        .flat_map(|line| wrap_styled_line(line.clone(), width, 0))
-        .collect()
+    wrap_lines(
+        lines.iter().cloned(),
+        u16::try_from(width).unwrap_or(u16::MAX),
+    )
 }
 
 fn resume_header_line(layout: &RowLayout, tab: ResumeTab) -> Line<'static> {

@@ -1,5 +1,17 @@
 use super::*;
 
+/// Share the viewer's admission and worker acknowledgement path. The route
+/// layer supplies API bearer authentication and the versioned error contract.
+pub(super) async fn stop_background_task(
+    state: State<ServerState>,
+    session_id: Path<String>,
+    request: Json<StopBackgroundTaskRequest>,
+) -> Result<StatusCode, ApiFailure> {
+    super::super::stop_background_task(state, session_id, request)
+        .await
+        .map_err(Into::into)
+}
+
 pub(super) async fn list_sessions(
     State(state): State<ServerState>,
     Query(query): Query<SessionListQuery>,

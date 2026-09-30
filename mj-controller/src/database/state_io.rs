@@ -106,7 +106,9 @@ pub fn load_mount_history() -> Result<BTreeMap<String, Vec<PathBuf>>> {
     read_mount_history(&open_reader(&database_path())?)
 }
 
-fn read_mount_history(connection: &Connection) -> Result<BTreeMap<String, Vec<PathBuf>>> {
+pub(super) fn read_mount_history(
+    connection: &Connection,
+) -> Result<BTreeMap<String, Vec<PathBuf>>> {
     let mut history = BTreeMap::<String, Vec<PathBuf>>::new();
     let mut statement =
         connection.prepare("SELECT host, source FROM mount_history ORDER BY host, ordinal")?;
@@ -119,6 +121,14 @@ fn read_mount_history(connection: &Connection) -> Result<BTreeMap<String, Vec<Pa
     for row in rows {
         let (host, source) = row?;
         history.entry(host).or_default().push(source);
+    }
+    for location in super::projects::read_project_catalog_from(connection)?.locations {
+        let paths = history
+            .entry(format!("project:{}", location.host))
+            .or_default();
+        if !paths.contains(&location.checkout_root) {
+            paths.push(location.checkout_root);
+        }
     }
     Ok(history)
 }
@@ -183,7 +193,8 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
     for session in state.sessions.values() {
         if let Some((existing_bundle, existing_workspace)) = existing_contexts.get(&session.id) {
             ensure!(
-                existing_bundle == &session.bundle_id,
+                existing_bundle
+                    == &super::projects::session_project_id(&tx, &session.id, &session.bundle_id)?,
                 "session {} was already associated with bundle {}, not {}",
                 session.id,
                 existing_bundle,
@@ -460,13 +471,15 @@ pub(super) fn parse_materialized_execution(
 /// orphan adoption — may use this.
 pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
+    let canonical_bundle =
+        super::projects::session_project_id(tx, &session.id, &session.bundle_id)?;
     tx.execute(
         "INSERT INTO session_contexts(session_id, bundle_id, created_at, workspace_id)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(session_id) DO NOTHING",
         params![
             session.id,
-            session.bundle_id,
+            canonical_bundle,
             session.created_at,
             session.workspace_id
         ],
@@ -477,7 +490,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     ensure!(
-        stored_bundle == session.bundle_id,
+        stored_bundle == canonical_bundle,
         "session {} belongs to bundle {}, not {}",
         session.id,
         stored_bundle,
@@ -498,8 +511,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
-             target_runtime_json, launch_branch, publication_json, checkout_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+             target_runtime_json, launch_branch, publication_json, checkout_json, project_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -530,7 +543,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              target_runtime_json = excluded.target_runtime_json,
              launch_branch = excluded.launch_branch,
              publication_json = excluded.publication_json,
-             checkout_json = excluded.checkout_json",
+             checkout_json = excluded.checkout_json,
+             project_json = coalesce(excluded.project_json, sessions.project_json)",
         params![
             session.id,
             session.title,
@@ -579,6 +593,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.launch_branch,
             session.publication.as_ref().map(serde_json::to_string).transpose()?,
             session.checkout.as_ref().map(serde_json::to_string).transpose()?,
+            session.project.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     tx.execute(
@@ -622,6 +637,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         build_cache,
         workspace_id: _,
         bundle_id: _,
+        project,
         create_managed_worktree: _,
         launch_base: _,
         launch_branch: _,
@@ -662,7 +678,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              managed_worktree = ?13,
              build_cache_json = ?14,
              target_runtime_json = ?15,
-             subagents = ?16
+             subagents = ?16,
+             project_json = coalesce(?17,project_json)
          WHERE session_id = ?1",
         params![
             id,
@@ -695,6 +712,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
                 .map(serde_json::to_string)
                 .transpose()?,
             subagents.as_ref().map(serde_json::to_string).transpose()?,
+            project.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     if changed != 1 {
@@ -1130,7 +1148,7 @@ const SESSION_QUERY: &str =
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
-                s.launch_branch, s.publication_json, s.checkout_json
+                s.launch_branch, s.publication_json, s.checkout_json, s.project_json
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1148,6 +1166,14 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         return Ok(None);
     };
     Ok(Some(SessionRecord {
+        project: row
+            .get::<_, Option<String>>(32)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(32, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?,
         target_runtime: row
             .get::<_, Option<String>>(28)?
             .map(|json| {

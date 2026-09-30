@@ -207,6 +207,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -221,6 +222,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             (
                 (*session_id).to_owned(),
                 SessionRecord {
+                    project: None,
                     target_runtime: None,
                     launch_base: None,
                     launch_branch: None,

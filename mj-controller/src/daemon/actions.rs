@@ -33,12 +33,21 @@ pub(super) async fn handle_action(
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }
-        DaemonAction::SubagentOptions { profile, model } => {
+        DaemonAction::SubagentOptions {
+            profile,
+            model,
+            config,
+        } => {
             // Discovery is restartable preparation and must not hold up handoff.
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => bail!("subagent discovery cancelled by daemon shutdown"),
-                options = crate::controller::profile_config::subagent_options(profile, model) => {
+                options = async move {
+                    match config {
+                        Some(config) => crate::controller::profile_config::subagent_options_for(*config, profile, model).await,
+                        None => crate::controller::profile_config::subagent_options(profile, model).await,
+                    }
+                } => {
                     Ok(DaemonReply::SubagentOptions(options?))
                 }
             }
@@ -255,6 +264,34 @@ pub(super) async fn handle_action(
         DaemonAction::CheckpointSession { session_id } => Ok(DaemonReply::Checkpoint(
             state.checkpoint_session_now(&session_id).await?,
         )),
+        DaemonAction::ProjectCatalog { refresh, retry } => Ok(DaemonReply::ProjectCatalog(
+            state.project_catalog(refresh, retry).await?,
+        )),
+        DaemonAction::CreateProject { sources } => {
+            let created = state.create_bundle_from_sources(sources).await?;
+            let id = created.bundle_id;
+            let bundle = created
+                .config
+                .bundles
+                .get(&id)
+                .context("created project is missing")?
+                .clone();
+            let project = blocking(move || {
+                crate::project_catalog::snapshot(
+                    &bundle,
+                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+                    false,
+                )
+            })
+            .await?;
+            Ok(DaemonReply::ProjectCreated(
+                mj_core::project_catalog::SavedProject {
+                    bundle_id: id,
+                    name: project.name(),
+                    project,
+                },
+            ))
+        }
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
         )),
@@ -663,6 +700,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::RuntimeSnapshot { .. }
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SubagentOptions { .. }
+            | DaemonAction::ProjectCatalog { .. }
     ) {
         Ok(None)
     } else {

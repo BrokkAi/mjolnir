@@ -2273,6 +2273,7 @@ fn add_api_priced_profile(dashboard: &mut DashboardState) {
         mj_core::config::HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Codex,
             home: std::path::PathBuf::from("/profiles/api-priced"),
@@ -2504,6 +2505,66 @@ fn minimized_sessions_keep_summary_rows_without_message_previews() {
     assert!(rendered.contains("ACP pretty"), "{rendered}");
     assert!(!rendered.contains("You:"), "{rendered}");
     assert!(!rendered.contains("Agent:"), "{rendered}");
+}
+
+#[test]
+fn a_starting_session_keeps_one_preview_across_incomplete_state_publications() {
+    let mut session = running_session();
+    session.state = SessionState::Provisioning;
+    session.session_title_override = Some("Startup".into());
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config.advanced.session_order = mj_core::config::SessionOrder::Priority;
+    dashboard.select_active_session(&id);
+    dashboard.begin_session_operation(id.clone(), SessionOperationKind::Launching, None);
+    let pane = dashboard.browse_pane();
+    dashboard.set_pane_session(pane, Some(&id));
+    for omit in [false, true] {
+        if omit {
+            let mut publication = dashboard.state.clone();
+            publication.sessions.remove(&id);
+            dashboard.set_state(publication);
+        }
+        let rendered = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(rendered.contains("Startup"), "{rendered}");
+        assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+        assert_eq!(dashboard.pane_session(pane), Some(id.as_str()));
+        let rows = drawn_session_rows(&dashboard, 60);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].content_height(),
+            1,
+            "startup remains a single preview line"
+        );
+    }
+
+    let mut ready = dashboard.state.sessions[&id].clone();
+    ready.state = SessionState::Running;
+    ready.session_title_override = Some("Ready session".into());
+    let mut publication = dashboard.state.clone();
+    publication.sessions.insert(id.clone(), ready);
+    dashboard.set_state(publication);
+    assert_eq!(drawn_session_rows(&dashboard, 60)[0].content_height(), 1);
+    dashboard.finish_session_operation(&id);
+    assert!(drawn_session_rows(&dashboard, 60)[0].content_height() > 1);
+    let rendered = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(rendered.contains("Ready session"), "{rendered}");
+    assert_eq!(dashboard.selected_session_id(), Some(id.as_str()));
+}
+
+#[test]
+fn finishing_a_launch_removes_a_preview_absent_from_authoritative_state() {
+    let session = running_session();
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation(id.clone(), SessionOperationKind::Launching, None);
+    let mut publication = dashboard.state.clone();
+    publication.sessions.remove(&id);
+    dashboard.set_state(publication);
+    assert!(dashboard.state.sessions.contains_key(&id));
+    dashboard.finish_session_operation(&id);
+    assert!(!dashboard.state.sessions.contains_key(&id));
+    assert!(dashboard.ordered_sessions().is_empty());
 }
 
 /// A busy minimized list keeps a bounded height and two-line hitboxes.

@@ -102,6 +102,7 @@ fn populated_dashboard() -> DashboardState {
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
                 kind,
                 home: std::path::PathBuf::from("/profiles").join(id),
@@ -142,6 +143,7 @@ fn populated_dashboard() -> DashboardState {
         state.sessions.insert(
             id.into(),
             mj_core::state::SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,
@@ -1541,6 +1543,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
 
 fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -1815,28 +1818,6 @@ fn resume_progress_explains_the_blocking_work() {
         resume_progress_notice("01234567", "codex-1", "podman"),
         "Preparing 01234567: verifying checkpoint, provisioning podman, and restoring codex-1…"
     );
-}
-
-#[test]
-fn only_a_fully_empty_config_triggers_automatic_setup() {
-    let mut config = mj_core::config::Config::default();
-    assert!(configuration_needs_setup(&config));
-    config.targets.insert(
-        "podman".into(),
-        mj_core::config::TargetTemplate::LocalPodman {
-            container: mj_core::config::ContainerTemplate {
-                build_cache: None,
-                image: "ubuntu:24.04".into(),
-                pull_policy: Default::default(),
-                platform: None,
-                cpus: None,
-                memory: None,
-                environment: Default::default(),
-                workspace_storage: Default::default(),
-            },
-        },
-    );
-    assert!(!configuration_needs_setup(&config));
 }
 
 #[test]

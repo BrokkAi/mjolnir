@@ -186,6 +186,7 @@ fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
 
 fn sample_state() -> State {
     let session = SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -272,6 +273,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex"),
                 environment: Default::default(),
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         )]),

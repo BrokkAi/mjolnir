@@ -442,6 +442,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                         home: std::path::PathBuf::from("/home/agent").join(id),
                         environment: Default::default(),
                         context_window_bytes: None,
+                        subagents: Default::default(),
                         guardian_review_model: None,
                     },
                 )

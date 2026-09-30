@@ -408,12 +408,6 @@ pub(super) async fn mark_conversation_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct StopBackgroundTaskRequest {
-    pub(super) background_task_id: String,
-}
-
 /// Ask the live session actor to stop one task the current projection still
 /// shows. The snapshot check is intentionally repeated at admission time:
 /// a task may have completed, or lost its provider stop capability, between
@@ -421,7 +415,7 @@ pub(super) struct StopBackgroundTaskRequest {
 pub(super) async fn stop_background_task(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    Json(request): Json<StopBackgroundTaskRequest>,
+    Json(request): Json<api::StopBackgroundTaskRequest>,
 ) -> Result<StatusCode, ApiError> {
     validate_public_id(&session_id)?;
     // Task ids are opaque provider ids (the worker currently uses values such
@@ -1108,4 +1102,48 @@ pub(super) async fn events(
         }
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ProjectCatalogQuery {
+    #[serde(default)]
+    retry: bool,
+}
+
+pub(super) async fn read_projects(
+    State(state): State<ServerState>,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    catalog_response(state, false, false).await
+}
+
+pub(super) async fn refresh_projects(
+    State(state): State<ServerState>,
+    Query(query): Query<ProjectCatalogQuery>,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    catalog_response(state, true, query.retry).await
+}
+
+async fn catalog_response(
+    state: ServerState,
+    refresh: bool,
+    retry: bool,
+) -> Result<Json<mj_core::project_catalog::ProjectCatalogView>, ApiError> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state
+        .preflight_tx
+        .send(PreflightRequest::ProjectCatalog {
+            refresh,
+            retry,
+            reply,
+        })
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    result
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?
+        .map(Json)
+        .map_err(|error| {
+            tracing::warn!(%error,"project catalog read failed");
+            ApiError::controller_unavailable()
+        })
 }

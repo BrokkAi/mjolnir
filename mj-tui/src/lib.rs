@@ -64,6 +64,7 @@ mod review_settings;
 mod setup;
 mod surface_controls;
 pub mod tile_layout;
+mod welcome;
 mod widgets;
 mod wizards;
 pub(crate) mod workspaces;
@@ -224,6 +225,7 @@ pub enum DashboardAction {
         id: u64,
         profile: String,
         model: Option<String>,
+        config: String,
     },
     ProbeGitStatus {
         session_id: String,
@@ -435,6 +437,9 @@ pub enum DashboardAction {
     /// Read the stored mount and project-directory history on a worker and
     /// hand it back through `DashboardState::apply_mount_history`.
     LoadMountHistory,
+    RefreshProjects {
+        retry: bool,
+    },
     LoadWebAccess,
     /// Stop the running daemon and start one from the build this surface is
     /// running, then report which build came up. The keep-alive never starts
@@ -750,6 +755,7 @@ pub(crate) enum Mode {
     /// The `F2` command palette: every command that applies right now.
     Palette(CommandPalette),
     Setup(setup::SetupDialog),
+    Welcome(welcome::WelcomeDialog),
 }
 
 pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], reverse: bool) -> T {
@@ -773,6 +779,7 @@ struct SessionOrderCache {
 }
 
 pub struct DashboardState {
+    pending_welcome: Option<welcome::WelcomeDialog>,
     #[cfg(test)]
     pub(crate) reconciliation_visits: Cell<usize>,
     pub(crate) row_index: RefCell<row_index::RowIndex>,
@@ -1152,6 +1159,7 @@ impl DashboardState {
             drawn_failures: BTreeMap::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
+            pending_welcome: None,
             help_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,

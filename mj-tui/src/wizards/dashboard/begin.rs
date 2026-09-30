@@ -50,9 +50,6 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                self.state.last_subagent_policy.clone(),
-            )),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 
@@ -60,6 +57,7 @@ impl DashboardState {
             bundle,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::new(Vec::new()),
 
             project_picker: Box::default(),
@@ -75,12 +73,17 @@ impl DashboardState {
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             remote_repositories: None,
             remote_preflight_in_flight: false,
             remote_preflight_error: None,
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -129,21 +132,27 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: false,
-            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -193,21 +202,27 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: false,
-            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -255,25 +270,29 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             // Move's safe default is to leave pending work idle. The review
             // checkbox can explicitly opt into starting it after readiness.
             discard_queue: true,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -329,11 +348,13 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(
                 Vec::new(),
                 operation
@@ -350,17 +371,31 @@ impl DashboardState {
                 .or(session.resource_allocation),
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                operation
-                    .selection
-                    .subagents
-                    .clone()
-                    .or_else(|| session.subagents.clone())
-                    .unwrap_or_default(),
-            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+    }
+
+    pub(in crate::wizards) fn skip_initial_profile(&mut self) -> DashboardAction {
+        match &self.mode {
+            Mode::New(wizard) if wizard.profile_count(self) == 1 => {}
+            Mode::Resume(wizard) if wizard.profile_count(self) == 1 => {}
+            _ => return DashboardAction::None,
+        }
+        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+            Mode::New(mut wizard) => {
+                wizard.set_profile_step_skipped(true);
+                wizard.profile = 0;
+                self.advance_new_wizard(wizard)
+            }
+            Mode::Resume(mut wizard) => {
+                wizard.set_profile_step_skipped(true);
+                wizard.profile = 0;
+                self.advance_resume_wizard(wizard)
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {
@@ -394,5 +429,36 @@ impl DashboardState {
     /// database holds now.
     pub fn apply_mount_history(&mut self, history: BTreeMap<String, Vec<std::path::PathBuf>>) {
         self.state.mount_history = history;
+        let entries = self.recent_project_entries();
+        if let Mode::New(wizard) = &mut self.mode {
+            if wizard.step == WizardStep::NewBundle
+                && wizard.project_picker.tab == super::super::projects::ProjectTab::Recent
+            {
+                let selected = wizard
+                    .project_picker
+                    .entries
+                    .get(wizard.project_picker.selected)
+                    .map(|entry| &entry.source);
+                wizard.project_picker.selected = selected
+                    .and_then(|source| entries.iter().position(|entry| &entry.source == source))
+                    .unwrap_or(0);
+                wizard.project_picker.entries = entries;
+            }
+            if wizard.step == WizardStep::ProjectDirectory {
+                let host = self
+                    .config
+                    .targets
+                    .keys()
+                    .nth(wizard.target)
+                    .and_then(|id| self.config.targets.get(id))
+                    .and_then(project_history_host);
+                wizard.project_history = host
+                    .map(|host| self.state.project_directories(host).to_vec())
+                    .unwrap_or_default();
+                wizard.project_history_index = wizard
+                    .project_history_index
+                    .min(wizard.project_history.len().saturating_sub(1));
+            }
+        }
     }
 }

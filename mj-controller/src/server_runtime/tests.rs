@@ -725,6 +725,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                         HarnessProfile {
                             enabled: true,
                             context_window_bytes: None,
+                            subagents: Default::default(),
                             guardian_review_model: None,
                             kind: HarnessKind::Codex,
                             home: PathBuf::from("/home/agent").join(id),
@@ -1200,6 +1201,7 @@ fn new_action() -> ControllerAction {
 
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

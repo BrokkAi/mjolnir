@@ -34,6 +34,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         .route("/sessions/{session_id}/destroy", post(destroy))
         .route("/sessions/{session_id}/resume", post(resume))
         .route(
+            "/sessions/{session_id}/background-tasks/stop",
+            post(stop_background_task),
+        )
+        .route(
             "/sessions/{session_id}/interrupt-turn",
             post(interrupt_turn),
         )

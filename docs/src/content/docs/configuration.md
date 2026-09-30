@@ -23,8 +23,8 @@ Checks do not start stopped services, and launch performs a final preflight.
 
 Settings refuses to remove or rewrite configuration used by an active session;
 add an alternative entry or stop the session first. Global defaults and profile
-enablement remain editable. The optional `mj setup` command and direct
-`config.toml` editing remain available for users who prefer them.
+enablement remain editable. `mj setup` reruns automatic agent and repository
+discovery; direct `config.toml` editing also remains available.
 
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
@@ -452,17 +452,33 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude or Codex session can start child sessions, called sub-agents, through
-Mjolnir's `spawn` tool. Whether a given session uses Mjolnir's sub-agents at
-all, instead of its harness's own, is a per-session choice. The TUI and web
-new-session forms offer **Native**, **Mjolnir, all models**, **Mjolnir, single
-model**, and **None**. The CLI uses `mj new --subagents native|all-models|single-model|none`. Native is the initial choice; the last
-accepted new-session choice is then remembered per instance across both UIs.
+Mjolnir's `spawn` tool. Configure delegation under Settings → Agent Profiles →
+a profile → Sub-agents. Each profile defaults to **Native**, using the harness's
+own subagents. The other choice is **Mjolnir, single model**, which selects one
+model and its effort. Create and Move dialogs use the selected profile's setting;
+resuming a session retains its recorded policy. Confirm has no subagent controls.
 
-Single-model mode selects a model and corresponding effort from eligible
-profiles. Its `spawn` tool always uses that selection and cannot override the
-profile, model, or effort; `list_profiles` is omitted. Configure profiles in
-Settings → Profiles and additional eligible profiles in Settings → Sub-agents.
-Claude/Codex Mjolnir children have native delegation disabled under both modes.
+For example, keep an OpenAI/Codex profile native and configure a Claude profile
+with a fixed Mjolnir child model:
+
+```toml
+[profiles.claude.subagents]
+mode = "single_model"
+model = "your-model-slug"
+effort = "high"
+```
+
+Single-model `spawn` always uses that selection and cannot override the profile,
+model, or effort; `list_profiles` is omitted. Mjolnir chooses an eligible profile
+offering that exact model and effort by remaining quota, so single-model does
+not mean single-profile. Configure additional eligible profiles in Settings →
+Sub-agents. Claude/Codex Mjolnir children have native delegation disabled. The
+CLI can override delegation for one new session with
+`mj new --subagents native|single-model|none` and `--subagent-model` /
+`--subagent-effort` for single-model mode. `none` disables delegation without
+changing the profile's settings; profile setup still offers only Native and
+single model. Multi-model is retired for new selections; existing sessions
+retain their recorded policy on resume.
 
 This section sets the concurrent child limit and eligible profiles.
 
@@ -483,9 +499,8 @@ codex2 = true
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
 
-A `spawn` call must name a model, or `current` for the parent session's own
-model. Unless the call also names a profile, Mjolnir runs the child on the
-eligible profile that offers that model and has the most quota left, meaning
+Mjolnir runs each child with the configured model and effort on the eligible
+profile that supports that selection and has the most quota left, meaning
 the lower of its 5-hour and weekly remaining percentages. A pay-per-use
 profile counts as 100% left, and a profile with no quota report comes last. On
 a tie, the parent's own profile wins. `mj doctor` shows, for each profile,
@@ -793,7 +808,7 @@ EC2 machine launches one instance per session. See
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image `mj setup` writes. |
+| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image used by built-in container targets. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
@@ -995,8 +1010,8 @@ and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 
-Harness-home variables influence `mj setup` discovery when no profile is yet
-written:
+Harness-home variables influence automatic first-run discovery and explicit
+`mj setup` reruns. Existing profiles retain their configured homes:
 
 | Harness | Discovery variable | Conventional home |
 | --- | --- | --- |

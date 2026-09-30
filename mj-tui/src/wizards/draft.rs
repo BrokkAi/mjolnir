@@ -49,6 +49,21 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn set_profile(&mut self, index: usize);
     fn target(&self) -> usize;
     fn set_target(&mut self, index: usize);
+    fn launch_error(&self) -> Option<&str>;
+    fn profile_step_skipped(&self) -> bool;
+    fn set_profile_step_skipped(&mut self, skipped: bool);
+    fn skips_review(&self) -> bool {
+        self.profile_step_skipped() && self.target_step_skipped()
+    }
+    fn has_back(&self) -> bool {
+        match self.step() {
+            WizardStep::Profile => false,
+            WizardStep::Target => !self.profile_step_skipped(),
+            WizardStep::Bundle | WizardStep::ProjectDirectory => !self.skips_review(),
+            WizardStep::Launching => false,
+            _ => true,
+        }
+    }
     fn target_step_skipped(&self) -> bool;
     fn set_target_step_skipped(&mut self, skipped: bool);
     fn mounts(&self) -> &MountWizard;
@@ -56,6 +71,10 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
     fn form_mut(&mut self) -> &mut Dialog<WizardControl>;
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation>;
+    fn sizing_error(&self) -> Option<&str>;
+    fn resource_editor(&self) -> &ResourceEditor;
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor;
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>>;
     /// The three sizing fields at once, so a caller can read the cached AWS
     /// sizes while writing the chosen allocation and the sizing error.
     fn sizing_mut(
@@ -156,7 +175,7 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
 }
 
 /// Whether the target step's Next is enabled: the draft must be able to use
-/// the selected target, and an EC2 target must already have a size.
+/// the selected target, and a sized target must have a valid allocation.
 pub(crate) fn target_advance_enabled<W: WizardDraft>(
     dashboard: &DashboardState,
     wizard: &W,
@@ -166,7 +185,7 @@ pub(crate) fn target_advance_enabled<W: WizardDraft>(
         && (wizard.resource_allocation().is_some()
             || !matches!(
                 dashboard.config.targets.get(&target_id),
-                Some(TargetTemplate::AwsEc2 { .. })
+                Some(target) if target_is_sized(target)
             ))
 }
 
@@ -195,6 +214,15 @@ impl WizardDraft for NewWizard {
         self.target = index;
     }
 
+    fn launch_error(&self) -> Option<&str> {
+        self.remote_preflight_error.as_deref()
+    }
+    fn profile_step_skipped(&self) -> bool {
+        self.profile_step_skipped
+    }
+    fn set_profile_step_skipped(&mut self, skipped: bool) {
+        self.profile_step_skipped = skipped;
+    }
     fn target_step_skipped(&self) -> bool {
         self.target_step_skipped
     }
@@ -221,6 +249,20 @@ impl WizardDraft for NewWizard {
 
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation> {
         self.resource_allocation.as_ref()
+    }
+
+    fn sizing_error(&self) -> Option<&str> {
+        self.sizing_error.as_deref()
+    }
+
+    fn resource_editor(&self) -> &ResourceEditor {
+        &self.resource_editor
+    }
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
+        &mut self.resource_editor
+    }
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
+        &self.aws_options
     }
 
     fn sizing_mut(
@@ -251,7 +293,10 @@ impl WizardDraft for NewWizard {
 
     /// Creation asks nothing of the daemon before Create, so returning to the
     /// review only puts the draft back.
-    fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+    fn reenter_review(mut self, dashboard: &mut DashboardState) -> DashboardAction {
+        if self.skips_review() {
+            self.step = WizardStep::Launching;
+        }
         dashboard.keep(self)
     }
 
@@ -267,13 +312,14 @@ impl WizardDraft for NewWizard {
     }
 
     /// Anything that changes what would be created invalidates the remote
-    /// creation preflight. Removing an attachment, adjusting sizes, opening a
-    /// fresh attachment editor and editing a field do not, because none of
+    /// creation preflight. Removing an attachment, opening a fresh
+    /// attachment editor and editing an unrelated field do not, because none of
     /// them changes the sources the preflight resolved.
     fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange) {
         if matches!(
             change,
             DraftChange::BundleSelected
+                | DraftChange::ResourcesAdjusted
                 | DraftChange::TargetSelected
                 | DraftChange::AttachmentOpened
                 | DraftChange::ReviewLeft
@@ -303,9 +349,6 @@ impl WizardDraft for NewWizard {
         }
         if self.step == WizardStep::Bundle && id == WizardControl::RemoveBundle {
             return Ok(dashboard.begin_bundle_removal(self));
-        }
-        if self.subagents.activate(id) {
-            return Ok(dashboard.keep(self));
         }
         if id == WizardControl::Back {
             return Err(self);
@@ -390,13 +433,6 @@ impl WizardDraft for NewWizard {
         }
     }
 
-    fn route_extra_interaction(
-        &mut self,
-        interaction: Option<Interaction<WizardControl>>,
-    ) -> Option<Interaction<WizardControl>> {
-        self.subagents.combo.route(interaction)
-    }
-
     /// Every target is offered, and the size is prepared for whichever one is
     /// picked; an unusable target is refused later, on Next.
     fn prepares_target_on_select(&self, _dashboard: &DashboardState) -> bool {
@@ -451,15 +487,6 @@ impl WizardDraft for NewWizard {
                     .is_some_and(|options| options.available) =>
             {
                 self.create_managed_worktree = !self.create_managed_worktree;
-                dashboard.record_event_handled();
-            }
-            Interaction::ComboBoxCommit(
-                WizardControl::Subagents
-                | WizardControl::SubagentModel
-                | WizardControl::SubagentEffort,
-                _,
-            ) if self.subagent_choice_applies(&dashboard.config) => {
-                self.subagents.apply(interaction);
                 dashboard.record_event_handled();
             }
             _ => {}
@@ -540,7 +567,7 @@ impl WizardDraft for NewWizard {
                     ControlKind::Button,
                     !dashboard.config.bundles.is_empty(),
                 );
-                declare_wizard_buttons(form, true, !dashboard.config.bundles.is_empty());
+                declare_wizard_buttons(form, self.has_back(), !dashboard.config.bundles.is_empty());
             }
             WizardStep::ProjectDirectory => {
                 form.declare_with_enabled(
@@ -555,7 +582,7 @@ impl WizardDraft for NewWizard {
                         true,
                     );
                 }
-                declare_wizard_buttons(form, true, true);
+                declare_wizard_buttons(form, self.has_back(), true);
             }
             WizardStep::NewBundle => self.declare_project_controls(form),
             step => unreachable!("{step:?} is declared by declare_wizard_controls"),
@@ -599,16 +626,10 @@ impl WizardDraft for NewWizard {
                     .is_some_and(|options| options.available),
             );
         }
-        if self.subagent_choice_applies(&dashboard.config) {
-            self.subagents.declare(form);
-        }
         let ready = !is_bare_project_target(target)
             || self.selected_worktree_options(&dashboard.config).is_some()
             || self.remote_preflight_error.is_some();
-        ready
-            && !self.remote_preflight_in_flight
-            && (!self.subagent_choice_applies(&dashboard.config)
-                || self.subagents.error().is_none())
+        ready && !self.remote_preflight_in_flight
     }
 }
 
@@ -637,6 +658,18 @@ impl WizardDraft for ResumeWizard {
         self.target = index;
     }
 
+    fn launch_error(&self) -> Option<&str> {
+        self.preparation_error
+            .as_deref()
+            .or(self.preflight_error.as_deref())
+            .or(self.mounts.error.as_deref())
+    }
+    fn profile_step_skipped(&self) -> bool {
+        self.profile_step_skipped
+    }
+    fn set_profile_step_skipped(&mut self, skipped: bool) {
+        self.profile_step_skipped = skipped;
+    }
     fn target_step_skipped(&self) -> bool {
         self.target_step_skipped
     }
@@ -663,6 +696,20 @@ impl WizardDraft for ResumeWizard {
 
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation> {
         self.resource_allocation.as_ref()
+    }
+
+    fn sizing_error(&self) -> Option<&str> {
+        self.sizing_error.as_deref()
+    }
+
+    fn resource_editor(&self) -> &ResourceEditor {
+        &self.resource_editor
+    }
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
+        &mut self.resource_editor
+    }
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
+        &self.aws_options
     }
 
     fn sizing_mut(
@@ -695,7 +742,14 @@ impl WizardDraft for ResumeWizard {
             .and_then(|session| session.resource_allocation.as_ref())
     }
 
-    fn reenter_review(self, dashboard: &mut DashboardState) -> DashboardAction {
+    fn reenter_review(mut self, dashboard: &mut DashboardState) -> DashboardAction {
+        if self.skips_review() {
+            self.step = WizardStep::Launching;
+            if !self.moving {
+                let profile = self.destination_profile(dashboard);
+                return dashboard.preflight_resume_session_action(self, profile);
+            }
+        }
         if !self.moving {
             return dashboard.keep(self);
         }
@@ -740,9 +794,6 @@ impl WizardDraft for ResumeWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
-        if self.step == WizardStep::Review && self.subagents.activate(id) {
-            return Ok(dashboard.keep(self));
-        }
         if id == WizardControl::ChooseMoveFiles
             && self
                 .preparation
@@ -755,11 +806,21 @@ impl WizardDraft for ResumeWizard {
         }
         if self.step == WizardStep::MoveFiles {
             match id {
-                WizardControl::Back => self.step = WizardStep::Review,
+                WizardControl::Back => {
+                    self.step = if self.skips_review() {
+                        WizardStep::Launching
+                    } else {
+                        WizardStep::Review
+                    }
+                }
                 WizardControl::Next => {
                     self.files.selection.acknowledge_large_transfer = true;
                     self.files.reviewed = true;
-                    self.step = WizardStep::Review;
+                    self.step = if self.skips_review() {
+                        WizardStep::Launching
+                    } else {
+                        WizardStep::Review
+                    };
                     let profile = self.destination_profile(dashboard);
                     return Ok(dashboard.start_move_preparation(self, profile));
                 }
@@ -805,28 +866,11 @@ impl WizardDraft for ResumeWizard {
             .is_none()
     }
 
-    fn route_extra_interaction(
-        &mut self,
-        interaction: Option<Interaction<WizardControl>>,
-    ) -> Option<Interaction<WizardControl>> {
-        self.subagents.combo.route(interaction)
-    }
-
     fn apply_extra_interaction(
         &mut self,
-        dashboard: &mut DashboardState,
+        _dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     ) {
-        if self.subagent_choice_applies(dashboard)
-            && let Some(changed) = self.subagents.apply(interaction)
-        {
-            // A prepared Move describes one exact destination draft.
-            if changed {
-                invalidate_move_preparation(self);
-            }
-            dashboard.record_event_handled();
-            return;
-        }
         if let Interaction::Toggle(WizardControl::MoveFile(index)) = interaction
             && let Some(assessment) = self.preparation.as_ref().and_then(|p| p.workspace.as_ref())
             && let Some((node, _)) = self.files.rows(assessment).get(*index)
@@ -904,18 +948,29 @@ impl WizardDraft for ResumeWizard {
         if self.has_queued_work(dashboard) {
             form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
         }
-        let subagents_ready = if self.subagent_choice_applies(dashboard) {
-            self.subagents.declare(form);
-            self.subagents.error().is_none()
-        } else {
-            true
-        };
-        subagents_ready
-            && (!self.moving || self.preparation.is_some() || self.preparation_error.is_some())
+        !self.moving || self.preparation.is_some() || self.preparation_error.is_some()
     }
 }
 
 impl ResumeWizard {
+    pub(crate) fn subagent_change(
+        &self,
+        dashboard: &DashboardState,
+    ) -> Option<mj_core::subagent::SubagentPolicy> {
+        if !self.moving {
+            return None;
+        }
+        let policy = &dashboard.config.profiles[&self.destination_profile(dashboard)].subagents;
+        let stored = dashboard
+            .state
+            .sessions
+            .get(&self.session_id)
+            .and_then(|session| session.subagents.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        (policy != &stored).then(|| policy.clone())
+    }
+
     /// The profile this resume or move lands on.
     pub(crate) fn destination_profile(&self, dashboard: &DashboardState) -> String {
         dashboard

@@ -8,7 +8,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use textwrap::WordSplitter;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The microphone glyph in the symbol set in force, so a console without UTF-8
@@ -704,63 +703,7 @@ fn wrap_line(
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
     let continuation_indent = continuation_indent.min(width.saturating_sub(1));
-    if line.spans.len() == 1 {
-        return wrap_single_span(line, width, continuation_indent, sources);
-    }
     wrap_styled_graphemes(line, width, continuation_indent, sources)
-}
-
-fn wrap_single_span(
-    line: Line<'static>,
-    width: usize,
-    continuation_indent: usize,
-    mut sources: Option<&mut CellSources>,
-) -> Vec<Line<'static>> {
-    let span = &line.spans[0];
-    if span.content.is_empty() {
-        if let Some(sources) = sources {
-            sources.push(Vec::new());
-        }
-        return vec![Line::default()];
-    }
-    let indent = " ".repeat(continuation_indent);
-    let options = textwrap::Options::new(width)
-        .subsequent_indent(&indent)
-        .break_words(false)
-        .word_splitter(WordSplitter::NoHyphenation);
-    let wrapped = textwrap::wrap(span.content.as_ref(), options);
-    let mut out = Vec::new();
-    for (index, wrapped_line) in wrapped.into_iter().enumerate() {
-        // textwrap writes the continuation indent into the span's own text.
-        let indent_cells = if index == 0 { 0 } else { continuation_indent };
-        let styled = Line::from(Span::styled(wrapped_line.into_owned(), span.style));
-        let styled_width = styled.width();
-        if styled_width <= width {
-            if let Some(sources) = sources.as_deref_mut() {
-                let mut cells = vec![None; indent_cells.min(styled_width)];
-                cells.resize(styled_width, Some(0));
-                sources.push(cells);
-            }
-            out.push(styled);
-        } else {
-            let first_row = sources.as_deref().map_or(0, Vec::len);
-            out.extend(wrap_styled_graphemes(
-                styled,
-                width,
-                continuation_indent,
-                sources.as_deref_mut(),
-            ));
-            if let Some(cells) = sources
-                .as_deref_mut()
-                .and_then(|sources| sources.get_mut(first_row))
-            {
-                for cell in cells.iter_mut().take(indent_cells) {
-                    *cell = None;
-                }
-            }
-        }
-    }
-    out
 }
 
 /// One grapheme of a line being wrapped, kept as a byte range into a shared
@@ -792,7 +735,7 @@ impl StyledBuffer {
         let mut graphemes = Vec::new();
         for span in &line.spans {
             let style = styles.len();
-            styles.push(span.style);
+            styles.push(line.style.patch(span.style));
             let base = text.len();
             text.push_str(span.content.as_ref());
             for (offset, grapheme) in text[base..].grapheme_indices(true) {
@@ -1092,6 +1035,31 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("👩‍💻")));
         assert!(rendered.iter().any(|line| line.contains("e\u{301}")));
         assert!(rendered.iter().any(|line| line.contains("ｶﾞ")));
+    }
+
+    #[test]
+    fn plain_and_styled_text_wrap_identically_including_long_paths() {
+        let prefix = "bifrost2 · 2 repositories ";
+        let path = "/tmp/claude-1000/-home-jonathan-Projects-bifrost2/9275cf63-2d14-4cd5-ad2a-5ec29e36c468/scratchpad/replay";
+        let plain = Line::raw(format!("{prefix}{path}"));
+        let styled = Line::from(vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(path, Style::default().fg(Color::Blue)),
+        ]);
+        for width in [1, 12, 40, 80] {
+            let rows = wrap_styled_line(plain.clone(), width, 0);
+            let (styled_rows, sources) = wrap_styled_line_with_sources(styled.clone(), width, 0);
+            assert_eq!(text(&rows), text(&styled_rows), "width {width}");
+            assert!(rows.iter().all(|row| row.width() <= width));
+            let actual = text(&rows).join("");
+            assert!(actual.ends_with(path), "{actual}");
+            for (row, source) in styled_rows.iter().zip(sources) {
+                assert_eq!(row.width(), source.len());
+                for span in &row.spans {
+                    assert!(matches!(span.style.fg, Some(Color::Yellow | Color::Blue)));
+                }
+            }
+        }
     }
 
     #[test]

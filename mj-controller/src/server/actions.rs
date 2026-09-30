@@ -25,7 +25,7 @@ pub enum ControllerAction {
         /// revision for a raw managed worktree.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
-        /// Omitted reuses the last accepted top-level session choice.
+        /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
         /// Which workspace the session belongs to. Optional on the wire so a
@@ -331,6 +331,13 @@ pub enum PreflightRequest {
     Resume(ResumePreflightRequest),
     CompletePath(PathCompletionRequest),
     DiscoverProjects(ProjectDiscoveryPreflight),
+    ProjectCatalog {
+        refresh: bool,
+        retry: bool,
+        reply: tokio::sync::oneshot::Sender<
+            Result<mj_core::project_catalog::ProjectCatalogView, String>,
+        >,
+    },
 }
 
 /// A project picker lookup sharing the preflight supervision and concurrency cap.

@@ -148,6 +148,7 @@ mod tests {
                 home: PathBuf::from("/profiles/profile-1"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -171,6 +172,7 @@ mod tests {
         state.sessions.insert(
             "session-1".into(),
             SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,

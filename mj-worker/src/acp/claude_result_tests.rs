@@ -394,6 +394,104 @@ async fn a_cancel_in_flight_lets_the_reply_end_the_prompt() {
     probe.close().await;
 }
 
+/// #1137: the cancellation acknowledgement and an SDK cycle result can arrive
+/// while Claude's prompt is still running. Only the prompt response lets the
+/// worker claim the Move's checkpoint; the controller needs no idle guess.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
+    use crate::relay::{DurableRelay, HarnessTurnPolicy, RelayCommand, test_support::submit_relay};
+    use crate::worker_runtime::record_runtime_event;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
+    durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let mut in_flight = BTreeMap::new();
+    let mut probe = ClaudeProbe::new().await;
+    loop {
+        let event = probe.event().await;
+        let configured = matches!(event, RuntimeEvent::SessionConfigured { .. });
+        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        if configured {
+            break;
+        }
+    }
+    let command = RelayCommand::Prompt {
+        prompt: vec![ContentBlock::Text(TextContent::new("go"))],
+    };
+    {
+        let mut durable = relay.lock().unwrap();
+        submit_relay(&mut durable, "prompt-1", command.clone());
+        assert_eq!(
+            durable.claim_pending_commands(true).unwrap()[0].command_id,
+            "prompt-1"
+        );
+        submit_relay(
+            &mut durable,
+            "move-cut",
+            RelayCommand::BeginCheckpoint {
+                reason: Some("Move".into()),
+            },
+        );
+        submit_relay(&mut durable, "cancel-1", RelayCommand::CancelTurn);
+        let claimed = durable.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "cancel-1");
+    }
+    in_flight.insert("prompt-1".into(), command);
+    in_flight.insert("cancel-1".into(), RelayCommand::CancelTurn);
+    let prompt = probe.prompt("prompt-1", "go").await;
+    probe
+        .commands
+        .send(CommandRequest::Cancel {
+            request_id: "cancel-1".into(),
+            steering_prompt: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(probe.message().await["method"], "session/cancel");
+    probe.sdk_result(success("human")).await;
+    // Cross the pipe buffer boundary while the cancelled prompt still owns work.
+    probe.chunk(&"still working ".repeat(8192)).await;
+    let mut acknowledged = false;
+    let mut cycle_result = false;
+    let mut output_received = false;
+    while !(acknowledged && cycle_result && output_received) {
+        let event = probe.event().await;
+        acknowledged |= matches!(event, RuntimeEvent::CancelApplied { .. });
+        cycle_result |= matches!(event, RuntimeEvent::ClaudeTurnResult(_));
+        output_received |= matches!(&event, RuntimeEvent::SessionUpdate { update } if update["sessionUpdate"] == "agent_message_chunk");
+        assert!(!matches!(event, RuntimeEvent::PromptFinished { .. }));
+        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        let mut durable = relay.lock().unwrap();
+        assert!(durable.claim_pending_commands(true).unwrap().is_empty());
+        assert!(durable.operational_state().checkpoint_ready.is_none());
+        assert!(durable.operational_state().active_prompt.is_some());
+    }
+    probe
+        .result(&prompt, json!({"stopReason": "cancelled"}))
+        .await;
+    loop {
+        let event = probe.event().await;
+        let finished = matches!(event, RuntimeEvent::PromptFinished { .. });
+        record_runtime_event(&relay, &mut in_flight, &probe.commands, event).unwrap();
+        if finished {
+            break;
+        }
+    }
+    {
+        let mut durable = relay.lock().unwrap();
+        let claimed = durable.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].command_id, "move-cut");
+        durable.record_checkpoint_ready("move-cut").unwrap();
+        assert!(durable.operational_state().checkpoint_ready.is_some());
+        assert!(durable.operational_state().active_prompt.is_none());
+    }
+    probe.close().await;
+}
+
 #[tokio::test]
 async fn background_and_interrupted_cycles_do_not_end_the_prompt() {
     let mut probe = ClaudeProbe::new().await;

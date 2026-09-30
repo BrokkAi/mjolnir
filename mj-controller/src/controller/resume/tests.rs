@@ -25,6 +25,82 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecuto
 
 use super::*;
 
+#[test]
+fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload() {
+    const CHILD: &str = "MJ_ACCEPTED_SOURCE_REPAIR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload")
+            .env(CHILD, "1").isolated_store(directory.path()).run();
+        return;
+    }
+    struct SourceExists;
+    impl CommandExecutor for SourceExists {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(id);
+    session.state = SessionState::Stopped;
+    session.checkpoint = Some(
+        crate::controller::test_support::write_network_checkpoint_archive(directory.path(), id, 0),
+    );
+    let bundle = ProjectBundle {
+        primary_repo: "project".into(),
+        repositories: vec![ProjectRepository {
+            id: "project".into(),
+            github: Some("acme/original".into()),
+            local: None,
+            destination: "custom-layout".into(),
+            git_ref: None,
+        }],
+    };
+    let project = crate::project_catalog::snapshot(&bundle, &SourceExists, true).unwrap();
+    session.project = Some(project.clone());
+    crate::database::store_catalog_project("project", &project, true).unwrap();
+    crate::database::save_session(&session).unwrap();
+    let config = Config {
+        bundles: BTreeMap::from([("project".into(), bundle)]),
+        ..Config::default()
+    };
+    config.save().unwrap();
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    assert!(matches!(
+        controller
+            .replace_resume_repository_origin(id, "project", "acme/moved", &SourceExists)
+            .unwrap(),
+        ResumeRepositorySourcePreflight::Ready(_)
+    ));
+    let accepted = crate::database::load_session_record(id)
+        .unwrap()
+        .unwrap()
+        .project
+        .unwrap();
+    assert_eq!(accepted.bundle.primary_repo, "project");
+    assert_eq!(
+        accepted.bundle.repositories[0].destination,
+        PathBuf::from("custom-layout")
+    );
+    assert_eq!(
+        accepted.network_sources["project"].fetch_url,
+        "https://github.com/acme/moved.git"
+    );
+    assert_eq!(accepted.identities, project.identities);
+}
+
 /// A person choosing a container for a local session has to see what the
 /// move does before it happens, and a person resuming the same session in
 /// place must not be asked anything.
@@ -159,6 +235,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -343,6 +420,7 @@ fn repository_preflight_distinguishes_the_original_source_from_a_reused_name() {
     assert_eq!(
         checkpoint_source_missing_commit(
             &configured,
+            None,
             &CheckpointRepositoryBundle {
                 metadata: snapshot.metadata.clone(),
                 committed_bundle: snapshot.committed_bundle.clone(),
@@ -370,6 +448,7 @@ fn repository_preflight_distinguishes_the_original_source_from_a_reused_name() {
     assert!(
         checkpoint_source_missing_commit(
             &configured,
+            None,
             &CheckpointRepositoryBundle {
                 metadata: snapshot.metadata,
                 committed_bundle: snapshot.committed_bundle,
@@ -536,8 +615,14 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
     };
 
     assert_eq!(
-        checkpoint_source_missing_commit(&configured, &archived, &executor, Some("secret-token"))
-            .unwrap(),
+        checkpoint_source_missing_commit(
+            &configured,
+            None,
+            &archived,
+            &executor,
+            Some("secret-token")
+        )
+        .unwrap(),
         None
     );
 
@@ -634,6 +719,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -996,6 +1082,7 @@ fn cross_harness_provision_cancellation_stops_the_next_command() {
 #[test]
 fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
+        project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
         launch_branch: None,
@@ -1218,6 +1305,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1369,6 +1457,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1554,6 +1643,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1825,6 +1915,7 @@ exit 0
                 home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
