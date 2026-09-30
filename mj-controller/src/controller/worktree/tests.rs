@@ -1590,6 +1590,7 @@ fn a_converted_record_is_a_valid_bundle_session() {
             home: PathBuf::from("/profiles/codex"),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1783,6 +1784,7 @@ fn a_session_that_left_its_target_is_a_valid_raw_session() {
             home: PathBuf::from("/profiles/codex"),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );

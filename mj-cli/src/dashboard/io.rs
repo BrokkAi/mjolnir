@@ -1438,10 +1438,9 @@ impl DashboardContext {
                             if let Err(error) =
                                 super::actions::start_resume_repository_preflight(self, launch)
                             {
-                                self.dashboard.set_notice(format!(
+                                self.dashboard.fail_resume_preflight(format!(
                                     "Could not check checkpoint repositories: {error:#}"
                                 ));
-                                self.dashboard.end_resume_preflight();
                             }
                         }
                         launch => {
@@ -1461,8 +1460,7 @@ impl DashboardContext {
                         let error = format!("Could not check attached directories: {error}");
                         self.dashboard
                             .apply_remote_session_preflight(generation, Err(error.clone()));
-                        self.dashboard.set_notice(error);
-                        self.dashboard.end_resume_preflight();
+                        self.dashboard.fail_resume_preflight(error);
                     }
                 }
             }
@@ -1521,10 +1519,9 @@ impl DashboardContext {
                             self.dashboard
                                 .apply_repository_origin_failure(&repository_id, error);
                         } else {
-                            self.dashboard.set_notice(format!(
+                            self.dashboard.fail_resume_preflight(format!(
                                 "Could not check checkpoint repositories: {error}"
                             ));
-                            self.dashboard.end_resume_preflight();
                         }
                     }
                 }
@@ -2386,6 +2383,7 @@ mod tests {
                 home: PathBuf::from("/home/dev/.codex"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

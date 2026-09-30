@@ -224,6 +224,7 @@ pub enum DashboardAction {
         id: u64,
         profile: String,
         model: Option<String>,
+        config: String,
     },
     ProbeGitStatus {
         session_id: String,

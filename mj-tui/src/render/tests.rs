@@ -2273,6 +2273,7 @@ fn add_api_priced_profile(dashboard: &mut DashboardState) {
         mj_core::config::HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Codex,
             home: std::path::PathBuf::from("/profiles/api-priced"),

@@ -20,12 +20,32 @@ pub enum SubagentPolicy {
 }
 
 impl SubagentPolicy {
-    pub const LABELS: [&str; 4] = [
-        "Native",
-        "Mjolnir, all models",
-        "Mjolnir, single model",
-        "None",
-    ];
+    pub fn is_native(&self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    /// Profile setup offers native delegation or one explicitly chosen model.
+    /// Legacy session policies remain readable, and children still use None.
+    pub fn validate_profile(&self, kind: crate::config::HarnessKind) -> anyhow::Result<()> {
+        match self {
+            Self::Native => Ok(()),
+            Self::SingleModel { model, effort } => {
+                anyhow::ensure!(
+                    kind.supports_delegation_tools(),
+                    "Mjolnir subagents require a Claude or Codex profile"
+                );
+                anyhow::ensure!(!model.trim().is_empty(), "select a subagent model");
+                anyhow::ensure!(
+                    effort.as_ref().is_none_or(|value| !value.trim().is_empty()),
+                    "subagent effort cannot be empty"
+                );
+                Ok(())
+            }
+            Self::AllModels | Self::None => {
+                anyhow::bail!("profile subagents must be native or single_model")
+            }
+        }
+    }
 
     pub fn uses_mjolnir(&self) -> bool {
         matches!(self, Self::AllModels | Self::SingleModel { .. })
@@ -33,27 +53,6 @@ impl SubagentPolicy {
 
     pub fn suppresses_native(&self) -> bool {
         !matches!(self, Self::Native)
-    }
-
-    pub fn index(&self) -> usize {
-        match self {
-            Self::Native => 0,
-            Self::AllModels => 1,
-            Self::SingleModel { .. } => 2,
-            Self::None => 3,
-        }
-    }
-
-    pub fn at_index(index: usize) -> Self {
-        match index {
-            1 => Self::AllModels,
-            2 => Self::SingleModel {
-                model: String::new(),
-                effort: None,
-            },
-            3 => Self::None,
-            _ => Self::Native,
-        }
     }
 
     pub fn parent_role(&self) -> Option<SubagentMcpRole> {

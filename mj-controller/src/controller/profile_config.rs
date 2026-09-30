@@ -26,6 +26,21 @@ pub async fn subagent_options(
     .await
 }
 
+/// Setup probes its draft without saving it or changing the live configuration.
+pub async fn subagent_options_for(
+    config: Config,
+    parent: String,
+    model: Option<String>,
+) -> Result<mj_core::subagent::SubagentOptions> {
+    subagent_options_with(&config, &parent, model, |id, model| {
+        let draft = config.clone();
+        serialized(id.clone(), move |cancelled| {
+            discover_from_config(&draft, &id, model, false, cancelled)
+        })
+    })
+    .await
+}
+
 /// Refuses a top-level session policy its profile cannot run. Only Claude and
 /// Codex take Mjolnir's delegation tools, and a single-model policy must name
 /// a model and effort that discovery offers now.
@@ -40,7 +55,9 @@ pub async fn validate_session_subagent_policy(
         .kind;
     refuse_unsupported_policy(kind, policy)?;
     if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = policy {
-        let options = subagent_options(profile_id.to_owned(), Some(model.clone())).await?;
+        let options =
+            subagent_options_for(config.clone(), profile_id.to_owned(), Some(model.clone()))
+                .await?;
         refuse_unavailable_choice(&options, policy)?;
     }
     Ok(())
@@ -308,6 +325,16 @@ fn discover_blocking(
         "profile discovery cancelled"
     );
     let config = Config::load()?;
+    discover_from_config(&config, profile_id, model, refresh, cancelled)
+}
+
+fn discover_from_config(
+    config: &Config,
+    profile_id: &str,
+    model: Option<String>,
+    refresh: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ProfileConfig> {
     let profile = config
         .enabled_profile(profile_id)
         .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
@@ -541,6 +568,7 @@ mod tests {
                     home: std::path::PathBuf::from("/unused"),
                     environment: Default::default(),
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                 },
             );
@@ -630,6 +658,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
         let mut choices = ProfileConfig {
@@ -655,6 +684,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
         let key = || fingerprint(&profile, &BTreeMap::new()).unwrap();
@@ -699,6 +729,7 @@ mod tests {
             home: root.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {

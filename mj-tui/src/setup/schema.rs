@@ -28,7 +28,14 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"max_concurrent":6,"eligible_profiles":{}})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"subagents":{"mode":"native"}})
+        }
+        "profiles" if path.len() == 3 && key == "subagents" => {
+            if value["mode"] == "single_model" {
+                json!({"mode":"single_model","model":"","effort":null})
+            } else {
+                json!({"mode":"native"})
+            }
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -279,6 +286,7 @@ pub(super) fn label(key: &str) -> String {
 pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        ["profiles", _, "subagents", "effort"] => "Model default".to_owned(),
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
         // A cleared number takes the setting's own default.
@@ -429,7 +437,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
         "subagents" => {
             // A cleared limit is the default one, which still applies.
             // Whether any given session uses Mjolnir sub-agents is now a
-            // per-session choice, so this page only bounds them.
+            // profile setting, so this page only bounds them.
             let limit = section["max_concurrent"].as_u64().unwrap_or(
                 u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
                     .unwrap_or(u64::MAX),
@@ -508,6 +516,8 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
         return value.to_owned();
     }
     match value {
+        "native" => "Native",
+        "single_model" => "Mjolnir, single model",
         "local" => "This machine",
         "ssh" => "SSH host",
         "aws-ec2" => "Amazon EC2",
@@ -536,6 +546,9 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
 pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
     let values: &[&str] = match key {
+        "mode" if path.len() == 4 && path[0] == "profiles" && path[2] == "subagents" => {
+            &["native", "single_model"]
+        }
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -629,6 +642,9 @@ pub(super) fn search_aliases(path: &[String]) -> &'static [&'static str] {
 }
 
 pub(super) fn help(path: &[String]) -> &'static str {
+    if path.len() >= 3 && path[0] == "profiles" && path[2] == "subagents" {
+        return "Delegation for new sessions and Moves using this profile. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort.";
+    }
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."

@@ -93,6 +93,7 @@ fn ssh_docker_registration_config() -> Config {
             home: PathBuf::from("/home/dev/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );

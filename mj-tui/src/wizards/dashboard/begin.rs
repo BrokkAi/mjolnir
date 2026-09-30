@@ -50,9 +50,6 @@ impl DashboardState {
         self.mode = Mode::New(NewWizard {
             worktree_options: None,
             create_managed_worktree: false,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                self.state.last_subagent_policy.clone(),
-            )),
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),
             step: WizardStep::Profile,
 
@@ -60,6 +57,7 @@ impl DashboardState {
             bundle,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::new(Vec::new()),
 
             project_picker: Box::default(),
@@ -82,6 +80,10 @@ impl DashboardState {
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -130,11 +132,13 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
@@ -142,10 +146,13 @@ impl DashboardState {
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
-            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -195,11 +202,13 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
@@ -207,10 +216,13 @@ impl DashboardState {
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
-            subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -258,11 +270,13 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
@@ -272,12 +286,13 @@ impl DashboardState {
             // Move's safe default is to leave pending work idle. The review
             // checkbox can explicitly opt into starting it after readiness.
             discard_queue: true,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                session.subagents.clone().unwrap_or_default(),
-            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
         self.mount_history_refresh_pending = true;
+        let action = self.skip_initial_profile();
+        if action != DashboardAction::None {
+            return action;
+        }
         self.resolve_all_aws_resource_options_action()
     }
 
@@ -333,11 +348,13 @@ impl DashboardState {
             preparing: false,
             preparation_request_id: None,
             preparation_error: None,
+            preflight_error: None,
             step: WizardStep::Profile,
 
             profile,
             target,
             target_step_skipped: false,
+            profile_step_skipped: false,
             mounts: MountWizard::with_mounts(
                 Vec::new(),
                 operation
@@ -356,16 +373,29 @@ impl DashboardState {
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
-            subagents: Box::new(subagents::SubagentDraft::new(
-                operation
-                    .selection
-                    .subagents
-                    .clone()
-                    .or_else(|| session.subagents.clone())
-                    .unwrap_or_default(),
-            )),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
         });
+    }
+
+    pub(in crate::wizards) fn skip_initial_profile(&mut self) -> DashboardAction {
+        match &self.mode {
+            Mode::New(wizard) if wizard.profile_count(self) == 1 => {}
+            Mode::Resume(wizard) if wizard.profile_count(self) == 1 => {}
+            _ => return DashboardAction::None,
+        }
+        match std::mem::replace(&mut self.mode, Mode::Dashboard) {
+            Mode::New(mut wizard) => {
+                wizard.set_profile_step_skipped(true);
+                wizard.profile = 0;
+                self.advance_new_wizard(wizard)
+            }
+            Mode::Resume(mut wizard) => {
+                wizard.set_profile_step_skipped(true);
+                wizard.profile = 0;
+                self.advance_resume_wizard(wizard)
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {

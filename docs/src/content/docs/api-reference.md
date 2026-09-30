@@ -436,10 +436,11 @@ workspaces, and invalid selections fail visibly. `at` cannot be combined with
 or `none`. `single_model` requires `model`, which must be one the parent's
 profiles offer, and takes an optional `effort`. The other modes take no other
 fields. The API spells the modes with underscores; `mj new --subagents` spells
-them with hyphens (`all-models`, `single-model`). Only Claude and Codex
-sessions accept a mode other than `native`. When `subagents` is omitted, the
-session reuses the last accepted choice. An unsupported mode or an unavailable
-model answers `422` with the reason in the body.
+them with hyphens (`single-model`); the CLI offers Native and single model.
+Only Claude and Codex sessions accept a mode other than `native`. When
+`subagents` is omitted, the session uses the selected profile’s setting
+(Native when unset). An unsupported mode or an unavailable model answers
+`422` with the reason in the body.
 
 Session creation still returns its ID before preparation finishes. Wait for
 readiness or inspect the session's failure before prompting. Readiness guarantees

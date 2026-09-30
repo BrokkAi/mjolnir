@@ -4538,6 +4538,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 home: profile_home,
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

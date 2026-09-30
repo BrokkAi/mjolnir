@@ -72,7 +72,7 @@ pub(super) fn declare(wizard: &ResumeWizard, form: &mut Dialog<WizardControl>) {
         form.declare_with_enabled(WizardControl::MoveOtherFiles, ControlKind::Button, true);
         super::dashboard::declare_wizard_buttons(
             form,
-            true,
+            !wizard.skips_review(),
             assessment
                 .selection_problem(&wizard.files.selection)
                 .is_none(),
@@ -234,10 +234,26 @@ pub(super) fn render(
         frame,
         layout.actions,
         &[
-            (WizardControl::Back, "Back", true),
+            (
+                if wizard.skips_review() {
+                    WizardControl::Cancel
+                } else {
+                    WizardControl::Back
+                },
+                if wizard.skips_review() {
+                    "Cancel"
+                } else {
+                    "Back"
+                },
+                true,
+            ),
             (
                 WizardControl::Next,
-                "Continue",
+                if wizard.skips_review() {
+                    "Move"
+                } else {
+                    "Continue"
+                },
                 assessment
                     .selection_problem(&wizard.files.selection)
                     .is_none(),

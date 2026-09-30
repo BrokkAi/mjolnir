@@ -635,6 +635,12 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
+    /// Delegation for new sessions and Moves using this profile.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::subagent::SubagentPolicy::is_native"
+    )]
+    pub subagents: crate::subagent::SubagentPolicy,
 }
 
 /// The transcript budget a profile without an explicit `context_window_bytes`
@@ -729,6 +735,9 @@ impl HarnessProfile {
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
+        self.subagents
+            .validate_profile(self.kind)
+            .with_context(|| format!("profile {id:?}"))?;
         if self.kind == HarnessKind::Muse {
             if self.home.file_name().is_none_or(|name| name != "muse") {
                 bail!(

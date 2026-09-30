@@ -249,8 +249,8 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 
 /// Global policy for Mjolnir-managed child agents.
 ///
-/// Whether sub-agents run at all is now a per-session choice
-/// (`SessionRecord.subagents`), not a global setting.
+/// Delegation defaults belong to each HarnessProfile and are recorded in
+/// SessionRecord.subagents when a session is created, rather than a global switch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SubagentConfig {

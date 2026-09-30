@@ -570,6 +570,7 @@ mod tests {
                     home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]).into(),
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                 },
             );
@@ -740,6 +741,7 @@ mod tests {
                 home: directory.path().join("muse"),
                 environment: BTreeMap::new().into(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -785,6 +787,7 @@ mod tests {
                 home,
                 environment: BTreeMap::new().into(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

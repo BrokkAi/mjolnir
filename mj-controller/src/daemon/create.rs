@@ -109,18 +109,11 @@ impl RuntimeState {
         let supplied = request.subagents.clone();
         let (config, policy) = blocking(move || {
             let controller = Controller::load()?;
-            let kind = controller
+            let profile = controller
                 .config
                 .enabled_profile(&parent)
-                .context("parent profile unavailable")?
-                .kind;
-            let policy = supplied.unwrap_or_else(|| {
-                if kind.supports_delegation_tools() {
-                    controller.state.last_subagent_policy.clone()
-                } else {
-                    Default::default()
-                }
-            });
+                .context("parent profile unavailable")?;
+            let policy = supplied.unwrap_or_else(|| profile.subagents.clone());
             Ok((controller.config, policy))
         })
         .await?;

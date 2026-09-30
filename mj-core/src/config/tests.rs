@@ -97,6 +97,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         home: home.to_path_buf(),
         environment: environment.into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -124,6 +125,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
@@ -284,6 +286,7 @@ fn guardian_review_model_accepts_its_three_forms_only_on_a_custom_provider() {
         home: native.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: Some(GUARDIAN_REVIEW_SESSION.to_owned()),
     };
     let error = native_profile
@@ -302,6 +305,7 @@ fn a_codex_profile_with_no_home_yet_reports_a_native_login() {
         home: PathBuf::from("/does/not/exist"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     assert_eq!(profile.auth_scheme(), AuthScheme::NativeLogin);
@@ -685,6 +689,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         )]),
@@ -2950,4 +2955,33 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
             .machines
             .contains_key("local")
     );
+}
+
+#[test]
+fn profile_subagents_default_to_native_and_round_trip_a_fixed_model() {
+    use crate::subagent::SubagentPolicy;
+    let mut profile: HarnessProfile =
+        serde_json::from_value(serde_json::json!({"kind":"claude","home":"/profiles/claude"}))
+            .unwrap();
+    assert_eq!(profile.subagents, SubagentPolicy::Native);
+    assert!(
+        serde_json::to_value(&profile)
+            .unwrap()
+            .get("subagents")
+            .is_none()
+    );
+    profile.subagents = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    let encoded = toml::to_string(&profile).unwrap();
+    assert_eq!(toml::from_str::<HarnessProfile>(&encoded).unwrap(), profile);
+    assert!(profile.validate("claude").is_ok());
+    profile.subagents = SubagentPolicy::AllModels;
+    assert!(profile.validate("claude").is_err());
+    profile.subagents = SubagentPolicy::SingleModel {
+        model: "".into(),
+        effort: None,
+    };
+    assert!(profile.validate("claude").is_err());
 }

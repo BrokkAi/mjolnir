@@ -1999,6 +1999,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let mut rejected = mj_core::credentials::RejectedLogins::default();

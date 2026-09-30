@@ -222,6 +222,7 @@ fn configure_local_startup(config: &mut Config, codex_home: PathBuf) {
             home: codex_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -419,6 +420,7 @@ fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -692,6 +694,7 @@ fn build_config_with_runtimes(
                 home: home.path.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

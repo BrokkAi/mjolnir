@@ -278,8 +278,9 @@ impl DashboardState {
             Err(error) => {
                 if let Mode::New(wizard) = &mut self.mode {
                     wizard.remote_preflight_in_flight = false;
-                    if wizard.step == WizardStep::Review {
+                    if matches!(wizard.step, WizardStep::Review | WizardStep::Launching) {
                         wizard.remote_preflight_error = Some(error.clone());
+                        wizard.form.get_mut().focus(WizardControl::Submit);
                     }
                 }
                 self.apply_project_directory_validation(directory, Err(error));
@@ -366,7 +367,7 @@ impl DashboardState {
         };
         if !matches!(
             wizard.step,
-            WizardStep::ProjectDirectory | WizardStep::Review
+            WizardStep::ProjectDirectory | WizardStep::Review | WizardStep::Launching
         ) || wizard.project_directory.trim() != directory
         {
             return;
@@ -375,7 +376,11 @@ impl DashboardState {
         match result {
             Ok(()) => {
                 wizard.project_directory_error = None;
-                wizard.step = WizardStep::Review;
+                wizard.step = if wizard.skips_review() {
+                    WizardStep::Launching
+                } else {
+                    WizardStep::Review
+                };
                 wizard.form.get_mut().focus(WizardControl::Submit);
             }
             Err(error) => {

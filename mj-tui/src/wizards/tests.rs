@@ -1622,12 +1622,16 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
                 environment: Default::default(),
             },
         )]);
+        config
+            .profiles
+            .insert("profile-2".into(), config.profiles["profile"].clone());
         config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
         let mut state = State::default();
         state.remember_project_directory("local", std::path::Path::new("/home/me/project"));
@@ -1679,6 +1683,7 @@ fn new_session_profile_step_aligns_its_columns() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -1798,6 +1803,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -1823,9 +1829,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         .collect::<String>();
     assert!(rendered.contains("No guardian approval mode"));
 
-    // localhost is the only target, so Enter on the profile step passes the
-    // target step.
-    ready_key(&mut dashboard, key(KeyCode::Enter));
+    // Both single-choice selectors were skipped when the wizard opened.
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("expected local project directory step")
     };
@@ -1849,9 +1853,9 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         )),
     );
     assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        dashboard.take_prerequisite_check().unwrap(),
         DashboardAction::CreateSession {
-            subagents: None,
+            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
             create_managed_worktree: Some(true),
             workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
             profile_id: "kimi".into(),
@@ -3443,6 +3447,7 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -4229,118 +4234,7 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
     assert!(bare.contains("Create isolated checkout"), "{bare}");
 }
 
-/// Only Claude and Codex can receive Mjolnir's delegation tools, so only they
-/// show the choice. Native sub-agents are the default.
-#[test]
-fn new_session_wizard_shows_subagent_choices_only_for_claude_and_codex() {
-    for (profile, visible) in [(0_usize, true), (1, true), (3, false)] {
-        let configuration = subagent_wizard_config();
-        let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
-        dashboard.begin_new();
-        let Mode::New(wizard) = &mut dashboard.mode else {
-            panic!("new wizard")
-        };
-        wizard.profile = profile;
-        wizard.step = WizardStep::Review;
-        wizard.project_directory = "/work/main".into();
-        assert_eq!(
-            wizard.subagents.policy,
-            mj_core::subagent::SubagentPolicy::Native
-        );
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        let text = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert_eq!(
-            text.contains("Subagents"),
-            visible,
-            "profile {profile}:\n{text}"
-        );
-    }
-}
-
-/// The wizard sends the selected value for Claude and Codex, and `None` for a
-/// harness that cannot receive the tools at all.
-#[test]
-fn new_session_wizard_sends_subagent_choice() {
-    let submit = |profile: usize, toggle: bool| {
-        let mut dashboard =
-            DashboardState::new(subagent_wizard_config(), State::default(), BTreeMap::new());
-        dashboard.begin_new();
-        let Mode::New(wizard) = &mut dashboard.mode else {
-            panic!("new wizard")
-        };
-        wizard.profile = profile;
-        wizard.step = WizardStep::Review;
-        wizard.project_directory = "/work/main".into();
-        dashboard.apply_resolved_project_directory(
-            &dashboard.path_input_context(),
-            "/work/main",
-            Ok((
-                PathBuf::from("/work/main"),
-                mj_core::state::ManagedWorktreeOptions {
-                    available: true,
-                    default_create: false,
-                },
-            )),
-        );
-        // Draw the review step so its controls are declared, as the terminal
-        // does before any key reaches them.
-        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        if toggle {
-            let Mode::New(wizard) = &mut dashboard.mode else {
-                panic!("new wizard")
-            };
-            wizard.form.get_mut().focus(WizardControl::Subagents);
-            ready_key(&mut dashboard, key(KeyCode::Enter));
-            ready_key(&mut dashboard, key(KeyCode::Down));
-            ready_key(&mut dashboard, key(KeyCode::Enter));
-        }
-        let Mode::New(wizard) = &mut dashboard.mode else {
-            panic!("new wizard")
-        };
-        wizard.form.get_mut().focus(WizardControl::Submit);
-        ready_key(&mut dashboard, key(KeyCode::Enter))
-    };
-
-    assert!(matches!(
-        submit(0, false),
-        DashboardAction::CreateSession {
-            subagents: Some(mj_core::subagent::SubagentPolicy::Native),
-            ..
-        }
-    ));
-    assert!(matches!(
-        submit(0, true),
-        DashboardAction::CreateSession {
-            subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
-            ..
-        }
-    ));
-    assert!(matches!(
-        submit(1, true),
-        DashboardAction::CreateSession {
-            subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
-            ..
-        }
-    ));
-    // Grok never receives the tools, so the wizard expresses no opinion.
-    assert!(matches!(
-        submit(3, false),
-        DashboardAction::CreateSession {
-            subagents: None,
-            ..
-        }
-    ));
-}
-
-/// A bare local target plus a Grok profile, so the sub-agent checkbox can be
-/// exercised against a harness that never receives the tools.
+/// A bare local target with supported and unsupported harness profiles.
 fn subagent_wizard_config() -> mj_core::config::Config {
     let mut configuration = config();
     configuration.targets.clear();
@@ -4352,6 +4246,7 @@ fn subagent_wizard_config() -> mj_core::config::Config {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Grok,
             home: PathBuf::from("/profiles/grok"),
@@ -5772,210 +5667,6 @@ fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
 }
 
 #[test]
-fn single_model_wizard_remembers_policy_and_ignores_retired_discovery() {
-    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
-    let state = State {
-        last_subagent_policy: fixed.clone(),
-        ..Default::default()
-    };
-    let mut dashboard = DashboardState::new(subagent_wizard_config(), state, BTreeMap::new());
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard");
-    };
-    assert_eq!(wizard.subagents.policy, fixed);
-    wizard.step = WizardStep::Review;
-    let Some(DashboardAction::DiscoverSubagentOptions { id, model, .. }) =
-        dashboard.take_subagent_discovery()
-    else {
-        panic!("discovery");
-    };
-    assert_eq!(model.as_deref(), Some("chosen"));
-    assert!(
-        dashboard.take_subagent_discovery().is_none(),
-        "one request per selection"
-    );
-    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
-        value: value.into(),
-        name: value.into(),
-        description: None,
-    };
-    let options = SubagentOptions {
-        models: vec![choice("chosen"), choice("next")],
-        efforts: vec![choice("high")],
-        unavailable: vec![],
-    };
-    dashboard.apply_subagent_options(id, Ok(options.clone()));
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard");
-    };
-    assert!(wizard.subagents.error().is_none());
-    wizard.subagents.select_model(2);
-    assert_eq!(
-        wizard.subagents.policy,
-        SubagentPolicy::SingleModel {
-            model: "next".into(),
-            effort: None
-        }
-    );
-    assert!(wizard.subagents.error().is_some());
-    let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
-        dashboard.take_subagent_discovery()
-    else {
-        panic!("next discovery");
-    };
-    dashboard.apply_subagent_options(id, Ok(options.clone()));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard");
-    };
-    assert!(
-        wizard.subagents.options().is_none(),
-        "old reply cannot finish the new request"
-    );
-    dashboard.apply_subagent_options(next, Ok(options));
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard");
-    };
-    assert!(
-        wizard.subagents.error().is_some(),
-        "new model requires a matching effort"
-    );
-    wizard.subagents.select_effort(1);
-    assert!(wizard.subagents.error().is_none());
-    dashboard.mode = Mode::Dashboard;
-    dashboard.begin_new();
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard");
-    };
-    assert_eq!(
-        wizard.subagents.policy, fixed,
-        "canceling does not save edits"
-    );
-}
-
-#[test]
-fn subagent_combobox_previews_cancel_and_commit_without_leaving_review() {
-    use mj_core::subagent::SubagentPolicy;
-    let mut dashboard =
-        DashboardState::new(subagent_wizard_config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard")
-    };
-    wizard.step = WizardStep::Review;
-    wizard.form.get_mut().focus(WizardControl::Subagents);
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let collapsed = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(collapsed.contains("Subagents"), "{collapsed}");
-    assert!(!collapsed.contains("Mjolnir, all models"), "{collapsed}");
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard")
-    };
-    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
-    assert!(wizard.subagents.combo.is_open(WizardControl::Subagents));
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let expanded = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(expanded.contains("Mjolnir, all models"), "{expanded}");
-    ready_key(&mut dashboard, key(KeyCode::Esc));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("Escape must only close the popup")
-    };
-    assert_eq!(wizard.step, WizardStep::Review);
-    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
-    assert!(!wizard.subagents.combo.is_open(WizardControl::Subagents));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard")
-    };
-    assert_eq!(wizard.subagents.policy, SubagentPolicy::AllModels);
-    assert!(!wizard.subagents.combo.is_open(WizardControl::Subagents));
-}
-
-#[test]
-fn subagent_model_combobox_discovers_only_after_a_changed_model_is_committed() {
-    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
-    let mut dashboard = DashboardState::new(
-        subagent_wizard_config(),
-        State {
-            last_subagent_policy: fixed.clone(),
-            ..Default::default()
-        },
-        BTreeMap::new(),
-    );
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard")
-    };
-    wizard.step = WizardStep::Review;
-    wizard.form.get_mut().focus(WizardControl::SubagentModel);
-    let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
-        dashboard.take_subagent_discovery()
-    else {
-        panic!("discovery")
-    };
-    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
-        value: value.into(),
-        name: value.into(),
-        description: None,
-    };
-    dashboard.apply_subagent_options(
-        id,
-        Ok(SubagentOptions {
-            models: vec![choice("chosen"), choice("next")],
-            efforts: vec![choice("high")],
-            unavailable: vec![],
-        }),
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    assert!(dashboard.take_subagent_discovery().is_none());
-    ready_key(&mut dashboard, key(KeyCode::Esc));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard")
-    };
-    assert_eq!(wizard.subagents.policy, fixed);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(
-        dashboard.take_subagent_discovery().is_none(),
-        "accepting the same model retains its effort and capabilities"
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("wizard")
-    };
-    assert_eq!(
-        wizard.subagents.policy,
-        SubagentPolicy::SingleModel {
-            model: "next".into(),
-            effort: None
-        }
-    );
-    assert!(
-        matches!(dashboard.take_subagent_discovery(), Some(DashboardAction::DiscoverSubagentOptions { model: Some(model), .. }) if model == "next")
-    );
-}
-
-#[test]
 fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
     use mj_core::move_workspace::*;
     let mut dashboard = dashboard_with_session(running_session());
@@ -6019,52 +5710,6 @@ fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
         rendered.contains(".agents/qualification/java-b/staged"),
         "{rendered}"
     );
-}
-
-#[test]
-fn move_review_offers_the_delegation_choice_and_prepares_again_on_a_change() {
-    use mj_core::subagent::SubagentPolicy;
-    let mut dashboard = dashboard_with_session(running_session());
-    let request_id = open_move_review(&mut dashboard);
-    assert!(dashboard.apply_move_preparation(request_id, move_preparation()));
-    assert_eq!(
-        resume_wizard(&dashboard).subagents.policy,
-        SubagentPolicy::Native,
-        "the draft starts on the session's own policy"
-    );
-    assert_eq!(resume_wizard(&dashboard).subagent_change(&dashboard), None);
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("Subagents"), "{rendered}");
-
-    let Mode::Resume(wizard) = &mut dashboard.mode else {
-        panic!("move wizard")
-    };
-    wizard.form.get_mut().focus(WizardControl::Subagents);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    let wizard = resume_wizard(&dashboard);
-    assert_eq!(wizard.subagents.policy, SubagentPolicy::AllModels);
-    assert!(
-        wizard.preparation.is_none(),
-        "a new policy discards the prepared Move"
-    );
-
-    let Some(DashboardAction::MoveSession {
-        subagents,
-        preparation_request_id: Some(_),
-        ..
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("the review prepares the Move again");
-    };
-    assert_eq!(subagents, Some(SubagentPolicy::AllModels));
-    assert!(resume_wizard(&dashboard).preparing);
 }
 
 /// #1175: the target step is a table like the profile step, and the resize
@@ -6494,4 +6139,294 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
             memory_bytes: 32 << 30,
         })
     );
+}
+
+#[test]
+fn profile_policy_is_used_for_create_without_session_policy_controls() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut configuration = subagent_wizard_config();
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    configuration
+        .profiles
+        .get_mut("claude-1")
+        .unwrap()
+        .subagents = fixed.clone();
+    let state = State {
+        last_subagent_policy: SubagentPolicy::AllModels,
+        ..Default::default()
+    };
+    let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard")
+    };
+    wizard.step = WizardStep::Review;
+    wizard.project_directory = "/work/main".into();
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: false,
+            },
+        )),
+    );
+    assert!(
+        !drawn(&mut dashboard, 120, 32)
+            .join("\n")
+            .contains("Subagents")
+    );
+    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(
+        matches!(action, DashboardAction::CreateSession { subagents: Some(policy), .. } if policy == fixed)
+    );
+    dashboard.begin_new();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("wizard")
+    };
+    wizard.profile = 1;
+    wizard.project_directory = "/work/main".into();
+    wizard.step = WizardStep::Review;
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/main",
+        Ok((
+            PathBuf::from("/work/main"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: false,
+            },
+        )),
+    );
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::CreateSession {
+            subagents: Some(SubagentPolicy::Native),
+            ..
+        }
+    ));
+}
+
+fn single_raw_config() -> Config {
+    let mut configuration = config();
+    configuration.profiles.retain(|id, _| id == "claude-1");
+    configuration.targets.clear();
+    configuration
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    configuration
+}
+
+#[test]
+fn single_profile_and_raw_target_create_from_project_without_confirm() {
+    let mut dashboard = DashboardState::new(single_raw_config(), State::default(), BTreeMap::new());
+    dashboard.begin_new();
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
+    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("1/1"), "{screen}");
+    assert!(screen.contains("Create"), "{screen}");
+    assert!(!screen.contains("Back"), "{screen}");
+    if let Mode::New(wizard) = &mut dashboard.mode {
+        wizard.project_directory = "/work/project".into();
+    }
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::ValidateProjectDirectory { .. }
+    ));
+    dashboard.apply_resolved_project_directory(
+        &dashboard.path_input_context(),
+        "/work/project",
+        Ok((
+            PathBuf::from("/work/project"),
+            mj_core::state::ManagedWorktreeOptions {
+                available: true,
+                default_create: true,
+            },
+        )),
+    );
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Launching);
+    assert!(
+        !drawn(&mut dashboard, 100, 30)
+            .join("\n")
+            .contains("Confirm")
+    );
+    assert!(matches!(
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::CreateSession {
+            create_managed_worktree: Some(true),
+            ..
+        })
+    ));
+    assert!(matches!(dashboard.mode, Mode::Dashboard));
+    assert!(dashboard.take_prerequisite_check().is_none());
+}
+
+#[test]
+fn single_profile_keeps_container_sizing_and_confirm() {
+    let mut configuration = config();
+    configuration.profiles.retain(|id, _| id == "claude-1");
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    let screen = drawn(&mut dashboard, 120, 30).join("\n");
+    assert!(screen.contains("1/3"), "{screen}");
+    assert!(!screen.contains("Back"), "{screen}");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Bundle);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
+}
+
+#[test]
+fn single_profile_raw_resume_starts_checks_without_confirm() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config = single_raw_config();
+    let session = dashboard.state.sessions.get_mut("session-1").unwrap();
+    session.project_directory = Some("/work/project".into());
+    session.target_template_id = "local".into();
+
+    let action = dashboard.begin_resume_for("session-1");
+    assert!(
+        matches!(action, DashboardAction::PreflightResumeRepositories { .. }),
+        "{action:?}"
+    );
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Launching);
+    assert!(dashboard.resume_preflight_in_flight());
+    assert!(dashboard.take_prerequisite_check().is_none());
+    assert!(
+        !drawn(&mut dashboard, 100, 30)
+            .join("\n")
+            .contains("Confirm")
+    );
+}
+
+#[test]
+fn raw_move_fast_path_submits_once_after_preparation_and_uses_profile_policy() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.config = single_raw_config();
+    let session = dashboard.state.sessions.get_mut("session-1").unwrap();
+    session.project_directory = Some("/work/project".into());
+    session.target_template_id = "local".into();
+
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    dashboard
+        .config
+        .profiles
+        .get_mut("claude-1")
+        .unwrap()
+        .subagents = fixed.clone();
+    let action = dashboard.begin_move();
+    let DashboardAction::MoveSession {
+        preparation_request_id: Some(request_id),
+        subagents: Some(policy),
+        ..
+    } = action
+    else {
+        panic!("{action:?}")
+    };
+    assert_eq!(policy, fixed);
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Launching);
+    assert!(dashboard.take_prerequisite_check().is_none());
+    let mut preparation = move_preparation();
+    preparation.selection.profile_id = Some("claude-1".into());
+    preparation.selection.target_template_id = Some("local".into());
+    preparation.selection.subagents = Some(fixed.clone());
+    assert!(dashboard.apply_move_preparation(request_id, preparation));
+    assert!(
+        matches!(dashboard.take_prerequisite_check(), Some(DashboardAction::MoveSession { preparation_request_id: None, subagents: Some(policy), .. }) if policy == fixed)
+    );
+    assert!(dashboard.take_prerequisite_check().is_none());
+}
+
+#[test]
+fn raw_resume_fast_path_failure_waits_for_explicit_retry() {
+    let mut session = stopped_session();
+    session.project_directory = Some("/work/project".into());
+    session.target_template_id = "local".into();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = single_raw_config();
+    assert!(matches!(
+        dashboard.begin_resume_for("session-1"),
+        DashboardAction::PreflightResumeRepositories { .. }
+    ));
+    let first_generation = dashboard.session_preflight_generation();
+    drawn(&mut dashboard, 100, 30);
+    dashboard.fail_resume_preflight("network unavailable".into());
+    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("network unavailable"), "{screen}");
+    assert!(screen.contains("Retry"), "{screen}");
+    assert!(!screen.contains("confirm"), "{screen}");
+    assert!(dashboard.take_prerequisite_check().is_none());
+    assert!(matches!(
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::PreflightResumeRepositories { .. }
+    ));
+    assert_ne!(dashboard.session_preflight_generation(), first_generation);
+    assert!(dashboard.resume_preflight_in_flight());
+    assert!(resume_wizard(&dashboard).preflight_error.is_none());
+}
+
+#[test]
+fn raw_move_fast_path_keeps_file_selection_and_launches_after_it() {
+    use mj_core::move_workspace::*;
+    let mut session = running_session();
+    session.project_directory = Some("/work/project".into());
+    session.target_template_id = "local".into();
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.config = single_raw_config();
+    let DashboardAction::MoveSession {
+        preparation_request_id: Some(request),
+        ..
+    } = dashboard.begin_move()
+    else {
+        panic!("prepare")
+    };
+    let mut preparation = move_preparation();
+    preparation.selection.profile_id = Some("claude-1".into());
+    preparation.selection.target_template_id = Some("local".into());
+    let mut assessment = WorkspaceAssessment::default();
+    assessment.files = vec![WorkspaceFile {
+        location: WorkspacePath {
+            repository: "repo".into(),
+            path: "large.bin".into(),
+        },
+        bytes: 2 << 30,
+    }];
+    assessment.roots = file_tree(&assessment);
+    preparation.workspace = Some(assessment);
+    assert!(dashboard.apply_move_preparation(request, preparation.clone()));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
+    assert!(dashboard.take_prerequisite_check().is_none());
+    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("Cancel"), "{screen}");
+    assert!(!screen.contains("Back"), "{screen}");
+    let DashboardAction::MoveSession {
+        preparation_request_id: Some(next),
+        ..
+    } = ready_key(&mut dashboard, key(KeyCode::Enter))
+    else {
+        panic!("reprepare")
+    };
+    assert_ne!(request, next);
+    preparation.selection.workspace = resume_wizard(&dashboard).files.selection.clone();
+    assert!(preparation.selection.workspace.acknowledge_large_transfer);
+    assert!(dashboard.apply_move_preparation(next, preparation));
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Launching);
+    assert!(matches!(
+        dashboard.take_prerequisite_check(),
+        Some(DashboardAction::MoveSession {
+            preparation_request_id: None,
+            ..
+        })
+    ));
+    assert!(dashboard.take_prerequisite_check().is_none());
 }

@@ -45,14 +45,18 @@ pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str)
         .iter()
         .position(|line| line.contains(title))
         .expect("dialog title");
-    let left = cells[top]
+    let title_column = lines[top][..lines[top].find(title).unwrap()]
+        .chars()
+        .count();
+    let left = cells[top][..title_column]
         .iter()
-        .position(|c| matches!(c, '╭' | '┌'))
+        .rposition(|c| matches!(c, '╭' | '┌'))
         .expect("left border");
-    let right = cells[top]
-        .iter()
-        .rposition(|c| matches!(c, '╮' | '┐'))
-        .expect("right border");
+    let right = title_column
+        + cells[top][title_column..]
+            .iter()
+            .position(|c| matches!(c, '╮' | '┐'))
+            .expect("right border");
     let bottom = (top + 1..cells.len())
         .find(|&row| matches!(cells[row][left], '╰' | '└'))
         .expect("bottom border");
@@ -249,6 +253,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                     kind: HarnessKind::Claude,
                     home: PathBuf::from("/profiles/claude"),
@@ -260,6 +265,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex"),
@@ -271,6 +277,7 @@ pub(crate) fn config() -> Config {
                 HarnessProfile {
                     enabled: true,
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                     kind: HarnessKind::Codex,
                     home: PathBuf::from("/profiles/codex-two"),

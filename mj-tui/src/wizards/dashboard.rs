@@ -48,7 +48,13 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                     .collect(),
             );
             declare_resource_controls(&mut form, target_resources(dashboard, wizard));
-            declare_wizard_buttons(&mut form, true, enabled);
+            declare_wizard_buttons(&mut form, wizard.has_back(), enabled);
+        }
+        WizardStep::Launching => {
+            form.declare_with_enabled(WizardControl::Cancel, ControlKind::Button, true);
+            if wizard.launch_error().is_some() {
+                form.declare_with_enabled(WizardControl::Submit, ControlKind::Button, true);
+            }
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
@@ -405,7 +411,7 @@ impl DashboardState {
         if wizard.step() == WizardStep::Mounts {
             return self.activate_wizard_mount(id, wizard);
         }
-        if wizard.step() == WizardStep::Review {
+        if matches!(wizard.step(), WizardStep::Review | WizardStep::Launching) {
             return self.activate_wizard_review(id, wizard);
         }
         let mut wizard = match wizard.activate_extra(self, id) {
@@ -413,6 +419,9 @@ impl DashboardState {
             Err(wizard) => wizard,
         };
         if id == WizardControl::Back {
+            if !wizard.has_back() {
+                return self.keep(wizard);
+            }
             let step = match wizard.step() {
                 WizardStep::Target => WizardStep::Profile,
                 WizardStep::Bundle | WizardStep::ProjectDirectory
@@ -494,10 +503,6 @@ impl DashboardState {
             | WizardControl::MountAccess
             | WizardControl::ReviewAttachments
             | WizardControl::CreateManagedWorktree
-            | WizardControl::Subagents
-            | WizardControl::SubagentModel
-            | WizardControl::SubagentEffort
-            | WizardControl::SubagentRetry
             | WizardControl::DiscardQueue
             | WizardControl::Submit => {
                 self.mode = Mode::New(wizard);

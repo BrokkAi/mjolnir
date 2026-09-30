@@ -436,13 +436,21 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::RestartDaemon => {
             spawn_daemon_restart(context);
         }
-        DashboardAction::DiscoverSubagentOptions { id, profile, model } => {
+        DashboardAction::DiscoverSubagentOptions {
+            id,
+            profile,
+            model,
+            config,
+        } => {
             crate::dashboard::spawn_io(
                 "discovering subagent models",
                 context.dashboard_io_tx.clone(),
                 move || {
+                    let config = serde_json::from_str(&config)?;
                     mj_core::runtime::block_on(
-                        mj_controller::controller::profile_config::subagent_options(profile, model),
+                        mj_controller::controller::profile_config::subagent_options_for(
+                            config, profile, model,
+                        ),
                     )?
                 },
                 move |result| DashboardIoUpdate::SubagentOptions { id, result },

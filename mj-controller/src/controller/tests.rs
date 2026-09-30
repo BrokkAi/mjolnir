@@ -23,6 +23,7 @@ fn registration_config() -> Config {
             home: PathBuf::from("/home/dev/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -2045,4 +2046,73 @@ fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
         refusal.message()
     );
     assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
+}
+
+#[test]
+fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
+    use mj_core::subagent::SubagentPolicy;
+    const MARKER: &str = "MJ_TEST_PROFILE_SUBAGENT_DEFAULT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_defaults_to_profile_policy_instead_of_the_last_session",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State {
+            last_subagent_policy: SubagentPolicy::AllModels,
+            ..Default::default()
+        },
+    };
+    let native = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "native",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&native].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    let fixed = SubagentPolicy::SingleModel {
+        model: "chosen".into(),
+        effort: Some("high".into()),
+    };
+    controller
+        .config
+        .profiles
+        .get_mut("codex")
+        .unwrap()
+        .subagents = fixed.clone();
+    let single = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "single",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(controller.state.sessions[&single].subagents, Some(fixed));
+    let mut override_options = launch_options(Vec::new());
+    override_options.subagents = Some(SubagentPolicy::Native);
+    let overridden = controller
+        .register_session_with_resources("codex", "project", "podman", "override", override_options)
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&overridden].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&native].subagents,
+        Some(SubagentPolicy::Native)
+    );
 }

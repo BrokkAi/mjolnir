@@ -5,12 +5,11 @@ use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
 mod resources;
+pub(crate) use picker::*;
+pub(crate) use render::*;
 use resources::{
     ResourceEditor, ResourcePicker, declare_resource_controls, memory_gib_text, target_resources,
 };
-mod subagents;
-pub(crate) use picker::*;
-pub(crate) use render::*;
 
 use mj_chat::path_input::PathInput;
 
@@ -63,6 +62,8 @@ pub(crate) enum WizardStep {
     Bundle,
     ProjectDirectory,
     Review,
+    /// Automatic submission waits here for supervised prerequisite checks.
+    Launching,
     MoveFiles,
     Mounts,
     NewBundle,
@@ -101,10 +102,6 @@ pub(crate) enum WizardControl {
     MountAccess,
     ReviewAttachments,
     CreateManagedWorktree,
-    Subagents,
-    SubagentModel,
-    SubagentEffort,
-    SubagentRetry,
     DiscardQueue,
     ChooseMoveFiles,
     MoveFile(usize),
@@ -164,10 +161,6 @@ impl TargetReadiness {
 pub(crate) struct NewWizard {
     pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
     pub(crate) create_managed_worktree: bool,
-    /// Whether this session gets Mjolnir's delegation tools instead of its
-    /// harness's own. Only Claude and Codex can, so the review step hides the
-    /// control for every other kind and the request then sends `None`.
-    pub(crate) subagents: Box<subagents::SubagentDraft>,
     /// Creation stays in this workspace even if the visible tab changes.
     pub(crate) workspace_id: String,
     pub(crate) step: WizardStep,
@@ -179,6 +172,7 @@ pub(crate) struct NewWizard {
     /// that step offered one target and nothing else to decide. Back and the
     /// step numbers in the title then leave that step out.
     pub(crate) target_step_skipped: bool,
+    pub(crate) profile_step_skipped: bool,
     pub(crate) mounts: MountWizard,
 
     pub(crate) project_picker: Box<ProjectPicker>,
@@ -211,12 +205,12 @@ impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
         self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
-            && self.subagents == other.subagents
             && self.workspace_id == other.workspace_id
             && self.step == other.step
             && self.profile == other.profile
             && self.bundle == other.bundle
             && self.target == other.target
+            && self.profile_step_skipped == other.profile_step_skipped
             && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.project_picker == other.project_picker
@@ -319,21 +313,6 @@ impl MountWizard {
 }
 
 impl NewWizard {
-    /// The harness kind of the profile the wizard has selected.
-    pub(crate) fn selected_profile_kind(&self, config: &Config) -> Option<HarnessKind> {
-        config
-            .profiles
-            .get(&nth_enabled_profile(config, self.profile))
-            .map(|profile| profile.kind)
-    }
-
-    /// Only Claude and Codex receive Mjolnir's delegation tools, so only they
-    /// get the choice.
-    pub(crate) fn subagent_choice_applies(&self, config: &Config) -> bool {
-        self.selected_profile_kind(config)
-            .is_some_and(HarnessKind::supports_delegation_tools)
-    }
-
     fn selected_worktree_options(
         &self,
         config: &Config,
@@ -453,6 +432,7 @@ pub(crate) struct ResumeWizard {
     /// A failed preparation remains visible in the review modal so retry is
     /// an explicit, single action.
     pub(crate) preparation_error: Option<String>,
+    pub(crate) preflight_error: Option<String>,
     pub(crate) step: WizardStep,
 
     pub(crate) profile: usize,
@@ -461,6 +441,7 @@ pub(crate) struct ResumeWizard {
     /// that step offered one target and nothing else to decide. Back and the
     /// step numbers in the title then leave that step out.
     pub(crate) target_step_skipped: bool,
+    pub(crate) profile_step_skipped: bool,
     pub(crate) mounts: MountWizard,
 
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
@@ -468,16 +449,12 @@ pub(crate) struct ResumeWizard {
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
     pub(crate) discard_queue: bool,
-    /// Move's delegation choice for its destination. A plain resume keeps the
-    /// session's own policy and never shows it.
-    pub(crate) subagents: Box<subagents::SubagentDraft>,
     pub(crate) form: RefCell<Dialog<WizardControl>>,
 }
 
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
         self.session_id == other.session_id
-            && self.subagents == other.subagents
             && self.files == other.files
             && self.source == other.source
             && self.title == other.title
@@ -486,10 +463,12 @@ impl PartialEq for ResumeWizard {
             && self.preparation == other.preparation
             && self.preparing == other.preparing
             && self.preparation_request_id == other.preparation_request_id
+            && self.preflight_error == other.preflight_error
             && self.preparation_error == other.preparation_error
             && self.step == other.step
             && self.profile == other.profile
             && self.target == other.target
+            && self.profile_step_skipped == other.profile_step_skipped
             && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.resource_allocation == other.resource_allocation

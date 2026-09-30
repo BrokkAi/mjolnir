@@ -844,25 +844,16 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 1/4 profile",
+        b"New session \xc2\xb7 1/3 target",
         Instant::now() + TIMEOUT,
     );
-    // Explicit New always enters the full wizard. The first two steps already
-    // have deterministic fixture defaults, while the project step requires
-    // the real temporary checkout path. Wait for the visible title, including
-    // unchanged cells retained across terminal diff updates.
-    master.write_all(b"\r").expect("choose fixture profile");
-    wait_for_screen(
-        &mut master,
-        &mut output,
-        b"New session \xc2\xb7 2/4 target",
-        Instant::now() + TIMEOUT,
-    );
+    // The sole profile is skipped; the fixture has two raw targets to choose
+    // between, so Target remains. The project still requires its real path.
     master.write_all(b"\r").expect("choose fixture target");
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 3/4 local project",
+        b"New session \xc2\xb7 2/3 local project",
         Instant::now() + TIMEOUT,
     );
     let project = storage.path().canonicalize().unwrap();
@@ -873,7 +864,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 4/4 review",
+        b"New session \xc2\xb7 3/3 review",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").expect("create wizard session");
@@ -918,7 +909,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     // the next command with the visible wizard closing after submission.
     wait_for_wizard_close(&mut master, &mut output);
 
-    // New remains explicit and uses the same full wizard whether the first
+    // New remains explicit and uses the same choices whether the first
     // launch is pending or its failed provisional session has been removed.
     // This second invocation uses the same explicit shortcut.
     output.clear();
@@ -926,21 +917,14 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 1/4 profile",
+        b"New session \xc2\xb7 1/3 target",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 2/4 target",
-        Instant::now() + TIMEOUT,
-    );
-    master.write_all(b"\r").unwrap();
-    wait_for_screen(
-        &mut master,
-        &mut output,
-        b"New session \xc2\xb7 3/4 local project",
+        b"New session \xc2\xb7 2/3 local project",
         Instant::now() + TIMEOUT,
     );
     master
@@ -950,7 +934,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     wait_for_screen(
         &mut master,
         &mut output,
-        b"New session \xc2\xb7 4/4 review",
+        b"New session \xc2\xb7 3/3 review",
         Instant::now() + TIMEOUT,
     );
     master.write_all(b"\r").unwrap();

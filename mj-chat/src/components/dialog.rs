@@ -116,6 +116,10 @@ impl<K: Copy + Eq> Dialog<K> {
     }
 
     /// Prevents duplicate submission while a supervised operation is pending.
+    pub fn submission_pending(&self) -> bool {
+        self.submission_pending
+    }
+
     pub fn set_submission_pending(&mut self, pending: bool) {
         self.submission_pending = pending;
     }

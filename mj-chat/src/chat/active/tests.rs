@@ -1123,6 +1123,7 @@ fn config_with_profiles(profiles: &[(&str, mj_core::config::HarnessKind)]) -> Co
                         home: std::path::PathBuf::from("/profiles").join(id),
                         environment: Default::default(),
                         context_window_bytes: None,
+                        subagents: Default::default(),
                         guardian_review_model: None,
                     },
                 )

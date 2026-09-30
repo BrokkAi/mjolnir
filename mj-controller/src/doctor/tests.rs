@@ -156,6 +156,7 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
         home: directory.path().join("codex-home"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     Config {
@@ -1624,6 +1625,7 @@ fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
         home,
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let config = Config {
@@ -1663,6 +1665,7 @@ fn claude_config_with_home<const N: usize>(
                 home: home.to_path_buf(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         )]
@@ -1702,6 +1705,7 @@ fn doctor_reports_disabled_profiles_without_probing_them() {
         home: PathBuf::from("/missing/disabled-profile"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let config = Config {
@@ -2307,6 +2311,7 @@ fn doctor_profile(kind: HarnessKind, home: PathBuf) -> HarnessProfile {
         home,
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -2491,6 +2496,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             home: "/profiles/plain".into(),
             environment: literal,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -2518,6 +2524,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             home: "/profiles/referenced".into(),
             environment: referenced,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );

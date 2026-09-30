@@ -296,6 +296,7 @@ impl ViewerSnapshot {
             .map(|(id, profile)| ViewerProfile {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
+                subagents: profile.subagents.clone(),
                 quota: None,
             })
             .collect();
@@ -812,6 +813,8 @@ pub struct ViewerBackgroundTask {
 pub struct ViewerProfile {
     pub id: String,
     pub harness_kind: String,
+    #[serde(default)]
+    pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<ViewerQuota>,
 }
