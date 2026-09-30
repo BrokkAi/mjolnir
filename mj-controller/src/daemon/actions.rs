@@ -33,12 +33,21 @@ pub(super) async fn handle_action(
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }
-        DaemonAction::SubagentOptions { profile, model } => {
+        DaemonAction::SubagentOptions {
+            profile,
+            model,
+            config,
+        } => {
             // Discovery is restartable preparation and must not hold up handoff.
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => bail!("subagent discovery cancelled by daemon shutdown"),
-                options = crate::controller::profile_config::subagent_options(profile, model) => {
+                options = async move {
+                    match config {
+                        Some(config) => crate::controller::profile_config::subagent_options_for(*config, profile, model).await,
+                        None => crate::controller::profile_config::subagent_options(profile, model).await,
+                    }
+                } => {
                     Ok(DaemonReply::SubagentOptions(options?))
                 }
             }

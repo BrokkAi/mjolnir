@@ -207,6 +207,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );

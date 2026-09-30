@@ -235,6 +235,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -718,6 +719,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1303,6 +1305,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1454,6 +1457,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1639,6 +1643,7 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1910,6 +1915,7 @@ exit 0
                 home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

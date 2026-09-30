@@ -118,8 +118,8 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
-    /// Delegation policy. Omitted reuses the last accepted new-session choice.
-    #[arg(long, value_parser = ["native", "all-models", "single-model", "none"])]
+    /// Delegation policy. Omitted uses the selected profile's setting.
+    #[arg(long, value_parser = ["native", "single-model"])]
     subagents: Option<String>,
     /// Fixed child model, required with --subagents single-model.
     #[arg(long, requires = "subagents")]
@@ -707,7 +707,6 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     }
     Ok(match args.subagents.as_deref() {
         Some("native") => Some(SubagentPolicy::Native),
-        Some("all-models") => Some(SubagentPolicy::AllModels),
         Some("single-model") => Some(SubagentPolicy::SingleModel {
             model: args
                 .subagent_model
@@ -715,7 +714,6 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
                 .context("--subagents single-model requires --subagent-model")?,
             effort: args.subagent_effort.clone(),
         }),
-        Some("none") => Some(SubagentPolicy::None),
         _ => None,
     })
 }
@@ -1943,8 +1941,8 @@ mod tests {
         use mj_core::subagent::SubagentPolicy;
         assert_eq!(parse(&[]).unwrap(), None);
         assert_eq!(
-            parse(&["--subagents", "none"]).unwrap(),
-            Some(SubagentPolicy::None)
+            parse(&["--subagents", "native"]).unwrap(),
+            Some(SubagentPolicy::Native)
         );
         assert_eq!(
             parse(&[

@@ -391,6 +391,7 @@ fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
         )])
         .into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let check = || {
@@ -435,6 +436,7 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         )])
         .into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let failure = |kind| {
@@ -2163,6 +2165,7 @@ fn readiness_stage_names_only_install_capable_default_harnesses() {
         home: PathBuf::from("/profiles/test"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2484,6 +2487,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -2662,6 +2666,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())])
             .into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -2777,6 +2782,7 @@ fn a_native_codex_profile_gets_no_generated_catalog() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2817,6 +2823,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2848,6 +2855,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2891,6 +2899,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2930,6 +2939,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2991,6 +3001,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
 
@@ -3062,6 +3073,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3117,6 +3129,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3587,6 +3600,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         ])
         .into(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -3895,6 +3909,7 @@ fn raw_local_muse_launches_unconstrained() {
         home: PathBuf::from("/profiles/muse"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3937,6 +3952,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3969,6 +3985,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
@@ -4071,6 +4088,7 @@ fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
 
@@ -4104,6 +4122,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -4858,6 +4877,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
 
@@ -4936,6 +4956,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
         let canonical = profile.authentication_marker();
@@ -5055,6 +5076,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         };
         let marker = profile.authentication_marker();
@@ -5722,6 +5744,7 @@ fn ssh_harness_preflight_uses_the_accounts_login_shell() {
         home: directory.path().into(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let template = mj_core::config::TargetTemplate::SshBare {

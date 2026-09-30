@@ -378,6 +378,20 @@ impl ButtonColumn {
 pub struct TextField;
 
 impl TextField {
+    /// Draws an editor whose whole field remains underlined before focus.
+    pub fn render_underlined<K: Copy + Eq>(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        input: &TextInput,
+        form: &mut Form<K>,
+        id: K,
+    ) {
+        Self::render(frame, area, input, form, id);
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().add_modifier(Modifier::UNDERLINED));
+    }
+
     /// Draws a horizontally scrolling field and registers its cursor map.
     pub fn render<K: Copy + Eq>(
         frame: &mut Frame<'_>,

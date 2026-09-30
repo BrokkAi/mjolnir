@@ -987,13 +987,7 @@ impl Controller {
             launch_branch,
             checkout,
             publication: None,
-            subagents: Some(subagents.unwrap_or_else(|| {
-                if profile.kind.supports_delegation_tools() {
-                    self.state.last_subagent_policy.clone()
-                } else {
-                    Default::default()
-                }
-            })),
+            subagents: Some(subagents.unwrap_or_else(|| profile.subagents.clone())),
             archived: false,
             container_cpus: None,
             container_memory: None,

@@ -2289,6 +2289,7 @@ mod tests {
                 home: PathBuf::from("/home/user/.claude"),
                 environment: Default::default(),
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

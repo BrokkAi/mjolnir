@@ -115,6 +115,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
+                subagents: Default::default(),
                 guardian_review_model: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
@@ -3548,6 +3549,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
@@ -5105,7 +5107,7 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
         "{}\n{}\n{}",
-        viewer_source("function subagentChoiceApplies(", "const SUBAGENT_MODES"),
+        viewer_source("function profileSubagents(", "function targetIsBare("),
         viewer_source(
             "function workingChildCount(",
             "function sessionInWorkspace("
@@ -5130,10 +5132,12 @@ function sessionById(id) { return sessions[id]; }
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
 assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
-draft.subagents = { mode: "all_models" };
-assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"all_models"}', "a changed policy must be sent");
+snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
+assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"single_model","model":"chosen","effort":"high"}', "the destination profile policy must be sent");
 draft.profileId = "kimi";
-assert(moveSubagentChange(draft) === null, "a harness without delegation tools sends no policy");
+assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
+draft.storedSubagents = { mode: "all_models" };
+assert(moveSubagentChange(draft).mode === "native", "a native destination resets a previous Mjolnir policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
 "#;
     run_viewer_script(

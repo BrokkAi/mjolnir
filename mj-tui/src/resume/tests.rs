@@ -2670,58 +2670,34 @@ fn resume_row_cost_for_a_few_thousand_sessions() {
     );
 }
 
-/// The in-dialog keys are advertised where the user can see them.
+/// Actions remain visible while generic keyboard boilerplate is removed.
 #[test]
-fn the_dialog_footer_names_its_own_keys() {
+fn session_dialog_uses_action_labels_without_navigation_boilerplate() {
     let mut dashboard = DashboardState::new(
         config(),
         state_with(vec![stopped_session()]),
         BTreeMap::new(),
     );
     dashboard.show_resume_dialog(1, Vec::new());
-    let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the Live tab");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    for hint in ["Enter opens", "a/b/w/i/d filter"] {
-        assert!(rendered.contains(hint), "{rendered}");
+    for tab in [ResumeTab::Live, ResumeTab::Hel, ResumeTab::Import] {
+        if tab == ResumeTab::Hel {
+            switch_to_hel(&mut dashboard);
+        }
+        if tab == ResumeTab::Import {
+            switch_to_import(&mut dashboard);
+        }
+        let lines = drawn(&mut dashboard, 120, 34);
+        assert_dialog_spacing(&lines, "Sessions", "Cancel");
+        let text = lines.join("\n");
+        for boilerplate in ["Enter opens", "Enter imports", "Tab moves", "←/→ tabs"] {
+            assert!(!text.contains(boilerplate), "{text}");
+        }
+        if tab == ResumeTab::Hel {
+            assert!(text.contains("  Destroy  "), "{text}");
+        } else {
+            assert!(!text.contains("  Destroy  "), "{text}");
+        }
     }
-    assert!(!rendered.contains("destroys"), "{rendered}");
-
-    switch_to_hel(&mut dashboard);
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the Mjolnir tab");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    for hint in [
-        "Mjolnir",
-        "Import",
-        "Delete destroys",
-        "  Destroy  ",
-        "←/→ tabs",
-        "/ searches",
-    ] {
-        assert!(rendered.contains(hint), "{rendered}");
-    }
-    // The dashboard's own footer row is drawn behind the modal and names the
-    // Sessions filter letters, so read the dialog's hint row rather than the
-    // whole screen.
-    let dialog_hints = buffer_lines(terminal.backend().buffer())
-        .into_iter()
-        .find(|line| line.contains("←/→ tabs"))
-        .expect("the dialog's hint row");
-    assert!(!dialog_hints.contains("filter"), "{dialog_hints}");
-
-    switch_to_import(&mut dashboard);
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the Import tab");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("Enter imports"), "{rendered}");
-    assert!(!rendered.contains("destroys"), "{rendered}");
-    assert!(!rendered.contains("  Destroy  "), "{rendered}");
-    assert!(!rendered.contains("archives"), "{rendered}");
 }
 
 /// A query's hits are counted on every tab, not only the one on screen, and

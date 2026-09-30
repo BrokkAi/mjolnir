@@ -452,17 +452,28 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude or Codex session can start child sessions, called sub-agents, through
-Mjolnir's `spawn` tool. Whether a given session uses Mjolnir's sub-agents at
-all, instead of its harness's own, is a per-session choice. The TUI and web
-new-session forms offer **Native**, **Mjolnir, all models**, **Mjolnir, single
-model**, and **None**. The CLI uses `mj new --subagents native|all-models|single-model|none`. Native is the initial choice; the last
-accepted new-session choice is then remembered per instance across both UIs.
+Mjolnir's `spawn` tool. Configure delegation under Settings → Agent Profiles →
+a profile → Sub-agents. Each profile defaults to **Native**, using the harness's
+own subagents. The other choice is **Mjolnir, single model**, which selects one
+model and its effort. Create and Move dialogs use the selected profile's setting;
+resuming a session retains its recorded policy. Confirm has no subagent controls.
 
-Single-model mode selects a model and corresponding effort from eligible
-profiles. Its `spawn` tool always uses that selection and cannot override the
-profile, model, or effort; `list_profiles` is omitted. Configure profiles in
-Settings → Profiles and additional eligible profiles in Settings → Sub-agents.
-Claude/Codex Mjolnir children have native delegation disabled under both modes.
+For example, keep an OpenAI/Codex profile native and configure a Claude profile
+with a fixed Mjolnir child model:
+
+```toml
+[profiles.claude.subagents]
+mode = "single_model"
+model = "your-model-slug"
+effort = "high"
+```
+
+Single-model `spawn` always uses that selection and cannot override the profile,
+model, or effort; `list_profiles` is omitted. Configure additional eligible
+profiles in Settings → Sub-agents. Claude/Codex Mjolnir children have native
+delegation disabled. The CLI can override the profile for one new session with
+`mj new --subagents native|single-model` and `--subagent-model` /
+`--subagent-effort` for single-model mode.
 
 This section sets the concurrent child limit and eligible profiles.
 
@@ -483,9 +494,8 @@ codex2 = true
 A configuration file written before the per-session choice existed may still
 have an `enabled` key here. It is read and ignored, and a save drops it.
 
-A `spawn` call must name a model, or `current` for the parent session's own
-model. Unless the call also names a profile, Mjolnir runs the child on the
-eligible profile that offers that model and has the most quota left, meaning
+Mjolnir runs each child with the configured model and effort on the eligible
+profile that supports that selection and has the most quota left, meaning
 the lower of its 5-hour and weekly remaining percentages. A pay-per-use
 profile counts as 100% left, and a profile with no quota report comes last. On
 a tie, the parent's own profile wins. `mj doctor` shows, for each profile,

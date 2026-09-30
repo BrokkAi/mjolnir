@@ -596,6 +596,7 @@ fn login_commands_match_each_harness_cli() {
         home: PathBuf::from("/home/user/.config"),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let command = |kind: HarnessKind| login_command(&profile(kind)).expect("login command");
@@ -640,6 +641,7 @@ fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
             .into_iter()
             .collect(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let error = login_command(&profile)
@@ -801,6 +803,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     };
     let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {

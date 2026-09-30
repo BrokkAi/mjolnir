@@ -55,6 +55,7 @@ fn add_codex_profile(config: &mut Config, home: &Path) {
             home: home.to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1847,6 +1848,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     home: home.clone(),
                     environment: Default::default(),
                     context_window_bytes: None,
+                    subagents: Default::default(),
                     guardian_review_model: None,
                 },
             );

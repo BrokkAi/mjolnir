@@ -28,6 +28,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
             .into_iter()
             .collect(),
         context_window_bytes: None,
+        subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -63,6 +64,7 @@ fn a_custom_provider_profile_asks_its_provider_for_quota_not_chatgpt() {
             home: native.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
+            subagents: Default::default(),
             guardian_review_model: None,
         },
         native.path().to_path_buf(),

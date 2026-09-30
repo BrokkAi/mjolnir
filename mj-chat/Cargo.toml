@@ -34,7 +34,6 @@ ratatui.workspace = true
 rat-focus = "2.1.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
-textwrap = "0.16"
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 unicode-segmentation = "1"

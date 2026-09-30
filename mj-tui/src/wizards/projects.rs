@@ -471,21 +471,134 @@ pub(super) fn render_project_picker(
     surfaces: &mut FrameSurfaces,
 ) {
     let picker = &wizard.project_picker;
-    let popup = centered_modal(frame, surfaces, 88, 25, area);
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 1,
-    });
-    let title = dismissible_modal_title(
-        form,
-        popup,
-        "Choose a project",
-        theme::title(true),
-        !wizard.bundle_creation_in_flight,
-    );
-    frame.render_widget(theme::modal().title(title), popup);
-    let row = |y: u16| Rect::new(inner.x, y, inner.width, u16::from(y < inner.bottom()));
+    let popup = centered_modal(frame, surfaces, 88, 32, area);
+    let inner = DialogShell::padded_inner(popup);
+    let layout = DialogShell::layout(inner, 1);
     let ready = !wizard.bundle_creation_in_flight;
+    let title = dismissible_modal_title(form, popup, "Choose a project", theme::title(true), ready);
+    frame.render_widget(theme::modal().title(title), popup);
+    let description = wrap_lines(
+        [Line::styled(
+            match picker.tab {
+                ProjectTab::Recent => {
+                    "Pick up a recent project, or find another on GitHub or in Folders."
+                }
+                ProjectTab::Github => {
+                    "Your GitHub repositories. Search by name or owner/repository."
+                }
+                ProjectTab::Folders => "Browse folders on this computer.",
+                ProjectTab::Url => {
+                    "Paste a GitHub URL, owner/repository, or local repository path."
+                }
+            },
+            theme::muted(),
+        )],
+        inner.width,
+    );
+    let directory = wrap_lines(
+        [Line::raw(picker.directory.as_deref().unwrap_or("Home"))],
+        inner.width,
+    );
+    let input_row = description.len() as u16 + 3;
+    let folder_actions_row = input_row + directory.len() as u16 + 1;
+    let filter_row = folder_actions_row + 2;
+    let list_row = match picker.tab {
+        ProjectTab::Recent => input_row,
+        ProjectTab::Github => input_row + 4,
+        ProjectTab::Folders => filter_row + 2,
+        ProjectTab::Url => input_row + 2,
+    };
+    let error = picker.creation_error.as_ref().or(picker.error.as_ref());
+    let message = if picker.loading {
+        Some("Loading projects…")
+    } else if let Some(error) = error {
+        Some(error.as_str())
+    } else if picker.entries.is_empty() && picker.tab != ProjectTab::Url {
+        Some(match picker.tab {
+            ProjectTab::Recent => {
+                "No recent projects yet. Choose GitHub or Folders above to get started."
+            }
+            ProjectTab::Github => {
+                "No matching repositories. Try another search or paste a repository URL."
+            }
+            _ => "No project folders here. Go up one folder or return Home.",
+        })
+    } else {
+        None
+    };
+    let message = wrap_lines(message.into_iter().map(Line::raw), inner.width);
+    let list_height = if !message.is_empty() {
+        message.len() as u16
+    } else if picker.tab == ProjectTab::Url {
+        0
+    } else {
+        picker.entries.len().clamp(1, 5) as u16
+    };
+    let retry_row = list_row + list_height + 1;
+    let status = if wizard.bundle_creation_in_flight {
+        Some("Preparing project…")
+    } else if picker.truncated {
+        Some("Showing the first matches. Search or browse further to narrow the list.")
+    } else {
+        None
+    };
+    let status = wrap_lines(
+        status
+            .into_iter()
+            .map(|text| Line::styled(text, theme::muted())),
+        inner.width,
+    );
+    let status_row = if error.is_some() {
+        retry_row + 2
+    } else {
+        list_row + list_height + u16::from(list_height > 0)
+    };
+    let multiple_row = status_row
+        + if status.is_empty() {
+            0
+        } else {
+            status.len() as u16 + 1
+        };
+    let basket_row = multiple_row + 2;
+    let basket_height = wizard.new_bundle_repositories.len().min(3) as u16;
+    let repo_actions_row = basket_row + basket_height + u16::from(basket_height > 0);
+    let height = if picker.multiple {
+        repo_actions_row + 1
+    } else {
+        multiple_row + 1
+    };
+    let focused_row = match form.focused() {
+        Some(
+            WizardControl::ProjectRecent
+            | WizardControl::ProjectGithub
+            | WizardControl::ProjectFolders
+            | WizardControl::ProjectUrl,
+        ) => Some(0),
+        Some(WizardControl::ProjectQuery) => Some(if picker.tab == ProjectTab::Folders {
+            filter_row
+        } else {
+            input_row
+        }),
+        Some(WizardControl::NewBundleSource) => Some(input_row),
+        Some(WizardControl::ProjectSearch) => Some(input_row + 2),
+        Some(
+            WizardControl::ProjectUp
+            | WizardControl::ProjectHome
+            | WizardControl::ProjectOpenFolder,
+        ) => Some(folder_actions_row),
+        Some(WizardControl::ProjectResults) => Some(list_row + list_height.saturating_sub(1)),
+        Some(WizardControl::ProjectRetry) => Some(retry_row),
+        Some(WizardControl::ProjectMultiple) => Some(multiple_row),
+        Some(WizardControl::NewBundleRepositories) => {
+            Some(basket_row + basket_height.saturating_sub(1))
+        }
+        Some(
+            WizardControl::Add | WizardControl::ProjectMakePrimary | WizardControl::NewBundleRemove,
+        ) => Some(repo_actions_row),
+        _ => None,
+    };
+    let viewport = FormViewport::new(layout.body, height, 0, focused_row);
+    let row = |start| viewport.row(start, 1);
     let tabs = [
         (WizardControl::ProjectRecent, "Recent", ProjectTab::Recent),
         (WizardControl::ProjectGithub, "GitHub", ProjectTab::Github),
@@ -511,46 +624,36 @@ pub(super) fn render_project_picker(
         .zip(&labels)
         .map(|((id, _, _), label)| (*id, label.as_str(), ready))
         .collect();
-    Dialog::render_actions(frame, row(inner.y), &actions, form);
-    let description = match picker.tab {
-        ProjectTab::Recent => "Pick up a recent project, or find another on GitHub or in Folders.",
-        ProjectTab::Github => "Your GitHub repositories. Search by name or owner/repository.",
-        ProjectTab::Folders => {
-            "Browse folders on this computer. Enter opens a folder or chooses a project."
-        }
-        ProjectTab::Url => "Paste a GitHub URL, owner/repository, or local repository path.",
-    };
-    frame.render_widget(
-        Paragraph::new(description).style(Style::default().fg(theme::palette().muted)),
-        row(inner.y + 1),
-    );
-    let mut list_y = inner.y + 3;
+    Dialog::render_actions(frame, row(0), &actions, form);
+    // Render wrapped text one row at a time so partial viewport clipping keeps
+    // the text and control geometry on the same rows.
+    for (index, line) in description.into_iter().enumerate() {
+        frame.render_widget(Paragraph::new(line), row(2 + index as u16));
+    }
     match picker.tab {
         ProjectTab::Github => {
             PathField::render_within(
                 frame,
-                inner,
-                row(list_y),
+                layout.body,
+                row(input_row),
                 &picker.query,
                 form,
                 WizardControl::ProjectQuery,
             );
             Dialog::render_actions(
                 frame,
-                row(list_y + 1),
+                row(input_row + 2),
                 &[(WizardControl::ProjectSearch, "Search", ready)],
                 form,
             );
-            list_y += 3;
         }
         ProjectTab::Folders => {
-            frame.render_widget(
-                Paragraph::new(picker.directory.as_deref().unwrap_or("Home")),
-                row(list_y),
-            );
+            for (index, line) in directory.into_iter().enumerate() {
+                frame.render_widget(Paragraph::new(line), row(input_row + index as u16));
+            }
             Dialog::render_actions(
                 frame,
-                row(list_y + 1),
+                row(folder_actions_row),
                 &[
                     (
                         WizardControl::ProjectOpenFolder,
@@ -566,126 +669,82 @@ pub(super) fn render_project_picker(
                 ],
                 form,
             );
-            let filter_row = row(list_y + 2);
-            let label_width = 17.min(filter_row.width);
+            let filter = row(filter_row);
+            let label_width = 8.min(filter.width);
             frame.render_widget(
-                Paragraph::new("Filter (Enter):"),
-                Rect::new(filter_row.x, filter_row.y, label_width, filter_row.height),
+                Paragraph::new("Filter:"),
+                Rect::new(filter.x, filter.y, label_width, filter.height),
             );
             PathField::render_within(
                 frame,
-                inner,
+                layout.body,
                 Rect::new(
-                    filter_row.x + label_width,
-                    filter_row.y,
-                    filter_row.width.saturating_sub(label_width),
-                    filter_row.height,
+                    filter.x + label_width,
+                    filter.y,
+                    filter.width - label_width,
+                    filter.height,
                 ),
                 &picker.folder_filter,
                 form,
                 WizardControl::ProjectQuery,
             );
-            list_y += 3;
         }
-        ProjectTab::Url => {
-            PathField::render_within(
-                frame,
-                inner,
-                row(list_y),
-                &wizard.new_bundle_source,
-                form,
-                WizardControl::NewBundleSource,
-            );
-            list_y += 2;
-        }
-        _ => {}
+        ProjectTab::Url => PathField::render_within(
+            frame,
+            layout.body,
+            row(input_row),
+            &wizard.new_bundle_source,
+            form,
+            WizardControl::NewBundleSource,
+        ),
+        ProjectTab::Recent => {}
     }
-    let basket_height = if picker.multiple {
-        let available_rows = inner.bottom().saturating_sub(list_y + 6);
-        (wizard.new_bundle_repositories.len().min(3) as u16).min(available_rows)
-    } else {
-        0
-    };
-    let footer_y = inner.bottom().saturating_sub(4 + basket_height);
-    let list_area = Rect::new(
-        inner.x,
-        list_y,
-        inner.width,
-        footer_y.saturating_sub(list_y + 1),
-    );
-    if picker.loading {
-        frame.render_widget(Paragraph::new("Loading projects…"), list_area);
-    } else if let Some(error) = picker.creation_error.as_ref().or(picker.error.as_ref()) {
-        frame.render_widget(
-            Paragraph::new(error.as_str()).wrap(ratatui::widgets::Wrap { trim: false }),
+    let list_area = viewport.row(list_row, list_height);
+    if !message.is_empty() {
+        for (index, line) in message.into_iter().enumerate() {
+            frame.render_widget(Paragraph::new(line), row(list_row + index as u16));
+        }
+    } else if picker.tab != ProjectTab::Url {
+        let rows: Vec<Line<'_>> = picker
+            .entries
+            .iter()
+            .map(|entry| {
+                let marker = if entry.kind == ProjectEntryKind::Directory {
+                    if theme::ascii() { ">" } else { "▸" }
+                } else if wizard.new_bundle_repositories.contains(&entry.source) {
+                    if theme::ascii() { "+" } else { "✓" }
+                } else {
+                    " "
+                };
+                Line::from(vec![
+                    Span::raw(format!("{marker} {}  ", entry.name)),
+                    Span::styled(&entry.description, theme::muted()),
+                ])
+            })
+            .collect();
+        ChoiceList::render(
+            frame,
             list_area,
+            &rows,
+            picker.selected,
+            form,
+            WizardControl::ProjectResults,
         );
+    }
+    if error.is_some() {
         Dialog::render_actions(
             frame,
-            row(footer_y.saturating_sub(1)),
+            row(retry_row),
             &[(WizardControl::ProjectRetry, "Retry", ready)],
             form,
         );
-    } else if picker.tab != ProjectTab::Url {
-        if picker.entries.is_empty() {
-            frame.render_widget(
-                Paragraph::new(match picker.tab {
-                    ProjectTab::Recent => {
-                        "No recent projects yet. Choose GitHub or Folders above to get started."
-                    }
-                    ProjectTab::Github => {
-                        "No matching repositories. Try another search or paste a repository URL."
-                    }
-                    _ => "No project folders here. Go up one folder or return Home.",
-                })
-                .wrap(ratatui::widgets::Wrap { trim: false }),
-                list_area,
-            );
-        } else {
-            let rows: Vec<Line<'_>> = picker
-                .entries
-                .iter()
-                .map(|entry| {
-                    let marker = if entry.kind == ProjectEntryKind::Directory {
-                        if theme::ascii() { ">" } else { "▸" }
-                    } else if wizard.new_bundle_repositories.contains(&entry.source) {
-                        if theme::ascii() { "+" } else { "✓" }
-                    } else {
-                        " "
-                    };
-                    Line::from(vec![
-                        Span::raw(format!("{marker} {}  ", entry.name)),
-                        Span::styled(
-                            &entry.description,
-                            Style::default().fg(theme::palette().muted),
-                        ),
-                    ])
-                })
-                .collect();
-            ChoiceList::render(
-                frame,
-                list_area,
-                &rows,
-                picker.selected,
-                form,
-                WizardControl::ProjectResults,
-            );
-        }
     }
-    let status = if wizard.bundle_creation_in_flight {
-        "Preparing project…"
-    } else if picker.truncated {
-        "Showing the first matches. Search or browse further to narrow the list."
-    } else {
-        "Enter chooses · ↑/↓ select · Tab moves focus · Esc goes back"
-    };
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(theme::palette().muted)),
-        row(footer_y),
-    );
+    for (index, line) in status.into_iter().enumerate() {
+        frame.render_widget(Paragraph::new(line), row(status_row + index as u16));
+    }
     Checkbox::render(
         frame,
-        row(footer_y + 1),
+        row(multiple_row),
         "Use several repositories together",
         picker.multiple,
         ready,
@@ -706,7 +765,7 @@ pub(super) fn render_project_picker(
             .collect();
         ChoiceList::render(
             frame,
-            Rect::new(inner.x, footer_y + 2, inner.width, basket_height),
+            viewport.row(basket_row, basket_height),
             &rows,
             wizard.new_bundle_selected,
             form,
@@ -714,7 +773,7 @@ pub(super) fn render_project_picker(
         );
         Dialog::render_actions(
             frame,
-            row(inner.bottom().saturating_sub(2)),
+            row(repo_actions_row),
             &[
                 (
                     WizardControl::Add,
@@ -753,7 +812,7 @@ pub(super) fn render_project_picker(
     };
     Dialog::render_actions(
         frame,
-        row(inner.bottom().saturating_sub(1)),
+        layout.actions,
         &[
             (WizardControl::Back, "Back", ready),
             (WizardControl::Cancel, "Cancel", ready),

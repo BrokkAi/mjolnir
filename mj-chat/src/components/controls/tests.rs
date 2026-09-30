@@ -590,7 +590,8 @@ fn path_field_popup_shows_candidates_a_wait_or_nothing() {
         },
     ));
     let text = path_field_screen(&input);
-    assert!(text.contains("Enter accept"), "{text}");
+    assert!(text.contains("matches"), "{text}");
+    assert!(!text.contains("Enter accept"), "{text}");
     assert!(text.contains("~/projects/"), "{text}");
     assert!(text.contains("~/provision/"), "{text}");
     assert!(!text.contains("Completing"), "{text}");
