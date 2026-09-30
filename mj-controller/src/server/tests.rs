@@ -4012,9 +4012,12 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
 async fn each_rejected_action_keeps_its_own_status_and_guidance() {
     for (outcome, status, guidance) in [
         (
-            ActionOutcome::Busy,
+            ActionOutcome::Busy {
+                running: 4,
+                limit: 4,
+            },
             StatusCode::TOO_MANY_REQUESTS,
-            "concurrent action limit",
+            "the daemon is at its limit of 4 concurrent actions (4 running; a session that is still starting holds one until it is ready)",
         ),
         (
             ActionOutcome::SessionBusy,
@@ -4070,6 +4073,12 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let error = body["error"].as_str().unwrap();
         assert!(error.contains(guidance), "{outcome:?} answered {error:?}");
+        if matches!(outcome, ActionOutcome::Busy { .. }) {
+            assert_eq!(body["running_actions"], 4, "{body}");
+            assert_eq!(body["action_limit"], 4, "{body}");
+        } else {
+            assert!(body.get("running_actions").is_none(), "{body}");
+        }
     }
 }
 

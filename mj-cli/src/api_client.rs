@@ -61,6 +61,8 @@ pub(crate) struct ApiClient {
     base_url: String,
     token: String,
     busy_retry: BusyRetry,
+    /// Where the one "waiting for the daemon" line goes; stderr outside tests.
+    wait_notice: fn(&str),
     http: reqwest::Client,
 }
 
@@ -109,6 +111,7 @@ impl ApiClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
             busy_retry: BusyRetry::DEFAULT,
+            wait_notice: |line| eprintln!("{line}"),
             http,
         }
     }
@@ -149,8 +152,8 @@ impl ApiClient {
     ///
     /// A 429 means the daemon is already running as many actions as it allows
     /// and did not admit this one. The request is sent again with growing
-    /// delays for up to [`BusyRetry::limit`], and each wait is reported on
-    /// stderr so the person sees what the command is waiting for.
+    /// delays for up to [`BusyRetry::limit`], and the first wait is reported
+    /// once on stderr so the person sees what the command is waiting for.
     async fn dispatch(
         &self,
         request: reqwest::RequestBuilder,
@@ -158,6 +161,7 @@ impl ApiClient {
         let started = std::time::Instant::now();
         let mut delay = self.busy_retry.first_delay;
         let mut request = request;
+        let mut announced = false;
         loop {
             let retry = request.try_clone();
             match self.dispatch_once(request).await? {
@@ -168,11 +172,10 @@ impl ApiClient {
                     if started.elapsed() + delay > self.busy_retry.limit {
                         return Ok(Err(failure));
                     }
-                    eprintln!(
-                        "The daemon is busy: {}. Trying again in {}s.",
-                        failure.message.trim_end_matches("; retry shortly"),
-                        delay.as_secs().max(1),
-                    );
+                    if !announced {
+                        announced = true;
+                        (self.wait_notice)(&waiting_notice(failure.busy));
+                    }
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(self.busy_retry.max_delay);
                     request = retry;
@@ -205,7 +208,17 @@ impl ApiClient {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_owned());
-        Ok(Err(ApiError { status, message }))
+        let busy = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| {
+                let count = |key: &str| body.get(key)?.as_u64()?.try_into().ok();
+                Some((count("running_actions")?, count("action_limit")?))
+            });
+        Ok(Err(ApiError {
+            status,
+            message,
+            busy,
+        }))
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -654,6 +667,8 @@ async fn probe_api(http: &reqwest::Client, base_url: &str) -> Result<()> {
 struct ApiError {
     status: reqwest::StatusCode,
     message: String,
+    /// `(running, limit)` when the daemon says how full its action pool is.
+    busy: Option<(usize, usize)>,
 }
 
 impl ApiError {
@@ -662,6 +677,17 @@ impl ApiError {
             true => anyhow!("the Mjolnir API answered {}", self.status),
             false => anyhow!("the Mjolnir API answered {}: {}", self.status, self.message),
         }
+    }
+}
+
+/// The one line printed when a command starts waiting for the daemon to admit
+/// it. A daemon that does not report its counts gets the same line without them.
+fn waiting_notice(busy: Option<(usize, usize)>) -> String {
+    match busy {
+        Some((running, limit)) => format!(
+            "Waiting for the daemon: {running} of {limit} actions are in use (sessions still starting). Retrying until one frees up."
+        ),
+        None => "Waiting for the daemon: all of its actions are in use (sessions still starting). Retrying until one frees up.".to_owned(),
     }
 }
 
@@ -899,7 +925,11 @@ mod tests {
                         *left -= 1;
                         return (
                             StatusCode::TOO_MANY_REQUESTS,
-                            Json(serde_json::json!({ "error": "at its concurrent action limit" })),
+                            Json(serde_json::json!({
+                                "error": "at its concurrent action limit",
+                                "running_actions": 4,
+                                "action_limit": 4,
+                            })),
                         );
                     }
                     (
@@ -924,6 +954,8 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let mut client = ApiClient::new(url, "secret-token".into()).unwrap();
+        static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        client.wait_notice = |line| NOTICES.lock().unwrap().push(line.to_owned());
         client.busy_retry = BusyRetry {
             first_delay: Duration::from_millis(10),
             max_delay: Duration::from_millis(20),
@@ -933,6 +965,17 @@ mod tests {
         let response = client.prompt("session-1", "hello".into()).await.unwrap();
         assert_eq!(response.turn_id, 7);
         assert_eq!(*refusals.lock().unwrap(), 0);
+        // Two refusals were retried, and the person saw one line about them.
+        assert_eq!(
+            *NOTICES.lock().unwrap(),
+            [
+                "Waiting for the daemon: 4 of 4 actions are in use (sessions still starting). Retrying until one frees up."
+            ]
+        );
+        assert_eq!(
+            waiting_notice(None),
+            "Waiting for the daemon: all of its actions are in use (sessions still starting). Retrying until one frees up."
+        );
 
         *refusals.lock().unwrap() = usize::MAX;
         client.busy_retry.limit = Duration::from_millis(50);
