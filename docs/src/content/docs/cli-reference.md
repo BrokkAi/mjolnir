@@ -199,7 +199,7 @@ mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
        [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
        [--title <text>]
-       [--model <name>] [--effort <name>] [--subagents native|single-model]
+       [--model <name>] [--effort <name>] [--subagents native|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
@@ -240,12 +240,14 @@ cannot be combined with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
-- `mj new --subagents native|single-model` selects delegation
+- `mj new --subagents native|single-model|none` selects delegation
   for Claude and Codex. Without this option, it uses the selected profile’s setting,
   which defaults to Native.
   `single-model` requires `--subagent-model` and a corresponding
   `--subagent-effort` when that model offers effort choices. Mjolnir fixes
   every child's model and effort and selects an eligible profile by quota.
+  `none` disables delegation; an explicit choice overrides the profile for this
+  session without changing its settings. `all-models` is no longer accepted.
   The old `--mj-subagents` and
   `--native-subagents` flags are no longer accepted.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as

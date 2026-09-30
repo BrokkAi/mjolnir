@@ -2188,7 +2188,10 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
             launch_options(Vec::new()),
         )
         .unwrap();
-    assert_eq!(controller.state.sessions[&single].subagents, Some(fixed));
+    assert_eq!(
+        controller.state.sessions[&single].subagents,
+        Some(fixed.clone())
+    );
     let mut override_options = launch_options(Vec::new());
     override_options.subagents = Some(SubagentPolicy::Native);
     let overridden = controller
@@ -2198,6 +2201,16 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
         controller.state.sessions[&overridden].subagents,
         Some(SubagentPolicy::Native)
     );
+    let mut disabled_options = launch_options(Vec::new());
+    disabled_options.subagents = Some(SubagentPolicy::None);
+    let disabled = controller
+        .register_session_with_resources("codex", "project", "podman", "disabled", disabled_options)
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&disabled].subagents,
+        Some(SubagentPolicy::None)
+    );
+    assert_eq!(controller.config.profiles["codex"].subagents, fixed);
     assert_eq!(
         crate::database::load_state().unwrap().sessions[&native].subagents,
         Some(SubagentPolicy::Native)

@@ -469,11 +469,16 @@ effort = "high"
 ```
 
 Single-model `spawn` always uses that selection and cannot override the profile,
-model, or effort; `list_profiles` is omitted. Configure additional eligible
-profiles in Settings → Sub-agents. Claude/Codex Mjolnir children have native
-delegation disabled. The CLI can override the profile for one new session with
-`mj new --subagents native|single-model` and `--subagent-model` /
-`--subagent-effort` for single-model mode.
+model, or effort; `list_profiles` is omitted. Mjolnir chooses an eligible profile
+offering that exact model and effort by remaining quota, so single-model does
+not mean single-profile. Configure additional eligible profiles in Settings →
+Sub-agents. Claude/Codex Mjolnir children have native delegation disabled. The
+CLI can override delegation for one new session with
+`mj new --subagents native|single-model|none` and `--subagent-model` /
+`--subagent-effort` for single-model mode. `none` disables delegation without
+changing the profile's settings; profile setup still offers only Native and
+single model. Multi-model is retired for new selections; existing sessions
+retain their recorded policy on resume.
 
 This section sets the concurrent child limit and eligible profiles.
 

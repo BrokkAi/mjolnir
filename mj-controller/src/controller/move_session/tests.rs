@@ -452,7 +452,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "delegation policy the destination harness cannot run",
             mj_core::state::MoveSelection {
-                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                subagents: Some(mj_core::subagent::SubagentPolicy::None),
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -462,6 +462,20 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 resource_allocation: None,
             },
             "supported only by Claude and Codex",
+        ),
+        (
+            "retired multi-model delegation",
+            mj_core::state::MoveSelection {
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                session_id: session_id.into(),
+                profile_id: Some("codex".into()),
+                target_template_id: Some("podman".into()),
+                additional_mounts: None,
+                resource_allocation: None,
+            },
+            "no longer available",
         ),
     ];
 
@@ -2005,6 +2019,14 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         .managed_worktree
         .unwrap();
     owned.kind = mj_core::state::ManagedCheckoutKind::Clone;
+    // An omitted Move override keeps a legacy policy even when the destination
+    // profile defaults to Native.
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     // The original seed repository is gone, but the session's independent
     // clone still exists under its recorded owner path.
     let project = checkout.with_file_name("retained-project");
@@ -2105,10 +2127,20 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         !worker_root.join("profile").join("source-only.txt").exists(),
         "the previous profile home must be gone"
     );
+    let staged_settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        fs::read(worker_root.join("profile").join("settings.json")).unwrap(),
-        br#"{"profile":"destination"}"#,
+        staged_settings["profile"], "destination",
         "the destination profile must be staged in its place"
+    );
+    assert!(
+        staged_settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("mcp__mj-agents__list_profiles")),
+        "legacy multi-model delegation retains its profile discovery tool"
     );
     assert!(destination_home.join("settings.json").is_file());
     let ownership: serde_json::Value =
@@ -2132,6 +2164,17 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     assert_eq!(moved.state, SessionState::Running);
     assert_eq!(moved.last_profile, IN_PLACE_DESTINATION_PROFILE);
     assert_eq!(moved.target, source_target);
+    assert_eq!(
+        moved.subagents,
+        Some(mj_core::subagent::SubagentPolicy::AllModels)
+    );
+    assert_eq!(
+        crate::database::load_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap()
+            .subagents,
+        moved.subagents
+    );
     // Same harness, so the archived native session carries the conversation.
     assert_eq!(moved.native_session_id.as_deref(), Some("native-session"));
 

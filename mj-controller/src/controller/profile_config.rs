@@ -41,7 +41,8 @@ pub async fn subagent_options_for(
     .await
 }
 
-/// Refuses a top-level session policy its profile cannot run. Only Claude and
+/// Validates a newly selected top-level policy, not a recorded resume policy.
+/// Multi-model is retired for new selections. Only Claude and
 /// Codex take Mjolnir's delegation tools, and a single-model policy must name
 /// a model and effort that discovery offers now.
 pub async fn validate_session_subagent_policy(
@@ -70,6 +71,11 @@ fn refuse_unsupported_policy(
     kind: mj_core::config::HarnessKind,
     policy: &mj_core::subagent::SubagentPolicy,
 ) -> Result<()> {
+    if *policy == mj_core::subagent::SubagentPolicy::AllModels {
+        return Err(anyhow::Error::new(mj_core::refusal::Refusal::unusable(
+            "Mjolnir multi-model subagents are no longer available for new selections; use native, single_model, or none",
+        )));
+    }
     if kind.supports_delegation_tools() || *policy == mj_core::subagent::SubagentPolicy::Native {
         return Ok(());
     }
@@ -578,6 +584,35 @@ mod tests {
             refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::Native)
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn new_policies_accept_native_and_none_but_refuse_multi_model_without_discovery() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "parent".into(),
+            HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: "missing-test-profile-home".into(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                guardian_review_model: None,
+                subagents: SubagentPolicy::Native,
+            },
+        );
+        for policy in [SubagentPolicy::Native, SubagentPolicy::None] {
+            validate_session_subagent_policy(&config, "parent", &policy)
+                .await
+                .unwrap();
+        }
+        let error = validate_session_subagent_policy(&config, "parent", &SubagentPolicy::AllModels)
+            .await
+            .unwrap_err();
+        let refusal = Refusal::of(&error).expect("a request refusal, not a discovery failure");
+        assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
+        assert!(refusal.message().contains("no longer available"));
+        assert!(refusal.message().contains("native, single_model, or none"));
     }
 
     #[test]

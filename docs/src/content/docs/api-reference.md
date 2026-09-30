@@ -374,15 +374,23 @@ workspaces, and invalid selections fail visibly. `at` cannot be combined with
 {"subagents": {"mode": "single_model", "model": "<model-id>", "effort": "low"}}
 ```
 
-`mode` is `native` (the harness's own sub-agents), `all_models`, `single_model`,
-or `none`. `single_model` requires `model`, which must be one the parent's
-profiles offer, and takes an optional `effort`. The other modes take no other
+`mode` is `native` (the harness's own sub-agents), `single_model`, or `none`
+(delegation disabled). `single_model` requires `model`, which must be one of the
+eligible profiles' models, and takes an optional `effort`. Mjolnir selects an
+eligible profile offering that exact model and effort by remaining quota; a
+single model does not mean a single profile. The other modes take no other
 fields. The API spells the modes with underscores; `mj new --subagents` spells
-them with hyphens (`single-model`); the CLI offers Native and single model.
+them with hyphens (`single-model`); both interfaces offer Native, single model,
+and None. An explicit policy overrides the profile for this session without
+changing the profile's settings.
 Only Claude and Codex sessions accept a mode other than `native`. When
 `subagents` is omitted, the session uses the selected profile’s setting
 (Native when unset). An unsupported mode or an unavailable model answers
 `422` with the reason in the body.
+
+`all_models` is retired for new sessions and explicit Move overrides, which
+answer `422` with supported alternatives. Existing multi-model sessions retain
+their recorded policy on resume and on a Move with no policy override.
 
 Session creation still returns its ID before preparation finishes. Wait for
 readiness or inspect the session's failure before prompting. Readiness guarantees

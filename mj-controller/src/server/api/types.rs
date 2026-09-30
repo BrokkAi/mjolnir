@@ -181,7 +181,7 @@ pub struct StartSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Omitted reuses the last accepted top-level session choice.
+    /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     #[serde(default)]
