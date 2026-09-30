@@ -61,6 +61,14 @@ pub(super) fn read_project_catalog_from(connection: &Connection) -> Result<Proje
 }
 
 pub(crate) fn store_project_location(location: &ProjectLocation) -> Result<()> {
+    ensure!(
+        !location.host.trim().is_empty()
+            && location.directory.is_absolute()
+            && location.checkout_root.is_absolute()
+            && location.repository_root.is_absolute(),
+        "project location on {:?} must contain absolute directory, checkout, and repository paths",
+        location.host
+    );
     let location = location.clone();
     submit_database_write("store_project_location", move |_| {
         let _commit = crate::upgrade::activity_unless_draining("project location catalog")?;

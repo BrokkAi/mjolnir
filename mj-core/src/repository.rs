@@ -186,14 +186,23 @@ pub fn resolve_directory(
     host: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<ResolvedDirectory> {
+    let directory = if host.is_none() {
+        std::fs::canonicalize(path)
+            .with_context(|| format!("resolve project directory {}", path.display()))?
+    } else {
+        anyhow::ensure!(
+            path.is_absolute(),
+            "remote project directory must be absolute"
+        );
+        path.to_owned()
+    };
     let output = executor.execute(
         &CommandSpec::new(
             "git",
             [
                 "-C".to_owned(),
-                path.to_string_lossy().into_owned(),
+                directory.to_string_lossy().into_owned(),
                 "rev-parse".into(),
-                "--path-format=absolute".into(),
                 "--show-toplevel".into(),
                 "--git-common-dir".into(),
             ],
@@ -209,10 +218,20 @@ pub fn resolve_directory(
     let text = String::from_utf8(output.stdout).context("decode project Git roots")?;
     let mut roots = text.lines();
     let checkout_root = PathBuf::from(roots.next().context("Git omitted the checkout root")?);
-    let common = PathBuf::from(
+    anyhow::ensure!(
+        checkout_root.is_absolute(),
+        "Git returned a non-absolute checkout root: {}",
+        checkout_root.display()
+    );
+    let common = crate::local_git::resolve_git_path(
+        &directory,
         roots
             .next()
             .context("Git omitted the shared repository directory")?,
+    )?;
+    anyhow::ensure!(
+        roots.next().is_none(),
+        "Git returned unexpected project roots: {text:?}"
     );
     let root = if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
         common
@@ -249,6 +268,86 @@ pub fn resolve_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OldGit {
+        roots: &'static str,
+    }
+
+    impl CommandExecutor for OldGit {
+        fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
+            let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
+                // Git 2.25 prints unsupported options as results and exits zero.
+                let echoed = if command
+                    .args
+                    .iter()
+                    .any(|argument| argument == "--path-format=absolute")
+                {
+                    "--path-format=absolute\n"
+                } else {
+                    ""
+                };
+                format!("{echoed}{}", self.roots)
+            } else {
+                String::new()
+            };
+            Ok(crate::targets::CommandOutput {
+                status: 0,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn remote_directory_resolution_supports_old_git_and_linked_checkouts() {
+        for (selected, output, checkout, repository) in [
+            (
+                "/projects/app/subdir",
+                "/projects/app\n../.git\n",
+                "/projects/app",
+                "/projects/app",
+            ),
+            (
+                "/worktrees/app-side",
+                "/worktrees/app-side\n/projects/app/.git\n",
+                "/worktrees/app-side",
+                "/projects/app",
+            ),
+        ] {
+            let resolved = resolve_directory(
+                Path::new(selected),
+                Some("old-git-host"),
+                &OldGit { roots: output },
+            )
+            .unwrap();
+            assert_eq!(resolved.checkout_root, Path::new(checkout));
+            assert_eq!(resolved.repository_root, Path::new(repository));
+            assert_eq!(
+                resolved.identity,
+                RepositoryIdentity::RemoteDirectory {
+                    host: "old-git-host".into(),
+                    root: repository.into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn successful_git_exit_does_not_accept_invalid_project_roots() {
+        for roots in [
+            "--path-format=absolute\n/projects/app\n/projects/app/.git\n",
+            "/projects/app\n--path-format=absolute\n",
+            "/projects/app\n.git\nextra\n",
+            "/projects/app\n",
+            "\n.git\n",
+        ] {
+            assert!(
+                resolve_directory(Path::new("/projects/app"), Some("host"), &OldGit { roots })
+                    .is_err(),
+                "accepted {roots:?}"
+            );
+        }
+    }
 
     #[test]
     fn github_url_forms_share_identity_without_credentials() {

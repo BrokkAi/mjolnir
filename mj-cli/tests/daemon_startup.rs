@@ -672,6 +672,10 @@ image = "ubuntu:24.04"
         "the client blamed the endpoint the daemon never published:\n{stderr}"
     );
     assert!(!data.join("daemon.json").exists());
+    assert!(
+        stderr.contains(&data.join("logs").display().to_string()) && stderr.contains("mj-daemon-"),
+        "the client did not name the actual daemon log:\n{stderr}"
+    );
     drop(storage);
 }
 

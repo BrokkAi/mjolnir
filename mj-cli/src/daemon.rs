@@ -22,9 +22,9 @@ const DEV_RESTART_STALE_DAEMON_ENV: &str = "MJ_DEV_RESTART_STALE_DAEMON";
 /// before it can answer anything, so a busy machine or a large instance can
 /// pass this point and still be healthy.
 const START_NOTICE_DELAY: Duration = Duration::from_secs(8);
-/// The hard upper bound on waiting for a launched daemon, so the command
-/// cannot hang forever behind a wedged startup.
-const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// Large stores can take more than a minute to rebuild a table during an
+/// upgrade. Keep startup bounded while allowing those migrations to finish.
+const START_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Debug)]
 struct DaemonStartGuard(fs::File);
 
@@ -184,7 +184,7 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
             START_TIMEOUT.as_secs()
         ),
     };
-    let output = launched.output_since_launch(&log_path).await;
+    let (log_path, output) = launched.output_since_launch(&log_path).await;
     Err(launched.failure(reason, output, &log_path))
 }
 
@@ -457,43 +457,49 @@ struct LaunchedDaemon {
 }
 
 impl LaunchedDaemon {
-    /// The last lines the daemon appended to its log since this launch.
-    ///
-    /// The log is shared by every daemon launch, so only the bytes written
-    /// after this launch can describe this daemon. Startup failures are a
-    /// short `Error:` report, so a few lines carry the whole explanation.
-    async fn output_since_launch(&self, log_path: &Path) -> String {
-        const KEPT_LINES: usize = 20;
+    /// Include process diagnostics and detached stderr. Failures before logger
+    /// initialization have only stderr; later failures also have a process log.
+    async fn output_since_launch(&self, log_path: &Path) -> (PathBuf, String) {
         let log_path = log_path.to_path_buf();
+        let fallback_path = log_path.clone();
         let offset = self.log_offset;
-        let appended = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut file = fs::File::open(&log_path)?;
-            file.seek(SeekFrom::Start(offset))?;
-            let mut appended = Vec::new();
-            file.read_to_end(&mut appended)?;
-            Ok(appended)
+        let pid = self.pid;
+        let output = tokio::task::spawn_blocking(move || -> Result<(PathBuf, String)> {
+            let directory = log_path
+                .parent()
+                .context("daemon stderr path has no parent")?;
+            let diagnostics = crate::logging::daemon_log_path(directory, pid)?;
+            let mut output = String::new();
+            if let Some(path) = &diagnostics {
+                output.push_str(&launch_log_tail(path, 0)?);
+            }
+            let stderr = launch_log_tail(&log_path, offset)?;
+            if !stderr.is_empty() {
+                if !output.is_empty() {
+                    output.push_str("\nDaemon stderr:\n");
+                }
+                output.push_str(&stderr);
+            }
+            Ok((diagnostics.unwrap_or(log_path), output))
         })
         .await;
-        let appended = match appended {
-            Ok(Ok(appended)) => appended,
+        match output {
+            Ok(Ok(output)) => output,
             Ok(Err(error)) => {
-                tracing::warn!(%error, "could not read the daemon log after a failed launch");
-                return String::new();
+                tracing::warn!(%error, "could not read the daemon logs after a failed launch");
+                (
+                    fallback_path,
+                    format!("could not read daemon logs: {error:#}"),
+                )
             }
             Err(error) => {
                 tracing::warn!(%error, "daemon log read task failed");
-                return String::new();
+                (
+                    fallback_path,
+                    format!("daemon log read task failed: {error}"),
+                )
             }
-        };
-        let text = String::from_utf8_lossy(&appended);
-        let lines: Vec<&str> = text
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        let skipped = lines.len().saturating_sub(KEPT_LINES);
-        lines[skipped..].join("\n")
+        }
     }
 
     fn failure(&self, reason: String, output: String, log_path: &Path) -> anyhow::Error {
@@ -507,6 +513,23 @@ impl LaunchedDaemon {
             log_path.display()
         ))
     }
+}
+
+fn launch_log_tail(path: &Path, offset: u64) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open daemon log {}", path.display()))?;
+    // Keep both memory and failure messages bounded during a noisy startup.
+    let start = offset.max(file.metadata()?.len().saturating_sub(64 * 1024));
+    file.seek(SeekFrom::Start(start))?;
+    let mut appended = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut appended)?;
+    let text = String::from_utf8_lossy(&appended);
+    let lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    Ok(lines[lines.len().saturating_sub(20)..].join("\n"))
 }
 
 fn daemon_launch_executable() -> Result<PathBuf> {
@@ -1388,7 +1411,8 @@ mod tests {
             || true,
             || {
                 attempts.set(attempts.get() + 1);
-                let ready = attempts.get() > 500;
+                let ready =
+                    tokio::time::Instant::now().duration_since(started) >= Duration::from_secs(75);
                 async move {
                     if ready {
                         Ok("client")
@@ -1407,6 +1431,64 @@ mod tests {
             "the test must cross the notice delay without reaching the bound, but waited {waited:?}"
         );
         assert!(announced.get().is_some(), "a long wait must say so");
+        assert!(
+            waited >= Duration::from_secs(75),
+            "a migration may exceed the old 60-second bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_launch_reports_its_diagnostic_log_and_only_its_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("logs");
+        fs::create_dir(&logs).unwrap();
+        let stderr = directory.path().join("daemon.log");
+        let old = "old launch must not appear\n";
+        fs::write(&stderr, format!("{old}this launch's stderr\n")).unwrap();
+        fs::write(
+            logs.join("mj-daemon-20260930T000000.000Z-8.log"),
+            "another daemon's diagnostics",
+        )
+        .unwrap();
+        let diagnostics = logs.join("mj-daemon-20260930T000000.000Z-7.log");
+        fs::write(
+            &diagnostics,
+            format!(
+                "{}\nERROR invalid project path\n",
+                "startup line\n".repeat(10_000)
+            ),
+        )
+        .unwrap();
+        let launched = LaunchedDaemon {
+            pid: 7,
+            log_offset: old.len() as u64,
+        };
+        let (path, output) = launched.output_since_launch(&stderr).await;
+        assert_eq!(path, diagnostics);
+        assert!(output.contains("ERROR invalid project path"));
+        assert!(output.contains("this launch's stderr"));
+        assert!(!output.contains("old launch"));
+        assert!(!output.contains("another daemon"));
+        assert!(output.len() < 1024);
+        let message = format!(
+            "{:#}",
+            launched.failure("startup timed out".into(), output, &path)
+        );
+        assert!(message.contains(&diagnostics.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_failure_before_logging_starts_reports_detached_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let stderr = directory.path().join("daemon.log");
+        fs::write(&stderr, "failed before logger initialization\n").unwrap();
+        let launched = LaunchedDaemon {
+            pid: 7,
+            log_offset: 0,
+        };
+        let (path, output) = launched.output_since_launch(&stderr).await;
+        assert_eq!(path, stderr);
+        assert_eq!(output, "failed before logger initialization");
     }
 
     #[tokio::test(start_paused = true)]

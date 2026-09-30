@@ -272,6 +272,28 @@ fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
     }
 }
 
+pub(crate) fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {
+    let directory = data_dir.join("logs");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("find the launched daemon's diagnostic log"),
+    };
+    let mut latest = None;
+    for entry in entries {
+        let entry = entry.context("read daemon diagnostic log entry")?;
+        if entry.file_name().to_str().and_then(parse_log_filename)
+            == Some((ProcessKind::Daemon, Some(pid)))
+        {
+            let path = entry.path();
+            if latest.as_ref().is_none_or(|previous| path > *previous) {
+                latest = Some(path);
+            }
+        }
+    }
+    Ok(latest)
+}
+
 fn prune_logs(directory: &Path, retain: usize, protected_pid: Option<u32>) -> Result<()> {
     let mut logs_by_kind: HashMap<ProcessKind, Vec<PathBuf>> = HashMap::new();
     for entry in fs::read_dir(directory)

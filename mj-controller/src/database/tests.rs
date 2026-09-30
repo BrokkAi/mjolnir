@@ -10,6 +10,30 @@ use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
 use rusqlite::OptionalExtension;
 
 #[test]
+fn invalid_project_locations_are_refused_before_database_admission() {
+    use mj_core::project_catalog::ProjectLocation;
+    let valid = ProjectLocation {
+        host: "remote".into(),
+        directory: "/projects/app".into(),
+        checkout_root: "/projects/app".into(),
+        repository_root: "/projects/app".into(),
+        identity: mj_core::repository::RepositoryIdentity::Github("acme".into(), "app".into()),
+        seen_at: "now".into(),
+    };
+    for field in 0..4 {
+        let mut location = valid.clone();
+        match field {
+            0 => location.directory = "relative".into(),
+            1 => location.checkout_root = "--path-format=absolute".into(),
+            2 => location.repository_root = "relative".into(),
+            _ => location.host.clear(),
+        }
+        let error = store_project_location(&location).unwrap_err().to_string();
+        assert!(error.contains("must contain absolute"), "{error}");
+    }
+}
+
+#[test]
 fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     // Without the flag a caller cannot tell ten matches from the first ten of
     // many, and will present a partial answer as a whole one.
