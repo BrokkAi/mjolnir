@@ -595,3 +595,7 @@ CI after the push: `fbb85556` failed only on macOS (`expired_claude_credentials_
 - Change Workspace needs no confirmation ("fully reversible"): a pick moves at once with the notice as feedback. Fix wave F28. Rule recorded for future UI work: confirmations only for actions that cannot be undone.
 - The Sessions `Filter:` input gets readline keys (Left/Right, Home/End, Ctrl-A/E/B/F, Alt-B/F, Ctrl-W/U/K, Delete, Backspace/Ctrl-H; caret at the cursor; horizontal scroll), using the shared single-line editor if one exists; its own `x` goes, the title's `×` stays. Fix wave F29.
 - `wait` without `child_session_ids` means every unfinished child of the parent (resolved by the daemon); `return_when` keeps its meaning; nothing running answers `complete` at once. Fix wave F30.
+
+### F28 — landed
+
+`68646657`: a workspace pick in the combobox (menu or palette) emits `DashboardAction::ChangeWorkspace` at once; `Confirmation::ChangeWorkspace` and its dialog code are gone; the "Moved … to workspace …" / "Could not move …" notices name the session and now the workspace in the one-line form. Tests: `choosing_a_workspace_moves_at_once`; the two confirmation tests removed. tui 889, CLI 253 green; clippy and fmt clean.
