@@ -127,6 +127,15 @@ macro_rules! dialog_form {
     };
 }
 
+impl DialogModal for crate::welcome::WelcomeDialog {
+    dialog_form!(());
+
+    fn prepare(&mut self) {
+        self.form.get_mut().set_dismiss_actions(&[()]);
+        self.form.get_mut().set_default_action(());
+    }
+}
+
 impl DialogModal for NoticeLogDialog {
     dialog_form!(DialogControl);
 
@@ -413,6 +422,7 @@ mode_surfaces!(
     Help,
     Palette,
     Setup,
+    Welcome,
 );
 
 impl DashboardState {

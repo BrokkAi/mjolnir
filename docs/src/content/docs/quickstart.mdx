@@ -25,26 +25,26 @@ Two words come up on every screen:
   a local container, an SSH host, or an EC2 instance.
 
 When no workspace exists, Mjolnir creates one named after the current
-directory. It does not start a session. On Linux and macOS, when there is no
-configuration yet and Codex is on this machine (`~/.codex` exists or the
-`codex` command is installed), `mj` also adds a `codex` profile that uses
-`~/.codex`, and a `localhost` target. When no agent profile is set up, the
-dashboard opens on a **Get started** panel instead of the session list; see
-[If no coding agent is installed](#if-no-coding-agent-is-installed).
+directory. On first launch, it automatically discovers your installed agents,
+adds their profiles, and creates a bundle for the current GitHub repository
+when one is found. A one-time welcome dialog shows the detected agents and
+project, plus any prerequisite errors. Continue dismisses the dialog even
+while checks are running; errors found afterward appear as dashboard notices.
+Mjolnir does not start a session automatically.
 
-Press **Create**, `N`, or `prefix+c` to open the full creation wizard. Choose the
+Press **Create**, `N`, or `prefix+c` to open the creation wizard. Choose the
 profile, target, project, resources, and attached directories before launch.
 Launch progress and failures appear on the dashboard. When the new session is
-ready, type a prompt and press `Enter`. Use **prefix+s Settings** to discover agent
-accounts, add SSH or EC2 connections, and change runtime options.
+ready, type a prompt and press `Enter`. Container images download in the
+background without blocking the dashboard or sessions on this machine.
+Use **prefix+s Settings** to add SSH or EC2 connections and change runtime options.
 
-`mj setup` is optional. Run it before `mj` if you prefer to set up from the
-shell. It looks for signed-in agents and local container runtimes, and lists
-what it will add to `config.toml`. Then it asks
-`Write this configuration? [y/N]`. Type `y` and press `Enter` to write the
-file. Pressing `Enter` alone answers no and writes nothing. After writing,
-setup runs `mj doctor` and ends by saying what to do next. You can skip setup
-and use Settings instead.
+`mj setup` reruns agent and repository discovery from the shell. It adds new
+profiles and bundles automatically, preserves your existing settings, and
+reports prerequisite errors. Use it after installing another agent or to
+discover another repository. It does not ask configuration questions or wait
+for container images. `mj doctor --smoke` remains available for explicit
+container smoke tests.
 
 `mj go` is a shortcut for later. Run it in a project directory: the first time
 it asks which profile and target to use, and after that it returns to that
@@ -53,13 +53,9 @@ the folder.
 
 ### If no coding agent is installed
 
-Mjolnir runs an agent you already use; it does not include one. Without one,
-`mj setup` prints `No existing Codex, Claude Code, Kimi Code, Grok Build, or
-Muse Code homes found.` and ends by telling you to install an agent. The
-dashboard shows the **Get started** panel, which says `No coding agent was
-found on this machine.` This panel appears whenever no agent profile is set
-up: after `mj setup` found no agent, or on the first `mj` when Codex is not
-installed. To fix this:
+Mjolnir runs an agent you already use; it does not include one. If no agent is
+found, the welcome reports the missing profile and the dashboard shows the
+**Get started** panel. To fix this:
 
 1. Install one supported agent and sign in with it once, using that agent's
    own instructions. For example, Claude Code: `npm install -g

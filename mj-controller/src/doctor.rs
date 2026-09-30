@@ -1037,8 +1037,8 @@ fn podman_check(
 /// doctor check.
 ///
 /// This is the single source of truth for Podman availability wording and
-/// remediation. `mj setup` calls it directly so its runtime list reports the
-/// same detail and fix that `mj doctor` would.
+/// remediation. Settings runtime discovery calls it directly so its runtime
+/// list reports the same detail and fix that `mj doctor` would.
 pub fn local_podman_runtime_check(
     executor: &impl CommandExecutor,
     platform: &ApplePlatform,

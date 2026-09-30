@@ -20,8 +20,8 @@ Checks do not start stopped services, and launch performs a final preflight.
 
 Settings refuses to remove or rewrite configuration used by an active session;
 add an alternative entry or stop the session first. Global defaults and profile
-enablement remain editable. The optional `mj setup` command and direct
-`config.toml` editing remain available for users who prefer them.
+enablement remain editable. `mj setup` reruns automatic agent and repository
+discovery; direct `config.toml` editing also remains available.
 
 If an active session references a missing profile, bundle, or target, Mjolnir
 still opens and marks that session as needing configuration repair. Select it
@@ -805,7 +805,7 @@ EC2 machine launches one instance per session. See
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image `mj setup` writes. |
+| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image used by built-in container targets. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
@@ -1007,8 +1007,8 @@ and finally the verified URL fallback.
 The normal release installer already supplies both supported portable Linux
 worker architectures.
 
-Harness-home variables influence `mj setup` discovery when no profile is yet
-written:
+Harness-home variables influence automatic first-run discovery and explicit
+`mj setup` reruns. Existing profiles retain their configured homes:
 
 | Harness | Discovery variable | Conventional home |
 | --- | --- | --- |

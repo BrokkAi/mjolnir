@@ -491,6 +491,68 @@ pub(crate) fn review_settings_choices(
     }
 }
 
+/// Discover and save first-run configuration without blocking terminal input.
+pub(crate) fn spawn_first_run_setup(
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    let progress = updates.clone();
+    spawn_cancellable_io(
+        tracker,
+        "first-run setup",
+        updates,
+        move |cancelled| {
+            use mj_controller::{doctor, setup};
+            let executor = CancellableProcessExecutor::new(cancelled.clone())
+                .with_deadline(Duration::from_secs(30));
+            let config_path = mj_core::config::config_path();
+            let result = setup::run_setup(
+                &config_path,
+                &mj_core::config::data_dir(),
+                false,
+                &executor,
+                &|| executor.is_cancelled(),
+                || {
+                    report(
+                        "first-run setup",
+                        &progress,
+                        DashboardIoUpdate::FirstRunStarted,
+                    );
+                },
+            )?;
+            let Some(summary) = result else {
+                if Config::load_from(&config_path)?.profiles.is_empty() {
+                    let agents = setup::discover_profiles(&executor)
+                        .into_iter()
+                        .map(|home| home.kind)
+                        .collect();
+                    report(
+                        "looking for installed coding agents",
+                        &progress,
+                        DashboardIoUpdate::InstalledAgents(Ok(agents)),
+                    );
+                }
+                return Ok(None);
+            };
+            report(
+                "first-run setup",
+                &progress,
+                DashboardIoUpdate::FirstRunConfigured(summary),
+            );
+            let checks =
+                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
+            let result = doctor::run_with_config_path(
+                &config_path,
+                &checks,
+                doctor::current_apple_platform(&checks),
+                doctor::DoctorOptions { smoke: false },
+            );
+            Ok(Some(setup::actionable_errors(&result)))
+        },
+        DashboardIoUpdate::FirstRunChecked,
+    )
+}
+
 /// Look for the coding agents installed on this machine, the same way Detect
 /// profiles does, so the Get started panel of a dashboard with no agent
 /// profile can say whether any was found.

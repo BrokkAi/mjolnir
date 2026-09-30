@@ -1821,28 +1821,6 @@ fn resume_progress_explains_the_blocking_work() {
 }
 
 #[test]
-fn only_a_fully_empty_config_triggers_automatic_setup() {
-    let mut config = mj_core::config::Config::default();
-    assert!(configuration_needs_setup(&config));
-    config.targets.insert(
-        "podman".into(),
-        mj_core::config::TargetTemplate::LocalPodman {
-            container: mj_core::config::ContainerTemplate {
-                build_cache: None,
-                image: "ubuntu:24.04".into(),
-                pull_policy: Default::default(),
-                platform: None,
-                cpus: None,
-                memory: None,
-                environment: Default::default(),
-                workspace_storage: Default::default(),
-            },
-        },
-    );
-    assert!(!configuration_needs_setup(&config));
-}
-
-#[test]
 fn materialized_projections_are_single_flight_and_coalesce_to_the_latest_snapshot() {
     let mut in_flight = BTreeSet::new();
     let mut pending = BTreeMap::new();

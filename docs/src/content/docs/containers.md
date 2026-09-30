@@ -171,9 +171,8 @@ checks Mjolnir runs is still growing, so treat the `fixable` status as
 authoritative rather than checking for specific check names.
 
 Once every check passes, run the same command with `--smoke` for an
-end-to-end test: it creates and removes a disposable container the same way
-`mj setup` does, confirming the full path works, not just static
-prerequisites. For Docker, this also verifies that a temporary writable
+end-to-end test: it creates and removes a disposable container, confirming
+the full path works beyond static prerequisite checks. For Docker, this also verifies that a temporary writable
 attachment is copy-on-write and that its managed OverlayFS volume cleans up.
 
 ```console

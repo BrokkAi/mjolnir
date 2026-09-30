@@ -24,6 +24,59 @@ fn isolated_command(root: &Path) -> Command {
     command
 }
 
+#[test]
+fn setup_reruns_without_questions_and_preserves_existing_accounts() {
+    let root = tempfile::tempdir().unwrap();
+    let config_directory = root.path().join("setup-config");
+    let data_directory = root.path().join("setup-data");
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::create_dir_all(root.path().join(".codex")).unwrap();
+    mj_core::test_hooks::install_fake_command(&tools, "codex", "#!/bin/sh\nexit 0\n");
+    mj_core::test_hooks::install_fake_command(&tools, "claude", "#!/bin/sh\nexit 1\n");
+    for run in 0..2 {
+        if run == 1 {
+            std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+        }
+        let output = isolated_command(root.path())
+            .args(["--instance", "setup-rerun", "setup"])
+            .env("MJ_CONFIG_DIR", &config_directory)
+            .env("MJ_DATA_DIR", &data_directory)
+            .env("PATH", &tools)
+            .env("CODEX_HOME", root.path().join(".codex"))
+            .env("CLAUDE_CONFIG_DIR", root.path().join(".claude"))
+            .env_remove("KIMI_CODE_HOME")
+            .env_remove("GROK_HOME")
+            .env_remove("MUSE_HOME")
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Welcome to Mjolnir"), "{stdout}");
+        assert!(stdout.contains("mj login"), "{stdout}");
+        assert!(!stdout.contains("Write this configuration"), "{stdout}");
+        assert!(!stdout.contains("Container image ["), "{stdout}");
+        let config =
+            mj_core::config::Config::load_from(&config_directory.join("config.toml")).unwrap();
+        assert_eq!(config.profiles.len(), run + 1);
+        assert!(config.profiles.contains_key("codex"));
+        assert_eq!(
+            std::fs::read(data_directory.join("setup-state")).unwrap(),
+            b"complete\n"
+        );
+    }
+    assert!(
+        !data_directory.join("daemon.json").exists(),
+        "explicit discovery starts no daemon"
+    );
+}
+
 /// Whether a discovered path is the instance tree itself, one of its ancestors
 /// (created as parents by `create_dir_all`), or something inside it. Anything
 /// else under `mjolnir/` is state that leaked out of the instance.

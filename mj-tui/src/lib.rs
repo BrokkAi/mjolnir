@@ -64,6 +64,7 @@ mod review_settings;
 mod setup;
 mod surface_controls;
 pub mod tile_layout;
+mod welcome;
 mod widgets;
 mod wizards;
 pub(crate) mod workspaces;
@@ -754,6 +755,7 @@ pub(crate) enum Mode {
     /// The `F2` command palette: every command that applies right now.
     Palette(CommandPalette),
     Setup(setup::SetupDialog),
+    Welcome(welcome::WelcomeDialog),
 }
 
 pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], reverse: bool) -> T {
@@ -777,6 +779,7 @@ struct SessionOrderCache {
 }
 
 pub struct DashboardState {
+    pending_welcome: Option<welcome::WelcomeDialog>,
     #[cfg(test)]
     pub(crate) reconciliation_visits: Cell<usize>,
     pub(crate) row_index: RefCell<row_index::RowIndex>,
@@ -1156,6 +1159,7 @@ impl DashboardState {
             drawn_failures: BTreeMap::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
+            pending_welcome: None,
             help_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,

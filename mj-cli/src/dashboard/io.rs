@@ -257,6 +257,9 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         error: String,
     },
+    FirstRunStarted,
+    FirstRunConfigured(mj_controller::setup::SetupReport),
+    FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
     SetupSaved {
         generation: u64,
         result: std::result::Result<Config, String>,
@@ -1263,6 +1266,17 @@ impl DashboardContext {
             DashboardIoUpdate::SetupDiscovered { generation, result } => {
                 self.dashboard.setup_discovered(generation, result)
             }
+            DashboardIoUpdate::FirstRunStarted => self.dashboard.begin_welcome(),
+            DashboardIoUpdate::FirstRunConfigured(report) => {
+                self.dashboard.welcome_configured(report.summary())
+            }
+            DashboardIoUpdate::FirstRunChecked(result) => match result {
+                Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
+                Ok(None) => {}
+                Err(error) => self.dashboard.welcome_checked(vec![format!(
+                    "Setup could not finish: {error}. Run `mj setup` to retry."
+                )]),
+            },
             DashboardIoUpdate::InstalledAgents(result) => match result {
                 Ok(agents) => self.dashboard.set_installed_agents(agents),
                 // The panel then keeps saying only that no profile is set

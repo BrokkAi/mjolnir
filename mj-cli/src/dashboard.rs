@@ -29,7 +29,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use mj_controller::database::DetachedSessionDraft;
-use mj_core::config::{Config, config_path};
+use mj_core::config::Config;
 use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
 use mj_core::subagent::SubagentRecord;
 
@@ -497,27 +497,6 @@ fn launch_repository_top_level() -> Option<std::path::PathBuf> {
     (!top_level.is_empty()).then(|| std::path::PathBuf::from(top_level))
 }
 
-/// Write the first-run configuration for an interactive dashboard, before
-/// the daemon starts.
-///
-/// The daemon reads the configuration when it starts. Written after that,
-/// the daemon's first snapshot carried the older configuration without the
-/// new profile; the dashboard took it, dropped the profile's quota refresh,
-/// then reloaded the file and got the profile back with no refresh on the
-/// way, so its row read "refreshing…" for good (launch finding R13-8).
-pub(crate) async fn initialize_first_run_config() -> Result<()> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
-        || !std::io::IsTerminal::is_terminal(&std::io::stdout())
-    {
-        return Ok(());
-    }
-    tokio::task::spawn_blocking(|| {
-        mj_controller::setup::initialize_local_startup_config(&config_path())
-    })
-    .await
-    .context("initialize startup configuration task failed")?
-}
-
 pub(crate) async fn run_dashboard_for_workspace(
     workspace_id: &str,
     client_id: &str,
@@ -546,8 +525,26 @@ pub(crate) async fn run_dashboard_for_workspace(
     else {
         return Ok(DashboardExit::Normal);
     };
+    let automatic_setup = resume.is_none() && go.is_none() && !open_workspace_manager;
     if let Some(resume) = resume {
         context.restore_upgrade(resume).await;
+    }
+    if automatic_setup {
+        io::spawn_first_run_setup(
+            context.dashboard_io_tx.clone(),
+            context.critical_operations.clone(),
+        );
+    } else if context
+        .controller
+        .config
+        .enabled_profiles()
+        .next()
+        .is_none()
+    {
+        io::spawn_installed_agent_discovery(
+            context.dashboard_io_tx.clone(),
+            context.critical_operations.clone(),
+        );
     }
     let mut restart_executable = None;
     if go.is_none() {
@@ -1524,9 +1521,6 @@ impl DashboardContext {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
         let terminal = TerminalGuard::enter()?;
-        if configuration_needs_setup(&controller.config) {
-            dashboard.begin_setup();
-        }
 
         let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.to_owned())?;
         let worker_updates_rx = remote_worker.updates;
@@ -1682,20 +1676,6 @@ impl DashboardContext {
         };
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();
-        // Without an agent profile the dashboard opens on the Get started
-        // panel, which says what a look at this machine found.
-        if context
-            .controller
-            .config
-            .enabled_profiles()
-            .next()
-            .is_none()
-        {
-            io::spawn_installed_agent_discovery(
-                context.dashboard_io_tx.clone(),
-                context.critical_operations.clone(),
-            );
-        }
         Ok(Some(context))
     }
 }
@@ -2171,10 +2151,6 @@ pub(crate) fn resume_progress_notice(
         "Preparing {}: verifying checkpoint, provisioning {target_id}, and restoring {profile_id}…",
         session_name
     )
-}
-
-fn configuration_needs_setup(config: &Config) -> bool {
-    config.is_unconfigured()
 }
 
 #[cfg(test)]

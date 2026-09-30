@@ -50,7 +50,14 @@ mj setup instructions --platform linux
 mj setup instructions --platform macos
 ```
 
-`mj setup` runs the interactive discovery flow. It scans harness homes and credentials, the current repository's GitHub origin, local Podman, Docker, and Apple Container runtimes, AWS CLI configuration, and concrete hosts in `~/.ssh/config`. Installed harness commands are detected even before their first login; setup reports the login needed to initialize their profile. After confirmation it adds newly discovered profiles, repository bundles, and targets while preserving existing entries and preferences. Repeated discovery reuses matching entries. When a target has different settings, setup offers to keep it or add a separate target; existing sessions keep their original configuration. A conflicting edit made while setup is open stops the write and asks you to rerun setup.
+`mj setup` reruns the same automatic agent and repository discovery used on
+first interactive startup. It detects installed harnesses and home-directory
+overrides, adds profiles and a bundle for the current GitHub origin, and
+preserves existing entries and preferences. Matching entries are reused;
+identifier collisions get separate names. It saves additions without questions
+and reports actionable doctor errors. Container downloads remain background
+daemon work. Configure container options, SSH hosts, and AWS targets in Settings;
+use `mj doctor --smoke` for explicit container smoke tests.
 
 `setup instructions` prints coding-agent-friendly preparation steps for a Linux or macOS host.
 

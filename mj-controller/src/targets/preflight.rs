@@ -94,7 +94,7 @@ impl PodmanHost<'_> {
 /// Verify the fast local preconditions for Hel's rootless Podman target.
 ///
 /// This intentionally never pulls an image. Image availability is verified by
-/// `mj setup`'s smoke test and by the subsequent target creation command.
+/// `mj doctor --smoke` and by the subsequent target creation command.
 pub fn verify_local_podman(executor: &impl CommandExecutor) -> Result<PodmanPreflight> {
     verify_podman(PodmanHost::Local, executor)
 }
@@ -106,7 +106,7 @@ pub struct DockerPreflight {
 
 /// Verify that the Docker CLI can reach a Linux Docker daemon.
 ///
-/// Image and OverlayFS support are exercised by the setup/doctor smoke test;
+/// Image and OverlayFS support are exercised by `mj doctor --smoke`;
 /// this fast probe runs before every launch and never pulls an image.
 pub fn verify_local_docker(executor: &impl CommandExecutor) -> Result<DockerPreflight> {
     verify_docker(None, executor)

@@ -89,13 +89,15 @@ least one of them first. Then, from a project directory:
 mj
 ```
 
-This opens the dashboard of workspaces, sessions, targets, and quota. Press
-`ctrl+b c` to create a session: pick an agent profile and where the session
-runs. If no agent profile is set up yet, the dashboard says what it found on
-this machine and how to add one.
+On first launch, Mjolnir automatically adds profiles for your installed agents
+and a bundle for the current GitHub repository. A brief welcome shows what it
+found and any prerequisite errors. Press Continue, then `ctrl+b c` to create
+a session: pick an agent profile and where the session runs. Container images
+download in the background while you use the dashboard. Configure SSH and AWS
+targets in Settings (`ctrl+b s`).
 
-- `mj setup` is optional. Run it before `mj` to find installed agents and
-  container runtimes from the shell.
+- `mj setup` reruns agent and repository discovery from the shell, preserving
+  your existing configuration.
 - `mj go` is a shortcut for later. Each folder remembers its setup, and
   running `mj go` again returns you to that folder's last conversation.
 - `mj doctor` checks prerequisites and tells you how to fix anything missing.

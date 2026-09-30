@@ -30,7 +30,10 @@ pub fn capture_checkpoint_with_native_state(
     );
     let mut resolved = spec.clone();
     resolved.relay_root = resolve_target_path(&resolved.relay_root)?;
-    resolved.harness_home = resolve_target_path(&resolved.harness_home)?;
+    resolved.harness_home = checkpoint_harness_home(
+        &resolved.relay_root,
+        &resolve_target_path(&resolved.harness_home)?,
+    )?;
     resolved.workspace_root = resolve_target_path(&resolved.workspace_root)?;
     resolved.stage_path = resolve_target_path(&resolved.stage_path)?;
     validate_capture_spec(&resolved)?;
@@ -567,7 +570,8 @@ pub fn export_checkpoint_with_native_state(
         CHECKPOINT_EXPORT_PROTOCOL_VERSION
     );
     let relay_root = resolve_target_path(&spec.relay_root)?;
-    let harness_home = resolve_target_path(&spec.harness_home)?;
+    let harness_home =
+        checkpoint_harness_home(&relay_root, &resolve_target_path(&spec.harness_home)?)?;
     let workspace_root = resolve_target_path(&spec.workspace_root)?;
     let output_path = resolve_target_path(&spec.output_path)?;
     spec.canonical_session.validate()?;
@@ -710,6 +714,28 @@ pub(super) fn collect_checkpoint_repositories(
             Ok(snapshot)
         })
         .collect()
+}
+
+/// Use the installed worker's source paths while retaining the controller's
+/// requirement that the export belongs to the same physical harness home.
+pub fn checkpoint_harness_home(relay_root: &Path, requested: &Path) -> Result<PathBuf> {
+    let Some(installed) =
+        mj_core::worker_launch::installed_harness_home(&relay_root.join("launch.json"))?
+    else {
+        // Earlier launch formats without a home use the checkpoint protocol's
+        // explicit source, as do standalone exports without a live worker.
+        return Ok(requested.to_path_buf());
+    };
+    let installed = resolve_home_relative_target_path(&installed)?;
+    ensure!(
+        fs::canonicalize(requested).context("resolve checkpoint harness home")?
+            == fs::canonicalize(&installed).context("resolve installed worker harness home")?,
+        "checkpoint harness home does not match the installed worker"
+    );
+    // An upgraded controller names <worker root>/profile, which can still be
+    // a link to an older worker's original home. Its launch file owns the
+    // paths used by both native history and the project-memory replica.
+    Ok(installed)
 }
 
 /// Codex exports carry the relay-root scan cache so that a long-lived session

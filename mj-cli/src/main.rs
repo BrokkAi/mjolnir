@@ -40,7 +40,7 @@ use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 
 use mj_controller::controller::Controller;
-use mj_controller::setup::{SetupOutcome, run_setup_dialog};
+use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
 use ratatui::Terminal;
@@ -97,7 +97,7 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
-    /// Discover local agent homes and create an initial Mjolnir configuration.
+    /// Rerun agent and repository discovery, preserving existing configuration.
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
     Import(ImportArgs),
@@ -1137,7 +1137,6 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
-    dashboard::initialize_first_run_config().await?;
     let mut daemon = daemon::connect_or_start().await?;
     let workspaces = daemon.list_workspaces().await?;
     let selected = if let Some(resume) = &resume
@@ -1844,9 +1843,7 @@ fn setup(args: SetupArgs) -> Result<()> {
             print!("{}", mj_controller::doctor::setup_instructions(platform));
             Ok(())
         }
-        None => match run_setup_dialog(&config_path())? {
-            SetupOutcome::Written | SetupOutcome::Cancelled => Ok(()),
-        },
+        None => run_setup_command(&config_path()),
     }
 }
 
