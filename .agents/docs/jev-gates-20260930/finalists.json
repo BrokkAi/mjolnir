@@ -1,0 +1,33 @@
+{
+  "frozen_at": "2026-09-30T21:09:13.959372+00:00",
+  "purpose": "Fresh stochastic repeat of the SAME corpus after selecting candidates; not an independent case holdout.",
+  "input_finalists": [
+    "current",
+    "probability_0.9",
+    "concentration_0.7",
+    "confidence_0.75",
+    "ratio_2.5_floor_0.5",
+    "ratio_2_floor_0.5"
+  ],
+  "finished_finalists": [
+    "current",
+    "confidence_0.7",
+    "concentration_0.6",
+    "ratio_3_floor_0.6"
+  ],
+  "provisional_recommendation": {
+    "input": "ratio_2.5_floor_0.5",
+    "finished_work": "confidence_0.7",
+    "finished_input": "existing none confidence >= 0.85",
+    "automation": "unchanged existing 0.90 gates"
+  },
+  "questions_sha256": "273b3ceca7978fe21a9067a32b6c9f2b1468b6728d4d146451fe504bad648775",
+  "gate_families": [
+    "provider confidence",
+    "winning probability",
+    "winner-minus-runner gap",
+    "normalized entropy concentration",
+    "winner/runner ratio with floor"
+  ],
+  "development_candidate_count": 113
+}

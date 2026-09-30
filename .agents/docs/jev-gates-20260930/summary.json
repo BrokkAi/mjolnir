@@ -1,0 +1,325 @@
+{
+  "created_at": "2026-09-30T21:13:50.233008+00:00",
+  "gate_count": 113,
+  "requests": 612,
+  "unique_fixtures": 102,
+  "session_groups": 47,
+  "note": "Two three-repeat replays of the same curated cases. Counts are correlated repeats, not independent production-rate estimates. Final aggregate recommendation considers both sweeps; probability_0.8 for finished was in the predefined grid but was not in the narrower frozen confirmation finalist list.",
+  "input": {
+    "current": {
+      "first": {
+        "tp": 35,
+        "fp": 1,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 36,
+        "fp": 0,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 71,
+        "fp": 1,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "ratio_2_floor_0.5": {
+      "first": {
+        "tp": 54,
+        "fp": 12,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 54,
+        "fp": 11,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 108,
+        "fp": 23,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "ratio_2.5_floor_0.5": {
+      "first": {
+        "tp": 51,
+        "fp": 6,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 51,
+        "fp": 7,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 102,
+        "fp": 13,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "ratio_3_floor_0.5": {
+      "first": {
+        "tp": 50,
+        "fp": 6,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 48,
+        "fp": 6,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 98,
+        "fp": 12,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "ratio_4_floor_0.5": {
+      "first": {
+        "tp": 45,
+        "fp": 4,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 43,
+        "fp": 4,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 88,
+        "fp": 8,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "confidence_0.75": {
+      "first": {
+        "tp": 44,
+        "fp": 3,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 42,
+        "fp": 3,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 86,
+        "fp": 6,
+        "positives": 108,
+        "negatives": 474
+      }
+    },
+    "concentration_0.7": {
+      "first": {
+        "tp": 38,
+        "fp": 1,
+        "positives": 54,
+        "negatives": 237
+      },
+      "second": {
+        "tp": 38,
+        "fp": 0,
+        "positives": 54,
+        "negatives": 237
+      },
+      "pooled": {
+        "tp": 76,
+        "fp": 1,
+        "positives": 108,
+        "negatives": 474
+      }
+    }
+  },
+  "finish_work": {
+    "current": {
+      "first": {
+        "tp": 31,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 32,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 63,
+        "fp": 6,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "ratio_2_floor_0.5": {
+      "first": {
+        "tp": 58,
+        "fp": 14,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 56,
+        "fp": 13,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 114,
+        "fp": 27,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "ratio_2.5_floor_0.5": {
+      "first": {
+        "tp": 57,
+        "fp": 8,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 54,
+        "fp": 9,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 111,
+        "fp": 17,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "ratio_3_floor_0.5": {
+      "first": {
+        "tp": 55,
+        "fp": 7,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 54,
+        "fp": 8,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 109,
+        "fp": 15,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "ratio_4_floor_0.5": {
+      "first": {
+        "tp": 52,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 52,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 104,
+        "fp": 6,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "probability_0.8": {
+      "first": {
+        "tp": 52,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 52,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 104,
+        "fp": 6,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "confidence_0.7": {
+      "first": {
+        "tp": 54,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 53,
+        "fp": 5,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 107,
+        "fp": 8,
+        "positives": 174,
+        "negatives": 258
+      }
+    },
+    "confidence_0.75": {
+      "first": {
+        "tp": 48,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "second": {
+        "tp": 49,
+        "fp": 3,
+        "positives": 87,
+        "negatives": 129
+      },
+      "pooled": {
+        "tp": 97,
+        "fp": 6,
+        "positives": 174,
+        "negatives": 258
+      }
+    }
+  },
+  "recommendation": {
+    "input": {
+      "winner": "required",
+      "ratio": 2.5,
+      "minimum_probability": 0.5
+    },
+    "finished_work": {
+      "winner": "finished",
+      "minimum_probability": 0.8
+    },
+    "other_gates": "Keep finished-input none confidence >= 0.85, failure gates, continuation, and recovery unchanged.",
+    "runtime_changed": false
+  }
+}

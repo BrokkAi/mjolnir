@@ -1,0 +1,323 @@
+{
+  "run": "/mnt/optane/mj-jev-gates-20260930/replay",
+  "requests": 306,
+  "manifest": {
+    "model": "jev-latest",
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "questions_sha256": "273b3ceca7978fe21a9067a32b6c9f2b1468b6728d4d146451fe504bad648775",
+    "fixtures_sha256": "c6a62a4e7ef51cf617766544a85a3e2a079f88202bb6f15fe192bc063c255aa5"
+  },
+  "policies": {
+    "current": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 1,
+        "correct_actions": 150,
+        "uncertain": 188,
+        "wrong_actions": 4,
+        "wrong_finished": 3,
+        "wrong_finished_replied": 3,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 35,
+        "finished_total": 87,
+        "finished_correct": 31,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "R04": 1
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "R04:await_input": 1
+      }
+    },
+    "ratio2_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 12,
+        "correct_actions": 195,
+        "uncertain": 98,
+        "wrong_actions": 32,
+        "wrong_finished": 20,
+        "wrong_finished_replied": 17,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 54,
+        "finished_total": 87,
+        "finished_correct": 63,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "D16": 3,
+        "E03": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "D16:await_input": 3,
+        "E03:await_input": 3,
+        "P01:finished": 3,
+        "P02:finished": 3,
+        "P06:finished": 3,
+        "P11:finished": 2,
+        "R04:await_input": 3,
+        "R05:finished": 3,
+        "S08:finished": 3
+      }
+    },
+    "ratio2_floor50_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 12,
+        "correct_actions": 195,
+        "uncertain": 98,
+        "wrong_actions": 32,
+        "wrong_finished": 20,
+        "wrong_finished_replied": 17,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 54,
+        "finished_total": 87,
+        "finished_correct": 63,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "D16": 3,
+        "E03": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "D16:await_input": 3,
+        "E03:await_input": 3,
+        "P01:finished": 3,
+        "P02:finished": 3,
+        "P06:finished": 3,
+        "P11:finished": 2,
+        "R04:await_input": 3,
+        "R05:finished": 3,
+        "S08:finished": 3
+      }
+    },
+    "ratio3_floor60_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 6,
+        "correct_actions": 186,
+        "uncertain": 129,
+        "wrong_actions": 18,
+        "wrong_finished": 12,
+        "wrong_finished_replied": 9,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 50,
+        "finished_total": 87,
+        "finished_correct": 57,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "P02:finished": 2,
+        "P06:finished": 2,
+        "R04:await_input": 3,
+        "R05:finished": 2,
+        "S08:finished": 3
+      }
+    },
+    "ratio4_floor70_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 4,
+        "correct_actions": 175,
+        "uncertain": 148,
+        "wrong_actions": 10,
+        "wrong_finished": 6,
+        "wrong_finished_replied": 3,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 45,
+        "finished_total": 87,
+        "finished_correct": 52,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 1,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 1,
+        "R04:await_input": 3,
+        "S08:finished": 3
+      }
+    },
+    "probability_two_thirds_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 12,
+        "correct_actions": 193,
+        "uncertain": 102,
+        "wrong_actions": 32,
+        "wrong_finished": 20,
+        "wrong_finished_replied": 17,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 54,
+        "finished_total": 87,
+        "finished_correct": 61,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "D16": 3,
+        "E03": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "D16:await_input": 3,
+        "E03:await_input": 3,
+        "P01:finished": 3,
+        "P02:finished": 3,
+        "P06:finished": 3,
+        "P11:finished": 2,
+        "R04:await_input": 3,
+        "R05:finished": 3,
+        "S08:finished": 3
+      }
+    },
+    "probability80_activity": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 4,
+        "correct_actions": 178,
+        "uncertain": 151,
+        "wrong_actions": 9,
+        "wrong_finished": 5,
+        "wrong_finished_replied": 3,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 45,
+        "finished_total": 87,
+        "finished_correct": 52,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 1,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 1,
+        "R04:await_input": 3,
+        "S08:finished": 2
+      }
+    },
+    "ratio2_all": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 12,
+        "correct_actions": 196,
+        "uncertain": 62,
+        "wrong_actions": 38,
+        "wrong_finished": 20,
+        "wrong_finished_replied": 17,
+        "wrong_continue": 4,
+        "required_total": 54,
+        "required_detected": 54,
+        "finished_total": 87,
+        "finished_correct": 63,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "D16": 3,
+        "E03": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "D16:await_input": 3,
+        "E03:await_input": 3,
+        "P01:finished": 3,
+        "P02:finished": 3,
+        "P06:finished": 3,
+        "P11:finished": 2,
+        "R04:await_input": 3,
+        "R05:finished": 3,
+        "S08:finished": 3,
+        "S09:continue": 3,
+        "S25:await_input": 2,
+        "S34:continue": 1
+      }
+    },
+    "ratio2_input_only": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 12,
+        "correct_actions": 166,
+        "uncertain": 155,
+        "wrong_actions": 15,
+        "wrong_finished": 3,
+        "wrong_finished_replied": 3,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 54,
+        "finished_total": 87,
+        "finished_correct": 31,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "D16": 3,
+        "E03": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "D16:await_input": 3,
+        "E03:await_input": 3,
+        "R04:await_input": 3
+      }
+    },
+    "ratio3_floor60_input_only": {
+      "counts": {
+        "controls_total": 237,
+        "false_input": 6,
+        "correct_actions": 162,
+        "uncertain": 165,
+        "wrong_actions": 9,
+        "wrong_finished": 3,
+        "wrong_finished_replied": 3,
+        "wrong_continue": 0,
+        "required_total": 54,
+        "required_detected": 50,
+        "finished_total": 87,
+        "finished_correct": 31,
+        "ambiguous": 15
+      },
+      "false_input_cases": {
+        "D07": 3,
+        "R04": 3
+      },
+      "wrong_action_cases": {
+        "A03:finished": 3,
+        "D07:await_input": 3,
+        "R04:await_input": 3
+      }
+    }
+  }
+}

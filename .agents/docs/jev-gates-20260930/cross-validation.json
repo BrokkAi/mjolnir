@@ -1,0 +1,1528 @@
+{
+  "note": "Exploratory source-grouped five-fold selection on first replay; earlier corpus inspection prevents claiming untouched independent validation.",
+  "source_groups": 47,
+  "fold_assignment": {
+    "51a8864993190bfa7f45b7711daf1d70": 0,
+    "a460eb82ca61a947c5e634abf72dab06": 1,
+    "81b21c67199a48f8cfad7ddc7076683b": 2,
+    "f1d4683a70fa5ad5f672851b173f552e": 3,
+    "0305d10cd40fb1342e5ad6171d6ae993": 4,
+    "2ddbd4ceaa5916f6c58138d97e62d8c1": 4,
+    "cf1a32d7fcf1b32a5bbfbd247604a7a3": 3,
+    "bf8745bb482f7d823f647de7da278e9e": 2,
+    "6d26c6d3c2659ce212d82e60a7d89a37": 1,
+    "bdb414d552592b30daf37b50d0aae04c": 0,
+    "0efccbcef11b71ab37df2f0e62e9cd9e": 4,
+    "73daae84d48d97b313392ab39e1c7371": 3,
+    "d2722d0582ead0f8b12d1b513e5cd8a9": 1,
+    "430c302f0bd8f53f4c2b9df22191f6f4": 2,
+    "c677a683ed940070fa8102f9c614bf1b": 1,
+    "synthetic-H": 3,
+    "ffcaa96197ff0295c9618f4397bc8648": 2,
+    "0b4b14fb06f2c331d802b44d8e35c660": 3,
+    "2e83c887c773ff0de84e2a0ce34039d7": 2,
+    "418f5bfcd099c0cb562b053262e44072": 0,
+    "2905480cf21356d4fbfe6d9ca06a3c38": 3,
+    "e3b40768188f92bcc4864eb8596bf74f": 3,
+    "88680b70c96804db3607ece46f92b339": 0,
+    "115a0d328e7b084236655312ef7a69bd": 2,
+    "14ef33c8073e63ec721c68fe5aeb9bc5": 3,
+    "26f87eef13fb2e11d39487db98717fc5": 0,
+    "1c2820c44b1cae51f1102627ed5d1afa": 2,
+    "73cbf0fb7bb73d1ed6594a0a3b955d21": 1,
+    "1934e7243f20840f23d3e12d8e31dc38": 3,
+    "d59acb28592370875cd114c05d8253f7": 4,
+    "eb7e41d23367ce7df920b7c56a3953fb": 0,
+    "2f88c7f26089ed109ffe71820f9234ef": 1,
+    "249b620ea02209220090ad4aec3ba746": 2,
+    "dfa5b874b8e3a8412759ffedd034218e": 3,
+    "6845361df38c1b9d9da7a0d43d71a159": 0,
+    "5d704332a5c81b42f94501e193a5f211": 4,
+    "0bdcf68ccaaed6894cb8af3bffb9060a": 1,
+    "58aaa46da0e41c23eec11b9e97e78f09": 2,
+    "0bf0983d553751026807d97d54857ede": 3,
+    "54b129beebda87d233ffb12c22d33913": 4,
+    "6b4cec881775e76ab0c9339d47f96853": 0,
+    "728ee69f7f4aac97366e018d9f888c28": 1,
+    "b9babd0d243572d8987d43c15bff8d5c": 2,
+    "cfaf0702664b39f3d199a8403dd41a6d": 3,
+    "ba55fe3e43207548125cdf15471f218c": 4,
+    "058256db1066dbfd4679468f88e7e2eb": 0,
+    "1339f145253a8e669cb31ee688d34f8e": 1
+  },
+  "fold_loads": [
+    {
+      "required": 3,
+      "finished": 5,
+      "size": 21
+    },
+    {
+      "required": 4,
+      "finished": 6,
+      "size": 21
+    },
+    {
+      "required": 4,
+      "finished": 6,
+      "size": 20
+    },
+    {
+      "required": 4,
+      "finished": 6,
+      "size": 20
+    },
+    {
+      "required": 3,
+      "finished": 6,
+      "size": 20
+    }
+  ],
+  "modes": {
+    "input": [
+      {
+        "training_false_positive_budget": 0,
+        "pooled_validation": {
+          "tp": 38,
+          "fp": 3,
+          "positives": 54,
+          "negatives": 237
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 29,
+              "fp": 0,
+              "positives": 45,
+              "negatives": 183
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 54
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 29,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 186
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 51
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.75",
+            "training": {
+              "tp": 35,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 189
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 48
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 27,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 198
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 39
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 26,
+              "fp": 0,
+              "positives": 45,
+              "negatives": 192
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 45
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.005,
+        "pooled_validation": {
+          "tp": 38,
+          "fp": 3,
+          "positives": 54,
+          "negatives": 237
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 29,
+              "fp": 0,
+              "positives": 45,
+              "negatives": 183
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 54
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 29,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 186
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 51
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.75",
+            "training": {
+              "tp": 35,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 189
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 48
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 27,
+              "fp": 0,
+              "positives": 42,
+              "negatives": 198
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 39
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "probability_0.9",
+            "training": {
+              "tp": 26,
+              "fp": 0,
+              "positives": 45,
+              "negatives": 192
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 45
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.01,
+        "pooled_validation": {
+          "tp": 39,
+          "fp": 3,
+          "positives": 54,
+          "negatives": 237
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.7",
+            "training": {
+              "tp": 32,
+              "fp": 1,
+              "positives": 45,
+              "negatives": 183
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 54
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "concentration_0.7",
+            "training": {
+              "tp": 32,
+              "fp": 1,
+              "positives": 42,
+              "negatives": 186
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 51
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "gap_0.6",
+            "training": {
+              "tp": 36,
+              "fp": 1,
+              "positives": 42,
+              "negatives": 189
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 48
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.7",
+            "training": {
+              "tp": 29,
+              "fp": 1,
+              "positives": 42,
+              "negatives": 198
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 39
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "concentration_0.7",
+            "training": {
+              "tp": 29,
+              "fp": 1,
+              "positives": 45,
+              "negatives": 192
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 45
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.025,
+        "pooled_validation": {
+          "tp": 47,
+          "fp": 6,
+          "positives": 54,
+          "negatives": 237
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "gap_0.6",
+            "training": {
+              "tp": 36,
+              "fp": 4,
+              "positives": 45,
+              "negatives": 183
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 54
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "gap_0.6",
+            "training": {
+              "tp": 39,
+              "fp": 4,
+              "positives": 42,
+              "negatives": 186
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 6,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 51
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "ratio_2.5_floor_0",
+            "training": {
+              "tp": 39,
+              "fp": 3,
+              "positives": 42,
+              "negatives": 189
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 48
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.75",
+            "training": {
+              "tp": 33,
+              "fp": 3,
+              "positives": 42,
+              "negatives": 198
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 11,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 39
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "ratio_2.5_floor_0",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 45,
+              "negatives": 192
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 3,
+              "positives": 9,
+              "negatives": 45
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.05,
+        "pooled_validation": {
+          "tp": 50,
+          "fp": 9,
+          "positives": 54,
+          "negatives": 237
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.6",
+            "training": {
+              "tp": 44,
+              "fp": 8,
+              "positives": 45,
+              "negatives": 183
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 9,
+              "negatives": 54
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 42,
+              "fp": 6,
+              "positives": 42,
+              "negatives": 186
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 12,
+              "negatives": 51
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.55",
+            "training": {
+              "tp": 42,
+              "fp": 9,
+              "positives": 42,
+              "negatives": 189
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 48
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.55",
+            "training": {
+              "tp": 42,
+              "fp": 9,
+              "positives": 42,
+              "negatives": 198
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 3,
+              "positives": 12,
+              "negatives": 39
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.55",
+            "training": {
+              "tp": 45,
+              "fp": 9,
+              "positives": 45,
+              "negatives": 192
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 3,
+              "positives": 9,
+              "negatives": 45
+            }
+          }
+        ]
+      }
+    ],
+    "finish_work": [
+      {
+        "training_false_positive_budget": 0,
+        "pooled_validation": {
+          "tp": 53,
+          "fp": 5,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 46,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 43,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 5,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.005,
+        "pooled_validation": {
+          "tp": 53,
+          "fp": 5,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 46,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 43,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 5,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.01,
+        "pooled_validation": {
+          "tp": 53,
+          "fp": 5,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 46,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 43,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 5,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.025,
+        "pooled_validation": {
+          "tp": 53,
+          "fp": 6,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 46,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "ratio_2.5_floor_0",
+            "training": {
+              "tp": 45,
+              "fp": 2,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 6,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.05,
+        "pooled_validation": {
+          "tp": 53,
+          "fp": 6,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 46,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 8,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "concentration_0.5",
+            "training": {
+              "tp": 46,
+              "fp": 5,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 6,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 43,
+              "fp": 5,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      }
+    ],
+    "finish_both": [
+      {
+        "training_false_positive_budget": 0,
+        "pooled_validation": {
+          "tp": 55,
+          "fp": 7,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 44,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 13,
+              "fp": 7,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.005,
+        "pooled_validation": {
+          "tp": 55,
+          "fp": 7,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 44,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 13,
+              "fp": 7,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.01,
+        "pooled_validation": {
+          "tp": 55,
+          "fp": 7,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "confidence_0.65",
+            "training": {
+              "tp": 44,
+              "fp": 0,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 13,
+              "fp": 7,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.025,
+        "pooled_validation": {
+          "tp": 57,
+          "fp": 9,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "ratio_2.5_floor_0",
+            "training": {
+              "tp": 47,
+              "fp": 2,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 15,
+              "fp": 9,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": false,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      },
+      {
+        "training_false_positive_budget": 0.05,
+        "pooled_validation": {
+          "tp": 57,
+          "fp": 9,
+          "positives": 87,
+          "negatives": 129
+        },
+        "folds": [
+          {
+            "fold": 0,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 72,
+              "negatives": 99
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 15,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 1,
+            "gate": "ratio_2.5_floor_0",
+            "training": {
+              "tp": 47,
+              "fp": 2,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 15,
+              "fp": 9,
+              "positives": 18,
+              "negatives": 21
+            }
+          },
+          {
+            "fold": 2,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 45,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 99
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 9,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 30
+            }
+          },
+          {
+            "fold": 3,
+            "gate": "concentration_0.6",
+            "training": {
+              "tp": 43,
+              "fp": 5,
+              "positives": 69,
+              "negatives": 102
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 27
+            }
+          },
+          {
+            "fold": 4,
+            "gate": "confidence_0.7",
+            "training": {
+              "tp": 42,
+              "fp": 3,
+              "positives": 69,
+              "negatives": 108
+            },
+            "training_budget_met": true,
+            "validation": {
+              "tp": 12,
+              "fp": 0,
+              "positives": 18,
+              "negatives": 21
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

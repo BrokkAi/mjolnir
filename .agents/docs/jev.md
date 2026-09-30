@@ -43,7 +43,9 @@ The evidence collector lives in `mj-transcript/src/turn_context.rs` (process-loc
 
 ### Questions and answers
 
-Four Choice questions, each returning `choice` and `confidence` (the fourth was added on 2026-09-29 with the `/v6/turn-verdict` route; v5 is frozen in `verdict_questions_v5.json`):
+Provider `confidence` is a statistic derived from the distribution, not the probability of the winning choice. Runtime gates currently use confidence; the scenario evaluator also retains the full distribution for offline comparisons. See [TypeSafe confidence](https://docs.typesafe.ai/confidence).
+
+Four Choice questions, each returning `choice`, `probabilities`, and `confidence` (the fourth was added on 2026-09-29 with the `/v6/turn-verdict` route; v5 is frozen in `verdict_questions_v5.json`):
 
 - `background`: `needed`, `unneeded`, `unclear`. Judged only over the `background` list in the evidence; used only for the quiet rule, never for the action policy.
 
@@ -141,6 +143,7 @@ These findings shaped the current evidence and thresholds. Details, tables, and 
 
 - Current decisions and optional scope (2026-09-30): Luna mined 17 additional real cases from 11 sessions, split by session before comparison. The selected input wording detected 9/9 required tuning requests versus 3/9 baseline, 6/12 held-out versus 3/12, and 16/42 existing-suite requests versus 9/42, with three repeats and no confident input alerts on 210 scored controls. It catches the 06:50 decision alongside a background benchmark, but misses two held-out requests, loses some finished/wait inferences, and retains the baseline's three harmful A03 goal-completion actions. The prompt was frozen before held-out evaluation; labels and thresholds stayed fixed. Details and digests: [input-detection experiment](jev-input-detection-20260930.md).
 - Five further input iterations (2026-09-30): corrected three optional-offer labels, one explicit-decision label, and one evidence-ambiguous plan case. The selected fourth candidate detects 36/54 required development replays versus 29/54 for the then-current prompt, restores finished detections from 22/69 to 27/69, and produces no confident false input alerts among 216 development and 21 fresh-session control replays. It loses one original-incident detection and three automatic continuations; broader misses remain. The fresh corpus contains no required-input cases, so recall generalization is unmeasured. Full prompts, corrected-label provenance, all five comparisons, and limitations: [five-iteration report](jev-input-five-20260930.md).
+- Probability gates (2026-09-30): a 113-setting offline sweep and two three-repeat replays support separate input and finished gates as a candidate improvement. Input at 2.5x runner-up with probability >= 0.50 detects 102/108 versus 71/108, at 13/474 versus 1/474 false alerts. Finished probability >= 0.80, keeping other gates, detects 104/174 versus 63/174 with the same six A03 false finishes. Grouped validation shows residual generalization risk; runtime gates remain unchanged. [Full comparison](jev-probability-gates-20260930.md).
 
 ## What the live logs show (2026-09-26 to 2026-09-29)
 

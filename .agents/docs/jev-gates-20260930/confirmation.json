@@ -1,0 +1,242 @@
+{
+  "replay": {
+    "input": {
+      "current": {
+        "counts": {
+          "tp": 35,
+          "fp": 1,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "R04": 1
+        }
+      },
+      "probability_0.9": {
+        "counts": {
+          "tp": 35,
+          "fp": 0,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {}
+      },
+      "concentration_0.7": {
+        "counts": {
+          "tp": 38,
+          "fp": 1,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "R04": 1
+        }
+      },
+      "confidence_0.75": {
+        "counts": {
+          "tp": 44,
+          "fp": 3,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "R04": 3
+        }
+      },
+      "ratio_2.5_floor_0.5": {
+        "counts": {
+          "tp": 51,
+          "fp": 6,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "D07": 3,
+          "R04": 3
+        }
+      },
+      "ratio_2_floor_0.5": {
+        "counts": {
+          "tp": 54,
+          "fp": 12,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "D07": 3,
+          "D16": 3,
+          "E03": 3,
+          "R04": 3
+        }
+      }
+    },
+    "finish_work": {
+      "current": {
+        "counts": {
+          "tp": 31,
+          "fp": 3,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3
+        }
+      },
+      "confidence_0.7": {
+        "counts": {
+          "tp": 54,
+          "fp": 3,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3
+        }
+      },
+      "concentration_0.6": {
+        "counts": {
+          "tp": 54,
+          "fp": 3,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3
+        }
+      },
+      "ratio_3_floor_0.6": {
+        "counts": {
+          "tp": 55,
+          "fp": 7,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3,
+          "P02": 2,
+          "P06": 2
+        }
+      }
+    }
+  },
+  "confirmation": {
+    "input": {
+      "current": {
+        "counts": {
+          "tp": 36,
+          "fp": 0,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {}
+      },
+      "probability_0.9": {
+        "counts": {
+          "tp": 31,
+          "fp": 0,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {}
+      },
+      "concentration_0.7": {
+        "counts": {
+          "tp": 38,
+          "fp": 0,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {}
+      },
+      "confidence_0.75": {
+        "counts": {
+          "tp": 42,
+          "fp": 3,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "R04": 3
+        }
+      },
+      "ratio_2.5_floor_0.5": {
+        "counts": {
+          "tp": 51,
+          "fp": 7,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "D07": 3,
+          "D16": 1,
+          "R04": 3
+        }
+      },
+      "ratio_2_floor_0.5": {
+        "counts": {
+          "tp": 54,
+          "fp": 11,
+          "positives": 54,
+          "negatives": 237
+        },
+        "false_cases": {
+          "D07": 3,
+          "D16": 2,
+          "E03": 3,
+          "R04": 3
+        }
+      }
+    },
+    "finish_work": {
+      "current": {
+        "counts": {
+          "tp": 32,
+          "fp": 3,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3
+        }
+      },
+      "confidence_0.7": {
+        "counts": {
+          "tp": 53,
+          "fp": 5,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3,
+          "P06": 2
+        }
+      },
+      "concentration_0.6": {
+        "counts": {
+          "tp": 52,
+          "fp": 6,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3,
+          "P06": 3
+        }
+      },
+      "ratio_3_floor_0.6": {
+        "counts": {
+          "tp": 54,
+          "fp": 8,
+          "positives": 87,
+          "negatives": 129
+        },
+        "false_cases": {
+          "A03": 3,
+          "P02": 2,
+          "P06": 3
+        }
+      }
+    }
+  },
+  "note": "Confirmation is a fresh stochastic replay of the SAME fixtures after finalists were frozen; it measures repeat stability, not unseen-session generalization."
+}

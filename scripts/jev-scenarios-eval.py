@@ -177,6 +177,9 @@ def ask(key, questions, evidence):
         return {"error": f"malformed answer: {error}", "latency_s": round(time.monotonic() - started, 3)}
     return {
         "verdict": verdict,
+        # Keep the full distribution for offline margin/odds comparisons.
+        # Provider confidence is a separate statistic, not the winning probability.
+        "answers": payload["answers"],
         "model": payload.get("model"),
         "usage": payload.get("usage"),
         "request_bytes": len(body),

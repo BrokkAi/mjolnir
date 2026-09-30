@@ -25,6 +25,32 @@ def verdict(failure=("none", 0.95), input_=("none", 0.95), work=("finished", 0.9
 
 
 class Experiments(unittest.TestCase):
+    def test_replay_preserves_probabilities_separately_from_provider_confidence(self):
+        answers = {
+            axis: {"type": "choice", **answer, "probabilities": {answer["choice"]: 0.8, "unclear": 0.2}}
+            for axis, answer in verdict(input_=("required", 0.42)).items()
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return json.dumps({"answers": answers, "model": "offline"}).encode()[:limit]
+
+        original = module.urllib.request.urlopen
+        module.urllib.request.urlopen = lambda request, timeout: Response()
+        try:
+            result = module.ask("offline-test", {}, self.fixture()["evidence"])
+        finally:
+            module.urllib.request.urlopen = original
+        self.assertEqual(result["verdict"]["input"], {"choice": "required", "confidence": 0.42})
+        self.assertEqual(result["answers"], answers)
+        self.assertEqual(result["answers"]["input"]["probabilities"]["required"], 0.8)
+
     def test_account_failure_stops_admission_and_reports_incomplete_run(self):
         originals = module.api_key, module.load_fixtures, module.ask
         try:
