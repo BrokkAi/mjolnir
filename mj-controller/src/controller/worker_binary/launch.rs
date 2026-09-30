@@ -73,7 +73,15 @@ impl Controller {
             "profile staging completed"
         );
         result?;
-        stage_managed_skills(profile.kind, &profile_stage)?;
+        stage_managed_skills(
+            profile.kind,
+            &profile_stage,
+            session
+                .target
+                .as_ref()
+                .context("session target is missing")?
+                .skills_scope(),
+        )?;
         stage_codex_catalog(
             &session.last_profile,
             profile,
@@ -647,6 +655,33 @@ pub(super) fn worker_launch_config(
     }
     let mut environment = target_environment.clone();
     environment.extend(profile.environment.resolved().clone());
+    if session
+        .target
+        .as_ref()
+        .is_some_and(|target| target.skills_scope() == mj_core::skills::SkillsScope::Localhost)
+    {
+        // Harnesses clear their environment. Host CLI commands must still
+        // address the daemon that created this session, including named instances.
+        environment.insert(
+            "MJ_CONFIG_DIR".into(),
+            std::path::absolute(mj_core::config::config_dir())
+                .context("resolve host Mjolnir configuration directory")?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        environment.insert(
+            "MJ_DATA_DIR".into(),
+            std::path::absolute(data_dir())
+                .context("resolve host Mjolnir data directory")?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        if let Some(instance) = mj_core::config::instance_name() {
+            environment.insert("MJ_INSTANCE".into(), instance);
+        } else {
+            environment.remove("MJ_INSTANCE");
+        }
+    }
     profile
         .kind
         .configure_home_environment(Path::new(&target_profile_home), &mut environment);

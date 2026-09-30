@@ -100,6 +100,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 profile_home: profile.home.clone(),
                 authenticates_with_api_key: profile.auth_scheme().is_api_key(),
                 sync_github_token,
+                skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })
         })

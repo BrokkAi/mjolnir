@@ -1084,6 +1084,10 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
         assert_eq!(in_container[0].profile_home, home, "{kind:?}");
         assert_eq!(in_container[0].harness, kind);
         assert!(in_container[0].sync_github_token, "{kind:?}");
+        assert_eq!(
+            in_container[0].skills_scope,
+            mj_core::skills::SkillsScope::Isolated
+        );
 
         let worker_root = directory
             .path()
@@ -1106,6 +1110,10 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             in_container[0].authenticates_with_api_key
         );
         assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
+        assert_eq!(
+            on_this_machine[0].skills_scope,
+            mj_core::skills::SkillsScope::Localhost
+        );
 
         // Muse's staged root lies under the data directory, and Muse never
         // ran from its profile home, so it has no linked form.

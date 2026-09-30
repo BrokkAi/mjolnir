@@ -725,6 +725,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
 
@@ -747,6 +748,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
     let mut coordinator = CredentialSyncCoordinator::spawn();
@@ -878,14 +880,14 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_home: profile_home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
 }
 
-/// Every session runs from a staged home of its own, so every session is
-/// pushed the managed skills along with the profile's own.
+/// Localhost sessions receive the CLI skill with the profile's own skills.
 #[test]
-fn every_session_is_pushed_the_managed_skills_too() {
+fn localhost_sessions_are_pushed_the_managed_skills_too() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
     std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
@@ -898,7 +900,13 @@ fn every_session_is_pushed_the_managed_skills_too() {
         let archive = canonical_session_skills(&target, format).unwrap();
         assert_eq!(
             archive,
-            mj_core::skills::session_skills(target.harness, home.path(), format).unwrap()
+            mj_core::skills::session_skills(
+                target.harness,
+                home.path(),
+                format,
+                mj_core::skills::SkillsScope::Localhost
+            )
+            .unwrap()
         );
         for managed in mj_core::skills::managed_skills(target.harness) {
             assert!(
@@ -944,6 +952,94 @@ for line in sys.stdin:
         raise AssertionError(method)
     print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
 "#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mixed_localhost_and_isolated_sessions_sync_different_skills_from_one_profile() {
+    use mj_core::skills::{SkillsArchive, SkillsScope};
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
+    std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
+    std::fs::create_dir_all(home.path().join("skills/mj")).unwrap();
+    std::fs::write(home.path().join("skills/mj/SKILL.md"), "old mj").unwrap();
+
+    for protocol in [22, RELAY_PROTOCOL_VERSION] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut targets = Vec::new();
+        // Put isolated first: cache construction must not decide scope for
+        // the other sessions sharing this profile.
+        for (index, scope) in [SkillsScope::Isolated, SkillsScope::Localhost]
+            .into_iter()
+            .enumerate()
+        {
+            let mut target = skills_sync_target(home.path());
+            target.session_id = format!("{index:032x}");
+            target.skills_scope = scope;
+            target.authenticates_with_api_key = true;
+            target.spec = CommandSpec::new(
+                "python3",
+                [
+                    "-c".to_owned(),
+                    SKILLS_FORMAT_RELAY.to_owned(),
+                    protocol.to_string(),
+                    target.session_id.clone(),
+                    scratch
+                        .path()
+                        .join(&target.session_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+            );
+            targets.push(target);
+        }
+        let outcomes = credential_sync::reconcile_profile(&targets, None).await;
+        assert_eq!(outcomes.len(), targets.len());
+        for outcome in outcomes {
+            assert_eq!(
+                outcome.outcome.unwrap(),
+                vec![CredentialSyncAction::SkillsPushed]
+            );
+        }
+        for target in &targets {
+            let archive = SkillsArchive::decode(
+                &std::fs::read(scratch.path().join(&target.session_id)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                archive,
+                canonical_session_skills(
+                    target,
+                    if protocol == 22 {
+                        mj_core::skills::SkillsArchiveFormat::Plain
+                    } else {
+                        mj_core::skills::SkillsArchiveFormat::Gzip
+                    }
+                )
+                .unwrap()
+            );
+            let stage = tempfile::tempdir().unwrap();
+            // Sync removes an mj copy left behind by an earlier build.
+            std::fs::create_dir_all(stage.path().join("skills/mj")).unwrap();
+            std::fs::write(stage.path().join("skills/mj/SKILL.md"), "old mj").unwrap();
+            mj_core::skills::install_skills(target.harness, stage.path(), &archive).unwrap();
+            assert_eq!(
+                stage.path().join("skills/mj/SKILL.md").exists(),
+                target.skills_scope == SkillsScope::Localhost
+            );
+            assert_eq!(
+                stage
+                    .path()
+                    .join("skills/mj/references/configuration.md")
+                    .exists(),
+                target.skills_scope == SkillsScope::Localhost
+            );
+            assert_eq!(
+                std::fs::read(stage.path().join("skills/review/SKILL.md")).unwrap(),
+                b"review"
+            );
+        }
+    }
+}
 
 /// A worker from before relay protocol 23 reads only the uncompressed
 /// `HELSKIL1` archive, whose limits count raw bytes. The controller sends it
@@ -1136,6 +1232,7 @@ fn codex_sync_target(
         profile_home: home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
     let skills = canonical_session_skills(&target, mj_core::skills::SkillsArchiveFormat::Gzip)
@@ -1254,6 +1351,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };
     let result = credential_sync::reconcile_profile_guarded(

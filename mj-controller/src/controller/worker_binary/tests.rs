@@ -2944,12 +2944,18 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
     };
 
     stage_profile(&profile, staged.path()).unwrap();
-    stage_managed_skills(profile.kind, staged.path()).unwrap();
+    stage_managed_skills(
+        profile.kind,
+        staged.path(),
+        mj_core::skills::SkillsScope::Localhost,
+    )
+    .unwrap();
 
     let expected = mj_core::skills::session_skills(
         profile.kind,
         home.path(),
         mj_core::skills::SkillsArchiveFormat::Gzip,
+        mj_core::skills::SkillsScope::Localhost,
     )
     .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
@@ -2963,6 +2969,43 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         std::fs::read_to_string(staged.path().join("skills/mj/SKILL.md")).unwrap(),
         "the user's own\n"
     );
+}
+
+#[test]
+fn isolated_profile_staging_removes_the_host_cli_skill_and_matches_sync() {
+    for kind in HarnessKind::ALL {
+        let home = tempfile::tempdir().unwrap();
+        let directory = mj_core::skills::mj_skill_directory(kind);
+        let mj = home.path().join(&directory);
+        std::fs::create_dir_all(mj.join("references")).unwrap();
+        std::fs::write(mj.join("SKILL.md"), "old mj").unwrap();
+        std::fs::write(mj.join("references/old.md"), "old reference").unwrap();
+        let other = home
+            .path()
+            .join(kind.synced_skill_dirs()[0])
+            .join("review/SKILL.md");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "review").unwrap();
+        let mut profile = zai_profile(home.path());
+        profile.kind = kind;
+        let stage = tempfile::tempdir().unwrap();
+        stage_profile(&profile, stage.path()).unwrap();
+        stage_managed_skills(kind, stage.path(), mj_core::skills::SkillsScope::Isolated).unwrap();
+        assert!(!stage.path().join(&directory).exists(), "{kind:?}");
+        let installed = mj_core::skills::collect_skills(kind, stage.path()).unwrap();
+        let expected = mj_core::skills::session_skills(
+            kind,
+            home.path(),
+            mj_core::skills::SkillsArchiveFormat::Gzip,
+            mj_core::skills::SkillsScope::Isolated,
+        )
+        .unwrap();
+        assert_eq!(installed, expected, "{kind:?}");
+        assert_eq!(
+            std::fs::read(stage.path().join(other.strip_prefix(home.path()).unwrap())).unwrap(),
+            b"review"
+        );
+    }
 }
 
 /// Claude Code provisions `skills/synced/` from the user's claude.ai account,
@@ -3006,7 +3049,12 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
         };
 
         stage_profile(&profile, staged.path()).unwrap();
-        stage_managed_skills(profile.kind, staged.path()).unwrap();
+        stage_managed_skills(
+            profile.kind,
+            staged.path(),
+            mj_core::skills::SkillsScope::Localhost,
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(staged.path().join("skills/review/SKILL.md")).unwrap(),
@@ -3032,6 +3080,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             profile.kind,
             home.path(),
             mj_core::skills::SkillsArchiveFormat::Gzip,
+            mj_core::skills::SkillsScope::Localhost,
         )
         .unwrap();
         let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
@@ -3078,12 +3127,18 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     };
 
     stage_profile(&profile, staged.path()).unwrap();
-    stage_managed_skills(profile.kind, staged.path()).unwrap();
+    stage_managed_skills(
+        profile.kind,
+        staged.path(),
+        mj_core::skills::SkillsScope::Localhost,
+    )
+    .unwrap();
 
     let expected = mj_core::skills::session_skills(
         profile.kind,
         home.path(),
         mj_core::skills::SkillsArchiveFormat::Gzip,
+        mj_core::skills::SkillsScope::Localhost,
     )
     .unwrap();
     let installed = mj_core::skills::collect_skills(profile.kind, staged.path()).unwrap();
@@ -3712,6 +3767,34 @@ fn launches_on_every_target(
         ("container", in_container),
         ("sub-agent", as_child),
     ]
+}
+
+#[test]
+fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&profile) {
+        if target == "localhost" {
+            assert_eq!(
+                launch.environment["MJ_CONFIG_DIR"],
+                std::path::absolute(mj_core::config::config_dir())
+                    .unwrap()
+                    .to_string_lossy()
+            );
+            assert_eq!(
+                launch.environment["MJ_DATA_DIR"],
+                std::path::absolute(data_dir()).unwrap().to_string_lossy()
+            );
+            assert_eq!(
+                launch.environment.get("MJ_INSTANCE"),
+                mj_core::config::instance_name().as_ref()
+            );
+        } else {
+            for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+                assert!(!launch.environment.contains_key(name), "{target}: {name}");
+            }
+        }
+    }
 }
 
 /// #1160: eleven Codex children of a ChatGPT profile died on their first

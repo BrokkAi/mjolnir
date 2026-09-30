@@ -1092,6 +1092,14 @@ pub fn allocation_memory(allocation: &SessionResourceAllocation) -> u64 {
 }
 
 impl TargetLocator {
+    /// Only raw localhost sessions can use the daemon host's CLI and config.
+    pub const fn skills_scope(&self) -> crate::skills::SkillsScope {
+        match self {
+            Self::LocalBare { .. } => crate::skills::SkillsScope::Localhost,
+            _ => crate::skills::SkillsScope::Isolated,
+        }
+    }
+
     fn validate(&self, session_id: &str) -> Result<()> {
         match self {
             Self::LocalBare { worker_root } => {

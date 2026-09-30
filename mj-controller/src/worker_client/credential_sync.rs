@@ -243,9 +243,8 @@ pub(super) async fn reconcile_profile_guarded(
             }),
         false => None,
     };
-    // Every target here runs the same profile, so they share one canonical
-    // skills tree. Collection reads and compresses the whole tree, so it runs
-    // once, off the scheduler threads.
+    // Targets share a profile but can differ in host CLI access. Collect off
+    // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
         tokio::task::spawn_blocking(move || CanonicalSkills::collect(&first))
             .await
@@ -336,28 +335,46 @@ pub(super) fn canonical_session_skills(
     target: &CredentialSyncTarget,
     format: mj_core::skills::SkillsArchiveFormat,
 ) -> Result<mj_core::skills::SkillsArchive> {
-    mj_core::skills::session_skills(target.harness, &target.profile_home, format).with_context(
-        || {
-            format!(
-                "collect canonical skills for profile {} from {}",
-                target.profile_id,
-                target.profile_home.display()
-            )
-        },
+    mj_core::skills::session_skills(
+        target.harness,
+        &target.profile_home,
+        format,
+        target.skills_scope,
     )
+    .with_context(|| {
+        format!(
+            "collect canonical skills for profile {} from {}",
+            target.profile_id,
+            target.profile_home.display()
+        )
+    })
 }
 
 /// A profile's canonical skills tree in each archive format a worker may read.
 /// Which one a session needs is known only from its worker's hello.
 pub(super) struct CanonicalSkills {
-    plain: std::result::Result<mj_core::skills::SkillsArchive, String>,
-    gzip: std::result::Result<mj_core::skills::SkillsArchive, String>,
+    plain: [std::result::Result<mj_core::skills::SkillsArchive, String>; 2],
+    gzip: [std::result::Result<mj_core::skills::SkillsArchive, String>; 2],
 }
 
 impl CanonicalSkills {
     pub(super) fn collect(target: &CredentialSyncTarget) -> Self {
-        let collect =
-            |format| canonical_session_skills(target, format).map_err(|error| format!("{error:#}"));
+        let mut base = target.clone();
+        base.skills_scope = mj_core::skills::SkillsScope::Isolated;
+        let collect = |format| {
+            let isolated =
+                canonical_session_skills(&base, format).map_err(|error| format!("{error:#}"));
+            let localhost = isolated.clone().and_then(|archive| {
+                archive
+                    .for_session(
+                        target.harness,
+                        mj_core::skills::SkillsScope::Localhost,
+                        format,
+                    )
+                    .map_err(|error| format!("{error:#}"))
+            });
+            [localhost, isolated]
+        };
         Self {
             plain: collect(mj_core::skills::SkillsArchiveFormat::Plain),
             gzip: collect(mj_core::skills::SkillsArchiveFormat::Gzip),
@@ -366,8 +383,8 @@ impl CanonicalSkills {
 
     fn failed(reason: &str) -> Self {
         Self {
-            plain: Err(reason.to_owned()),
-            gzip: Err(reason.to_owned()),
+            plain: [Err(reason.to_owned()), Err(reason.to_owned())],
+            gzip: [Err(reason.to_owned()), Err(reason.to_owned())],
         }
     }
 
@@ -376,12 +393,19 @@ impl CanonicalSkills {
     fn for_format(
         &self,
         format: mj_core::skills::SkillsArchiveFormat,
+        scope: mj_core::skills::SkillsScope,
     ) -> Result<&mj_core::skills::SkillsArchive> {
         let collected = match format {
             mj_core::skills::SkillsArchiveFormat::Plain => &self.plain,
             mj_core::skills::SkillsArchiveFormat::Gzip => &self.gzip,
         };
-        collected.as_ref().map_err(|error| anyhow!("{error}"))
+        let index = match scope {
+            mj_core::skills::SkillsScope::Localhost => 0,
+            mj_core::skills::SkillsScope::Isolated => 1,
+        };
+        collected[index]
+            .as_ref()
+            .map_err(|error| anyhow!("{error}"))
     }
 }
 
@@ -480,7 +504,7 @@ pub(super) async fn reconcile_on(
 ) -> Result<Vec<CredentialSyncAction>> {
     let skills = canonical
         .skills
-        .for_format(client.skills_archive_format())?;
+        .for_format(client.skills_archive_format(), target.skills_scope)?;
     reconcile_connected(
         client,
         target,

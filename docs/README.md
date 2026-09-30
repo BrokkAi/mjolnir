@@ -40,6 +40,11 @@ test runs never rewrite documentation assets.
 
 Update the relevant guide and reference together when behavior changes:
 
+The configuration reference's canonical source is
+`mj-core/assets/skills/mj/references/configuration.md`. It ships with the
+localhost `mj` skill; the same synchronization hooks generate its website
+page. Edit that source instead of `src/content/docs/configuration.md`.
+
 | Surface | Implementation to check | Documentation |
 | --- | --- | --- |
 | Commands and flags | `mj-cli/src/main.rs`, `mj-cli/src/api_commands.rs`, `mj-cli/src/acp.rs`; `mj --help` | CLI reference, ACP agent, README examples |

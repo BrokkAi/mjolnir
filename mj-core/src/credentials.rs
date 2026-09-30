@@ -616,6 +616,8 @@ pub struct CredentialSyncTarget {
     pub authenticates_with_api_key: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
+    /// Target-derived availability of the host CLI skill.
+    pub skills_scope: crate::skills::SkillsScope,
     /// Reconnect command for the session's worker proxy.
     pub spec: CommandSpec,
 }

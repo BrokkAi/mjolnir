@@ -365,7 +365,7 @@ Codex's own `skills/.system/`, are not copied; see
 
 Mjolnir then adds its own files to the staged home:
 
-- the managed `mj` skill (see [Managed skills](#managed-skills));
+- on localhost, the managed `mj` skill (see [Managed skills](#managed-skills));
 - the session's replica of its project memory, under `projects/`;
 - for a Claude session with Mjolnir sub-agents, or a Claude sub-agent, the
   `mj-agents` MCP server in `.claude.json`, and an allow rule in
@@ -505,10 +505,20 @@ says it is `above the 1048576 byte limit of an uncompressed skills archive`.
 
 ### Managed skills
 
-Mjolnir installs the `mj` skill (driving Mjolnir sessions from an agent) into
-every session's staged home. It is written at launch and merged into the tree
-pushed on every reconciliation. A user skill at the same path is replaced by the
-managed copy in the session only; your own `skills/` directory is left alone.
+Mjolnir installs the `mj` skill into localhost sessions. You can ask the model
+to "configure mj with ..."; the skill explains editing your Mjolnir
+configuration and includes the [configuration reference](/configuration/).
+It also teaches session orchestration through the `mj` CLI. Localhost agents
+receive the owning daemon's configuration and data paths so their commands
+address the same Mjolnir instance.
+
+Container, SSH, and EC2 sessions do not receive this host CLI skill. Their
+delegation and project-memory MCP tools carry their own instructions. Launch
+staging and ongoing skills reconciliation both enforce this distinction,
+including removing an older copy from an isolated session. The `skills/mj/`
+directory is reserved: localhost sessions receive the managed copy and isolated
+sessions omit it, even if the profile contains a user copy. Your own `skills/`
+directory is left alone.
 
 Session recall and file provenance are provided by the `mj-memory` MCP server:
 `search_sessions`, `get_session_brief`, `search_session`, `read_session`,

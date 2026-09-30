@@ -1,12 +1,47 @@
 ---
 name: mj
-description: Drive Mjolnir coding sessions from inside an agent. Use when you need to start another coding session, send it a prompt, wait for its turn to end, read its transcript, look at its diff, export its work, or close it, and when you need to check whether the Mjolnir daemon is healthy.
+description: Configure Mjolnir (mj) for the user or drive its coding sessions from localhost. Use for requests to configure mj profiles, targets, review, delegation, or interface preferences; to start and steer sessions; or to diagnose the daemon.
 ---
 
-# Drive Mjolnir sessions
+# Configure and drive Mjolnir
 
 Mjolnir (`mj`) runs coding sessions on local or remote targets. This skill is
-how you, an agent running inside one session, start and steer other sessions.
+how an agent running on the user's localhost configures Mjolnir and starts
+and steers sessions.
+
+## Configure Mjolnir for the user
+
+For requests such as "configure mj to review with this model" or "add an SSH
+target", read [the configuration reference](references/configuration.md).
+It describes the supported settings and TOML examples for this build. Search
+its headings for the relevant section rather than guessing keys.
+
+Mjolnir's user configuration is `config.toml` in `$MJ_CONFIG_DIR` when set.
+Otherwise use the platform configuration directory and the `MJ_INSTANCE`
+subdirectory described in the reference. Localhost sessions receive the
+owning daemon's `MJ_CONFIG_DIR`, `MJ_DATA_DIR`, and named instance so file
+edits and `mj` commands address the same instance. The harness's staged home
+(`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, etc.) holds the agent's own settings, not
+the user's Mjolnir configuration. Do not confuse its `config.toml` with mj's.
+
+Read the existing file, make only the requested changes, and preserve its
+other settings and comments. Check the file again before writing and reconcile
+any concurrent changes. Use the file's current schema version;
+do not rewrite a configuration from a newer mj version. Prefer adding a
+new named profile or target over changing one used by an active session.
+
+Run `mj doctor --json` before and after editing. Distinguish configuration
+errors introduced by the change from existing authentication or runtime
+problems; report those without making unrelated changes. The daemon reloads
+configuration automatically. Changes to launch settings apply to future
+sessions, while daemon startup settings may need a restart; consult the
+reference and do not restart a daemon just to apply an ordinary preference.
+Summarize the edited path and settings and any remaining diagnostics.
+
+For initial discovery, `mj setup` is interactive. For host prerequisites,
+`mj setup instructions --platform linux` or `--platform macos` prints an
+agent preparation guide. `mj set-config` changes one live session's harness
+settings (model, effort, etc.); it does not edit the user's mj defaults.
 
 ## Check availability first
 
@@ -16,9 +51,7 @@ mj api-info
 ```
 
 `mj api-info` prints the API base URL and the file holding the bearer token.
-Both commands must succeed. They often fail inside containers and on remote
-targets, because the worker there cannot reach the daemon on the user's
-machine.
+Both commands must succeed for CLI orchestration.
 
 When `mj` is unusable, use the `mj-agents` MCP tools if your harness lists
 them. When neither is available, say once that session orchestration is not
@@ -50,9 +83,9 @@ the daemon.
 
 ## Commands
 
-Every command takes `--json` and then prints the API response unchanged. A
-session is named with `--session <id>`. For the flags of any command, append
-`--help` to it rather than guessing.
+The session and workspace API commands below take `--json` to print the API
+response unchanged. A session is named with `--session <id>`. For the flags
+of any command, append `--help` to it rather than guessing.
 
 Sessions and workspaces:
 

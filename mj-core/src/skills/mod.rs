@@ -20,7 +20,14 @@ use crate::config::HarnessKind;
 
 mod managed;
 
-pub use managed::managed_skills;
+pub use managed::{managed_skills, mj_skill_directory};
+
+/// Whether an agent can use the user's host CLI and configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsScope {
+    Localhost,
+    Isolated,
+}
 
 /// Skills archives travel base64-encoded inside an 8 MiB relay frame. The cap
 /// applies to the archive as it is sent, so to the compressed size of a
@@ -145,6 +152,28 @@ pub struct SkillsArchive {
 }
 
 impl SkillsArchive {
+    /// Select the managed skill for this target without scanning the profile again.
+    pub fn for_session(
+        mut self,
+        kind: HarnessKind,
+        scope: SkillsScope,
+        format: SkillsArchiveFormat,
+    ) -> Result<Self> {
+        let directory = mj_skill_directory(kind);
+        self.entries
+            .retain(|entry| !within(&entry.path, &directory));
+        if scope == SkillsScope::Localhost {
+            self.entries.extend(managed_skills(kind));
+            self.entries
+                .sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        if self.entries.len() > MAX_SKILLS_FILES {
+            bail!("skills tree has more than {MAX_SKILLS_FILES} files");
+        }
+        self.ensure_fits(format, "session skills tree")?;
+        Ok(self)
+    }
+
     pub fn entries(&self) -> &[SkillsEntry] {
         &self.entries
     }
@@ -396,12 +425,12 @@ fn collect_files(
 }
 
 /// The skills tree a session gets: the user's own skills from `home`, plus the
-/// skills Mjolnir manages.
+/// host CLI skill on localhost. The reserved `mj` directory is replaced on
+/// localhost and excluded entirely on isolated targets.
 ///
-/// A managed entry replaces a user entry at the same path, so the session
-/// always runs Mjolnir's copy of a managed skill. Launch staging and the
-/// credential-sync push both compute the tree this way; if they disagreed, the
-/// first reconciliation after launch would wipe whatever the other installed.
+/// Launch staging and the credential-sync push both reserve the complete
+/// `mj` directory. They must agree on scope or the first reconciliation would
+/// reinstall a host skill on an isolated target.
 ///
 /// The tree is collected for `format`, the format the session's worker reads,
 /// so a file too large for that format is left out on both sides.
@@ -409,31 +438,10 @@ pub fn session_skills(
     kind: HarnessKind,
     home: &Path,
     format: SkillsArchiveFormat,
+    scope: SkillsScope,
 ) -> Result<SkillsArchive> {
     let collected = collect_files(kind, home, Links::Follow, format)?;
-    let mut entries = collected.entries;
-    for entry in managed_skills(kind) {
-        match entries.binary_search_by(|existing| existing.path.cmp(&entry.path)) {
-            Ok(index) => {
-                tracing::warn!(
-                    path = %entry.path,
-                    home = %home.display(),
-                    "a user skill has the path of a Mjolnir-managed skill; the managed skill replaces it"
-                );
-                entries[index] = entry;
-            }
-            Err(index) => entries.insert(index, entry),
-        }
-    }
-    if entries.len() > MAX_SKILLS_FILES {
-        bail!("skills tree has more than {MAX_SKILLS_FILES} files");
-    }
-    let archive = SkillsArchive { entries };
-    archive.ensure_fits(
-        format,
-        &format!("skills tree under {} with managed skills", home.display()),
-    )?;
-    Ok(archive)
+    collected.for_session(kind, scope, format)
 }
 
 /// How one collection walks a skills tree.
@@ -876,17 +884,18 @@ mod tests {
     fn managed_skills_are_installable_archive_entries() {
         for kind in HarnessKind::ALL {
             let entries = managed_skills(kind);
-            assert_eq!(entries.len(), 1, "{kind:?}");
             let prefix = kind.synced_skill_dirs()[0];
             for entry in &entries {
                 validate_archive_path(&entry.path).expect(&entry.path);
                 assert!(entry.path.starts_with(&format!("{prefix}/")), "{entry:?}");
                 assert!(entry.bytes.len() as u64 <= MAX_SKILLS_FILE_BYTES);
-                assert!(
-                    entry.bytes.starts_with(b"---\nname: "),
-                    "{} needs skill frontmatter",
-                    entry.path
-                );
+                if entry.path.ends_with("/SKILL.md") {
+                    assert!(
+                        entry.bytes.starts_with(b"---\nname: "),
+                        "{} needs skill frontmatter",
+                        entry.path
+                    );
+                }
             }
             // The install path only writes what `decode` accepts, so the
             // managed set has to survive a round trip on its own.
@@ -904,8 +913,13 @@ mod tests {
     #[test]
     fn session_skills_of_an_empty_home_is_the_managed_set() {
         let home = tempfile::tempdir().unwrap();
-        let archive =
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let archive = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
         assert_eq!(archive.entries(), managed_skills(HarnessKind::Claude));
         assert!(archive.state().present);
         // Collection is unchanged: it still reports the user tree alone.
@@ -917,6 +931,50 @@ mod tests {
     }
 
     #[test]
+    fn localhost_installs_the_linked_configuration_reference_and_isolated_sessions_remove_mj() {
+        for kind in HarnessKind::ALL {
+            let home = tempfile::tempdir().unwrap();
+            let directory = mj_skill_directory(kind);
+            write(home.path(), &format!("{directory}/SKILL.md"), b"old mj");
+            write(
+                home.path(),
+                &format!("{directory}/references/obsolete.md"),
+                b"old reference",
+            );
+            let other = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
+            write(home.path(), &other, b"review");
+            for format in FORMATS {
+                let local =
+                    session_skills(kind, home.path(), format, SkillsScope::Localhost).unwrap();
+                install_skills(kind, home.path(), &local).unwrap();
+                let skill =
+                    std::fs::read_to_string(home.path().join(&directory).join("SKILL.md")).unwrap();
+                assert!(skill.contains("references/configuration.md"));
+                let reference = std::fs::read_to_string(
+                    home.path()
+                        .join(&directory)
+                        .join("references/configuration.md"),
+                )
+                .unwrap();
+                assert!(reference.contains("[profiles"));
+                assert!(
+                    !home
+                        .path()
+                        .join(&directory)
+                        .join("references/obsolete.md")
+                        .exists()
+                );
+
+                let isolated =
+                    session_skills(kind, home.path(), format, SkillsScope::Isolated).unwrap();
+                install_skills(kind, home.path(), &isolated).unwrap();
+                assert!(!home.path().join(&directory).exists(), "{kind:?}");
+                assert_eq!(std::fs::read(home.path().join(&other)).unwrap(), b"review");
+            }
+        }
+    }
+
+    #[test]
     fn user_recall_and_provenance_skills_remain_user_owned() {
         let home = tempfile::tempdir().unwrap();
         write(home.path(), "skills/recall/SKILL.md", b"user recall");
@@ -925,8 +983,13 @@ mod tests {
             "skills/provenance/SKILL.md",
             b"user provenance",
         );
-        let archive =
-            session_skills(HarnessKind::Codex, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let archive = session_skills(
+            HarnessKind::Codex,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
         for name in ["recall", "provenance"] {
             let entry = archive
                 .entries()
@@ -947,8 +1010,13 @@ mod tests {
         );
         write(home.path(), "skills/review/SKILL.md", b"review");
 
-        let archive =
-            session_skills(HarnessKind::Codex, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let archive = session_skills(
+            HarnessKind::Codex,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
         let managed = managed_skills(HarnessKind::Codex);
         let mine = archive
             .entries()
@@ -1172,8 +1240,13 @@ mod tests {
                 "skills/viz/demos/sunspot-pretty.html"
             ]
         );
-        let session =
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let session = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
         assert!(session.entries().iter().any(|entry| entry.bytes == page));
         let wire = session.encode(SkillsArchiveFormat::Gzip);
         assert!(wire.len() <= MAX_SKILLS_ARCHIVE_BYTES);
@@ -1192,8 +1265,13 @@ mod tests {
             );
         }
 
-        let archive =
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let archive = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
 
         assert!(archive.encode(SkillsArchiveFormat::Plain).len() > 6_000_000);
         let wire = archive.encode(SkillsArchiveFormat::Gzip);
@@ -1224,10 +1302,20 @@ mod tests {
             paths(archive).contains(&"skills/viz/demos/sunspot-pretty.html")
         };
 
-        let plain =
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Plain).unwrap();
-        let compressed =
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).unwrap();
+        let plain = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Plain,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
+        let compressed = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Gzip,
+            SkillsScope::Localhost,
+        )
+        .unwrap();
 
         assert!(!has_page(&plain));
         assert!(has_page(&compressed));
@@ -1243,14 +1331,25 @@ mod tests {
                 &html(1_000_000),
             );
         }
-        let error = session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Plain)
-            .unwrap_err();
+        let error = session_skills(
+            HarnessKind::Claude,
+            home.path(),
+            SkillsArchiveFormat::Plain,
+            SkillsScope::Localhost,
+        )
+        .unwrap_err();
         assert!(
             format!("{error:#}").contains("byte limit of an uncompressed skills archive"),
             "{error:#}"
         );
         assert!(
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip).is_ok()
+            session_skills(
+                HarnessKind::Claude,
+                home.path(),
+                SkillsArchiveFormat::Gzip,
+                SkillsScope::Localhost
+            )
+            .is_ok()
         );
     }
 
@@ -1269,8 +1368,13 @@ mod tests {
 
         for error in [
             collect_skills(HarnessKind::Claude, home.path()).unwrap_err(),
-            session_skills(HarnessKind::Claude, home.path(), SkillsArchiveFormat::Gzip)
-                .unwrap_err(),
+            session_skills(
+                HarnessKind::Claude,
+                home.path(),
+                SkillsArchiveFormat::Gzip,
+                SkillsScope::Localhost,
+            )
+            .unwrap_err(),
         ] {
             let message = format!("{error:#}");
             assert!(
@@ -1424,9 +1528,14 @@ mod tests {
             session.extend(managed_skills(kind));
             session.sort_by(|left, right| left.path.cmp(&right.path));
             assert_eq!(
-                session_skills(kind, home.path(), SkillsArchiveFormat::Gzip)
-                    .unwrap()
-                    .entries(),
+                session_skills(
+                    kind,
+                    home.path(),
+                    SkillsArchiveFormat::Gzip,
+                    SkillsScope::Localhost
+                )
+                .unwrap()
+                .entries(),
                 session,
                 "{kind:?}"
             );

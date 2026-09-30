@@ -193,14 +193,25 @@ pub(super) fn configure_claude_subagent_mcp(
 
 /// Write Mjolnir's managed skills into a staged profile home.
 ///
-/// This is the launch half of the invariant that
-/// [`mj_core::skills::session_skills`] defines: a managed skill overwrites a
-/// user skill at the same path, so the staged tree fingerprints the same as
-/// the archive the first credential sync pushes and nothing is wiped.
+/// Reserve the same directory and honor the same target scope as
+/// [`mj_core::skills::session_skills`], so later sync preserves this tree.
 pub(super) fn stage_managed_skills(
     kind: mj_core::config::HarnessKind,
     profile_stage: &Path,
+    scope: mj_core::skills::SkillsScope,
 ) -> Result<()> {
+    let directory = profile_stage.join(mj_core::skills::mj_skill_directory(kind));
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove staged mj skill {}", directory.display()));
+        }
+    }
+    if scope == mj_core::skills::SkillsScope::Isolated {
+        return Ok(());
+    }
     for entry in mj_core::skills::managed_skills(kind) {
         let path = profile_stage.join(&entry.path);
         if let Some(parent) = path.parent() {

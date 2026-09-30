@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 const docsRoot = fileURLToPath(new URL('..', import.meta.url));
 for (const guide of [
   {
+    source: '../mj-core/assets/skills/mj/references/configuration.md',
+    target: 'configuration.md',
+    title: 'Configuration reference',
+    description: 'Complete reference for Mjolnir config.toml, including profiles, secrets, bundles, machines, runtimes, review, viewer, paths, and environment overrides.',
+  },
+  {
     source: '../mj-controller/docs/PODMAN.md',
     target: 'podman.md',
     title: 'Podman for Mjolnir',

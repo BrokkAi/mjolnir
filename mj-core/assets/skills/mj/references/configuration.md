@@ -1,7 +1,4 @@
----
-title: Configuration reference
-description: Complete reference for Mjolnir 2 config.toml, including profiles, secrets, bundles, machines, runtimes, review, viewer, paths, and environment overrides.
----
+# Configuration reference
 
 Mjolnir keeps per-user configuration in `config.toml`. Workspaces, sessions,
 prompt history, per-session resource choices, drafts, and read markers live in
