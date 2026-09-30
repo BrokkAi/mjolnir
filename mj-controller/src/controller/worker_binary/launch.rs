@@ -197,9 +197,9 @@ impl Controller {
         Ok((configuration, config_roots.into_iter().collect()))
     }
 
-    /// Probe the installed binary and collect the dead worker's exit record
-    /// and log tail after a session becomes unreachable. Best-effort; returns
-    /// `None` when the target no longer exists or has no diagnostics.
+    /// Probe the installed binary and the worker's recorded state after a
+    /// session becomes unreachable. Returns `None` only when the session has
+    /// no target to probe; a probe that fails says why.
     pub fn diagnose_worker(&self, session_id: &str) -> Option<String> {
         self.diagnose_worker_controlled(session_id, &crate::targets::ProcessExecutor)
     }
@@ -234,14 +234,14 @@ impl Controller {
             }
         };
         let binary_failure = worker_binary_probe_failure(executor, &backend, &worker_root);
-        let last_words = worker_last_words(executor, &backend, &worker_root);
-        match (binary_failure, last_words) {
-            (Some(binary_failure), Some(last_words)) => {
-                Some(format!("{binary_failure}; {last_words}"))
-            }
-            (Some(binary_failure), None) => Some(binary_failure),
-            (None, last_words) => last_words,
-        }
+        let probe = match probe_worker(executor, &backend, &worker_root) {
+            Ok(probe) => probe.to_string(),
+            Err(error) => format!("the worker could not be probed: {error:#}"),
+        };
+        Some(match binary_failure {
+            Some(binary_failure) => format!("{binary_failure}; {probe}"),
+            None => probe,
+        })
     }
 
     /// A non-destructive liveness probe plus commands that replace a confirmed

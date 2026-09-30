@@ -1,27 +1,8 @@
 use super::*;
 
 impl Controller {
-    pub(in crate::controller) async fn checkpoint_session_latched(
-        &self,
-        session_id: &str,
-        executor: &(impl CommandExecutor + Sync),
-        manager: Option<&SessionManagerControl>,
-        exclusivity: LatchExclusivity,
-        export_policy: CheckpointExportPolicy,
-    ) -> Result<LatchedCheckpoint> {
-        self.checkpoint_session_latched_for_operation(
-            session_id,
-            executor,
-            manager,
-            exclusivity,
-            export_policy,
-            None,
-        )
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn checkpoint_session_latched_for_operation(
+    pub(in crate::controller) async fn checkpoint_session_latched_for_operation(
         &self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
@@ -29,6 +10,7 @@ impl Controller {
         exclusivity: LatchExclusivity,
         export_policy: CheckpointExportPolicy,
         requested_operation_id: Option<&str>,
+        held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         self.checkpoint_session_latched_with_recovery_stage(
             session_id,
@@ -38,6 +20,7 @@ impl Controller {
             export_policy,
             exclusivity == LatchExclusivity::HoldThroughClose,
             requested_operation_id,
+            held_relay,
         )
         .await
     }
@@ -52,6 +35,7 @@ impl Controller {
         export_policy: CheckpointExportPolicy,
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
+        held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         let layout = self.session_export_layout(session_id, executor)?;
         // The layout-level future holds the whole capture protocol and is
@@ -69,12 +53,17 @@ impl Controller {
             recovery_copy,
             requested_operation_id,
             layout,
+            held_relay,
         ))
         .await
     }
 
     /// Capture an explicitly supplied repository layout using the unchanged
     /// checkpoint protocol. The caller owns the resulting artifact.
+    ///
+    /// `held_relay` is a connection the caller already holds on this session,
+    /// such as a Move's hold on its source; the checkpoint uses it instead of
+    /// leasing another.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::controller) async fn checkpoint_session_latched_with_layout(
         &self,
@@ -86,6 +75,7 @@ impl Controller {
         recovery_copy: bool,
         requested_operation_id: Option<&str>,
         layout: SessionExportLayout,
+        held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
@@ -249,6 +239,7 @@ impl Controller {
                 },
                 exclusivity == LatchExclusivity::HoldThroughClose
                     || session.harness_kind != HarnessKind::Kimi,
+                held_relay,
             )
             .await?;
         let (barrier, barrier_command_id) = loop {

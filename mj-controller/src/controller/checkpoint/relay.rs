@@ -1,15 +1,24 @@
 use super::*;
 
 impl Controller {
+    /// `source_relay` is the connection a Move holds on its source. When it
+    /// holds none yet, this leases one and keeps it for the caller.
     pub(in crate::controller) async fn prepare_move_source_checkpoint(
         &self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
         operation: &mut mj_core::state::MoveOperation,
+        source_relay: &mut crate::controller::move_session::MoveSourceRelay,
     ) -> Result<()> {
-        let snapshot =
-            crate::controller::move_session::refresh_move_source(manager, session_id).await?;
+        let snapshot = if source_relay.is_held() {
+            source_relay.sync(session_id).await?
+        } else {
+            *source_relay =
+                crate::controller::move_session::MoveSourceRelay::lease(manager, session_id)
+                    .await?;
+            source_relay.snapshot()
+        };
         if snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.operational.checkpoint_only)
@@ -61,9 +70,13 @@ impl Controller {
                 },
             )
             .await?;
-        adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
-            .await?
-            .release();
+        if source_relay.is_held() {
+            source_relay.replace_connection(connection);
+        } else {
+            adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
+                .await?
+                .release();
+        }
         Ok(())
     }
 
@@ -77,6 +90,7 @@ impl Controller {
         manager: Option<&SessionManagerControl>,
         target: InstalledWorkerRestart<'_>,
         restart_if_unreachable: bool,
+        held_relay: Option<ControllerRelayLease>,
     ) -> Result<(ControllerRelayLease, bool)> {
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => Some(target),
@@ -89,14 +103,32 @@ impl Controller {
                 None
             }
         };
-        match connect_checkpoint_relay(
-            session_id,
-            manager,
-            target.reconnect,
-            project_memory.clone(),
-        )
-        .await
-        {
+        let connected = match held_relay {
+            Some(mut relay) => {
+                relay
+                    .connection_mut()
+                    .set_project_memory_target(project_memory.clone());
+                match relay.connection_mut().sync().await {
+                    Ok(_) => Ok(relay),
+                    Err(error) => {
+                        // Let go of the dead connection before the restart
+                        // below leases the session again.
+                        drop(relay);
+                        Err(error)
+                    }
+                }
+            }
+            None => {
+                connect_checkpoint_relay(
+                    session_id,
+                    manager,
+                    target.reconnect,
+                    project_memory.clone(),
+                )
+                .await
+            }
+        };
+        match connected {
             Ok(relay) => Ok((relay, false)),
             Err(error) if worker_connect_needs_restart(&error) && restart_if_unreachable => {
                 tracing::warn!(

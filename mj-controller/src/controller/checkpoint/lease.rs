@@ -67,7 +67,7 @@ impl ControllerRelayLease {
     }
 
     /// Swap the proxy after the worker process behind it was restarted.
-    pub(super) fn replace_connection(&mut self, connection: StandaloneSession) {
+    pub(in crate::controller) fn replace_connection(&mut self, connection: StandaloneSession) {
         match self {
             Self::Managed {
                 lease: Some(lease), ..

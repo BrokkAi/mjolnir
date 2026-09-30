@@ -46,15 +46,6 @@ const WORKER_STARTUP_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 /// How often a wait loop looks for cancellation while it is idle.
 pub(super) const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Marker that opens the exit record a dying worker writes to its root.
-pub(super) const WORKER_EXIT_RECORD_MARKER: &str = "--- worker-exit.json ---";
-
-/// Marker that opens the startup record a starting worker writes to its root.
-pub(super) const WORKER_STARTUP_RECORD_MARKER: &str = "--- worker-startup.json ---";
-
-/// Marker that opens the probe's report of whether the worker is running.
-pub(super) const WORKER_PROCESS_MARKER: &str = "--- worker process ---";
-
 pub(super) enum NativeSessionReadiness {
     Waiting,
     Ready(String),
@@ -170,9 +161,9 @@ trait StartingWorkerProbe {
 
     async fn connect(&mut self) -> Result<Self::Relay>;
 
-    /// What the worker looks like on the target right now, or `None` when the
-    /// target could not be asked.
-    fn inspect(&self) -> Option<WorkerProbe>;
+    /// What the worker looks like on the target right now, or why the target
+    /// could not tell.
+    fn inspect(&self) -> Result<WorkerProbe>;
 }
 
 struct StartingWorkerConnection<'a, E: CommandExecutor> {
@@ -190,7 +181,7 @@ impl<E: CommandExecutor> StartingWorkerProbe for StartingWorkerConnection<'_, E>
         StandaloneSession::connect_command(self.spec, self.session_id).await
     }
 
-    fn inspect(&self) -> Option<WorkerProbe> {
+    fn inspect(&self) -> Result<WorkerProbe> {
         probe_worker(self.executor, self.locator, self.worker_root)
     }
 }
@@ -276,23 +267,15 @@ enum StartupVerdict {
 }
 
 fn verdict(probe: &WorkerProbe) -> StartupVerdict {
-    if probe.exited {
-        // A worker that already wrote its exit record will never accept a
-        // connection, so report the recorded cause instead of waiting it out.
-        return StartupVerdict::Hopeless(probe.diagnostics.clone(), probe.refusal.clone());
+    // A worker that wrote its exit record, or whose process is gone, will never
+    // accept a connection, so report what it did instead of waiting it out.
+    if let Some(exit) = &probe.exit {
+        return StartupVerdict::Hopeless(probe.to_string(), exit.refusal.clone());
     }
-    if !probe.alive {
-        let step = probe.step.as_deref().unwrap_or("start");
-        return StartupVerdict::Hopeless(
-            format!(
-                "the worker process is gone; it reached the startup step {step:?} \
-                 and left no exit record\n{}",
-                probe.diagnostics
-            ),
-            None,
-        );
+    if !probe.alive() {
+        return StartupVerdict::Hopeless(probe.to_string(), None);
     }
-    StartupVerdict::Working(probe.step.clone())
+    StartupVerdict::Working(probe.step().map(ToOwned::to_owned))
 }
 
 /// Wait for a worker that was just started to accept a relay connection.
@@ -315,6 +298,8 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let mut step: Option<String> = None;
     let mut last_error: Option<anyhow::Error> = None;
     let mut stalled_on: Option<String> = None;
+    // Why the latest probe of the worker failed, when it did.
+    let mut probe_error: Option<anyhow::Error> = None;
     loop {
         if executor.cancellation_requested() {
             bail!("operation cancelled while connecting to the worker relay");
@@ -363,35 +348,48 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
         // worker recorded and a worker that just moved is not given up on.
         if now >= next_probe || timed_out || now >= deadline {
             next_probe = now + WORKER_STARTUP_PROBE_INTERVAL;
-            match probe.inspect().map(|probe| verdict(&probe)) {
-                Some(StartupVerdict::Hopeless(reason, refusal)) => {
-                    let error = error.context(reason).context(WorkerStartupFailure {
-                        reached_socket: reached_socket(step.as_deref()),
-                    });
-                    // A refusal is a precondition the caller can fix, so its
-                    // sentence travels to the caller as a 409 rather than
-                    // stopping at the daemon log.
-                    return Err(match refusal {
-                        Some(refusal) => {
-                            error.context(mj_core::refusal::Refusal::precondition(refusal))
+            match probe.inspect() {
+                Ok(found) => {
+                    probe_error = None;
+                    match verdict(&found) {
+                        StartupVerdict::Hopeless(reason, refusal) => {
+                            let error = error.context(reason).context(WorkerStartupFailure {
+                                reached_socket: reached_socket(found.step()),
+                            });
+                            // A refusal is a precondition the caller can fix, so
+                            // its sentence travels to the caller as a 409 rather
+                            // than stopping at the daemon log.
+                            return Err(match refusal {
+                                Some(refusal) => {
+                                    error.context(mj_core::refusal::Refusal::precondition(refusal))
+                                }
+                                None => error,
+                            });
                         }
-                        None => error,
-                    });
-                }
-                Some(StartupVerdict::Working(reported)) => {
-                    if reported != step {
-                        // The worker is getting somewhere. Let it, up to the
-                        // ceiling: what it is doing takes as long as the
-                        // session's own data takes.
-                        step = reported;
-                        deadline = std::cmp::min(ceiling, now + WORKER_STARTUP_PROGRESS_GRACE);
-                        stalled_on = None;
-                    } else if step.is_some() {
-                        stalled_on = step.clone();
+                        StartupVerdict::Working(reported) => {
+                            if reported != step {
+                                // The worker is getting somewhere. Let it, up to
+                                // the ceiling: what it is doing takes as long as
+                                // the session's own data takes.
+                                step = reported;
+                                deadline =
+                                    std::cmp::min(ceiling, now + WORKER_STARTUP_PROGRESS_GRACE);
+                                stalled_on = None;
+                            } else if step.is_some() {
+                                stalled_on = step.clone();
+                            }
+                        }
                     }
                 }
-                // The target could not be asked; keep waiting on the clock.
-                None => {}
+                // The target could not tell; keep waiting on the clock, and say
+                // why if the wait ends without a better answer.
+                Err(inspect_error) => {
+                    tracing::debug!(
+                        error = %format!("{inspect_error:#}"),
+                        "could not probe a starting worker"
+                    );
+                    probe_error = Some(inspect_error);
+                }
             }
         }
         // An attempt with no time left is only the loop's last look at the
@@ -435,10 +433,16 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                 "worker relay did not accept a connection in {waited}s; \
                  its last startup step was {step:?}"
             ),
-            None => format!(
-                "worker relay did not accept a connection in {waited}s; \
-                 no startup step could be read from its record"
-            ),
+            None => match &probe_error {
+                Some(probe_error) => format!(
+                    "worker relay did not accept a connection in {waited}s; \
+                     the worker could not be probed: {probe_error:#}"
+                ),
+                None => format!(
+                    "worker relay did not accept a connection in {waited}s; \
+                     it recorded no startup step"
+                ),
+            },
         },
     };
     let marker = WorkerStartupFailure {
@@ -456,6 +460,7 @@ mod tests {
 
     use anyhow::{Result, bail};
 
+    use crate::controller::worker_binary::{WorkerExitRecord, WorkerStartupRecord};
     use crate::targets::{CancellableProcessExecutor, CommandOutput};
     use mj_core::config::HarnessKind;
 
@@ -635,7 +640,7 @@ mod tests {
             }
         }
 
-        fn inspect(&self) -> Option<WorkerProbe> {
+        fn inspect(&self) -> Result<WorkerProbe> {
             let exited = self
                 .death_after_attempts
                 .is_some_and(|died_after| self.attempts >= died_after);
@@ -652,22 +657,13 @@ mod tests {
             } else {
                 self.stuck_step.map(ToOwned::to_owned)
             };
-            let diagnostics = if exited {
-                format!(
-                    "worker diagnostics:\n{WORKER_EXIT_RECORD_MARKER}\n\
-                     {{\"reason\":\"durable relay open failed\"}}"
-                )
-            } else {
-                "worker diagnostics:\n--- worker process ---\nabsent".to_owned()
-            };
-            Some(WorkerProbe {
-                alive: !exited && !gone,
-                step,
-                exited,
-                refusal: exited
-                    .then(|| self.refusal.map(ToOwned::to_owned))
-                    .flatten(),
-                diagnostics,
+            Ok(WorkerProbe {
+                startup: step.map(|step| WorkerStartupRecord { step }),
+                exit: exited.then(|| WorkerExitRecord {
+                    reason: "durable relay open failed".into(),
+                    refusal: self.refusal.map(ToOwned::to_owned),
+                }),
+                pids: if exited || gone { vec![] } else { vec![41] },
             })
         }
     }
@@ -703,7 +699,10 @@ mod tests {
         assert_eq!(worker.attempts, 1);
         assert!(started.elapsed() < WORKER_STARTUP_CONNECT_INTERVAL);
         let reported = format!("{error:#}");
-        assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
+        assert!(
+            reported.contains("the worker exited: durable relay open failed"),
+            "{reported}"
+        );
         assert!(reported.contains("connect attempt 1 refused"), "{reported}");
     }
 

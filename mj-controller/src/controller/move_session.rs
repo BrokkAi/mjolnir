@@ -210,28 +210,105 @@ use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
 /// Refresh source state without turning a dead source harness into a Move prerequisite.
-/// Leasing preserves typed transport failures, unlike the UI's string-valued sync reply.
 pub async fn refresh_move_source(
     manager: &SessionManagerControl,
     id: &str,
 ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
-    let handle = manager
-        .wait_for_session(id, std::time::Duration::from_secs(5))
-        .await?;
-    let result = async {
-        let mut lease = handle.lease_connection().await?;
-        let snapshot = lease.connection_mut().sync().await?;
-        lease.release();
-        Ok(snapshot)
-    }
-    .await;
-    match result {
-        Ok(snapshot) => Ok(Some(snapshot)),
-        Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
-            tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
-            Ok(None)
+    Ok(MoveSourceRelay::lease(manager, id).await?.snapshot())
+}
+
+/// A Move's hold on its source's relay connection, from the confirmation
+/// until the checkpoint that seals the source takes it over. While it is
+/// held, the session actor admits nothing to the relay, so the state the Move
+/// was confirmed against is the state it interrupts. Dropping it hands the
+/// connection back to the actor.
+#[derive(Default)]
+pub(in crate::controller) struct MoveSourceRelay(Option<super::checkpoint::ControllerRelayLease>);
+
+impl MoveSourceRelay {
+    /// Take the source's connection from its session actor, which syncs it
+    /// before handing it over. Holds nothing when the source's worker cannot
+    /// be reached; the Move then recovers it without its harness. Leasing
+    /// preserves typed transport failures, unlike the UI's string-valued sync.
+    pub(in crate::controller) async fn lease(
+        manager: &SessionManagerControl,
+        id: &str,
+    ) -> Result<Self> {
+        let handle = manager
+            .wait_for_session(id, std::time::Duration::from_secs(5))
+            .await?;
+        match handle.lease_connection().await {
+            Ok(lease) => Ok(Self(Some(
+                super::checkpoint::ControllerRelayLease::Managed {
+                    handle,
+                    lease: Some(lease),
+                },
+            ))),
+            Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
+                tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
+                Ok(Self(None))
+            }
+            Err(error) => Err(error),
         }
-        Err(error) => Err(error),
+    }
+
+    /// The source's state as of its last sync, or `None` when it is unreachable.
+    pub(in crate::controller) fn snapshot(
+        &mut self,
+    ) -> Option<mj_core::state::ManagedSessionSnapshot> {
+        self.0
+            .as_mut()
+            .map(|relay| relay.connection_mut().snapshot())
+    }
+
+    /// Sync the held connection again. A source whose transport died since it
+    /// was leased is let go and reported unreachable.
+    pub(in crate::controller) async fn sync(
+        &mut self,
+        id: &str,
+    ) -> Result<Option<mj_core::state::ManagedSessionSnapshot>> {
+        let Some(relay) = self.0.as_mut() else {
+            return Ok(None);
+        };
+        match relay.connection_mut().sync().await {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
+                tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
+                self.0 = None;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(in crate::controller) fn is_held(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Hand the connection to the checkpoint that seals the source.
+    pub(in crate::controller) fn take(
+        &mut self,
+    ) -> Option<super::checkpoint::ControllerRelayLease> {
+        self.0.take()
+    }
+
+    /// Keep holding the source across a worker restart, on the new worker's
+    /// connection.
+    pub(in crate::controller) fn replace_connection(
+        &mut self,
+        connection: crate::session_manager::StandaloneSession,
+    ) {
+        if let Some(relay) = self.0.as_mut() {
+            relay.replace_connection(connection);
+        }
+    }
+}
+
+impl Drop for MoveSourceRelay {
+    fn drop(&mut self) {
+        if let Some(relay) = self.0.take() {
+            relay.release();
+        }
     }
 }
 
@@ -687,20 +764,24 @@ impl Controller {
         let id = prepared.selection.session_id.clone();
         let started = std::time::Instant::now();
         executor.notify_notice("Checking destination");
+        let mut source_relay = MoveSourceRelay::default();
         let checked = {
             let _checking_destination =
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
             let mut checked = self
                 .prepare_move_session_controlled(prepared.selection.clone(), executor)
                 .await?;
-            // Destination checks can outlast a turn. Refresh confirmation from the
-            // relay immediately before interruption, while new submissions are held.
+            // Destination checks can outlast a turn. Confirm against the relay
+            // immediately before interruption, and hold its connection from
+            // here until the checkpoint seals the source, so nothing reaches
+            // the relay between this confirmation and the interruption.
             if matches!(
                 self.state.sessions[&id].state,
                 SessionState::Running | SessionState::Disconnected
             ) {
                 let source_harness = self.state.sessions[&id].harness_kind;
-                let snapshot = refresh_move_source(manager, &id).await?;
+                source_relay = MoveSourceRelay::lease(manager, &id).await?;
+                let snapshot = source_relay.snapshot();
                 let (active, queue, fingerprint) =
                     self.move_confirmation(&checked.selection, checked.conversion.as_deref())?;
                 checked.source_unavailable = snapshot
@@ -860,8 +941,14 @@ impl Controller {
         );
         // Move nests checkpoint and restore state machines. Heap-own their
         // futures so dev builds fit the runtime's ordinary thread stacks.
-        let result =
-            Box::pin(self.execute_move(&mut operation, Some(&checked), executor, manager)).await;
+        let result = Box::pin(self.execute_move(
+            &mut operation,
+            Some(&checked),
+            executor,
+            manager,
+            source_relay,
+        ))
+        .await;
         self.finish_move_result(&mut operation, result, executor)
     }
 
@@ -942,7 +1029,7 @@ impl Controller {
                 if session.state == SessionState::Provisioning || session.target != operation.source_target {
                     self.rollback_move_destination(&operation, anyhow::anyhow!("resume interrupted Move transfer"), executor)?;
                 }
-                return Box::pin(self.execute_move(&mut operation, None, executor, manager)).await;
+                return Box::pin(self.execute_move(&mut operation, None, executor, manager, MoveSourceRelay::default())).await;
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
@@ -1022,8 +1109,14 @@ impl Controller {
     ) -> Result<()> {
         let id = operation.selection.session_id.clone();
         if self.state.sessions[&id].state == SessionState::Closing {
-            self.prepare_move_source_checkpoint(&id, executor, manager, operation)
-                .await?;
+            self.prepare_move_source_checkpoint(
+                &id,
+                executor,
+                manager,
+                operation,
+                &mut MoveSourceRelay::default(),
+            )
+            .await?;
             let handle = manager
                 .wait_for_session(&id, std::time::Duration::from_secs(5))
                 .await?;
@@ -1068,6 +1161,7 @@ impl Controller {
                         operation,
                         None,
                         SourceTargetDisposition::Destroy,
+                        MoveSourceRelay::default(),
                     ))
                     .await?;
                 }
@@ -1084,12 +1178,15 @@ impl Controller {
         Ok(())
     }
 
+    /// `source_relay` is the source connection the Move confirmed against,
+    /// held until the checkpoint that seals the source takes it over.
     async fn execute_move(
         &mut self,
         operation: &mut MoveOperation,
         preparation: Option<&MovePreparation>,
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
+        mut source_relay: MoveSourceRelay,
     ) -> Result<()> {
         let id = operation.selection.session_id.clone();
         ensure!(
@@ -1161,9 +1258,12 @@ impl Controller {
                     operation,
                     preparation,
                     disposition,
+                    std::mem::take(&mut source_relay),
                 ))
                 .await?;
             }
+            // Past the source stop, nothing else needs the source's connection.
+            drop(source_relay);
             // An in-place move never reaches `Stopped` with a target: its
             // source stays `Closing` in the environment the destination reuses.
             if !operation.in_place

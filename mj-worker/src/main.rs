@@ -194,7 +194,10 @@ fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Opt
             return;
         }
     };
-    if let Err(error) = std::fs::write(root.join(mj_core::relay::WORKER_EXIT_FILE), bytes) {
+    // Atomic, like the startup record: the controller parses what it reads.
+    if let Err(error) =
+        mj_core::config::atomic_write(&root.join(mj_core::relay::WORKER_EXIT_FILE), &bytes)
+    {
         eprintln!("Mjolnir: could not write worker exit record: {error}");
     }
 }

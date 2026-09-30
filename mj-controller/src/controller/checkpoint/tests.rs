@@ -2265,12 +2265,14 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 
     let executor = RecordingExecutor::default();
     let latched = controller
-        .checkpoint_session_latched(
+        .checkpoint_session_latched_for_operation(
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::HoldThroughClose,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2323,12 +2325,14 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     assert_eq!(before.operational.execution, RelayExecutionState::Running);
     connection.release();
     let deferred = controller
-        .checkpoint_session_latched(
+        .checkpoint_session_latched_for_operation(
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::ReleaseAfterLatch,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            None,
+            None,
         )
         .await;
     assert!(
@@ -2392,12 +2396,14 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     }
 
     let changed = controller
-        .checkpoint_session_latched(
+        .checkpoint_session_latched_for_operation(
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::HoldThroughClose,
             CheckpointExportPolicy::ReuseUnchangedArchive,
+            None,
+            None,
         )
         .await;
     let Err(error) = changed else {
@@ -2587,12 +2593,14 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
 
     let executor = StagingExecutor::default();
     let deferred = controller
-        .checkpoint_session_latched(
+        .checkpoint_session_latched_for_operation(
             LATCH_RELAY_SESSION,
             &executor,
             Some(&channels.control),
             LatchExclusivity::ReleaseAfterLatch,
             CheckpointExportPolicy::Always,
+            None,
+            None,
         )
         .await;
     let Err(error) = deferred else {
@@ -3095,6 +3103,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
             &mut operation,
             None,
             crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+            crate::controller::move_session::MoveSourceRelay::default(),
         )
         .await
         .unwrap();
@@ -3431,6 +3440,7 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
         LatchExclusivity::ReleaseAfterLatch,
         CheckpointExportPolicy::Always,
         false,
+        None,
         None,
     );
     let latched_size = std::mem::size_of_val(&latched);

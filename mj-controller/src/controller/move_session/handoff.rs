@@ -13,6 +13,7 @@ impl Controller {
         manager: &SessionManagerControl,
         operation: &mut MoveOperation,
         preparation: Option<&MovePreparation>,
+        source_relay: Option<super::super::checkpoint::ControllerRelayLease>,
     ) -> Result<()> {
         let previous = self.state.sessions[id].clone();
         let mut layout = self.session_export_layout(id, executor)?;
@@ -29,6 +30,7 @@ impl Controller {
             false,
             Some(&operation.operation_id),
             layout,
+            source_relay,
         ))
         .await?;
         operation.handoff = Some(latched.artifact.metadata.clone());

@@ -93,6 +93,7 @@ impl Controller {
                 SourceTargetDisposition::Destroy,
                 true,
                 None,
+                None,
             )
             .await?
         {
@@ -117,10 +118,12 @@ impl Controller {
             SourceTargetDisposition::Destroy,
             acknowledge_unpublished_work,
             before_close,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn suspend_session_for_move(
         &mut self,
         session_id: &str,
@@ -129,14 +132,28 @@ impl Controller {
         operation: &mut mj_core::state::MoveOperation,
         preparation: Option<&mj_core::state::MovePreparation>,
         disposition: SourceTargetDisposition,
+        mut source_relay: super::move_session::MoveSourceRelay,
     ) -> Result<bool> {
-        self.prepare_move_source_checkpoint(session_id, executor, manager, operation)
-            .await?;
+        self.prepare_move_source_checkpoint(
+            session_id,
+            executor,
+            manager,
+            operation,
+            &mut source_relay,
+        )
+        .await?;
         if disposition == SourceTargetDisposition::RetainForInPlaceSwap
             || operation.workspace_transfer.is_some()
         {
-            self.seal_move_handoff(session_id, executor, manager, operation, preparation)
-                .await?;
+            self.seal_move_handoff(
+                session_id,
+                executor,
+                manager,
+                operation,
+                preparation,
+                source_relay.take(),
+            )
+            .await?;
             return Ok(false);
         }
         self.suspend_session_controlled_with_manager(
@@ -147,6 +164,7 @@ impl Controller {
             disposition,
             true,
             None,
+            source_relay.take(),
         )
         .await
     }
@@ -164,6 +182,7 @@ impl Controller {
         disposition: SourceTargetDisposition,
         acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
+        held_relay: Option<super::checkpoint::ControllerRelayLease>,
     ) -> Result<bool> {
         let previous = self
             .state
@@ -185,12 +204,14 @@ impl Controller {
         // Close seals the relay at the exact latched cursor, so this checkpoint
         // keeps its exclusive connection until the relay reports Closed.
         let mut latched = match self
-            .checkpoint_session_latched(
+            .checkpoint_session_latched_for_operation(
                 session_id,
                 executor,
                 manager,
                 LatchExclusivity::HoldThroughClose,
                 CheckpointExportPolicy::ReuseUnchangedArchive,
+                None,
+                held_relay,
             )
             .await
         {
@@ -465,6 +486,7 @@ impl Controller {
                         SourceTargetDisposition::Destroy,
                         acknowledge_unpublished_work,
                         before_close,
+                        None,
                     )
                     .await;
             }

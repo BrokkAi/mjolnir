@@ -179,9 +179,11 @@ pub(in crate::controller) fn worker_probe_diagnosis(
         Some(failure) => error.context(failure),
         None => error,
     };
-    match worker_last_words(executor, locator, worker_root) {
-        Some(last_words) => error.context(last_words),
-        None => error,
+    match probe_worker(executor, locator, worker_root) {
+        Ok(probe) => error.context(probe.to_string()),
+        Err(probe_error) => {
+            error.context(format!("the worker could not be probed: {probe_error:#}"))
+        }
     }
 }
 
@@ -219,255 +221,197 @@ pub(super) fn worker_binary_probe_failure(
 
 /// What one probe of a starting or dead worker found.
 ///
-/// The three facts are read from the same command, because on a container or
-/// SSH target every probe costs a round trip: whether the process is there,
-/// which startup step it last recorded, and the diagnostic text a failure
-/// should carry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The probe script prints exactly this document: the worker's own startup and
+/// exit records, inserted unchanged, and the live processes for its root. All
+/// three facts come from one command, because on a container or SSH target
+/// every probe costs a round trip.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(in crate::controller) struct WorkerProbe {
-    /// A process for this worker root is running on the target.
-    pub alive: bool,
-    /// The latest step from `worker-startup.json`, when the worker wrote one.
-    pub step: Option<String>,
-    /// The worker recorded its own death.
-    pub exited: bool,
-    /// A sentence the worker wrote for whoever asked, when it stopped on a
-    /// precondition the caller can fix rather than on an internal failure.
-    pub refusal: Option<String>,
-    /// Exit record, log tail and process state, for an error to carry.
-    pub diagnostics: String,
+    /// `worker-startup.json`, when the worker wrote one.
+    pub startup: Option<WorkerStartupRecord>,
+    /// `worker-exit.json`: the worker recorded its own death.
+    pub exit: Option<WorkerExitRecord>,
+    /// Live worker processes for this root, the recorded one first.
+    pub pids: Vec<u32>,
 }
 
-/// Fetch the worker's startup record, structured exit record, log tail, and
-/// current process state from the target, so unreachable-worker errors carry
-/// the root cause. The process section distinguishes a worker that died early
-/// from one that is still running but never accepted a relay connection; it
-/// must be read before the caller stops the worker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(in crate::controller) struct WorkerStartupRecord {
+    /// The latest step the worker reached.
+    pub step: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(in crate::controller) struct WorkerExitRecord {
+    pub reason: String,
+    /// A sentence the worker wrote for whoever asked, when it stopped on a
+    /// precondition the caller can fix rather than on an internal failure.
+    #[serde(default)]
+    pub refusal: Option<String>,
+}
+
+impl WorkerProbe {
+    pub fn alive(&self) -> bool {
+        !self.pids.is_empty()
+    }
+
+    pub fn step(&self) -> Option<&str> {
+        self.startup.as_ref().map(|record| record.step.as_str())
+    }
+}
+
+/// One sentence naming what the worker did: its recorded exit reason, or
+/// whether it is running and the step it last reached.
+impl std::fmt::Display for WorkerProbe {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(exit) = &self.exit {
+            return write!(formatter, "the worker exited: {}", exit.reason);
+        }
+        match (self.alive(), self.step()) {
+            (true, Some(step)) => write!(
+                formatter,
+                "the worker is running; its last startup step was {step:?}"
+            ),
+            (true, None) => write!(
+                formatter,
+                "the worker is running and recorded no startup step"
+            ),
+            (false, Some(step)) => write!(
+                formatter,
+                "the worker process is gone; it reached the startup step {step:?} \
+                 and left no exit record"
+            ),
+            (false, None) => write!(
+                formatter,
+                "the worker process is gone and recorded no startup step"
+            ),
+        }
+    }
+}
+
+/// Read the worker's startup record, exit record and live processes from the
+/// target. The process state distinguishes a worker that died early from one
+/// that is still running but never accepted a relay connection, so it must be
+/// read before the caller stops the worker.
+///
+/// A target that cannot be asked, or a record that does not parse, is an
+/// error: the caller must not mistake it for a worker with nothing to report.
 pub(in crate::controller) fn probe_worker(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> Option<WorkerProbe> {
-    let text = worker_last_words(executor, locator, worker_root)?;
-    Some(WorkerProbe {
-        alive: process_section(&text).is_some_and(|section| section.starts_with("alive")),
-        step: startup_step(&text),
-        exited: text.contains(WORKER_EXIT_RECORD_MARKER),
-        refusal: exit_refusal(&text),
-        diagnostics: text,
+) -> Result<WorkerProbe> {
+    let command = targets::locator_command(
+        locator,
+        vec!["sh".into(), "-c".into(), worker_probe_script(worker_root)],
+    )
+    .purpose("probe worker state");
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "the worker probe exited with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "read the worker probe: {}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        )
     })
 }
 
-/// The sentence a refusing worker wrote in its exit record, when it wrote one.
-fn exit_refusal(text: &str) -> Option<String> {
-    exit_record_field(text, "refusal")
+/// The shell half of [`probe_worker`]. The records are JSON the worker wrote,
+/// so they are inserted as they are; everything else it prints is a number.
+fn worker_probe_script(worker_root: &str) -> String {
+    format!(
+        r#"{identity}
+hel_record() {{
+    if [ -s "$1" ]; then cat "$1"; else printf null; fi
+}}
+printf '{{"startup":'
+hel_record "$hel_root/{startup_file}"
+printf ',"exit":'
+hel_record "$hel_root/{exit_file}"
+printf ',"pids":['
+if hel_pid=$(hel_recorded_worker); then
+    printf '%s' "$hel_pid"
+else
+    hel_separator=
+    while read -r hel_pid hel_args; do
+        case "$hel_pid" in
+            '' | *[!0-9]*) continue ;;
+        esac
+        [ "$hel_pid" -eq $$ ] && continue
+        case "$hel_args" in
+            *"$hel_match"*|*"$hel_match_home"*)
+                printf '%s%s' "$hel_separator" "$hel_pid"
+                hel_separator=,
+                ;;
+        esac
+    done <<MJ_PS
+$(hel_ps -eo pid=,args=)
+MJ_PS
+fi
+printf ']}}\n'
+"#,
+        identity = targets::worker_daemon_identity_script(worker_root),
+        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
+        exit_file = mj_core::relay::WORKER_EXIT_FILE,
+    )
 }
 
-fn exit_record_field(text: &str, field: &str) -> Option<String> {
-    let (_, rest) = text.split_once(WORKER_EXIT_RECORD_MARKER)?;
-    let body = rest.split("\n--- ").next().unwrap_or(rest);
-    let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
-    record
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-/// A failure on one line, for a session's error field: each cause's first
-/// line, with a worker's diagnostic dump replaced by the first line of the
-/// reason the worker recorded for its exit. The caller logs the full chain.
-///
-/// [`worker_probe_diagnosis`] attaches the dump as the outermost context, so
-/// the whole chain began "worker diagnostics:" and ran to a hundred lines of
-/// startup steps, log tail and bridge stderr (R8-2).
+/// A failure on one line, for a session's error field: the first line of each
+/// cause. A worker's exit reason can carry its bridge's stderr after the first
+/// line; the caller logs the full chain.
 pub(in crate::controller) fn failure_line(error: &anyhow::Error) -> String {
     error
         .chain()
-        .filter_map(|cause| {
-            let text = cause.to_string();
-            let dump = text
-                .split_once("worker diagnostics:")
-                .map(|(before, _)| before.trim_end());
-            match dump {
-                Some(before) => {
-                    let reason = exit_record_field(&text, "reason").and_then(|reason| {
-                        reason
-                            .lines()
-                            .next()
-                            .map(|line| format!("the worker exited: {}", line.trim()))
-                    });
-                    let before = before.lines().next().unwrap_or_default().trim();
-                    match (before.is_empty(), reason) {
-                        (true, reason) => reason,
-                        (false, Some(reason)) => Some(format!("{before}: {reason}")),
-                        (false, None) => Some(before.to_owned()),
-                    }
-                }
-                None => Some(text.lines().next().unwrap_or_default().trim().to_owned()),
-            }
+        .map(|cause| {
+            cause
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
         })
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(": ")
 }
 
-/// The text under the process marker, which is `alive (...)` or `absent`.
-fn process_section(text: &str) -> Option<&str> {
-    text.split_once(WORKER_PROCESS_MARKER)
-        .map(|(_, rest)| rest.trim_start())
-}
-
-/// The latest step name from the startup record embedded in a probe.
-///
-/// The record is pretty-printed JSON, so it is bounded by the next section
-/// marker rather than by counting braces.
-fn startup_step(text: &str) -> Option<String> {
-    let (_, rest) = text.split_once(WORKER_STARTUP_RECORD_MARKER)?;
-    let body = rest.split("\n--- ").next().unwrap_or(rest);
-    let record: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
-    record
-        .get("step")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-pub(in crate::controller) fn worker_last_words(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
-    worker_root: &str,
-) -> Option<String> {
-    let script = format!(
-        r#"{identity}
-if [ -f {root}/{startup_file} ]; then echo '{startup_marker}'; cat {root}/{startup_file}; fi
-if [ -f {root}/worker-exit.json ]; then echo '{marker}'; cat {root}/worker-exit.json; fi
-if [ -f {root}/worker.log ]; then echo '--- worker.log (tail) ---'; tail -n 20 {root}/worker.log; fi
-echo '{process_marker}'
-if hel_pid=$(hel_recorded_worker); then
-    echo "alive (recorded pid $hel_pid)"
-    hel_ps -o pid=,ppid=,stat=,etime=,args= -p "$hel_pid"
-    exit 0
-fi
-hel_found=0
-while read -r hel_pid hel_args; do
-    case "$hel_pid" in
-        '' | *[!0-9]*) continue ;;
-    esac
-    [ "$hel_pid" -eq $$ ] && continue
-    case "$hel_args" in
-        *"$hel_match"*|*"$hel_match_home"*)
-            hel_found=1
-            echo "alive (unrecorded pid $hel_pid)"
-            hel_ps -o pid=,ppid=,stat=,etime=,args= -p "$hel_pid"
-            ;;
-    esac
-done <<MJ_PS
-$(hel_ps -eo pid=,args=)
-MJ_PS
-[ "$hel_found" -eq 1 ] || echo 'absent'
-"#,
-        identity = targets::worker_daemon_identity_script(worker_root),
-        root = targets::posix_quote(worker_root),
-        startup_file = mj_core::relay::WORKER_STARTUP_FILE,
-        startup_marker = WORKER_STARTUP_RECORD_MARKER,
-        process_marker = WORKER_PROCESS_MARKER,
-        marker = WORKER_EXIT_RECORD_MARKER
-    );
-    let command = targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("collect worker last words");
-    let output = match executor.execute(&command) {
-        Ok(output) => output,
-        Err(error) => {
-            tracing::debug!(
-                worker_root,
-                %error,
-                "could not collect worker diagnostics"
-            );
-            return None;
-        }
-    };
-    if output.status != 0 {
-        tracing::debug!(
-            worker_root,
-            status = output.status,
-            "worker diagnostic probe returned a failure"
-        );
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then(|| format!("worker diagnostics:\n{text}"))
-}
-
 #[cfg(test)]
 mod probe_tests {
     use super::*;
 
-    /// The probe's output is one block of text from the target. Reading the
-    /// step and the process state out of it is what lets the readiness wait
-    /// tell a worker that is still working from one that has died, so both
-    /// have to survive the pretty-printed JSON and the sections around it.
-    #[test]
-    fn a_probe_reads_the_latest_step_and_whether_the_worker_is_alive() {
-        let text = format!(
-            "worker diagnostics:\n{WORKER_STARTUP_RECORD_MARKER}\n\
-             {{\n  \"step\": \"review-baseline\",\n  \"pid\": 41,\n  \
-             \"steps\": [\n    {{ \"step\": \"start\" }},\n    \
-             {{ \"step\": \"review-baseline\" }}\n  ]\n}}\n\
-             --- worker.log (tail) ---\n\n{WORKER_PROCESS_MARKER}\n\
-             alive (recorded pid 41)\n41 1 Sl 00:12 hel worker run"
-        );
-
-        assert_eq!(startup_step(&text).as_deref(), Some("review-baseline"));
-        assert!(process_section(&text).is_some_and(|section| section.starts_with("alive")));
-    }
-
-    #[test]
-    fn a_worker_that_left_no_startup_record_reports_no_step() {
-        let text = format!("worker diagnostics:\n{WORKER_PROCESS_MARKER}\nabsent");
-
-        assert_eq!(startup_step(&text), None);
-        assert!(process_section(&text).is_some_and(|section| section.starts_with("absent")));
-    }
-
     /// R8-2 (cli/048): a resume whose worker exited stored the whole probe
-    /// as the session's error, 96 lines beginning "worker diagnostics:". The
-    /// error keeps one line: the reason the worker recorded, then the rest of
-    /// the chain.
+    /// as the session's error, 96 lines long. The error keeps one line: the
+    /// reason the worker recorded, then the rest of the chain.
     #[test]
-    fn a_failure_carrying_worker_diagnostics_is_one_line_naming_the_workers_reason() {
-        let reason = "select required ACP execution mode auto: Cannot set permission mode \
-                      to auto: auto mode unavailable for this model\n\
-                      ACP bridge stderr:\n[session/create] phase=register durationMs=1";
-        let dump = format!(
-            "worker diagnostics:\n{WORKER_STARTUP_RECORD_MARKER}\n\
-             {{\n  \"step\": \"acp-initialized\"\n}}\n{WORKER_EXIT_RECORD_MARKER}\n{}\n\
-             --- worker.log (tail) ---\nERROR mj_worker: Mjolnir worker exited\n\
-             {WORKER_PROCESS_MARKER}\nabsent",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "reason": reason, "refusal": null, "version": "2.20.0"
-            }))
-            .unwrap()
-        );
+    fn a_failure_carrying_a_worker_exit_is_one_line_naming_the_workers_reason() {
+        let probe = WorkerProbe {
+            startup: Some(WorkerStartupRecord {
+                step: "acp-initialized".into(),
+            }),
+            exit: Some(WorkerExitRecord {
+                reason: "select required ACP execution mode auto: Cannot set permission mode \
+                         to auto: auto mode unavailable for this model\n\
+                         ACP bridge stderr:\n[session/create] phase=register durationMs=1"
+                    .into(),
+                refusal: None,
+            }),
+            pids: vec![],
+        };
         let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
             .context("write relay history_requests request")
-            .context(dump);
+            .context(probe.to_string());
 
         assert_eq!(
             failure_line(&error),
             "the worker exited: select required ACP execution mode auto: Cannot set \
              permission mode to auto: auto mode unavailable for this model: write relay \
              history_requests request: broken pipe"
-        );
-
-        // A worker that left no exit record is still named, by what the
-        // readiness wait saw, and the dump stays out.
-        let error = anyhow::anyhow!("connect refused").context(format!(
-            "the worker process is gone; it reached the startup step \"serving\" and left no \
-             exit record\nworker diagnostics:\n{WORKER_PROCESS_MARKER}\nabsent"
-        ));
-        assert_eq!(
-            failure_line(&error),
-            "the worker process is gone; it reached the startup step \"serving\" and left no \
-             exit record: connect refused"
         );
     }
 }
