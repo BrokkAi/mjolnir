@@ -49,17 +49,17 @@ pub(super) async fn wait(
             (ApiSession::from(session), observation)
         };
         if let Some(decision) = resolve_wait(&observation, &request) {
-            return Ok(Json(
-                finish_wait(
-                    &backend,
-                    &session_id,
-                    session_facts,
-                    observation,
-                    decision,
-                    relay,
-                )
-                .await?,
-            ));
+            let mut response = finish_wait(
+                &backend,
+                &session_id,
+                session_facts,
+                observation,
+                decision,
+                relay,
+            )
+            .await?;
+            response.requested_turn_id = request.turn_id;
+            return Ok(Json(response));
         }
 
         let changed = async {
@@ -114,6 +114,7 @@ pub(super) async fn wait(
                     turn_id: request.turn_id.or_else(|| {
                         observation.active_turn.as_ref().and_then(|turn| turn.accepted_ordinal)
                     }),
+                    requested_turn_id: request.turn_id,
                     turn_number: None,
                     elapsed_ms: None,
                     tool_calls: None,
@@ -334,6 +335,7 @@ pub(super) async fn finish_wait(
         }),
         report_source,
         turn_id: decision.turn_id,
+        requested_turn_id: None,
         turn_number: summary.as_ref().map(|summary| summary.turn_number),
         elapsed_ms: summary
             .as_ref()

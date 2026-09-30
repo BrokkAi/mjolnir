@@ -168,9 +168,12 @@ pub(crate) struct WaitArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// The turn to wait for, as `mj prompt` printed it. Both forms honor the
-    /// worker's completion assessment, including expected continuation.
-    /// Omit it to wait until the session is idle with nothing queued.
+    /// Wait until this turn, as `mj prompt` printed it, or a later one, has
+    /// ended. The answer describes the latest turn that ended (a session keeps
+    /// only that turn's outcome and reply), and `--json` reports it as
+    /// `turn_id` beside `requested_turn_id`. Both forms honor the worker's
+    /// completion assessment, including expected continuation. Omit it to
+    /// wait until the session is idle with nothing queued.
     #[arg(long)]
     turn: Option<u64>,
     /// Seconds to wait before answering `timeout`.
@@ -800,6 +803,16 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         ));
     }
     lines.push(summary);
+    // A wait for turn N answers with the latest turn that ended, which is a
+    // later turn when the session has moved on. Say so rather than let the
+    // reply read as turn N's.
+    if let (Some(requested), Some(answered)) = (response.requested_turn_id, response.turn_id)
+        && answered > requested
+    {
+        lines.push(format!(
+            "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
+        ));
+    }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
     // J-25), so each is printed only when it says something new.
@@ -1880,6 +1893,21 @@ mod tests {
         );
         let no_calls = wait_response("finished", serde_json::json!({"tool_calls": 0}));
         assert_eq!(wait_report_lines(&no_calls)[0], "turn finished");
+        // A wait for an earlier turn answers about the later one, and says so.
+        let later = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 87, "requested_turn_id": 82}),
+        );
+        assert!(
+            wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
+            "{:?}",
+            wait_report_lines(&later)
+        );
+        let same = wait_response(
+            "finished",
+            serde_json::json!({"turn_id": 82, "requested_turn_id": 82}),
+        );
+        assert_eq!(wait_report_lines(&same).len(), 1);
         assert_eq!(
             serde_json::to_value(&finished).unwrap()["stop_reason"],
             "EndTurn",

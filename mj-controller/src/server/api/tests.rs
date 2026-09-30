@@ -2306,6 +2306,55 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
     assert!(body["session"]["last_turn_outcome"].get("usage").is_none());
 }
 
+/// A wait for turn N ends when turn N or a later one has ended, and answers
+/// about the latest one, since only its outcome is kept. The answer says which
+/// turn it describes and which one was asked about (RVA-2).
+#[tokio::test(start_paused = true)]
+async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
+    let backend = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Idle,
+            active_turn: None,
+            last_turn_outcome: Some(MaterializedTurnOutcome {
+                diagnostic: None,
+                usage: None,
+                command_id: "prompt-2".into(),
+                accepted_ordinal: Some(8),
+                turn_start_position: Some(9),
+                completed_ordinal: 12,
+                completed_at_ms: 900,
+                outcome: TurnOutcomeKind::Completed {
+                    stop_reason: "end_turn".into(),
+                },
+            }),
+        })]),
+        summary: Some(TurnSummary {
+            turn_number: 2,
+            turn_started_at_ms: 100,
+            last_changed_at_ms: 900,
+            final_message: Some("the later reply".into()),
+            tool_calls: 0,
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"turn_id":5}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    assert_eq!(body["outcome"], "finished");
+    assert_eq!(body["turn_id"], 8);
+    assert_eq!(body["requested_turn_id"], 5);
+    assert_eq!(body["final_message"], "the later reply");
+}
+
 #[tokio::test(start_paused = true)]
 async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     let diagnostic = mj_core::diagnostic::TurnDiagnostic::from_provider(&serde_json::json!({

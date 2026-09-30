@@ -466,8 +466,14 @@ pub struct WaitResponse {
     /// message. Absent for every other session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_source: Option<String>,
+    /// The turn this answer is about: the latest turn that ended at or after
+    /// the requested one, since a session keeps only its latest turn's outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
+    /// The turn the request named, so a caller can see when `turn_id` is a
+    /// later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_turn_id: Option<u64>,
     /// One-based position of this turn in the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u64>,
