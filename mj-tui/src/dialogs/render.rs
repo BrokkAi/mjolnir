@@ -1,4 +1,5 @@
 use super::*;
+use crate::fit_session_name;
 
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
@@ -391,7 +392,7 @@ fn render_text_prompt(
         return;
     }
     frame.render_widget(
-        Paragraph::new(header),
+        Paragraph::new(fit_session_name(header, usize::from(inner.width))),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let field = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
@@ -549,8 +550,9 @@ pub(crate) fn render_changed_files(
         .state
         .sessions
         .get(&dialog.session_id)
-        .map(|session| session.listed_title().to_owned())
+        .map(|session| crate::render::session_name(session).to_owned())
         .unwrap_or_else(|| dialog.session_id.clone());
+    let name = fit_session_name(&name, usize::from(popup.width).saturating_sub(24));
     let title = dismissible_modal_title(
         &mut form,
         popup,
@@ -1121,10 +1123,11 @@ pub(crate) fn render_repository_origin(
 
 /// The line that says which session a dialog is about: its name when the
 /// caller knows one, else its id.
-fn session_line(session_id: &str, session_name: Option<&str>) -> Line<'static> {
+fn session_line(session_id: &str, session_name: Option<&str>, width: usize) -> Line<'static> {
     let name = session_name
         .filter(|name| !name.is_empty())
         .unwrap_or(session_id);
+    let name = fit_session_name(name, width.saturating_sub("Session: ".len()));
     Line::raw(format!("Session: {name}"))
 }
 
@@ -1135,6 +1138,7 @@ fn session_line(session_id: &str, session_name: Option<&str>) -> Line<'static> {
 pub(crate) fn confirmation_body(
     confirmation: &Confirmation,
     session_name: Option<&str>,
+    width: usize,
 ) -> (&'static str, Vec<Line<'static>>) {
     match confirmation {
         Confirmation::RepairRepositoryRemotes { repairs, .. } => (
@@ -1225,7 +1229,7 @@ pub(crate) fn confirmation_body(
         } => (
             " Destroy suspended session? ",
             vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::raw(
                     "Mjolnir will permanently destroy the recovery archive and session record.",
@@ -1242,7 +1246,7 @@ pub(crate) fn confirmation_body(
         } => (
             " Suspension could not complete ",
             vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::styled(
                     format!("Suspension failed: {error}"),
@@ -1260,7 +1264,7 @@ pub(crate) fn confirmation_body(
                 " Suspend while working? "
             },
             vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::styled(
                     "The agent is in the middle of a turn.",
@@ -1288,7 +1292,7 @@ pub(crate) fn confirmation_body(
             (
                 " Interrupt all? ",
                 vec![
-                    session_line(session_id, session_name),
+                    session_line(session_id, session_name, width),
                     Line::raw(""),
                     Line::styled(running, Style::default().fg(theme::palette().warning)),
                     Line::raw(
@@ -1305,6 +1309,12 @@ pub(crate) fn confirmation_body(
             let name = session_name
                 .filter(|name| !name.is_empty())
                 .unwrap_or(session_id);
+            // One line: the session's name gives way to the rest of the
+            // sentence, and a workspace name never takes more than half of it.
+            let workspace_name = fit_session_name(workspace_name, width / 2);
+            let fixed = "Move session \"\" to workspace \"\"?".len()
+                + Line::raw(workspace_name.as_str()).width();
+            let name = fit_session_name(name, width.saturating_sub(fixed));
             (
                 " Change workspace? ",
                 vec![
@@ -1323,7 +1333,7 @@ pub(crate) fn confirmation_body(
             unverified_clone,
         } => {
             let mut lines = vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw("Save a recovery copy and release the environment."),
                 Line::raw("You can resume this session later."),
             ];
@@ -1352,7 +1362,7 @@ pub(crate) fn confirmation_body(
         } => (
             " Discard changes since checkpoint? ",
             vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw(format!("Recovery copy: {}", checkpoint.created_at)),
                 Line::raw("Release the environment using this older recovery copy."),
                 Line::raw("All work since that copy may be permanently lost."),
@@ -1364,7 +1374,7 @@ pub(crate) fn confirmation_body(
             error,
             recoverable,
         } => {
-            let mut lines = vec![session_line(session_id, session_name), Line::raw("")];
+            let mut lines = vec![session_line(session_id, session_name, width), Line::raw("")];
             match error {
                 Some(error) => lines.push(Line::styled(
                     format!("Failed: {error}"),
@@ -1449,7 +1459,7 @@ pub(crate) fn confirmation_body(
         } => (
             " Destroy session? ",
             vec![
-                session_line(session_id, session_name),
+                session_line(session_id, session_name, width),
                 Line::raw(""),
                 Line::raw(
                     "Permanently destroy this session, its environment, and its recovery archive?",
@@ -1489,7 +1499,13 @@ pub(crate) fn render_confirmation(
         Confirmation::RecoverMove { .. } => 14,
         Confirmation::ForceDestroy { .. } => 11,
     };
-    let (title, mut lines) = confirmation_body(confirmation, dialog.session_name.as_deref());
+    let body_width = usize::from(
+        crate::widgets::centered_rect(72, 1, area)
+            .width
+            .saturating_sub(2),
+    );
+    let (title, mut lines) =
+        confirmation_body(confirmation, dialog.session_name.as_deref(), body_width);
     let buttons = confirmation_buttons(confirmation);
     lines.push(Line::raw(""));
     lines.push(confirmation_key_line(buttons));

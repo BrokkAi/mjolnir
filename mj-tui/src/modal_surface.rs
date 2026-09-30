@@ -28,7 +28,7 @@ use ratatui::layout::Rect;
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, ContainerEditor, DialogControl,
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
-    RepositoryOriginDialog, TargetActionsDialog, WebDialog, WorkspacePicker,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::palette::{CommandPalette, PaletteControl};
@@ -160,14 +160,6 @@ impl DialogModal for RenameEditor {
         form.set_dismiss_actions(&[DialogControl::Cancel]);
         form.set_submit(DialogControl::Field, DialogControl::Save);
         form.set_default_action(DialogControl::Save);
-    }
-}
-
-impl DialogModal for WorkspacePicker {
-    dialog_form!(crate::dialogs::WorkspacePickerControl);
-
-    fn prepare(&mut self) {
-        WorkspacePicker::prepare_dialog_state(self);
     }
 }
 
@@ -402,7 +394,6 @@ mode_surfaces!(
     Web,
     WorkspaceManager,
     Rename,
-    ChangeWorkspace,
     ChangedFiles,
     NoticeLog,
     EditContainer,

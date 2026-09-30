@@ -33,7 +33,7 @@ use mj_core::targets::AdditionalMount;
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
-    RepositoryOriginDialog, TargetActionsDialog, WebDialog, WorkspacePicker,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -83,6 +83,7 @@ pub use crate::ingest::{
     PreparedMaterializedSessionSummary,
 };
 pub use crate::keybinds::KeyRoute;
+pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
@@ -728,8 +729,6 @@ pub(crate) enum Mode {
     Web(WebDialog),
     WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
-    /// The workspace choice for one session, before its confirmation.
-    ChangeWorkspace(WorkspacePicker),
     /// The selected session's changed files, branch, and upstream distance.
     ChangedFiles(ChangedFilesDialog),
     /// The last notices the footer showed, newest first.

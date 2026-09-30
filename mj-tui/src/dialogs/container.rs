@@ -138,7 +138,10 @@ impl ContainerEditor {
     fn rows(&self) -> Vec<Row<'_>> {
         use ContainerEditFocus::*;
         let mut rows = vec![
-            Row::Text(Line::raw(format!("Session: {}", self.session_name))),
+            Row::Text(Line::raw(format!(
+                "Session: {}",
+                crate::fit_session_name(&self.session_name, 58)
+            ))),
             Row::Text(Line::styled(
                 CONTAINER_EDIT_SCOPE,
                 Style::default().fg(theme::palette().muted),

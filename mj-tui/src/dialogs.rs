@@ -3,11 +3,6 @@
 pub(crate) mod render;
 pub(crate) use render::*;
 
-mod change_workspace;
-pub(crate) use change_workspace::{
-    WorkspacePicker, WorkspacePickerControl, render_workspace_picker,
-};
-
 mod container;
 pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container_editor};
 
@@ -559,7 +554,7 @@ impl DashboardState {
         let name = confirmation
             .session_id()
             .and_then(|session_id| self.state.sessions.get(session_id))
-            .map(|session| session.listed_title().to_owned());
+            .map(|session| crate::render::session_name(session).to_owned());
         let dialog = ConfirmDialog::new(confirmation);
         match name {
             Some(name) => dialog.naming_session(&name),
@@ -1205,7 +1200,7 @@ impl DashboardState {
         };
         self.mode = Mode::Rename(RenameEditor {
             session_id: session.id.clone(),
-            session_name: session.listed_title().to_owned(),
+            session_name: crate::render::session_name(session).to_owned(),
             title: TextInput::from_value(
                 session
                     .session_title_override

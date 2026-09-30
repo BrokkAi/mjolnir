@@ -32,6 +32,8 @@ use crate::{DashboardAction, DashboardState, Focus, Mode};
 use mj_core::state::{ManagedCheckoutKind, SessionRecord};
 use mj_core::subagent::SubagentPolicy;
 
+mod workspace;
+
 /// One row of the palette: a command and whether it can be run.
 ///
 /// `Blocked` entries are listed greyed with their reason rather than dropped,
@@ -63,6 +65,8 @@ pub(crate) struct CommandPalette {
     session_only: bool,
     session_id: Option<String>,
     session_title: Option<String>,
+    /// The workspace list open on the "Change workspace" row, if any.
+    workspace_popup: Option<workspace::WorkspacePopup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +74,8 @@ pub(crate) enum PaletteControl {
     Query,
     Commands,
     Run,
+    /// The combobox anchored on the "Change workspace" row.
+    Workspace,
 }
 
 impl CommandPalette {
@@ -95,6 +101,9 @@ impl CommandPalette {
                     .get(self.selected)
                     .is_some_and(|entry| entry.availability == Availability::Ready),
             );
+        }
+        if let Some(popup) = &self.workspace_popup {
+            form.declare_with_enabled(PaletteControl::Workspace, popup.kind(), true);
         }
         form.set_menu(true);
         form.set_list_activation(
@@ -299,7 +308,7 @@ fn heading_for(dashboard: &DashboardState, scope: Scope) -> String {
         return if dashboard.go.is_some() {
             dashboard.go_conversation_title(&session.id)
         } else {
-            session.listed_title().to_owned()
+            crate::render::session_name(session).to_owned()
         };
     }
     scope.heading().to_owned()
@@ -471,6 +480,7 @@ impl DashboardState {
             session_only: false,
             session_id: self.command_session_id().map(str::to_owned),
             session_title: None,
+            workspace_popup: None,
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
@@ -482,7 +492,7 @@ impl DashboardState {
             if self.go.is_some() {
                 self.go_conversation_title(&session.id)
             } else {
-                session.listed_title().to_owned()
+                crate::render::session_name(session).to_owned()
             }
         });
         let entries = session_menu_entries(self);
@@ -495,6 +505,7 @@ impl DashboardState {
             session_only: true,
             session_id,
             session_title,
+            workspace_popup: None,
         };
         palette.prepare();
         self.mode = Mode::Palette(palette);
@@ -577,6 +588,9 @@ impl DashboardState {
     }
 
     pub(crate) fn handle_palette_event(&mut self, event: Event) -> DashboardAction {
+        if matches!(&self.mode, Mode::Palette(palette) if palette.workspace_popup.is_some()) {
+            return self.handle_workspace_popup_event(event);
+        }
         let Mode::Palette(palette) = &mut self.mode else {
             return DashboardAction::None;
         };
@@ -649,6 +663,12 @@ impl DashboardState {
                         "{} is unavailable: {reason}.",
                         spec(entry.id).label
                     ));
+                    return DashboardAction::None;
+                }
+                if entry.id == CommandId::ChangeWorkspace {
+                    // The choice opens on the row, inside the palette.
+                    self.remember_command(entry.id);
+                    self.open_workspace_popup();
                     return DashboardAction::None;
                 }
                 if spec(entry.id).scope == Scope::Session {
@@ -803,10 +823,10 @@ pub(crate) fn render_palette(
     let title = dismissible_modal_title(
         &mut form,
         popup,
-        palette
-            .session_title
-            .clone()
-            .unwrap_or_else(|| format!("{} Commands", theme::glyphs().spark)),
+        palette.session_title.as_ref().map_or_else(
+            || format!("{} Commands", theme::glyphs().spark),
+            |title| crate::fit_session_name(title, usize::from(popup.width).saturating_sub(8)),
+        ),
         theme::title(true),
         true,
     );
@@ -984,6 +1004,15 @@ pub(crate) fn render_palette(
         form.list_offset(PaletteControl::Commands),
         usize::from(list_area.height).max(1),
     );
+    let workspace_anchor = palette.workspace_popup.as_ref().and_then(|_| {
+        let line = lines.iter().position(|line| {
+            matches!(line, PaletteLine::Command(index)
+                if palette.entries[*index].id == CommandId::ChangeWorkspace)
+        })?;
+        let row = line.checked_sub(form.list_offset(PaletteControl::Commands))?;
+        (row < usize::from(list_area.height))
+            .then(|| (list_area.y + u16::try_from(row).unwrap_or(0), list_area.x))
+    });
     if !palette.session_only {
         Dialog::render_actions(
             frame,
@@ -998,6 +1027,11 @@ pub(crate) fn render_palette(
             )],
             &mut form,
         );
+    }
+    // Drawn after every other control so the list lies over the rows below.
+    if let (Some(popup), Some((y, x))) = (&palette.workspace_popup, workspace_anchor) {
+        let row = Rect::new(x + 2, y, list_area.width.saturating_sub(2), 1);
+        popup.render(frame, area, row, palette.session_only, &mut form);
     }
     form.end_frame(if palette.session_only {
         PaletteControl::Commands

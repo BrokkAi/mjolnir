@@ -972,12 +972,16 @@ impl DashboardContext {
             }
             DashboardIoUpdate::RenameSession { title, result } => match result {
                 Ok(title) => {
-                    self.dashboard
-                        .set_notice(format!("Renamed session to {title}"));
+                    self.dashboard.set_notice(format!(
+                        "Renamed session to {}",
+                        mj_tui::fit_session_name(&title, mj_tui::NOTICE_NAME_CELLS)
+                    ));
                 }
                 Err(error) => {
-                    self.dashboard
-                        .set_notice(format!("Rename failed for {title}: {error}"));
+                    self.dashboard.set_notice(format!(
+                        "Rename failed for {}: {error}",
+                        mj_tui::fit_session_name(&title, mj_tui::NOTICE_NAME_CELLS)
+                    ));
                 }
             },
             DashboardIoUpdate::ChangeWorkspace {
@@ -1758,7 +1762,12 @@ impl DashboardContext {
 
 /// How a notice names a session; see [`State::session_notice_name`].
 pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
-    state.session_notice_name(session_id)
+    // A session named by its initial prompt can have a title of many
+    // paragraphs; a notice names it by the start, on one line.
+    mj_tui::fit_session_name(
+        &state.session_notice_name(session_id),
+        mj_tui::NOTICE_NAME_CELLS,
+    )
 }
 
 /// How a lifecycle's completion notice names its session. The daemon's
@@ -1767,7 +1776,9 @@ pub(crate) fn session_notice_name(state: &State, session_id: &str) -> String {
 /// the operation began stands in (launch finding R5-4).
 fn lifecycle_notice_name(state: &State, session_id: &str, taken_at_start: Option<&str>) -> String {
     match taken_at_start {
-        Some(name) if !state.sessions.contains_key(session_id) => name.to_owned(),
+        Some(name) if !state.sessions.contains_key(session_id) => {
+            mj_tui::fit_session_name(name, mj_tui::NOTICE_NAME_CELLS)
+        }
         _ => session_notice_name(state, session_id),
     }
 }

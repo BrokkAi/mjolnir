@@ -1670,7 +1670,7 @@ impl DashboardState {
                             interrupting,
                             unverified_clone,
                         })
-                        .naming_session(session.listed_title()),
+                        .naming_session(crate::render::session_name(session)),
                     );
                 }
                 DashboardAction::None
@@ -1684,7 +1684,7 @@ impl DashboardState {
             CommandId::RestartSession => {
                 let Some((session_id, name)) = self
                     .selected_session()
-                    .map(|s| (s.id.clone(), s.listed_title().to_owned()))
+                    .map(|s| (s.id.clone(), crate::render::session_name(s).to_owned()))
                 else {
                     return DashboardAction::None;
                 };
@@ -1746,7 +1746,7 @@ impl DashboardState {
                 Availability::Ready => {
                     if let Some(session) = self.command_session() {
                         let session_id = session.id.clone();
-                        let name = session.listed_title().to_owned();
+                        let name = crate::render::session_name(session).to_owned();
                         let targets = self.interrupt_all_targets(&session_id);
                         let parent_running = targets.sessions.contains(&session_id);
                         self.mode = crate::Mode::Confirm(
@@ -1793,10 +1793,12 @@ impl DashboardState {
                     DashboardAction::CopySessionId { session_id }
                 }),
             CommandId::DestroySession => {
-                let Some((session_id, name)) = self
-                    .selected_session()
-                    .map(|session| (session.id.clone(), session.listed_title().to_owned()))
-                else {
+                let Some((session_id, name)) = self.selected_session().map(|session| {
+                    (
+                        session.id.clone(),
+                        crate::render::session_name(session).to_owned(),
+                    )
+                }) else {
                     return DashboardAction::None;
                 };
                 let delete_branch_available = self

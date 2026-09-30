@@ -1591,6 +1591,18 @@ pub(crate) fn session_name(session: &SessionRecord) -> &str {
     session.listed_title()
 }
 
+/// How many cells a notice gives a session's name.
+pub const NOTICE_NAME_CELLS: usize = 40;
+
+/// A session's name as one line of at most `room` cells, cut with the
+/// theme's ellipsis. A session named by its initial prompt can have a title
+/// of many paragraphs; the Sessions row shows the start of it, and so does
+/// every dialog and notice that names the session.
+#[must_use]
+pub fn fit_session_name(name: &str, room: usize) -> String {
+    truncate_to_cells(name, room, Truncate::SUMMARY)
+}
+
 /// Maps the controller's review projection to the short overlay that fits in
 /// every session row. The controller owns the detailed wording and verdict;
 /// the TUI only compresses that authoritative view for the list.
