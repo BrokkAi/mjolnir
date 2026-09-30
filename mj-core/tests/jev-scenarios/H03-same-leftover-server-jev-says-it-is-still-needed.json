@@ -1,0 +1,82 @@
+{
+  "id": "H03",
+  "title": "Same leftover server, Jev says it is still needed",
+  "category": "leftover-process-needed",
+  "harness": "claude",
+  "source": {
+    "kind": "hand-built",
+    "note": "Not a recorded turn. Built to pin the quiet rule's Jev layer; the evidence is the shape production sends for a session whose only leftover process is a background command."
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": true
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:1",
+          "role": "user",
+          "text": "Start the dev server in the background so I can poke at it later, then fix the failing unit test in src/parser.rs and push."
+        },
+        {
+          "id": "agent:2",
+          "role": "assistant",
+          "text": "The parser test is fixed and committed. The full integration suite is still running in the background (about 20 minutes left); I'll report the results and push when it finishes."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "background": [
+      {
+        "id": "claude:task-1",
+        "command": "cargo test --workspace --release > /tmp/suite.log 2>&1",
+        "started_s_ago": 900
+      }
+    ],
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 1,
+    "queued_commands": 0,
+    "user_prompt_tail": "Start the dev server in the background so I can poke at it later, then fix the failing unit test in src/parser.rs and push.",
+    "assistant_text_tail": "The parser test is fixed and committed. The full integration suite is still running in the background (about 20 minutes left); I'll report the results and push when it finishes.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "waiting",
+    "background": "needed",
+    "quiet": false,
+    "action": "wait",
+    "wrong_actions": [
+      "continue",
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "a needed process keeps the session busy",
+    "judgment": "n/a",
+    "next": "n/a"
+  },
+  "context": {
+    "after": []
+  }
+}

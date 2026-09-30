@@ -1,0 +1,308 @@
+{
+  "id": "P06",
+  "title": "Agent answers a correction about the target directory and stops",
+  "category": "should-continue-weak",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "a460eb82ca61a947c5e634abf72dab06",
+    "session_title": "/home/jonathan/Projects/bifrost5 via codex",
+    "reply_position": 41559,
+    "captured_at": "2026-09-12T18:33:20.274Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:30761",
+          "role": "user",
+          "text": "what is industry sota for 3196? is that \"we don't do that and need to catch up\" or \"we're going beyond what anyone else does\" territory?\n\n\"make the guarded branch Partial(unmodeled_guard) in general\" sounds like something we should do either way, should we split that into a separate ticket?"
+        },
+        {
+          "id": "user:31388",
+          "role": "user",
+          "text": "fable, is opus right?"
+        },
+        {
+          "id": "user:32004",
+          "role": "user",
+          "text": "what schema change do we still need?"
+        },
+        {
+          "id": "agent:32036",
+          "role": "assistant",
+          "text": "Finished checking: the stub producer already records the return annotation structurally, so I can answer without further checks.\n\nNone, for everything we have evidence for.\n\n- **Stdlib and annotated stubs**: the fact is already in the compiled declaration surface. `python/external.rs:2331-2333` records every stub function's `return_type` through `type_ref`, and the `subscript`/`generic_type` arms keep the shape, so `inspect.isclass` lands as `Signature.returns = Named { name: \"TypeIs\", arguments: [Named { \"type\", [Named \"object\"] }] }`. The missing piece is an adapter consumer that reads that `TypeRef` at an opaque call guard and emits verdicts (`InstanceOf` rules for `TypeIs`, positive-arm-only for `TypeGuard`). That is engine code, not a pack record, and it needs no cross-language schema decision.\n- **Workspace predicates**: a `-> TypeIs[C]` annotation on a workspace function goes through the same consumer. Unannotated workspace helpers whose bodies are `isinstance` checks are already summarized by `call_guard_narrowing` (#3122).\n- **The dramatiq case itself**: needs neither. The class-object argument drop is the bug; fixing it makes the row `partial`.\n\nWhat a new authored record would still cover is only a third-party predicate whose stub has no `TypeIs`/`TypeGuard` annotation and whose body we cannot see. We have no corpus example of that yet, so I would take the schema proposal out of #3196 rather than decide it now, and reopen it if a run produces one. `callable()` and the other non-nominal cases stay `OpenTypeBound` under either design.\n\nConfidence: confirmed for the producer path and the `TypeRef` shape; the exact `name` string (\"TypeIs\" vs \"typing_extensions.TypeIs\") depends on the import form in `inspect.pyi` and the consumer should accept both, the way `canonical_python_return_type` already does for `NoReturn`/`Never`."
+        },
+        {
+          "id": "user:32194",
+          "role": "user",
+          "text": "okay, pls proceed w class-object arg drop, Partial-on-unmodeled-guard change, remainder of 3196"
+        },
+        {
+          "id": "user:32200",
+          "role": "user",
+          "text": "pull befor dispatching opuses"
+        },
+        {
+          "id": "agent:32344",
+          "role": "assistant",
+          "text": "Done for now; both implementation agents are running and I have nothing else to request until they report.\n\nWhat I did:\n\n- Pulled: `bifrost5` fast-forwarded to `origin/master` at `088bba783` (48 commits, clean).\n- Filed #3282 (class object passed by reference contributes no atom) and #3283 (unmodeled predicate call leaves both arms `complete`), both tagged `agent-in-progress`. Posted the typeshed correction and the reshaped plan on #3196 and tagged it.\n- Dispatched two Opus agents in isolated worktrees with separate target dirs on `/mnt/optane`:\n  - Agent 1: #3282. `UnknownReason::ClassObject` for class references and `type(x)`, check function references, migration 0063, semantics tag bump, issue test, gates, fixture evidence.\n  - Agent 2: #3283 then #3196, sequentially. Part 1 adds the three-way guard outcome, the both-arm `UnmodeledGuard` remainder, migration 0064, and a before/after measurement on 9 batch-14 repositories (posted to #3283). Part 2 reads `TypeIs`/`TypeGuard` from the stub `Signature.returns`, with the false-arm asymmetry and the non-nominal fallback to Part 1.\n- Both agents commit on their worktree branches and do not push. I integrate by cherry-picking onto `bifrost5`, reconcile the two `UnknownReason` additions and the version tag, run the gates once, and push to `origin/master`.\n\nMeasurement runs use at most 9 repositories at 3 threads each, `nice -n 10`."
+        },
+        {
+          "id": "agent:33012",
+          "role": "assistant",
+          "text": "Agent 1 (#3282) finished its first pass and I sent it back for one gap; agent 2 (#3283 → #3196) is still running. Nothing else to do until they report.\n\nAgent 1's result so far, commit `6a185134f` on its worktree branch:\n\n- Mechanism confirmed as filed: the class name is an ordinary value in the `Local | ... | Callable` seeding arm, and `retained_value_class` answered `NotApplicable` for anything but a string literal.\n- Function references (`f(callback)`) were dropped the same way; now `Unknown(UncertainFlow)`. Method references already gave `unmodeled_load` and were left alone.\n- `UnknownReason::ClassObject`, label `class_object`, migration 0063, `type(x)` moved to `ClassObject`, adapter tag v33, issue test.\n- Fixtures: `by_ref` row is `partial {builtins.str, class_object}` and the false positive is gone; the two true positives at `by_instance` remain; dramatiq's row is `partial` with no finding.\n- Gates: 3708 passed (flow/analysis/rql), 409 (core), 1577 (suite_semantic), 20 (issue tests), clippy clean.\n\nThe gap: its seed fires only for a name the same module declares. A class reached through `from pkg.models import Worker` still contributes nothing, which is what the real dramatiq callers do. I asked it to extend the rule to import-bound names (resolved class → `ClassObject`, function or unresolvable import → `UncertainFlow`; an import-bound value must never yield zero atoms) with a two-module fixture, as a second commit."
+        },
+        {
+          "id": "agent:33346",
+          "role": "assistant",
+          "text": "Reviewed agent 1's two commits and sent both agents corrections; nothing else to request until they report.\n\nReview of `6a185134f` + `1de325134` (#3282):\n\n- Design and migration are sound: `ClassObject` after `ScalarReceiver`, label and store vocabulary added, migration 0063 rebuilds the CHECK-constrained row table and preserves rows, schema digest re-pinned and core tests pass. The binder refactor (`python_unambiguous_module_binding_bounded` returning the binding kind; `FunctionDeclaration`/`Import` kinds only at module level) is clean and keeps the one other consumer's behavior.\n- Two things I sent back for its third commit: (1) a name shadowed by an enclosing callable's local or parameter must answer `NotApplicable`, not `UncertainFlow` (the local's producer already supplies the atoms; the agent's version would turn exact rows `partial`), with `global` reads treated as reaching the module binding; (2) the perf item it flagged itself: namespace imports (`import os`, `import logging`) used as bare names seed `UncertainFlow` from the binder kind without the bounded type lookup, since those names appear on nearly every line of the corpus.\n\nOne catch that affects agent 2: `UnknownReason::UnmodeledGuard { class }` already exists on master (an `isinstance` guard whose class is unmodeled; `from_label` treats any unknown label as that variant). I told agent 2 to name the new reason `UnmodeledPredicate` (label `unmodeled_predicate`) with an explicit label arm and the plain-reason CHECK list, rather than colliding with or reusing the existing variant."
+        },
+        {
+          "id": "agent:33618",
+          "role": "assistant",
+          "text": "Agent 1's three commits are integrated: `bifrost5` fast-forwarded to `c8421da90`, then merged with `origin/master` (9 new commits, clean merge; master had also touched `bindings.rs`, so I am re-running the gates on the merged tree rather than trusting the worktree run). Gates are running in the background at nice 10: core/python/flow/analysis/rql crates, `suite_semantic`, the issue tests, and clippy. I will push to `origin/master` when they pass.\n\nAgent 2 (#3283 → #3196) is still working; its rename to `UnmodeledPredicate` was delivered."
+        },
+        {
+          "id": "agent:33719",
+          "role": "assistant",
+          "text": "#3282 is landed and closed. Pushed `bd7f10e0c` to `origin/master` (fast-forward from `772d8d8d0`); gates on the merged tree: 4137 passed across core/python/flow/analysis/rql, 1577 in `suite_semantic`, 22 issue tests, clippy silent.\n\nRemaining: agent 2 (#3283, then #3196) is still running. When it reports I will review its two commits, cherry-pick onto `bifrost5` (expect small conflicts in the `UnknownReason` enum, the label lists, the 0064 migration's fresh-schema rename against 0063, and the adapter version tag, which I will bump past v35), re-run the gates, push, and record its measurement tables on the issues."
+        },
+        {
+          "id": "agent:33855",
+          "role": "assistant",
+          "text": "Status: agent 2 finished its first pass (three commits: #3283, #3196, and the `UnmodeledPredicate` rename); I reviewed all three and sent it four follow-ups before landing: merge master (its migration 0064 was written against the pre-#3282 table and would drop `class_object` from the allowed set), include builtin callees such as `callable(x)`, constrain every direct argument of an unmodeled predicate rather than only the first, and re-measure with class-set row counts since policy status cannot see recall loss. I am building the master baseline binary for that measurement in the background (first attempt used a wrong package name). Nothing else to do until the build and the agent report back.\n\nIts first-pass measurement for the record: on the 9 repositories nothing changed except dramatiq's one false positive, which is gone; `not p(x)` needs no special handling because the lowering swaps the edges; the stub signature carries `typing.TypeIs[type[object]]` with an import-resolved head; and `issue_3122`'s tests that asserted \"an unreadable helper body preserves absence\" were asserting the unsound behavior and were updated."
+        },
+        {
+          "id": "agent:34011",
+          "role": "assistant",
+          "text": "The master baseline binary (`bin/bifrost-master-bd7f10e0c`) is built and in place for agent 2's row-count measurement. Waiting on agent 2's report; nothing else is pending."
+        },
+        {
+          "id": "agent:35218",
+          "role": "assistant",
+          "text": "Filed #3296 for the recall gap agent 2 found (an `Unknown` remainder is not dropped on an `isinstance` true arm). Everything else waits on the gate run over the merged tree (`eab5b87d8` = agent 2's five commits + latest master); when it passes I push, close #3283 and #3196, and build `bin/bifrost-m15` for the campaign."
+        },
+        {
+          "id": "agent:35281",
+          "role": "assistant",
+          "text": "Agent 2's final cleanup notice adds nothing new (the \"other agent's\" `nextest -p brokk-bifrost-core` it saw is my gate run). Still waiting on that gate over `eab5b87d8` before pushing."
+        },
+        {
+          "id": "user:39962",
+          "role": "user",
+          "text": "pls give me a summary of what's left to do, then get back to\nburning it down"
+        },
+        {
+          "id": "agent:39964",
+          "role": "assistant",
+          "text": "I’ll check the restored branch and gate results, summarize what remains, then finish the pending validation and integration work. I’ll leave #3296 open and keep the campaign batches on hold."
+        },
+        {
+          "id": "agent:40014",
+          "role": "assistant",
+          "text": "The old gate finished successfully: 4,137 crate tests, 1,577 semantic tests, and 1,201 issue tests passed; Clippy and the release build completed, and `bifrost-m15` was copied.\n\nWhat remains:\n- Check migration, cache-version, and open-core consistency.\n- Integrate with current `origin/master`, validate the combined result, and push.\n- Keep the broader campaign paused pending the solver-budget decision.\n\nThe restored remote history already contains a #3296 implementation from another worker. I’ll inspect that overlap and leave the issue’s status alone."
+        },
+        {
+          "id": "agent:40163",
+          "role": "assistant",
+          "text": "The merge exposed three conflicts where the predicate work overlaps #3296. I’ve combined both behaviors and advanced the Python cache identity to v37. I also found an integration detail to fix: a later class guard must be able to narrow an unknown remainder created by an earlier predicate. I’m checking that interaction before running the combined gate."
+        },
+        {
+          "id": "agent:40272",
+          "role": "assistant",
+          "text": "The integration is checkpointed. The open-core check found missing inventory entries for the campaign files and one upstream note; I’ve regenerated them using the existing policy, with no new publication decisions.\n\nThe focused regressions are compiling. The first attempt selected Rust 1.96 through the inherited environment, so I explicitly pinned Cargo, rustc, and rustdoc to the required 1.97.1 toolchain."
+        },
+        {
+          "id": "agent:40378",
+          "role": "assistant",
+          "text": "The issue tracker is ahead of the handoff: #3131, #3134, #3194, and #3296 are already closed. The remaining documented gaps are #3196’s broader predicate/schema support and #3135’s callable-object and cross-file NoReturn handling.\n\nFor this pass, I’m finishing the pending predicate integration and validation. I won’t resume campaign batches based solely on #3194’s closed status."
+        },
+        {
+          "id": "user:40480",
+          "role": "user",
+          "text": "merge+push to origin/master if we're at a good point for that, make sure the execplan calls for regular pushing to origin/master so we don't drift too far"
+        },
+        {
+          "id": "agent:40486",
+          "role": "assistant",
+          "text": "Yes—the integration is committed, and I’ll push it to `origin/master` once the combined checks pass. I’ll also update the campaign ExecPlan to require regular validated pushes, so future work doesn’t accumulate this much drift."
+        },
+        {
+          "id": "agent:40561",
+          "role": "assistant",
+          "text": "Clippy passed, and the new predicate/class-guard regression passed. Four TypeIs/TypeGuard tests caught another merge interaction: the expanded guard processing can reach a value with only unknown evidence, while predicate-remainder creation requires a concrete source to trigger it. I’ll preserve the existing unknown evidence in that case and rerun the tests before pushing."
+        },
+        {
+          "id": "agent:40663",
+          "role": "assistant",
+          "text": "The ExecPlan now requires a validated push at each coherent milestone, before another campaign batch, and before ending a session. It includes fetch/merge steps, a no-force-push rule, and verification that the checkpoint reached `origin/master`.\n\nThe integration fix is committed. The full issue and semantic suites are running; crate tests and the release build are queued behind compilation."
+        },
+        {
+          "id": "agent:40753",
+          "role": "assistant",
+          "text": "All 2,847 issue and semantic tests now pass, including the four that caught the integration assertion. Final workspace Clippy, formatting, and open-core classification also pass. The remaining checks are the crate suites and release build."
+        },
+        {
+          "id": "agent:40812",
+          "role": "assistant",
+          "text": "The crate test binaries are still compiling; no further failures have appeared. I’m also checking for another `origin/master` advance before the push, so the final checkpoint includes any new overlap."
+        },
+        {
+          "id": "agent:40864",
+          "role": "assistant",
+          "text": "`origin/master` hasn’t advanced again. The crate gate has moved from compilation into its 6,011 tests. Once it and the release build finish, I’ll record the results in the ExecPlan and push the checkpoint."
+        },
+        {
+          "id": "agent:40923",
+          "role": "assistant",
+          "text": "All 6,011 crate tests passed, including the cache migration checks. That brings the combined result to 8,858 passing tests. Only the release build remains; I also verified that the existing `bifrost-m15` binary is intact."
+        },
+        {
+          "id": "agent:40992",
+          "role": "assistant",
+          "text": "The release build is still compiling the analysis crate. Tests, linting, and classification are green; I’m waiting for the optimized build before pushing."
+        },
+        {
+          "id": "agent:41040",
+          "role": "assistant",
+          "text": "The optimized build has progressed through analysis to flow, RQL, and semantic packs. Compiler processes are active, and no new failures have appeared. The ExecPlan now records the passing gates and the integration fix they exposed."
+        },
+        {
+          "id": "agent:41095",
+          "role": "assistant",
+          "text": "The release build is now on policy and runtime. I’ll save the new binary as `bifrost-m16`, preserving `m15` for comparison, then commit the final validation record and push."
+        },
+        {
+          "id": "agent:41151",
+          "role": "assistant",
+          "text": "The release build has reached the MCP and LSP crates without errors. I’ve also refreshed project memory to point future sessions to the ExecPlan’s current state and regular-push requirement."
+        },
+        {
+          "id": "agent:41200",
+          "role": "assistant",
+          "text": "The release build passed. All validation is green, and I’m saving `bifrost-m16` and pushing the integration plus ExecPlan updates to `origin/master` now."
+        },
+        {
+          "id": "agent:41244",
+          "role": "assistant",
+          "text": "Another worker pushed between my fetch and push, so Git rejected the fast-forward. Their changes are private planning artifacts and inventory entries, with no compiled-code overlap. I’ll merge them, recheck classification, and retry."
+        },
+        {
+          "id": "user:41297",
+          "role": "user",
+          "text": "hey, it looks like you're using CARGO_TARGET_DIR=/home/jonathan/Projects/hel/target which doesn't make sense at all, or is that another agent?"
+        },
+        {
+          "id": "agent:41307",
+          "role": "assistant",
+          "text": "That was me. This session inherited `CARGO_TARGET_DIR=/home/jonathan/Projects/hel/target`, which resolves to a managed target under `/mnt/optane/mbx-targets/`. I reused it for tests and the release build; Clippy used isolated temporary targets.\n\nI should have flagged that mismatch instead of treating it as the campaign’s build location. The builds are finished. I’ll use a Bifrost-specific target for future work and leave that shared directory alone."
+        },
+        {
+          "id": "agent:41422",
+          "role": "assistant",
+          "text": "That was me—the session inherited the `hel/target` setting, and I reused it. I should have selected a Bifrost-specific target. All builds are finished; future builds will use an explicit Bifrost target.\n\nMerged and pushed to `origin/master` through `c6e695c0a`. All 8,858 tests, Clippy, formatting, classification, and release build passed. The ExecPlan now requires regular validated pushes."
+        },
+        {
+          "id": "user:41491",
+          "role": "user",
+          "text": "just use ~/Projects/bifrost5/target"
+        },
+        {
+          "id": "user:41520",
+          "role": "user",
+          "text": "that's supposed to be your working dir"
+        },
+        {
+          "id": "agent:41521",
+          "role": "assistant",
+          "text": "I’ll use `/home/jonathan/Projects/bifrost5/target` explicitly for future Bifrost builds and record that choice."
+        },
+        {
+          "id": "agent:41559",
+          "role": "assistant",
+          "text": "Yes—my working directory is `/home/jonathan/Projects/bifrost5`. The inherited `CARGO_TARGET_DIR` incorrectly pointed elsewhere. I’ll explicitly use `/home/jonathan/Projects/bifrost5/target`."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "that's supposed to be your working dir",
+    "assistant_text_tail": "Yes—my working directory is `/home/jonathan/Projects/bifrost5`. The inherited `CARGO_TARGET_DIR` incorrectly pointed elsewhere. I’ll explicitly use `/home/jonathan/Projects/bifrost5/target`.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": null,
+    "action": "continue",
+    "wrong_actions": [
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "wrong",
+    "next": "user: 'continue' 293 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-12T18:38:14.092Z",
+        "kind": "user",
+        "text": "continue"
+      },
+      {
+        "at": "2026-09-12T18:38:16.221Z",
+        "kind": "agent",
+        "text": "I’ll continue from the pushed checkpoint, using `/home/jonathan/Projects/bifrost5` as the working directory and its `target/` for Cargo. I’ll check the remaining campaign gaps and pick up the next act"
+      },
+      {
+        "at": "2026-09-12T18:38:29.278Z",
+        "kind": "agent",
+        "text": "There’s a newer owner decision on #3196 that wasn’t reflected in the handoff: it is unblocked for a combined native Python and CSMI implementation. It also tightens the semantics—TypeGuard must replac"
+      },
+      {
+        "at": "2026-09-12T18:41:54.042Z",
+        "kind": "agent",
+        "text": "The standard’s key constraint is that target types must stay intact through import and export. The current class-set domain cannot interpret every generic or structural target exactly, so I’ll preserv"
+      },
+      {
+        "at": "2026-09-12T18:46:55.515Z",
+        "kind": "agent",
+        "text": "The profile validator and conformance tests are in place, and the first build is running under `bifrost5/target`. The tests cover exact scope matching, missing identities, conflicting facts, incomplet"
+      },
+      {
+        "at": "2026-09-12T18:49:53.364Z",
+        "kind": "agent",
+        "text": "I found an existing structured call-argument matcher for positional, keyword, optional, and variadic parameters. I’ll reuse it for predicate subjects instead of assuming the first argument written is "
+      }
+    ]
+  }
+}

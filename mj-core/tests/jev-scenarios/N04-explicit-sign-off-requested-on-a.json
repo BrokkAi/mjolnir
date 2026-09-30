@@ -1,0 +1,173 @@
+{
+  "id": "N04",
+  "title": "Explicit sign-off requested on a re-scope",
+  "category": "control-signoff",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "73daae84d48d97b313392ab39e1c7371",
+    "session_title": "bifrost via codex2",
+    "reply_position": 5604,
+    "captured_at": "2026-08-24T13:54:03.055Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:11",
+          "role": "user",
+          "text": "what languages do we have good \"stdlib packs\" for? how are those authored/updated as bifrost adds features"
+        },
+        {
+          "id": "user:1158",
+          "role": "user",
+          "text": "\"Bifrost’s language-specific producer parses that exact artifact\" but how does this work when the stdlib includes native (C/C++) code (Java, Python, etc)"
+        },
+        {
+          "id": "user:1933",
+          "role": "user",
+          "text": "> does not place JDK method bodies into the program CFG—even for methods implemented in Java\n\nwhat does this mean we can't do, that we could if stdlib were CFG-integrated?"
+        },
+        {
+          "id": "user:2675",
+          "role": "user",
+          "text": "idea from https://github.com/BrokkAi/bifrost-dev/issues/1871 was that we should be capturing the CFG flows in our semantic summary, did that not get built? (David: \"I think the only thing we would sacrifice is hiding side-effects, but storing everything would be massive, so that's our compromise\")"
+        },
+        {
+          "id": "user:3834",
+          "role": "user",
+          "text": "> That derivation pipeline was not successfully scaled into the currently shipped stdlib content\n\nwtf does it do then, and what would we need to do to get it working as designed in the stdlib packs"
+        },
+        {
+          "id": "agent:3838",
+          "role": "assistant",
+          "text": "Fair reaction. I’m tracing the executable path from CLI → derivation → adjudication → fixture → pack assembly, because the likely failure is not “the solver does nothing” but that its output never reaches the release-pack assembler. I’ll identify the exact missing seams and the shortest path to make derived stdlib packs real."
+        },
+        {
+          "id": "agent:3933",
+          "role": "assistant",
+          "text": "Bluntly: the CFG derivation is currently an authoring experiment and analyzer diagnostic, not a stdlib-pack generator. The “last mile” was never wired up.\n\n```text\nPinned JDK source\n      ↓\nCFG/value-flow derivation\n      ↓\nderived entries ──→ join report + compiler smoke test ──→ stops\n\nHand-authored JSON candidates\n      ↓\ngolden-summary-pack\n      ↓\nshipped JDK/CPython packs\n```\n\nWhat it actually does today:\n\n- Parses real Java method bodies and runs Bifrost’s production value-flow solver over their CFG/ICFG.\n- Attempts to derive parameter/receiver → normal-return or exceptional-return transfers.\n- Records typed reasons when it cannot finish: unresolved calls, native/bodyless methods, external procedures, budgets, unsupported semantics, and so on.\n- Compares or joins those results with CodeQL and Joern corpora.\n- Round-trips derived entries through the pack compiler to prove that they are syntactically representable.\n\nThat logic is in [derive.rs](/workspace/bifrost/crates/bifrost-semantic-packs/src/summary_foundry/derive.rs:186) and [summary_foundry/mod.rs](/workspace/bifrost/crates/bifrost-semantic-packs/src/summary_foundry/mod.rs:349). But the command only emits a join/report artifact; it does not emit a release pack. The synthetic pack created during round-trip validation is literally version `0.0.0` and exists only in memory.\n\nLikewise, the supposedly end-to-end pipeline in [driver.rs](/workspace/bifrost/crates/bifrost-semantic-packs/src/summary_foundry/driver.rs) has no production caller; its real derivation execution is exercised only by tests.\n\nThe scale run reported in issue #1871 confirms both that the machinery exists and that it was not production-ready:\n\n- 4,948 `java.util` procedures\n- 4,756 derived entries\n- only 165 transfers\n- zero entries considered complete\n- roughly 31 minutes on one core\n- huge numbers of external/unresolved boundaries because only `java.util`, not all of `java.base`, was loaded\n\nThat’s captured in the [issue #1871 ExecPlan](/workspace/bifrost/.agents/plans/issue-1871-summary-model-foundry.md:76). The issue remains open, and the plan explicitly says the Java pilot and some production-driver proof are still unfinished.\n\nThere is also an important design shortfall relative to David’s proposal. The current automatic derivation only observes return and exceptional-return flows. It does not derive symbolic heap effects. When it converts a result into pack IR, it emits empty `locations`, `effects`, and `declared_effects` in [ir.rs](/workspace/bifrost/crates/bifrost-semantic-packs/src/summary_foundry/ir.rs:476). So this is not yet the context-independent, heap/object-sensitive summary design discussed in the issue.\n\nThe shipped packs therefore come from the separate `golden-summary-pack` path. All 103 current JDK entries identify themselves as hand-authored from Javadoc/JDK-source reasoning; the 12 CPython entries are likewise hand-authored.\n\n## What it would take\n\nThere are two different targets.\n\n### Minimum useful derived stdlib pack\n\nThis could ship substantially sooner:\n\n1. Analyze all of `java.base` together so calls from `java.util` into `java.lang`, `jdk.internal`, etc. resolve.\n2. Add an actual pack-generation command that converts derived entries into a versioned `AuthoredSemanticModelPack`, with real selectors, provenance, sharding, rejection accounting, and deterministic output.\n3. Merge three layers deliberately:\n   - automatically derived pure-Java transfers;\n   - hand-authored native/JNI/reflection models;\n   - hand-authored sanitizer and special-effect overrides.\n4. Initially ship only positive parameter/receiver → return flows as partial summaries. Do not mark methods complete or infer “no flow.”\n5. Put regeneration and pack-on/pack-off behavior tests into release CI.\n\nThat would finally make the CFG work contribute to the shipped pack, but it would still be the reduced return-flow design—not David’s full design.\n\n### The intended heap/object-sensitive design\n\nTo deliver what David described, Bifrost additionally needs:\n\n- Summary inputs with access paths, such as `arg0.field` or collection contents.\n- Outputs representing writes into receiver- and parameter-reachable heap.\n- Symbolic heap locations and alias relationships.\n- Derivation that drives the heap/update oracle instead of inspecting only returns.\n- Call-site instantiation of symbolic locations against actual receiver/argument aliases.\n- SCC/fixed-point handling for recursion and mutually recursive calls.\n- Derived effects such as allocation, escape, calls, unknown boundaries, and sanitization, instead of hard-coded empty effect sets.\n- A schema/compiler/runtime update, because the current pack IR cannot precisely spell “write to a field reachable from parameter N.”\n- Reusable cached procedure summaries. The current per-target closure discovery repeats too much work to scale across a JDK.\n- Real-body differential validation. Synthetic fixtures prove that summaries bind and execute, but not that they faithfully summarize the original method.\n\nNative code remains a typed boundary. Pure Java code can be derived around it, while JNI/native methods require hand-authored conservative summaries. The important compromise is the one David described: defer unbounded global side effects, but retain parameter-, receiver-, and heap-reachable effects.\n\nSo the honest answer is: the foundational CFG derivation was built, and it uncovered useful analyzer gaps, but neither production pack assembly nor the proposed heap-sensitive representation was completed. “Get it working as designed” is not just enabling a dormant flag; it requires finishing both those pieces."
+        },
+        {
+          "id": "user:5189",
+          "role": "user",
+          "text": "You are continuing a coding session previously run by another ACP harness. The restored workspace is authoritative. Use the historical state below for continuity, and do not repeat completed work unless verification requires it.\n\nNo active task here — the two carried-over snapshots are historical context from prior investigations into GitHub issue #1871 (CFG-derived semantic summaries), both answer-only with no code changes. The `/model sonnet` command was a local switch, nothing to act on.\n\nWhat would you like to work on?"
+        },
+        {
+          "id": "agent:5191",
+          "role": "assistant",
+          "text": "The workspace is restored on a clean `master` (latest commit: `9dd4420fb`, the backward data-flow solving enhancement). The prior session's work on issue #1871 was investigation only — answers about CFG-derived semantic summaries, no code changes pending.\n\nThere's nothing in flight, so I'm ready for whatever you'd like to tackle: continuing the #1871 design work, picking up another issue, a review, or something new entirely."
+        },
+        {
+          "id": "user:5200",
+          "role": "user",
+          "text": "i'd like you to drive 1871 to completion. what do you see as the next steps to get to \"stdlib packs have a semantic flow summary\""
+        },
+        {
+          "id": "agent:5202",
+          "role": "assistant",
+          "text": "I'll start by re-grounding in the issue and the current state of the code, since the prior session's details were summarized away. Let me pull the issue and survey the relevant crates in parallel."
+        },
+        {
+          "id": "agent:5480",
+          "role": "assistant",
+          "text": "The Explore agent gave me a thorough map. Now let me get the actual issue text (the earlier `gh` call hit a GraphQL deprecation error) and read the epic plan's remaining milestones."
+        },
+        {
+          "id": "agent:5493",
+          "role": "assistant",
+          "text": "The plan file is long; let me read the rest (Decision Log and remaining progress)."
+        },
+        {
+          "id": "agent:5574",
+          "role": "assistant",
+          "text": "While that builds, I'll set up task tracking for the drive."
+        },
+        {
+          "id": "agent:5604",
+          "role": "assistant",
+          "text": "Here's my read, based on the issue, the ExecPlan, and the current tree. The build verifying step 1 is running in the background; everything below is confirmed from the plan, the issue tracker, and the code except where labeled.\n\n## Where #1871 actually stands\n\nThe hard part — the mechanism — is finished and proven end to end: authored `procedure_summaries` pack payloads compile, activate, bind through the canonical member-identity route (#1978), lower into the value-flow plan, propagate taint, and conclude at the honest `ProvenBySummary` tier (#1916). Content ships for two languages: 103 JDK entries and 12 CPython entries in `semantic-packs/golden-core/`, plus sanitizer packs. The conformance suite (`tests/suite_bench_policy/issue_1871_stdlib_summary_conformance.rs`) proves the pack-on finding / pack-off honest-`Inconclusive` pair on both languages with real checked-in bytes. Foundry milestones 1–4.6 are done.\n\nThree gaps stand between here and \"stdlib packs have a semantic flow summary\":\n\n**1. The completion-tier half of the acceptance criterion is asserted nowhere on the stdlib fixtures — but its blockers are now gone.** The conformance pairs still assert `Inconclusive` on *both* sides, because at the time (2026-08-17) Java could never conclude on an inline fixture (#2342) and Python abstained on `exceptional_control_flow` (#2276). Both issues have since closed, and the #2342 follow-up doc records the Java flow now reaching `ProvenBySummary`. So the first step is cheap and high-value: re-run the fixtures, upgrade the assertions to `ProvenBySummary` with the pack active, and the issue's acceptance criterion 1 is discharged with real evidence. That verification build is running now. (The related 2026-08-18 follow-up — the compatibility bound silently drifting with the crate version — already landed as `a5db49ed2`.)\n\n**2. Content exists for 2 of the 5 policy-pack languages.** The issue's direction is \"a first summary pack per policy-pack language,\" and the built-in packs claim java, python, rust, typescript, javascript (confirmed by grep over `crates/bifrost-policy/policy-packs/`). Missing: **Rust std** and **JS/TS**. Rust is well-timed — #2589 (commit `1673c7f02`) just made Rust callables keyable by the summary binder and added binding evidence, so the route should work. JS/TS needs a binding probe first (each language's call boundary must publish an exact external target; Rust needed two fixes to get there), then a decision on whether one pack serves both JS and TS the way the JVM realm serves Java/Kotlin/Scala. The CPython converter is already realm-parameterized (`GoldenRealm`), so each new language is: ~15–20 hand-authored candidates (formatting/concat, collections, codecs, IO wrappers), a realm entry in `golden_pack.rs`, and a conformance pair.\n\n**3. Milestone 5 (the FIRD Java pilot) should be re-scoped out, not executed.** This is the one judgment call, and the plan's own evidence makes it: the realistic demand sweep measured blocked verdicts on real repos as **100% engine-capability-blocked and 0% summary-closable** (framework type resolution, tracked under the #1877 epic tree), so the pilot's headline metric is capped at zero by construction. Meanwhile the OWASP bakeoff workstream (#1935, #2354) has *become* the real demand-driven Java content pipeline — the staged framework/servlet summary packs are exactly demand-ranked authoring. I'd record that supersession in the ExecPlan and close #1871 on its literal acceptance criteria once 1 and 2 land, with your concurrence on that scope reading before the issue is actually closed.\n\n`★ Insight ─────────────────────────────────────`\n- The acceptance criterion literally says \"`Complete` completion,\" but #1916 deliberately made that unreachable for summary-backed runs: an external summary is an authored claim about a body Bifrost never analyzed, so it earns the distinct `ProvenBySummary` tier rather than laundering authored trust into the word reserved for proof from analyzed code. \"Completion\" for this issue means that tier.\n- The demand data flipping from \"author more summaries\" to \"fix engine resolution\" is the plan working as designed — milestone 4.5 was built precisely to separate summary-closable from engine-blocked blockers before content investment scaled.\n`─────────────────────────────────────────────────`\n\n## Execution order\n\n1. **Now (running):** verify the Java/Python conformance fixtures reach `ProvenBySummary`; upgrade assertions and the header doc. If a residual blocker holds a side open, record the measured cause honestly and file it.\n2. **Rust golden pack** — candidates, realm, checked-in pack, conformance pair (delegated to an implementation agent per your delegation rule, with my review).\n3. **JS/TS binding probe, then golden pack** — same shape; any binding gap gets filed as an engine issue with a minimal fixture rather than worked around.\n4. **Plan re-scope + closing evidence on #1871** — then your call on closing.\n\nI've tracked these as tasks 1–4 (task 4 blocked on the others). The conformance build is cold (empty target dir), so it'll take a while; I'll pick up with the results when it finishes and start the Rust workstream in parallel unless you'd rather redirect any of the above — the M5 re-scope in step 4 is the main thing I'd like your explicit sign-off on before the issue closes."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "i'd like you to drive 1871 to completion. what do you see as the next steps to get to \"stdlib packs have a semantic flow summary\"",
+    "assistant_text_tail": "teria once 1 and 2 land, with your concurrence on that scope reading before the issue is actually closed.\n\n`★ Insight ─────────────────────────────────────`\n- The acceptance criterion literally says \"`Complete` completion,\" but #1916 deliberately made that unreachable for summary-backed runs: an external summary is an authored claim about a body Bifrost never analyzed, so it earns the distinct `ProvenBySummary` tier rather than laundering authored trust into the word reserved for proof from analyzed code. \"Completion\" for this issue means that tier.\n- The demand data flipping from \"author more summaries\" to \"fix engine resolution\" is the plan working as designed — milestone 4.5 was built precisely to separate summary-closable from engine-blocked blockers before content investment scaled.\n`─────────────────────────────────────────────────`\n\n## Execution order\n\n1. **Now (running):** verify the Java/Python conformance fixtures reach `ProvenBySummary`; upgrade assertions and the header doc. If a residual blocker holds a side open, record the measured cause honestly and file it.\n2. **Rust golden pack** — candidates, realm, checked-in pack, conformance pair (delegated to an implementation agent per your delegation rule, with my review).\n3. **JS/TS binding probe, then golden pack** — same shape; any binding gap gets filed as an engine issue with a minimal fixture rather than worked around.\n4. **Plan re-scope + closing evidence on #1871** — then your call on closing.\n\nI've tracked these as tasks 1–4 (task 4 blocked on the others). The conformance build is cold (empty target dir), so it'll take a while; I'll pick up with the results when it finishes and start the Rust workstream in parallel unless you'd rather redirect any of the above — the M5 re-scope in step 4 is the main thing I'd like your explicit sign-off on before the issue closes.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "right",
+    "next": "user: 'M5 lgtm, you have the ball'"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-24T13:56:47.320Z",
+        "kind": "user",
+        "text": "M5 lgtm, you have the ball"
+      },
+      {
+        "at": "2026-08-24T13:59:16.620Z",
+        "kind": "agent",
+        "text": "The decision is recorded in the plan's Decision Log. Current state of play:  - **Task 1 (completion-tier assertions):** an Opus agent is determining empirically whether the Java and Python conformance"
+      },
+      {
+        "at": "2026-08-24T14:04:36.128Z",
+        "kind": "agent",
+        "text": "The probe results are decisive and change task 1's shape:  - **Java can reach `ProvenBySummary` today** — the shipped pack + the real `URLDecoder.decode` call conclude at the tier once the fixture's s"
+      },
+      {
+        "at": "2026-08-24T14:05:42.987Z",
+        "kind": "agent",
+        "text": "The Opus agent is now implementing the Java completion-tier upgrade and drafting the two Python engine issues; the binding-readiness probe for Rust and JS/TS is still running. Status so far, in plain "
+      },
+      {
+        "at": "2026-08-24T14:09:10.551Z",
+        "kind": "agent",
+        "text": "The binding-readiness probe fundamentally reframes tasks 2 and 3: the converter seam is clean, but **the call-site binding route is dead for both Rust and JS/TS** — for reasons that are per-language a"
+      },
+      {
+        "at": "2026-08-24T14:13:31.398Z",
+        "kind": "agent",
+        "text": "Python issues filed as #2600 and #2601. Now reviewing the conformance diff before substituting the issue-number placeholders and committing."
+      }
+    ]
+  }
+}

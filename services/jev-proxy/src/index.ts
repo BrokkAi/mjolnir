@@ -3,6 +3,7 @@ import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json
 import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
 import questionsV3 from "../../../mj-core/src/activity/verdict_questions_v3.json" with { type: "json" };
 import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json" with { type: "json" };
+import questionsV5 from "../../../mj-core/src/activity/verdict_questions_v5.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 
@@ -35,6 +36,36 @@ type TurnEvidenceV4 = TurnEvidenceV2 & { completion?: {
   stop_reason: string;
   diagnostic: { message: string; code?: string; http_status?: number; reset_at?: string } | null;
 } };
+
+type TurnEvidenceV6 = TurnEvidenceV4 & {
+  background?: { id: string; command: string; started_s_ago: number }[];
+  final_tool_calls?: { name: string; status: string }[];
+};
+
+// v6 adds the background commands behind `background_commands`, so Jev can
+// judge whether anyone still depends on them (the `background` question).
+function evidenceV6(value: unknown): value is TurnEvidenceV6 {
+  if (!object(value)) return false;
+  const { background, final_tool_calls, ...ordinary } = value;
+  if (!evidenceV5(ordinary)) return false;
+  if (final_tool_calls !== undefined && !(Array.isArray(final_tool_calls) && final_tool_calls.length <= 16
+    && final_tool_calls.every(item => object(item) && Object.keys(item).length === 2
+      && text(item.name, 128) && text(item.status, 32)))) return false;
+  if (background === undefined) return true;
+  return Array.isArray(background) && background.length <= 16
+    && background.every(item => object(item) && Object.keys(item).length === 3
+      && text(item.id, 256) && text(item.command, 128) && count(item.started_s_ago));
+}
+
+function answersV6(value: unknown): Record<string, unknown> | null {
+  const result = answersV5(value);
+  if (!result || !object(value) || !object(value.answers)) return null;
+  const answer = value.answers.background;
+  if (answer === undefined || answer === null) return result;
+  if (!object(answer) || answer.type !== "choice" || typeof answer.choice !== "string"
+    || !["needed", "unneeded", "unclear"].includes(answer.choice) || !probability(answer.confidence)) return null;
+  return { ...result, background: { type: "choice", choice: answer.choice, confidence: answer.confidence } };
+}
 
 function evidenceV5(value: unknown): value is TurnEvidenceV4 {
   if (!object(value)) return false;
@@ -218,7 +249,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 | 5 = 1, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 = 1, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -236,14 +267,14 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 5 ? questions : version === 4 ? questionsV4 : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
+          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 6 ? questions : version === 5 ? questionsV5 : version === 4 ? questionsV4 : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 5 ? answersV5(body) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
+        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 6 ? answersV6(body) : version === 5 ? answersV5(body) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -262,7 +293,7 @@ export default {
     const search = url.pathname === "/v1/help-search";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -287,6 +318,9 @@ export default {
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
+    }
+    if (url.pathname === "/v6/turn-verdict") {
+      return evidenceV6(state) ? classify(state, key, 6) : error("invalid_evidence", 400);
     }
     if (url.pathname === "/v5/turn-verdict") {
       return evidenceV5(state) ? classify(state, key, 5) : error("invalid_evidence", 400);

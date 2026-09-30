@@ -35,6 +35,17 @@ pub enum Work {
     Unclear,
 }
 
+/// Whether anyone still depends on the background commands the session holds.
+/// Asked only when leftover processes are the one thing keeping a session
+/// from being quiet; see `mj_core::activity::quiet_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Background {
+    Needed,
+    Unneeded,
+    Unclear,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Judgment<T> {
     pub choice: T,
@@ -45,6 +56,10 @@ pub struct Verdict {
     pub failure: Judgment<Failure>,
     pub input: Judgment<Input>,
     pub work: Judgment<Work>,
+    /// Absent from answers older proxies return, and ignored unless the
+    /// request listed background commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Judgment<Background>>,
 }
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
@@ -73,6 +88,11 @@ impl Verdict {
             failure: choice(answers, "failure")?,
             input: choice(answers, "input")?,
             work: choice(answers, "work")?,
+            background: answers
+                .get("background")
+                .filter(|answer| !answer.is_null())
+                .map(|_| choice(answers, "background"))
+                .transpose()?,
         })
     }
     pub fn action(self, authorization_complete: bool) -> Action {
@@ -223,7 +243,72 @@ impl Default for ContextHistory {
         }
     }
 }
+/// Most messages fit whole; a pasted document is kept by its head and tail
+/// with an explicit marker, so one paste cannot use up the whole budget.
+pub const MESSAGE_HEAD_BYTES: usize = 4 * 1024;
+pub const MESSAGE_TAIL_BYTES: usize = 2 * 1024;
+/// Total entries the wire contract allows (`ContinuationEvidence::validate`
+/// and the proxy validator). Assistant entries give way first; only a
+/// history with this many user messages on its own is refused.
+pub const MAX_MESSAGES: usize = 256;
+
+/// Keep the first [`MESSAGE_HEAD_BYTES`] and last [`MESSAGE_TAIL_BYTES`] of
+/// a long message, with the omitted byte count in between.
+#[must_use]
+pub fn trim_middle(text: &str) -> String {
+    if text.len() <= MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
+        return text.to_owned();
+    }
+    let head_end = text.floor_char_boundary(MESSAGE_HEAD_BYTES);
+    let tail_start = text.ceil_char_boundary(text.len() - MESSAGE_TAIL_BYTES);
+    format!(
+        "{}\n[... {} bytes omitted from the middle of this message ...]\n{}",
+        &text[..head_end],
+        tail_start - head_end,
+        &text[tail_start..]
+    )
+}
+
 impl ContextHistory {
+    fn user_bytes(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.text.len())
+            .sum()
+    }
+
+    fn user_count(&self) -> usize {
+        self.messages.iter().filter(|m| m.role == "user").count()
+    }
+
+    fn assistant_bytes(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.text.len())
+            .sum()
+    }
+
+    /// Evict the oldest assistant entry that is not the one being written.
+    /// Returns false when none remains.
+    fn evict_oldest_assistant(&mut self) -> bool {
+        let protected = self.open_assistant_id.clone();
+        let Some(i) = self
+            .messages
+            .iter()
+            .position(|m| m.role == "assistant" && Some(&m.id) != protected.as_ref())
+        else {
+            return false;
+        };
+        if i + 1 == self.messages.len() {
+            self.final_reply_omitted = true;
+        }
+        self.messages.remove(i);
+        self.assistant_history_omitted = true;
+        true
+    }
+
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::schema::v1::ContentBlock]) {
         use agent_client_protocol::schema::v1::ContentBlock;
         self.open_assistant_id = None;
@@ -247,16 +332,16 @@ impl ContextHistory {
         if text.trim().is_empty() {
             return;
         }
-        if self
-            .messages
-            .iter()
-            .filter(|m| m.role == "user")
-            .map(|m| m.text.len())
-            .sum::<usize>()
-            + text.len()
-            > USER_BYTES
-            || self.messages.len() >= 256
-        {
+        let text = trim_middle(&text);
+        // The byte budget is for user text alone; a message that would push
+        // it over is the one case that makes the history incomplete.
+        if self.user_bytes() + text.len() > USER_BYTES || self.user_count() >= MAX_MESSAGES {
+            self.authorization_complete = false;
+            return;
+        }
+        // Assistant entries make room; the wire cap counts both roles.
+        while self.messages.len() >= MAX_MESSAGES && self.evict_oldest_assistant() {}
+        if self.messages.len() >= MAX_MESSAGES {
             self.authorization_complete = false;
             return;
         }
@@ -266,6 +351,7 @@ impl ContextHistory {
             text,
         });
     }
+
     pub fn assistant(&mut self, id: Option<&str>, ordinal: u64, text: &str) {
         let id = id
             .map(str::to_owned)
@@ -277,12 +363,9 @@ impl ContextHistory {
                 .last_mut()
                 .filter(|m| m.role == "assistant" && m.id == id)
             {
-                if last.text.len() + text.len() <= ASSISTANT_BYTES {
-                    last.text.push_str(text);
-                } else {
-                    self.messages.pop();
-                    self.assistant_history_omitted = true;
-                    self.final_reply_omitted = true;
+                last.text.push_str(text);
+                if last.text.len() > MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES {
+                    last.text = trim_middle(&last.text);
                 }
             }
         } else {
@@ -290,31 +373,39 @@ impl ContextHistory {
             self.messages.push(EvidenceMessage {
                 id: id.clone(),
                 role: "assistant".into(),
-                text: text.into(),
+                text: trim_middle(text),
             });
         }
         self.open_assistant_id = Some(id);
-        while self
-            .messages
-            .iter()
-            .filter(|m| m.role == "assistant")
-            .map(|m| m.text.len())
-            .sum::<usize>()
-            > ASSISTANT_BYTES
-            || self.messages.len() > 256
-        {
-            if let Some(i) = self.messages.iter().position(|m| m.role == "assistant") {
-                if i + 1 == self.messages.len() {
-                    self.final_reply_omitted = true;
-                }
-                self.messages.remove(i);
-                self.assistant_history_omitted = true;
-            } else {
-                self.authorization_complete = false;
-                break;
-            }
-        }
+        // Oldest assistant entries give way to the byte budget and the wire
+        // cap; the entry being written is never evicted, and user entries are
+        // never evicted here.
+        while (self.assistant_bytes() > ASSISTANT_BYTES || self.messages.len() > MAX_MESSAGES)
+            && self.evict_oldest_assistant()
+        {}
     }
+    /// Evict the oldest assistant entries, never the final reply, until
+    /// `fits` accepts the history. Returns false when nothing more can go.
+    pub fn shrink_until(&mut self, mut fits: impl FnMut(&Self) -> bool) -> bool {
+        while !fits(self) {
+            let protected = self
+                .messages
+                .last()
+                .filter(|m| m.role == "assistant")
+                .map(|m| m.id.clone());
+            let Some(i) = self
+                .messages
+                .iter()
+                .position(|m| m.role == "assistant" && Some(&m.id) != protected.as_ref())
+            else {
+                return false;
+            };
+            self.messages.remove(i);
+            self.assistant_history_omitted = true;
+        }
+        true
+    }
+
     pub fn evidence(&self) -> crate::continuation::ContinuationEvidence {
         crate::continuation::ContinuationEvidence {
             messages: self.messages.clone(),
@@ -367,8 +458,141 @@ mod tests {
                 choice: work,
                 confidence: 0.99,
             },
+            background: None,
         }
     }
+    fn scored(failure: (Failure, f32), input: (Input, f32), work: (Work, f32)) -> Verdict {
+        Verdict {
+            failure: Judgment {
+                choice: failure.0,
+                confidence: failure.1,
+            },
+            input: Judgment {
+                choice: input.0,
+                confidence: input.1,
+            },
+            work: Judgment {
+                choice: work.0,
+                confidence: work.1,
+            },
+            background: None,
+        }
+    }
+
+    #[test]
+    fn finished_and_wait_need_the_activity_bar_and_a_confident_absence_of_failure() {
+        let none = (Failure::None, 0.95);
+        assert_eq!(
+            scored(none, (Input::None, 0.85), (Work::Finished, 0.85)).action(false),
+            Action::Finished
+        );
+        assert_eq!(
+            scored(none, (Input::None, 0.85), (Work::Waiting, 0.85)).action(false),
+            Action::Wait
+        );
+        // One hundredth under either bar is uncertain.
+        assert_eq!(
+            scored(none, (Input::None, 0.84), (Work::Finished, 0.99)).action(false),
+            Action::Uncertain
+        );
+        assert_eq!(
+            scored(none, (Input::None, 0.99), (Work::Waiting, 0.84)).action(false),
+            Action::Uncertain
+        );
+        // Redundant permission is not "no input" for idle inference.
+        assert_eq!(
+            scored(
+                none,
+                (Input::RedundantRequest, 0.99),
+                (Work::Finished, 0.99)
+            )
+            .action(false),
+            Action::Uncertain
+        );
+        // An unsure failure axis blocks idle, waiting, and continuation alike.
+        for failure in [
+            (Failure::None, 0.89),
+            (Failure::Unclear, 0.5),
+            (Failure::Other, 0.6),
+        ] {
+            assert_eq!(
+                scored(failure, (Input::None, 0.99), (Work::Finished, 0.99)).action(true),
+                Action::Uncertain,
+                "{failure:?}"
+            );
+            assert_eq!(
+                scored(
+                    failure,
+                    (Input::None, 0.99),
+                    (Work::AuthorizedUnfinished, 0.99)
+                )
+                .action(true),
+                Action::Uncertain,
+                "{failure:?}"
+            );
+        }
+        // Continuation needs the automation bar on both axes, not the activity bar.
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.90),
+                (Work::AuthorizedUnfinished, 0.90)
+            )
+            .action(true),
+            Action::Continue
+        );
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.89),
+                (Work::AuthorizedUnfinished, 0.99)
+            )
+            .action(true),
+            Action::Uncertain
+        );
+        assert_eq!(
+            scored(
+                none,
+                (Input::None, 0.99),
+                (Work::AuthorizedUnfinished, 0.89)
+            )
+            .action(true),
+            Action::Uncertain
+        );
+        // A required-input answer wins even against a confident provider failure.
+        assert_eq!(
+            scored(
+                (Failure::TransientProvider, 0.99),
+                (Input::Required, 0.85),
+                (Work::Unclear, 0.1)
+            )
+            .action(true),
+            Action::AwaitInput
+        );
+    }
+
+    #[test]
+    fn a_missing_background_answer_parses_and_a_bad_one_fails() {
+        let mut answers = serde_json::json!({"answers": {
+            "failure": {"type": "choice", "choice": "none", "confidence": 0.99},
+            "input": {"type": "choice", "choice": "none", "confidence": 0.99},
+            "work": {"type": "choice", "choice": "finished", "confidence": 0.99},
+        }});
+        assert!(Verdict::parse(&answers).unwrap().background.is_none());
+        answers["answers"]["background"] =
+            serde_json::json!({"type": "choice", "choice": "unneeded", "confidence": 0.9});
+        assert_eq!(
+            Verdict::parse(&answers)
+                .unwrap()
+                .background
+                .map(|j| j.choice),
+            Some(Background::Unneeded)
+        );
+        answers["answers"]["background"] =
+            serde_json::json!({"type": "choice", "choice": "maybe", "confidence": 0.9});
+        assert!(Verdict::parse(&answers).is_err());
+    }
+
     #[test]
     fn provider_recovery_is_independent_of_uncertain_remaining_work() {
         let mut v = verdict(Failure::TransientProvider, Input::Unclear, Work::Unclear);
@@ -446,13 +670,113 @@ mod tests {
             context.messages.iter().filter(|m| m.role == "user").count(),
             1
         );
+        // One pasted document is kept by its head and tail, not refused.
         context.user(
-            "too-large",
+            "pasted",
             &[ContentBlock::Text(TextContent::new(
                 "x".repeat(USER_BYTES + 1),
             ))],
         );
+        assert!(context.authorization_complete);
+        let pasted = context
+            .messages
+            .iter()
+            .find(|m| m.id == "user:pasted")
+            .expect("kept");
+        assert!(pasted.text.len() < MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES + 100);
+        assert!(pasted.text.contains("bytes omitted from the middle"));
+        // Only the user byte budget itself makes the history incomplete.
+        for i in 0..6 {
+            context.user(
+                &format!("paste-{i}"),
+                &[ContentBlock::Text(TextContent::new("y".repeat(USER_BYTES)))],
+            );
+        }
         assert!(!context.authorization_complete);
-        assert!(context.messages.iter().all(|m| m.id != "user:too-large"));
+    }
+
+    #[test]
+    fn long_sessions_evict_assistant_entries_before_refusing_a_user_message() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        // Two hundred exchanges with ten assistant messages each: far past
+        // the old 256-entry refusal, still complete.
+        for i in 0..200 {
+            context.user(
+                &format!("u{i}"),
+                &[ContentBlock::Text(TextContent::new(format!("step {i}")))],
+            );
+            for j in 0..10 {
+                context.assistant(Some(&format!("a{i}-{j}")), i * 10 + j, "ok");
+            }
+        }
+        assert!(
+            context.authorization_complete,
+            "hundreds of exchanges stay complete"
+        );
+        assert!(context.messages.len() <= MAX_MESSAGES);
+        assert!(context.assistant_history_omitted);
+        assert!(!context.final_reply_omitted);
+        assert_eq!(context.user_count(), 200);
+        assert!(
+            context.messages.iter().any(|m| m.id == "user:u0"),
+            "user history is never evicted"
+        );
+        assert_eq!(
+            context.messages.last().map(|m| m.role.as_str()),
+            Some("assistant")
+        );
+        // Only the 257th distinct user message cannot fit.
+        for i in 200..MAX_MESSAGES {
+            context.user(
+                &format!("u{i}"),
+                &[ContentBlock::Text(TextContent::new(format!("step {i}")))],
+            );
+        }
+        assert!(context.authorization_complete);
+        context.user(
+            "u-one-too-many",
+            &[ContentBlock::Text(TextContent::new("step 256"))],
+        );
+        assert!(!context.authorization_complete);
+    }
+
+    #[test]
+    fn shrinking_to_a_wire_limit_drops_old_assistant_entries_but_keeps_the_reply() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        context.user("u", &[ContentBlock::Text(TextContent::new("do the thing"))]);
+        for i in 0..12 {
+            context.assistant(Some(&format!("a{i}")), i, &"z".repeat(1000));
+        }
+        let limit = 5_000;
+        assert!(context.shrink_until(|c| serde_json::to_vec(c).unwrap().len() <= limit));
+        assert!(serde_json::to_vec(&context).unwrap().len() <= limit);
+        assert!(context.assistant_history_omitted);
+        assert!(context.messages.iter().any(|m| m.id == "user:u"));
+        assert_eq!(context.messages.last().map(|m| m.id.as_str()), Some("a11"));
+        assert!(!context.final_reply_omitted);
+        assert!(context.evidence().validate().is_ok());
+        // Once only the user message and the final reply remain, it gives up.
+        assert!(!context.shrink_until(|c| serde_json::to_vec(c).unwrap().len() <= 100));
+    }
+
+    #[test]
+    fn a_long_final_reply_is_trimmed_rather_than_omitted() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+        let mut context = ContextHistory::default();
+        context.user(
+            "u",
+            &[ContentBlock::Text(TextContent::new("write the report"))],
+        );
+        for chunk in 0..40 {
+            context.assistant(Some("reply"), chunk, &"r".repeat(1024));
+        }
+        assert!(!context.final_reply_omitted);
+        assert!(context.authorization_complete);
+        let reply = context.messages.last().unwrap();
+        assert_eq!(reply.role, "assistant");
+        assert!(reply.text.contains("bytes omitted from the middle"));
+        assert!(context.evidence().validate().is_ok());
     }
 }

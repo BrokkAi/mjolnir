@@ -355,6 +355,8 @@ impl SessionActivity {
                 .as_ref()
                 .is_some_and(|retry| !retry.submitted),
             idle_since_ms: self.idle_since_ms,
+            task_settled_at_ms: None,
+            background_needed: None,
             ..mj_core::activity::ActivityFacts::default()
         }
     }

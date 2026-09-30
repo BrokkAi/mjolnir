@@ -233,6 +233,9 @@ impl DurableRelay {
             return Ok(());
         }
         let now = epoch_millis();
+        // A task leaving the level says nothing about a coming turn: a task
+        // the user stopped leaves it too, and no turn follows a stop. Only
+        // the edge update (`claude_async_task_control_changed`) knows which.
         self.claude_background_tasks = tasks
             .into_iter()
             .map(|task| {
@@ -377,6 +380,7 @@ impl DurableRelay {
         &mut self,
         task_id: String,
         can_stop: bool,
+        settled: bool,
     ) -> Result<()> {
         if self.background_work != BackgroundWorkPolicy::ClaudeTasks {
             return Ok(());
@@ -386,7 +390,18 @@ impl DurableRelay {
         } else {
             self.claude_stoppable_tasks.remove(&task_id);
         }
+        if settled {
+            self.note_task_settled();
+        }
         self.persist_activity_transition()
+    }
+
+    /// A background task the harness will answer with a turn of its own just
+    /// settled. Until that turn opens, the session is not quiet.
+    pub(super) fn note_task_settled(&mut self) {
+        if self.snapshot.active_prompt.is_none() && self.snapshot.harness_turn.is_none() {
+            self.task_settled_at_ms = Some(epoch_millis());
+        }
     }
 
     /// Resolve a public task id only while it still names stoppable background
@@ -492,6 +507,7 @@ impl DurableRelay {
         self.claude_background_tasks.clear();
         self.claude_pending_stops.clear();
         self.claude_stoppable_tasks.clear();
+        self.task_settled_at_ms = None;
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
         self.kimi_observed_task_ids.clear();

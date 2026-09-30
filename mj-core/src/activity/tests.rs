@@ -758,3 +758,151 @@ fn a_duration_agrees_its_unit_with_the_count() {
     assert_eq!(describe_duration(90_000), "about 1 minute");
     assert_eq!(describe_duration(11 * MINUTE), "about 11 minutes");
 }
+
+// --- the layered quiet rule -------------------------------------------------
+
+#[test]
+fn a_settled_background_task_is_an_imminent_turn_for_the_window() {
+    let now = 5_000_000;
+    let facts = ActivityFacts {
+        task_settled_at_ms: Some(now - 1_000),
+        ..ActivityFacts::default()
+    };
+    assert!(turn_imminent(&facts, now));
+    assert_eq!(
+        quiet_at(&facts, now),
+        Quiet::No("background task settled; its notification turn is about to start")
+    );
+    assert!(has_work_in_flight_at(&facts, now));
+    // The window closes on its own.
+    assert!(!turn_imminent(&facts, now + IMMINENT_TURN_WINDOW_MS + 1));
+    assert_eq!(
+        quiet_at(&facts, now + IMMINENT_TURN_WINDOW_MS + 1),
+        Quiet::Yes
+    );
+    // Once the turn the settle promised has opened, the turn itself is the
+    // reason, and the settle no longer counts on its own.
+    let turned = ActivityFacts {
+        harness_turn_started_at_ms: Some(now),
+        ..facts.clone()
+    };
+    assert!(!turn_imminent(&turned, now));
+    assert_eq!(quiet_at(&turned, now), Quiet::No("turn in flight"));
+    // A settle in the future (clock skew) does not count either.
+    let skewed = ActivityFacts {
+        task_settled_at_ms: Some(now + 10_000),
+        ..ActivityFacts::default()
+    };
+    assert!(!turn_imminent(&skewed, now));
+}
+
+#[test]
+fn jev_may_discharge_leftover_processes_but_never_a_turn_or_a_shell() {
+    let now = 5_000_000;
+    let leftover = ActivityFacts {
+        background_commands: 1,
+        background_started_at_ms: Some(now - 60_000),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(quiet_at(&leftover, now), Quiet::No("background work"));
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                background_needed: Some(true),
+                ..leftover.clone()
+            },
+            now
+        ),
+        Quiet::No("background work")
+    );
+    let unneeded = ActivityFacts {
+        background_needed: Some(false),
+        ..leftover.clone()
+    };
+    assert_eq!(quiet_at(&unneeded, now), Quiet::Yes);
+    assert!(!has_work_in_flight_at(&unneeded, now));
+    assert!(matches!(classify(&unneeded), ActivityState::Idle { .. }));
+    assert!(!driver_present(&unneeded));
+    // An agent terminal is judged with the commands; a user's shell is not.
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                active_agent_terminals: 1,
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::Yes
+    );
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                active_user_shells: 1,
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::No("user shell open")
+    );
+    // Observed turn facts outrank the judgment.
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                tools_in_flight: vec![InFlightToolCall {
+                    tool_call_id: "t".into(),
+                    title: None,
+                    status: ToolCallStatus::Pending,
+                    started_at_ms: now - 1_000,
+                }],
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::No("tool call in flight")
+    );
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                task_settled_at_ms: Some(now - 500),
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::No("background task settled; its notification turn is about to start")
+    );
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                queued_commands: 1,
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::No("queued command")
+    );
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                goal_active: true,
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::No("goal owns the session")
+    );
+    // A held barrier is not work, but it is not "quiet" either.
+    assert_eq!(
+        quiet_at(
+            &ActivityFacts {
+                checkpoint_barrier: true,
+                ..unneeded.clone()
+            },
+            now
+        ),
+        Quiet::Barrier
+    );
+    assert!(!is_quiet(&ActivityFacts {
+        checkpoint_barrier: true,
+        ..ActivityFacts::default()
+    }));
+}

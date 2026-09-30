@@ -512,11 +512,6 @@ pub enum RuntimeEvent {
     NativeAgent {
         event: crate::native_agent::NativeAgentEvent,
     },
-    ContinuationExpected {
-        since_ms: i64,
-        note: String,
-        generation: u64,
-    },
     Connected {
         agent_name: Option<String>,
         agent_version: Option<String>,
@@ -579,6 +574,9 @@ pub enum RuntimeEvent {
     ClaudeAsyncTaskControlChanged {
         task_id: String,
         can_stop: bool,
+        /// The task completed or failed, so Claude Code will follow it with a
+        /// task-notification turn. A task the user stopped gets no turn.
+        settled: bool,
     },
     /// Claude Code reported the end of one model cycle. It travels on the
     /// same ordered stream as `SessionUpdate`, so everything the adapter sent

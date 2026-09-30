@@ -1,0 +1,109 @@
+{
+  "id": "S43",
+  "title": "Running turn says it is waiting for trace evidence",
+  "category": "running-waiting",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "51a8864993190bfa7f45b7711daf1d70",
+    "session_title": "/home/jonathan/Projects/bifrost2 via claude4",
+    "decision": "3124130-1790688604873-00000000000000000001",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T13:30:04.873Z",
+    "assessed_at": "2026-09-29T13:30:05.059Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "claude",
+    "phase": "running",
+    "silent_for_s": 60,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\nland ultimately means \"push to origin/master\"\n</user>\n<assistant>\nI'm checking how the JDK gets indexed in production versus test fixtures, since the implicit `java.lang.Object` superclass looks like the shared cause of all three failures.\n</assistant>\n<assistant>\nI'll add temporary diagnostics to the Java signature and applicability code, run the three failing tests plus one passing control, then restore the file byte-for-byte.\n</assistant>\n<assistant>\nWaiting for the traced test build to finish; I'll use Monitor to wake when the nextest summary appears.\n</assistant>\n<assistant>\nWhile the build runs, I'll read the shared hierarchy nearest-name walker to see where an unresolved supertype edge adds a gap.\n</assistant>\n<assistant>\nThe fact_resolution module is over 50,000 lines, so reading blind is not productive. I'll wait for the trace evidence to point at the exact gap origins.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "land ultimately means \"push to origin/master\"",
+    "assistant_text_tail": "The fact_resolution module is over 50,000 lines, so reading blind is not productive. I'll wait for the trace evidence to point at the exact gap origins."
+  },
+  "recorded_verdict": {
+    "work_state": "BackgroundWork",
+    "work_state_confidence": 0.7699999809265137,
+    "needs_user_input": 0.06000000238418579,
+    "retryable_server_error": 0.0,
+    "assessment": {
+      "failure": {
+        "choice": "unclear",
+        "confidence": 0.4399999976158142
+      },
+      "input": {
+        "choice": "none",
+        "confidence": 0.9399999976158142
+      },
+      "work": {
+        "choice": "waiting",
+        "confidence": 0.7699999809265137
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "waiting",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "nothing",
+    "judgment": "right",
+    "next": "user replied 7 s later"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T13:30:11.637Z",
+        "kind": "user",
+        "text": "jesus, that's a monster. is that a single source file? should we split it up?"
+      },
+      {
+        "at": "2026-09-29T13:31:44.352Z",
+        "kind": "agent",
+        "text": "I'm adding two more trace points to find where the public inherited case exits before any comparison runs, then rerunning only that test."
+      },
+      {
+        "at": "2026-09-29T13:33:21.131Z",
+        "kind": "agent",
+        "text": "Reading the import composition function while the public-case trace build finishes."
+      },
+      {
+        "at": "2026-09-29T13:38:24.513Z",
+        "kind": "agent",
+        "text": "I'll add a temporary producer-side dump test that prints every gap with its site kind and source text for the fixture files, so the consumer's site IDs map back to source."
+      },
+      {
+        "at": "2026-09-29T13:44:09.136Z",
+        "kind": "agent",
+        "text": "Gathering the type definitions and import paths I need to write the qualified-prefix change in `java_demand.rs`."
+      },
+      {
+        "at": "2026-09-29T13:49:59.780Z",
+        "kind": "agent",
+        "text": "The reason sets are byte-identical, so my change did not take effect on this path. I'll instrument the new helper to see whether it runs and what it sees."
+      }
+    ]
+  }
+}

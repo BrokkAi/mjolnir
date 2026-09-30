@@ -10,6 +10,9 @@ type PendingRepliedVerdict = (u64, TurnEvidence, Option<(String, u64)>);
 pub(super) struct RepliedVerdictState {
     last_generation: Option<u64>,
     inference: Mutex<Option<(u64, Decision, i64)>>,
+    /// Jev's confident answer to whether the listed background commands are
+    /// still needed, with the evidence generation it was judged at.
+    background: Mutex<Option<(u64, bool)>>,
 }
 
 fn blocked(facts: &ActivityFacts) -> Option<&'static str> {
@@ -35,27 +38,51 @@ fn blocked(facts: &ActivityFacts) -> Option<&'static str> {
 }
 
 impl RepliedVerdictState {
+    /// `(expected_continuation, inferred_idle_since_ms, background_needed)`
+    /// for the current generation, or nothing once the evidence has moved on.
     pub(super) fn inference(
         &self,
         generation: u64,
         facts: &ActivityFacts,
-    ) -> (Option<i64>, Option<i64>) {
+    ) -> (Option<i64>, Option<i64>, Option<bool>) {
         let mut inference = self
             .inference
             .lock()
             .expect("verdict inference lock poisoned");
+        let mut background = self
+            .background
+            .lock()
+            .expect("verdict background lock poisoned");
+        let stale = blocked(facts).is_some();
         if inference
             .as_ref()
             .is_some_and(|(accepted, _, _)| *accepted != generation)
-            || blocked(facts).is_some()
+            || stale
         {
             *inference = None;
         }
-        match *inference {
-            Some((_, Decision::InferIdle | Decision::AwaitingInput, since)) => (None, Some(since)),
-            Some((_, Decision::ExpectContinuation, since)) => (Some(since), None),
-            _ => (None, None),
+        if background
+            .as_ref()
+            .is_some_and(|(accepted, _)| *accepted != generation)
+            || stale
+        {
+            *background = None;
         }
+        let needed = background.map(|(_, needed)| needed);
+        match *inference {
+            Some((_, Decision::InferIdle | Decision::AwaitingInput, since)) => {
+                (None, Some(since), needed)
+            }
+            Some((_, Decision::ExpectContinuation, since)) => (Some(since), None, needed),
+            _ => (None, None, needed),
+        }
+    }
+
+    fn judge_background(&self, generation: u64, needed: Option<bool>) {
+        *self
+            .background
+            .lock()
+            .expect("verdict background lock poisoned") = needed.map(|needed| (generation, needed));
     }
 }
 
@@ -116,6 +143,23 @@ impl DurableRelay {
         );
         evidence.completion = Some(a.completion.clone());
         evidence.authorization = self.snapshot.assessment_context.clone();
+        let now = epoch_millis();
+        evidence.background = self
+            .background_commands()
+            .into_iter()
+            .take(mj_core::activity::verdict::IN_FLIGHT_TOOLS)
+            .map(|command| {
+                let mut text = command.command;
+                text.truncate(
+                    text.floor_char_boundary(mj_core::activity::verdict::TOOL_TITLE_BYTES),
+                );
+                mj_core::activity::verdict::BackgroundEvidence {
+                    id: command.id,
+                    command: text,
+                    started_s_ago: now.saturating_sub(command.started_at_ms).max(0) as u64 / 1000,
+                }
+            })
+            .collect();
         if let Some(context) = &evidence.authorization
             && !context.final_reply_omitted
             && let Some(last) = context
@@ -134,7 +178,23 @@ impl DurableRelay {
         if evidence.authorization.is_some() {
             evidence.transcript_summary.clear();
         }
-        if serde_json::to_vec(&evidence)?.len() > 60 * 1024 {
+        // The wire limit is 64 KiB. A history near its own budgets can pass
+        // it with JSON overhead; old assistant entries go first, and the
+        // whole history is dropped only when even that is not enough.
+        const WIRE_BUDGET: usize = 60 * 1024;
+        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET
+            && let Some(mut context) = evidence.authorization.take()
+        {
+            let mut probe = evidence.clone();
+            let fits = context.shrink_until(|c| {
+                probe.authorization = Some(c.clone());
+                serde_json::to_vec(&probe)
+                    .map(|b| b.len() <= WIRE_BUDGET)
+                    .unwrap_or(false)
+            });
+            evidence.authorization = fits.then_some(context);
+        }
+        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET {
             evidence.authorization = None;
             evidence.transcript_summary.clear();
         }
@@ -178,6 +238,25 @@ impl DurableRelay {
                     && c.evidence().validate().is_ok()
             });
         let action = verdict.action(complete);
+        // The quiet judgment is separate from the action: it only ever says
+        // whether the listed leftover processes still matter, and only when
+        // the request listed some.
+        let listed = a
+            .evidence
+            .as_ref()
+            .is_some_and(|e| !e.background.is_empty());
+        let needed = verdict
+            .background
+            .filter(|judgment| {
+                listed && judgment.confidence >= mj_core::activity::verdict::ACT_CONFIDENCE
+            })
+            .and_then(|judgment| match judgment.choice {
+                mj_core::assessment::Background::Needed => Some(true),
+                mj_core::assessment::Background::Unneeded => Some(false),
+                mj_core::assessment::Background::Unclear => None,
+            });
+        self.replied_verdict
+            .judge_background(self.turn_context.generation(), needed);
         a.verdict = Some(verdict);
         a.action = Some(action);
         a.status = Status::Assessed;
@@ -204,6 +283,7 @@ impl DurableRelay {
                     a.status = Status::Deferred;
                     "quota_resolution_required"
                 }
+                Action::Continue if !self.continuation_enabled => "continuation_disabled",
                 Action::Continue if self.snapshot.continuation.eligible() => {
                     a.status = Status::Deferred;
                     "authorized_continuation_ready"
@@ -360,6 +440,8 @@ impl DurableRelay {
         Ok("applied")
     }
 
+    /// Test helper: apply an expected-continuation decision directly.
+    #[cfg(test)]
     pub fn expect_continuation(
         &mut self,
         since_ms: i64,
@@ -409,7 +491,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = completed(temp.path());
         relay
-            .claude_async_task_control_changed("0".into(), true)
+            .claude_async_task_control_changed("0".into(), true, false)
             .unwrap();
         let before = relay.operational_state().background_commands;
         assert!(
@@ -523,5 +605,232 @@ mod tests {
                 .unwrap(),
             "stale_generation"
         );
+    }
+}
+
+#[cfg(test)]
+mod settled_task_tests {
+    use super::*;
+    use mj_core::config::HarnessKind;
+
+    fn claude_relay(root: &Path) -> DurableRelay {
+        let mut relay = DurableRelay::open(root, "settle-test", "test").unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Claude);
+        relay.background_work = BackgroundWorkPolicy::ClaudeTasks;
+        relay
+    }
+
+    fn task(id: &str) -> crate::acp::ClaudeBackgroundTask {
+        crate::acp::ClaudeBackgroundTask {
+            task_id: id.into(),
+            description: format!("cargo test ({id})"),
+        }
+    }
+
+    #[test]
+    fn a_completed_task_keeps_the_session_busy_until_its_turn_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay
+            .claude_background_tasks_changed(vec![task("a"), task("b")])
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
+
+        // The adapter's edge update for a completed task.
+        relay
+            .claude_async_task_control_changed("a".into(), false, true)
+            .unwrap();
+        let facts = relay.activity_facts();
+        let settled = facts.task_settled_at_ms.expect("settle recorded");
+        assert!(mj_core::activity::turn_imminent(&facts, settled + 1_000));
+        assert_eq!(relay.operational_state().task_settled_at_ms, Some(settled));
+        assert!(
+            !relay.operational_state().is_quiet(),
+            "a settled task is a turn about to start"
+        );
+
+        // The notification turn opens: the settle has done its job, and the
+        // turn itself is now the reason the session is busy.
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted {
+                started_at_ms: settled + 2_000,
+            })
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
+        assert!(relay.activity_facts().harness_turn_started_at_ms.is_some());
+    }
+
+    #[test]
+    fn a_confident_unneeded_judgment_releases_the_leftover_tasks_until_the_evidence_moves() {
+        use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        // A configured harness session; otherwise nothing is ever quiet.
+        relay.acp_ready = true;
+        relay
+            .claude_background_tasks_changed(vec![task("srv")])
+            .unwrap();
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+            .unwrap();
+        relay
+            .record_session_update(
+                serde_json::from_value(serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Done; the dev server stays up for you."}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
+        assert_eq!(
+            evidence.background.len(),
+            1,
+            "the leftover task is named in the evidence"
+        );
+        assert!(evidence.background[0].command.contains("srv"));
+        let before = relay.activity_facts();
+        assert!(mj_core::activity::driver_present(&before));
+        assert_eq!(
+            relay.operational_state().quiet().reason(),
+            "background work"
+        );
+
+        let judged = |background| Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+            },
+            work: Judgment {
+                choice: Work::Finished,
+                confidence: 0.99,
+            },
+            background: Some(Judgment {
+                choice: background,
+                confidence: 0.95,
+            }),
+        };
+        relay
+            .apply_turn_assessment(generation, judged(Background::Unneeded))
+            .unwrap();
+        let after = relay.activity_facts();
+        assert_eq!(after.background_needed, Some(false));
+        assert_eq!(
+            after.background_commands, 1,
+            "the task list itself is untouched"
+        );
+        assert!(!mj_core::activity::driver_present(&after));
+        let quiet = relay.operational_state().quiet();
+        assert!(quiet.is_yes(), "{}", quiet.reason());
+        assert_eq!(relay.operational_state().background_needed, Some(false));
+
+        // New foreground work invalidates the judgment with the rest of the inference.
+        relay
+            .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 2 })
+            .unwrap();
+        assert!(relay.activity_facts().background_needed.is_none());
+    }
+
+    #[test]
+    fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+        use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
+        use mj_core::relay::RelayCommandOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .unwrap();
+        relay.set_continuation_enabled(false);
+        // A real user prompt, so the authorization history is complete and
+        // the verdict can reach `Continue` at all.
+        submit_relay(
+            &mut relay,
+            "original-prompt",
+            prompt("Fix the failing test and push when done."),
+        );
+        assert_eq!(
+            relay.claim_pending_commands(true).unwrap()[0].command_id,
+            "original-prompt"
+        );
+        relay
+            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new("Fixed the test. I'll push next.")),
+            )))
+            .unwrap();
+        relay
+            .record_command_completed(
+                "original-prompt",
+                RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "EndTurn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
+        assert!(evidence.authorization.is_some());
+        let verdict = Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 0.99,
+            },
+            input: Judgment {
+                choice: Input::None,
+                confidence: 0.99,
+            },
+            work: Judgment {
+                choice: Work::AuthorizedUnfinished,
+                confidence: 0.99,
+            },
+            background: None,
+        };
+        let reason = relay.apply_turn_assessment(generation, verdict).unwrap();
+        assert_eq!(reason, "continuation_disabled");
+        let assessment = relay.snapshot.assessment.as_ref().unwrap();
+        assert_eq!(
+            assessment.status,
+            Status::Assessed,
+            "nothing would consume a deferred one"
+        );
+        assert!(!relay.operational_state().retry_assessment_pending);
+    }
+
+    #[test]
+    fn only_the_edge_update_settles_and_a_stopped_task_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay
+            .claude_background_tasks_changed(vec![task("a"), task("b")])
+            .unwrap();
+        // A stop the user asked for is answered with a notice, not a turn.
+        relay
+            .claude_async_task_control_changed("b".into(), false, false)
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
+        // The level shrinking cannot tell a completed task from a stopped
+        // one, so it does not count as a settle on its own.
+        relay
+            .claude_background_tasks_changed(vec![task("a")])
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
+        assert_eq!(relay.operational_state().background_commands.len(), 1);
+        relay
+            .claude_async_task_control_changed("a".into(), false, true)
+            .unwrap();
+        assert!(relay.activity_facts().task_settled_at_ms.is_some());
+        // A restart forgets it with the rest of the harness's processes.
+        relay.forget_harness_processes();
+        assert!(relay.activity_facts().task_settled_at_ms.is_none());
     }
 }

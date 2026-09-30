@@ -174,11 +174,16 @@ where
                 }
                 if notification_harness == HarnessKind::Claude {
                     match claude_async_task_control_update(&notification.update) {
-                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set { task_id, can_stop })) => {
+                        Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
+                            task_id,
+                            can_stop,
+                            settled,
+                        })) => {
                             notification_events
                                 .send(RuntimeEvent::ClaudeAsyncTaskControlChanged {
                                     task_id,
                                     can_stop,
+                                    settled,
                                 })
                                 .await
                                 .map_err(|_| relay_event_channel_error())?;

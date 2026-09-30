@@ -265,8 +265,40 @@ impl TurnContext {
     ) -> TurnEvidence {
         let state = self.0.lock().expect("turn context lock poisoned");
         let summary = state.summary.latest_user_messages();
+        let last_assistant = state
+            .summary
+            .entries
+            .iter()
+            .rposition(|e| e.role == crate::summary::SummaryRole::Assistant);
+        let final_tool_calls = state
+            .summary
+            .entries
+            .iter()
+            .skip(last_assistant.map_or(0, |i| i + 1))
+            .filter(|e| e.role == crate::summary::SummaryRole::Tool)
+            .take(IN_FLIGHT_TOOLS)
+            .map(|e| mj_core::activity::verdict::ToolOutcome {
+                name: tail(
+                    e.tool
+                        .as_ref()
+                        .and_then(|t| t.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or(&e.text),
+                    TOOL_TITLE_BYTES,
+                ),
+                status: e
+                    .tool
+                    .as_ref()
+                    .and_then(|t| t.get("status"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            })
+            .collect();
         let mut evidence = TurnEvidence {
             authorization: None,
+            final_tool_calls,
+            background: Vec::new(),
             harness,
             phase,
             silent_for_s: facts
@@ -426,6 +458,35 @@ mod tests {
         assert_eq!(evidence.tools_in_flight[0].running_s, 4);
         let full = context.0.lock().unwrap().summary.render(256 * 1024);
         assert!(full.contains("OLD REQUEST") && full.contains("TOOL_BODY"));
+    }
+
+    #[test]
+    fn tool_calls_after_the_last_assistant_text_are_named_in_the_evidence() {
+        use mj_core::relay::RelayObservation;
+        let context = TurnContext::default();
+        context.observe_relay(
+            &RelayObservation::CommandStarted {
+                command_id: "audit".into(),
+                started_at_ms: 0,
+            },
+            Some("Audit the cache and hand back."),
+        );
+        context.observe(&message("m1", "I'm checking the update paths now."));
+        let handback: SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate":"tool_call", "toolCallId":"hb", "title":"mcp__mj-agents__handback",
+            "status":"completed", "rawInput":{"report":"done"}
+        }))
+        .unwrap();
+        context.observe(&handback);
+        let facts = ActivityFacts::default();
+        let evidence = context.evidence(HarnessKind::Codex, TurnPhase::Replied, &facts, 5_000);
+        assert_eq!(evidence.final_tool_calls.len(), 1);
+        assert!(evidence.final_tool_calls[0].name.contains("handback"));
+        assert_eq!(evidence.final_tool_calls[0].status, "completed");
+        // Text after the call closes the list again.
+        context.observe(&message("m2", "Handed back."));
+        let evidence = context.evidence(HarnessKind::Codex, TurnPhase::Replied, &facts, 5_000);
+        assert!(evidence.final_tool_calls.is_empty());
     }
 
     #[test]

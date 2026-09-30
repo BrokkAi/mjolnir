@@ -38,7 +38,13 @@ pub(super) struct RawSessionNotification {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClaudeAsyncTaskControlUpdate {
-    Set { task_id: String, can_stop: bool },
+    Set {
+        task_id: String,
+        can_stop: bool,
+        /// `completed` or `failed`: Claude Code answers either with a
+        /// task-notification turn. `stopped` is answered with a plain notice.
+        settled: bool,
+    },
     Ignore,
 }
 
@@ -69,6 +75,7 @@ pub(super) fn claude_async_task_control_update(
                 .get("canStop")
                 .and_then(serde_json::Value::as_bool)
                 .ok_or_else(|| "async_task_spawned requires canStop".to_owned())?,
+            settled: false,
         })),
         "async_task_state_update" => {
             let state = update
@@ -79,6 +86,7 @@ pub(super) fn claude_async_task_control_update(
                 Ok(Some(ClaudeAsyncTaskControlUpdate::Set {
                     task_id: task_id()?,
                     can_stop: false,
+                    settled: state != "stopped",
                 }))
             } else if matches!(state, "running" | "paused") {
                 Ok(Some(ClaudeAsyncTaskControlUpdate::Ignore))

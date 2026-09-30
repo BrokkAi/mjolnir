@@ -29,10 +29,35 @@ pub struct ToolEvidence {
     pub running_s: u64,
 }
 
+/// One background command the agent left running, as the quiet judgment sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BackgroundEvidence {
+    pub id: String,
+    /// The command line, cut to [`TOOL_TITLE_BYTES`].
+    pub command: String,
+    pub started_s_ago: u64,
+}
+
+/// A tool call the agent made after its last text, by name and outcome only.
+/// A `handback` or `spawn` here says what the reply's silence does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ToolOutcome {
+    pub name: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct TurnEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<crate::assessment::ContextHistory>,
+    /// Tool calls made after the last assistant text of the turn, oldest
+    /// first, at most [`IN_FLIGHT_TOOLS`]. Empty on older workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub final_tool_calls: Vec<ToolOutcome>,
+    /// The background commands behind `background_commands`, sent so Jev can
+    /// judge whether anyone still depends on them. Empty on older workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<BackgroundEvidence>,
     pub harness: HarnessKind,
     pub phase: TurnPhase,
     pub silent_for_s: u64,
@@ -156,11 +181,6 @@ impl TurnVerdict {
                 None => None,
             },
         })
-    }
-
-    pub fn should_retry_server_error(&self) -> bool {
-        self.retryable_server_error
-            .is_some_and(|score| score >= SERVER_RETRY_CONFIDENCE)
     }
 }
 
@@ -296,28 +316,6 @@ mod tests {
             }
         }
         assert!(TurnVerdict::parse(&json!({})).is_err());
-    }
-
-    #[test]
-    fn server_retry_requires_a_confident_valid_probability() {
-        let mut response = json!({"answers": {
-            "work_state":{"type":"choice","choice":"unclear","confidence":0.5},
-            "needs_user_input":{"type":"noul","noul":0.01},
-            "retryable_server_error":{"type":"noul","noul":0.90}
-        }});
-        assert!(
-            TurnVerdict::parse(&response)
-                .unwrap()
-                .should_retry_server_error()
-        );
-        response["answers"]["retryable_server_error"]["noul"] = json!(0.89);
-        assert!(
-            !TurnVerdict::parse(&response)
-                .unwrap()
-                .should_retry_server_error()
-        );
-        response["answers"]["retryable_server_error"]["noul"] = json!(1.1);
-        assert!(TurnVerdict::parse(&response).is_err());
     }
 
     #[test]

@@ -17,6 +17,17 @@ pub fn disabled_by_environment() -> bool {
     std::env::var(DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
 }
 
+/// Set to `1` in a worker's launch environment when automatic continuation
+/// is off (`[continuation] enabled = false`, or Jev off). The worker then
+/// never parks a `Continue` verdict as "deferred": nobody would act on it,
+/// and `mj wait` would hold the turn open for it.
+pub const CONTINUATION_DISABLED_ENVIRONMENT: &str = "MJ_CONTINUATION_DISABLED";
+
+/// Whether this process was launched with automatic continuation turned off.
+pub fn continuation_disabled_by_environment() -> bool {
+    std::env::var(CONTINUATION_DISABLED_ENVIRONMENT).is_ok_and(|value| value == "1")
+}
+
 const SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 const SEGMENTS: usize = 4;
 

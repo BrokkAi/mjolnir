@@ -1,0 +1,118 @@
+{
+  "id": "N02",
+  "title": "Offer to rewrite a plan section after an advice question",
+  "category": "control-offer",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "2ddbd4ceaa5916f6c58138d97e62d8c1",
+    "session_title": "/home/jonathan/Projects/bifrost3 via claude",
+    "reply_position": 18036,
+    "captured_at": "2026-09-07T03:25:41.699Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:17946",
+          "role": "assistant",
+          "text": "Compacting...\n\nCompacting completed."
+        },
+        {
+          "id": "user:17958",
+          "role": "user",
+          "text": "fable, what should we do here"
+        },
+        {
+          "id": "agent:17991",
+          "role": "assistant",
+          "text": "Still checking one thing before I answer: how the solver treats a lock whose subject resolves open, since that decides whether the fix is one line or a design change."
+        },
+        {
+          "id": "agent:18036",
+          "role": "assistant",
+          "text": "Put the workerpool false positive at the front of the queue, split its fix into a safety half and a precision half, and make bbolt's next step depend on the result. Steps 1 and 2 (two-hop type, pointer-deref store) drop behind it.\n\n**Why it goes first.** The shipped policy's claim is precision. A `proven`/`unprotected` finding on `p.stopped = true` under a held `p.stopMutex.Lock()` is a worse outcome than any of the remaining misses, and it is a class defect in the solver rather than a Go-specific gap: a lock whose subject fails to resolve is being lost instead of opening the report.\n\n**Half A: an unresolvable lock must never vanish.** From what I read just now, three sites can lose it, and Opus's `exact=0 open=0` measurement says at least one of them did:\n\n- The provider's `modeled_effects` in `crates/bifrost-rql/src/structural/search/concurrency.rs`, when `resolved_value_at` answers `AliasSetTruncated` for a subject rooted at a `CaptureSlot` (the exclusion at lines 160-168). Whether it emits the effect with `canonical: None` plus a reason, or drops the effect, is the thing to print.\n- `resolve_modeled_subject` in `crates/bifrost-flow/src/concurrency.rs:2500`: when both `canonical_capture_identity` and `stable_modeled_identity` miss, it leaves the subject untouched and pushes no reason.\n- The repeated self-conflict block that hardcodes `ConcurrentProtection::Unprotected`.\n\nThe invariant to install: every `LockAcquire` that reaches `must_locks` (line 4422) either has an exact canonical or lands in `locks.open` with a reason, and an access under an open lock reports `AmbiguousSynchronization`, not `Unprotected`. Acceptance for this half is that `ParentChildFieldMutex` goes from proven-unprotected to *open*, and `ParentChildLocalMutex` is unchanged. Ship that on its own commit. Open is the correct failure mode; it also makes the census honest regardless of how long half B takes.\n\n**Half B: resolve `p.mu` the way `p.stopped` already resolves.** The access on the same captured struct gets a location today, so the identity machinery exists; the lock subject just does not reach it. Do the measurement Opus recorded (print each candidate's `AccessPathRoot` at the exclusion for both reproducers and for bbolt `bucket.go:84`) before changing anything. My expectation is that the right fix is not to delete the `CaptureSlot` exclusion but to route capture-rooted subjects through the capture/field-chain identity that accesses use in bifrost-flow. That is a guess; the print decides. Acceptance: field case proven-protected, local case unchanged, and the copy-negatives from this session still negative.\n\n**Then re-measure bbolt before steps 1 and 2.** If `alias_set_truncated` clears at `bucket.go:84`, what remains is `unknown_location`, which points at the pointer-deref store (step 2) more than the two-hop type (step 1). If it does not clear, that is the bounded-heap-identity work the plan already assigns to #2902; stop chasing it in this tranche, adjudicate bbolt as inconclusive with the cause named, and move on.\n\n**Scope for the rest.** pond, ants and go-playground/pool are misses (`partial_discovery`, zero pairs), not false positives. Keep them as step 4 but treat them as optional for closing this tranche. The tranche's deliverable should read: zero false positives across the six, cache2go detected and explained safe, bbolt adjudicated with a named cause, ledgers updated.\n\nTwo things I would tell Opus explicitly: keep the disable-and-rerun check before every commit (it caught three inert fixes this session), and do not skip the print in half B, since that is the step this plan has been wrong by skipping twice.\n\nIf you want, I will rewrite the \"What remains, in order\" section to this ordering before you hand back; otherwise it is ready to give to Opus as is."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "fable, what should we do here",
+    "assistant_text_tail": " is unchanged. Ship that on its own commit. Open is the correct failure mode; it also makes the census honest regardless of how long half B takes.\n\n**Half B: resolve `p.mu` the way `p.stopped` already resolves.** The access on the same captured struct gets a location today, so the identity machinery exists; the lock subject just does not reach it. Do the measurement Opus recorded (print each candidate's `AccessPathRoot` at the exclusion for both reproducers and for bbolt `bucket.go:84`) before changing anything. My expectation is that the right fix is not to delete the `CaptureSlot` exclusion but to route capture-rooted subjects through the capture/field-chain identity that accesses use in bifrost-flow. That is a guess; the print decides. Acceptance: field case proven-protected, local case unchanged, and the copy-negatives from this session still negative.\n\n**Then re-measure bbolt before steps 1 and 2.** If `alias_set_truncated` clears at `bucket.go:84`, what remains is `unknown_location`, which points at the pointer-deref store (step 2) more than the two-hop type (step 1). If it does not clear, that is the bounded-heap-identity work the plan already assigns to #2902; stop chasing it in this tranche, adjudicate bbolt as inconclusive with the cause named, and move on.\n\n**Scope for the rest.** pond, ants and go-playground/pool are misses (`partial_discovery`, zero pairs), not false positives. Keep them as step 4 but treat them as optional for closing this tranche. The tranche's deliverable should read: zero false positives across the six, cache2go detected and explained safe, bbolt adjudicated with a named cause, ledgers updated.\n\nTwo things I would tell Opus explicitly: keep the disable-and-rerun check before every commit (it caught three inert fixes this session), and do not skip the print in half B, since that is the step this plan has been wrong by skipping twice.\n\nIf you want, I will rewrite the \"What remains, in order\" section to this ordering before you hand back; otherwise it is ready to give to Opus as is.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "waiting",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "no Jev record",
+    "judgment": "right",
+    "next": "user: 'do it pls' was the decision"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-07T03:26:52.519Z",
+        "kind": "user",
+        "text": "do it pls"
+      },
+      {
+        "at": "2026-09-07T03:28:41.653Z",
+        "kind": "agent",
+        "text": "Done and pushed: `62ee768c2` on `origin/master`, plan file only.  What changed in `.agents/plans/go-race-small-repository-gap-closure.md`:  - **\"What remains, in order\"** is now the seven-step sequenc"
+      },
+      {
+        "at": "2026-09-07T03:29:35.103Z",
+        "kind": "user",
+        "text": "opus, go"
+      },
+      {
+        "at": "2026-09-07T03:30:47.883Z",
+        "kind": "agent",
+        "text": "The provider does retain an unresolvable lock as `partial: Some(subject)` with `canonical: None`, and `MustLockSet` already has an `open` half. So the loss is further along than the plan assumed. Inst"
+      },
+      {
+        "at": "2026-09-07T03:38:41.595Z",
+        "kind": "agent",
+        "text": "**The plan's hypothesis is falsified.** Zero `canonical_actual` calls, zero `acquire`, zero exclusions — the lock model never produces an effect at all for `p.mu.Lock()`. Comparing against the local-m"
+      },
+      {
+        "at": "2026-09-07T03:38:59.497Z",
+        "kind": "agent",
+        "text": "Now the picture is clear. In the local case `canonical_actual` runs and the acquire lands with an exact canonical; in the field case it is **never called**, so `exact_model_effects` bails before `bind"
+      }
+    ]
+  }
+}

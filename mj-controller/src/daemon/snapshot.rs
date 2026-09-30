@@ -243,6 +243,14 @@ impl RuntimeState {
                 && let Some(session) = controller.state.sessions.get(&session_id)
                 && session.state.has_live_worker()
             {
+                let quiet = snapshot.operational.quiet();
+                if !quiet.is_yes() {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        reason = quiet.reason(),
+                        "session is not quiet; upgrade, checkpoint and move wait"
+                    );
+                }
                 let facts = snapshot.operational.facts();
                 // A busy session is not replaced, and that needs no comment.
                 // An idle one that is still not replaceable would otherwise

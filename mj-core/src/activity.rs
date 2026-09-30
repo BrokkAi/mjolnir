@@ -88,6 +88,20 @@ pub struct ActivityFacts {
     pub current_step_started_at_ms: Option<i64>,
     /// Start of the current observed idle period, when the relay knows it.
     pub idle_since_ms: Option<i64>,
+    /// When a background task the harness will follow up on last settled,
+    /// while no turn has opened since. Claude Code answers every settled
+    /// background command with a task-notification turn of its own; for
+    /// [`IMMINENT_TURN_WINDOW_MS`] after the settle the session is treated as
+    /// having a turn in flight, because the process facts lag the queue by a
+    /// second or so and that second is when a worker upgrade killed a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_settled_at_ms: Option<i64>,
+    /// Jev's confident judgment of whether anyone still depends on the
+    /// background commands and agent terminals the session holds. `Some(false)`
+    /// lets a `sleep infinity` stop counting as work; `None` and `Some(true)`
+    /// leave today's rule in force. Process-local, never restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_needed: Option<bool>,
 }
 
 impl Default for ActivityFacts {
@@ -123,8 +137,33 @@ impl Default for ActivityFacts {
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
             idle_since_ms: None,
+            task_settled_at_ms: None,
+            background_needed: None,
         }
     }
+}
+
+/// How long after a background task settles the session counts as having a
+/// turn about to start. The observed gap between the settle and the harness
+/// turn is one to three seconds; the window is generous because a missed
+/// turn costs a person a restart and a bounded wait costs nothing.
+pub const IMMINENT_TURN_WINDOW_MS: i64 = 60_000;
+
+/// Whether a settled background task means a harness turn is about to open.
+#[must_use]
+pub fn turn_imminent(facts: &ActivityFacts, now_ms: i64) -> bool {
+    facts.prompt_started_at_ms.is_none()
+        && facts.harness_turn_started_at_ms.is_none()
+        && facts.task_settled_at_ms.is_some_and(|settled| {
+            (0..=IMMINENT_TURN_WINDOW_MS).contains(&now_ms.saturating_sub(settled))
+        })
+}
+
+/// Whether the background commands and agent terminals still count as work.
+/// A user's own shell always counts; Jev is never asked about it.
+fn leftover_processes_count(facts: &ActivityFacts) -> bool {
+    facts.background_needed != Some(false)
+        && (facts.background_commands > 0 || facts.active_agent_terminals > 0)
 }
 
 /// What a session is doing, at the granularity every part of Mjolnir agrees on.
@@ -419,7 +458,9 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
             since_ms: Some(since_ms),
         };
     }
-    if facts.background_commands > 0 || facts.active_user_shells > 0 {
+    if (facts.background_commands > 0 && facts.background_needed != Some(false))
+        || facts.active_user_shells > 0
+    {
         return ActivityState::Background {
             started_at_ms: facts.background_started_at_ms,
         };
@@ -449,22 +490,100 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
 /// reads the classified state rather than that flag.
 #[must_use]
 pub fn has_work_in_flight(facts: &ActivityFacts) -> bool {
-    if facts.execution == RelayExecutionState::Closed {
-        return false;
+    quiet_at(facts, crate::clock::epoch_millis()).work_in_flight()
+}
+
+/// [`has_work_in_flight`] at a given time, for callers and tests that hold a clock.
+#[must_use]
+pub fn has_work_in_flight_at(facts: &ActivityFacts, now_ms: i64) -> bool {
+    quiet_at(facts, now_ms).work_in_flight()
+}
+
+/// Whether the worker may be stopped without losing anything, or why not.
+///
+/// The three layers, in order: facts about turns that no judgment may
+/// override; Jev's judgment about leftover processes, which can only make a
+/// session quieter; and the process-fact rule that applies when Jev has said
+/// nothing. See `.agents/docs/jev.md`, "Quiet".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quiet {
+    Yes,
+    /// Nothing is running, but a checkpoint barrier is held; stopping the
+    /// worker would lose nothing, replacing it must still wait.
+    Barrier,
+    No(&'static str),
+}
+
+impl Quiet {
+    #[must_use]
+    pub fn is_yes(self) -> bool {
+        self == Self::Yes
     }
-    classify(facts).has_work_in_flight()
-        // The durable flag on its own is too weak to claim the agent is
-        // working, but far too strong to ignore when the question is whether
-        // killing the worker would destroy something.
-        || facts.execution != RelayExecutionState::Idle
-        || facts.queued_commands > 0
-        || facts.background_commands > 0
-        || facts.active_user_shells > 0
-        || facts.active_agent_terminals > 0
-        || facts.goal_pending_resume
-        || facts.goal_decision
-        || facts.acp_ready == Some(false)
-        || facts.background_work_known == Some(false)
+
+    #[must_use]
+    pub fn work_in_flight(self) -> bool {
+        matches!(self, Self::No(_))
+    }
+
+    /// The reason, for a log line.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Yes => "quiet",
+            Self::Barrier => "checkpoint barrier held",
+            Self::No(reason) => reason,
+        }
+    }
+}
+
+#[must_use]
+pub fn quiet_at(facts: &ActivityFacts, now_ms: i64) -> Quiet {
+    if facts.execution == RelayExecutionState::Closed {
+        return Quiet::Yes;
+    }
+    // Layer 1: observed turn facts. Jev never overrides these.
+    let state = classify(facts);
+    if matches!(state, ActivityState::Turn { .. }) {
+        return Quiet::No("turn in flight");
+    }
+    if matches!(state, ActivityState::Tool { .. }) {
+        return Quiet::No("tool call in flight");
+    }
+    if turn_imminent(facts, now_ms) {
+        return Quiet::No("background task settled; its notification turn is about to start");
+    }
+    if facts.execution != RelayExecutionState::Idle {
+        return Quiet::No("execution flag is not idle");
+    }
+    if facts.queued_commands > 0 {
+        return Quiet::No("queued command");
+    }
+    if facts.goal_pending_resume || facts.goal_decision || matches!(state, ActivityState::Goal) {
+        return Quiet::No("goal owns the session");
+    }
+    if facts.acp_ready == Some(false) {
+        return Quiet::No("harness session still opening");
+    }
+    if facts.background_work_known == Some(false) {
+        return Quiet::No("provider background state unknown");
+    }
+    if facts.capacity_retry_armed || matches!(state, ActivityState::Retry) {
+        return Quiet::No("provider retry armed");
+    }
+    if facts.active_user_shells > 0 {
+        return Quiet::No("user shell open");
+    }
+    // Layers 2 and 3: leftover processes, unless Jev judged them unneeded.
+    if leftover_processes_count(facts) {
+        return Quiet::No("background work");
+    }
+    if state.has_work_in_flight() {
+        return Quiet::No("session state is not idle");
+    }
+    if facts.checkpoint_barrier {
+        return Quiet::Barrier;
+    }
+    Quiet::Yes
 }
 
 /// Whether a prompt could start now: no turn, tool, queued command, user
@@ -522,7 +641,7 @@ pub fn submit_blockers(facts: &ActivityFacts) -> Vec<&'static str> {
 /// [`has_work_in_flight`], which asks whether killing the worker loses work.
 #[must_use]
 pub fn driver_present(facts: &ActivityFacts) -> bool {
-    classify(facts).has_work_in_flight()
+    classify(facts).has_work_in_flight() || turn_imminent(facts, crate::clock::epoch_millis())
 }
 
 /// Whether nothing at all is happening, including no checkpoint barrier.
@@ -532,7 +651,7 @@ pub fn driver_present(facts: &ActivityFacts) -> bool {
 /// whether anything *else* is running.
 #[must_use]
 pub fn is_quiet(facts: &ActivityFacts) -> bool {
-    !facts.checkpoint_barrier && !has_work_in_flight(facts)
+    quiet_at(facts, crate::clock::epoch_millis()).is_yes()
 }
 
 /// Whether a controller may replace this worker without losing work.

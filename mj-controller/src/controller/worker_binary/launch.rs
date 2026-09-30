@@ -328,6 +328,7 @@ impl Controller {
             &target,
         )?;
         apply_jev_switch(&mut launch, self.config.jev.enabled);
+        apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());
         launch.subagents = session
             .subagents
             .clone()
@@ -489,6 +490,20 @@ pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
         environment.remove("TYPESAFE_API_KEY");
         environment.insert(
             mj_core::jev::DISABLED_ENVIRONMENT.to_owned(),
+            "1".to_owned(),
+        );
+    }
+}
+
+/// Tell the worker when nobody will act on a `Continue` verdict, so it does
+/// not park the assessment as deferred. Travels like the Jev switch.
+pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
+    if enabled {
+        return;
+    }
+    for environment in [&mut launch.target_environment, &mut launch.environment] {
+        environment.insert(
+            mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT.to_owned(),
             "1".to_owned(),
         );
     }

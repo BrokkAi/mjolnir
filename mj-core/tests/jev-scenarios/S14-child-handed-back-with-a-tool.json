@@ -1,0 +1,107 @@
+{
+  "id": "S14",
+  "title": "Child handed back with a tool call after its last text; scored unfinished 0.99",
+  "category": "subagent-child",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "b9babd0d243572d8987d43c15bff8d5c",
+    "session_title": "benchmark-cache-audit",
+    "decision": "assessment-b9babd0d243572d8987d43c15bff8d5c-510",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T03:42:24.488Z",
+    "assessed_at": "2026-09-29T03:42:24.711Z",
+    "recorded_action": "uncertain",
+    "recorded_status": "assessed",
+    "recorded_reason": "assessment_uncertain",
+    "note": "final_tool_calls added from the controller transcript (handback call at 03:42:21Z after the last assistant text); the recorded evidence predates the field."
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "msg_0b3c0fb4b9380add016abb3259028887d19feed295ac34cc29",
+          "role": "assistant",
+          "text": "I’ll trace the cache lifetimes and invalidation path, then check what the profile exposes for timings, cache layers, operators, and completion proofs. I’ll keep this read-only and won’t build or run benchmarks."
+        },
+        {
+          "id": "msg_0b3c0fb4b9380add016abb3268c22487d19abebb7f40c7175a",
+          "role": "assistant",
+          "text": "The public profile contract already distinguishes request-core timings from end-to-end latency and reports several reusable cache layers. I’m following those fields into the executor now, especially to determine which caches survive requests and which are invalidated by edits."
+        },
+        {
+          "id": "msg_0b3c0fb4b9380add016abb32fc7e9487d19cc1111e4d281e21",
+          "role": "assistant",
+          "text": "I found no general cross-request cache for the final `CodeQueryResult`; its seed and relation memo tables are rebuilt per request. There are reusable lower-level stores, plus specialized durable type-flow root projections, so a repeated “warm query” can mean several distinct things. I’m checking the benchmark harness and edit/update paths to pin down those distinctions and the A→B→A case."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "g agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nRead-only planning investigation for defensible warm latency benchmark. Audit query execution caches: final answer memoization vs reusable facts/indexes/semantic summaries; lifetime and invalidation after source edit; profile telemetry timings/work/cache_layers/operators and proof/completion fields. Read architecture docs and routed guidance. No edits/build/benchmark. Return decisive references and concrete acceptance checks, including repeated A/B edits potentially hitting blob cache.",
+    "assistant_text_tail": "I found no general cross-request cache for the final `CodeQueryResult`; its seed and relation memo tables are rebuilt per request. There are reusable lower-level stores, plus specialized durable type-flow root projections, so a repeated “warm query” can mean several distinct things. I’m checking the benchmark harness and edit/update paths to pin down those distinctions and the A→B→A case.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    },
+    "final_tool_calls": [
+      {
+        "name": "mcp__mj-agents__handback",
+        "status": "completed"
+      }
+    ]
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "none",
+      "confidence": 0.9200000166893005
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.9900000095367432
+    },
+    "work": {
+      "choice": "authorized_unfinished",
+      "confidence": 0.9900000095367432
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": true,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "uncertain only because the child had no user message in its authorization",
+    "judgment": "harmless",
+    "next": "child parked"
+  },
+  "context": {
+    "after": []
+  }
+}

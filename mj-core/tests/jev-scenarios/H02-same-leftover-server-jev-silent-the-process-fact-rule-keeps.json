@@ -1,0 +1,82 @@
+{
+  "id": "H02",
+  "title": "Same leftover server, Jev silent; the process-fact rule keeps the session busy",
+  "category": "leftover-process-unjudged",
+  "harness": "claude",
+  "source": {
+    "kind": "hand-built",
+    "note": "Not a recorded turn. Built to pin the quiet rule's Jev layer; the evidence is the shape production sends for a session whose only leftover process is a background command."
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:1",
+          "role": "user",
+          "text": "Start the dev server in the background so I can poke at it later, then fix the failing unit test in src/parser.rs and push."
+        },
+        {
+          "id": "agent:2",
+          "role": "assistant",
+          "text": "The dev server is running in the background on port 8080. I fixed the parser test (the delimiter case), ran the suite (212 passed), committed as 4f1c2a9, and pushed to origin/main. Nothing else is pending on my side."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "background": [
+      {
+        "id": "claude:task-1",
+        "command": "sleep infinity",
+        "started_s_ago": 900
+      }
+    ],
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 1,
+    "queued_commands": 0,
+    "user_prompt_tail": "Start the dev server in the background so I can poke at it later, then fix the failing unit test in src/parser.rs and push.",
+    "assistant_text_tail": "The dev server is running in the background on port 8080. I fixed the parser test (the delimiter case), ran the suite (212 passed), committed as 4f1c2a9, and pushed to origin/main. Nothing else is pending on my side.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "background": "unneeded",
+    "quiet": false,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "with no judgment the session is not quiet: today's rule",
+    "judgment": "n/a",
+    "next": "n/a"
+  },
+  "context": {
+    "after": []
+  }
+}

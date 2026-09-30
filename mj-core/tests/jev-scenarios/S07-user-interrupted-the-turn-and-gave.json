@@ -1,0 +1,95 @@
+{
+  "id": "S07",
+  "title": "User interrupted the turn and gave a new instruction",
+  "category": "user-interrupt",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "c677a683ed940070fa8102f9c614bf1b",
+    "session_title": "autocull via codex",
+    "decision": "3964862-1790457023819-00000000000000000004",
+    "contract": "turn-verdict-v4",
+    "captured_at": "2026-09-26T21:20:11.659Z",
+    "assessed_at": "2026-09-26T21:20:12.040Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\notoh i do want to renumber the groups as they get changed \n, and match \"next group\" (after keep/reject on the last photo in group N) to group N+1 in display order\n</user>\n<assistant>\nI’ll make group labels follow the current display order and make advancing past the last photo move to the next group in that same order.\n</assistant>\n<assistant>\nThe rail already sorts groups by ranking status and person, but captions and automatic advancement still use catalog order. I’ll give labels, navigation, and prefetch one shared display order, while keeping photo numbers and stored group identities stable.\n</assistant>\n<assistant>\nLabels and movement now use the same display order. I’m testing reordered groups, including undo and reaching the last displayed group when its catalog position is earlier than the others.\n</assistant>\n<assistant>\nThe navigation tests pass. I also found that saved review logs contain keep/reject actions that depend on the old order. I’m preserving that replay behavior so reopening a shoot won’t apply past decisions to different photos.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "otoh i do want to renumber the groups as they get changed \n, and match \"next group\" (after keep/reject on the last photo in group N) to group N+1 in display order",
+    "assistant_text_tail": "The navigation tests pass. I also found that saved review logs contain keep/reject actions that depend on the old order. I’m preserving that replay behavior so reopening a shoot won’t apply past decisions to different photos."
+  },
+  "recorded_verdict": {
+    "work_state": "StillWorking",
+    "work_state_confidence": 0.5199999809265137,
+    "needs_user_input": 0.09000000357627869,
+    "retryable_server_error": 0.029999999329447746
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": true,
+    "action": "uncertain",
+    "wrong_actions": [
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "nothing (uncertain)",
+    "judgment": "right",
+    "next": "user typed a new instruction 17 s later; an automatic continue would have raced it"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-26T21:20:28.820Z",
+        "kind": "user",
+        "text": "don't bother preserving old behavior, there are no shoots where this matters"
+      },
+      {
+        "at": "2026-09-26T21:20:36.654Z",
+        "kind": "agent",
+        "text": "Understood. I’ll remove the compatibility handling and use display order consistently for all review actions."
+      },
+      {
+        "at": "2026-09-26T21:22:10.353Z",
+        "kind": "agent",
+        "text": "Groups now number consecutively in display order, and keep/reject advancement follows that order. All 367 core and app tests pass, including reordered navigation, undo, completion, and preview behavio"
+      },
+      {
+        "at": "2026-09-26T21:23:15.058Z",
+        "kind": "agent",
+        "text": "Done. Groups renumber consecutively in display order, and keep/reject on the last photo advances from group N to displayed group N+1. Original photo numbers stay unchanged.  No compatibility handling."
+      },
+      {
+        "at": "2026-09-26T21:23:21.603Z",
+        "kind": "user",
+        "text": "what happens during \"analyzing content?\""
+      },
+      {
+        "at": "2026-09-26T21:23:25.164Z",
+        "kind": "agent",
+        "text": "I’ll trace the “Analyzing content” stage to see exactly what work it does."
+      }
+    ]
+  }
+}

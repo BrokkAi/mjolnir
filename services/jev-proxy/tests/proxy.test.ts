@@ -272,7 +272,7 @@ test("v4 supplies completion diagnostics and requires a typed server retry answe
 });
 
 test("v5 independently assesses an autonomous capacity refusal", async (t) => {
-  const { default: unifiedQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { default: unifiedQuestions } = await import("../../../mj-core/src/activity/verdict_questions_v5.json", { with: { type: "json" } });
   const { recent_tools: _recent, ...ordinary } = base;
   const state = { ...ordinary, phase: "replied", transcript_summary: "",
     assistant_text_tail: "Selected model is at capacity. Please try a different model.",
@@ -297,4 +297,82 @@ test("v5 independently assesses an autonomous capacity refusal", async (t) => {
   calls.restore();
   upstream(t, async () => Response.json({ answers: { ...result.answers, failure: { type: "choice", choice: "invented", confidence: 1 } } }));
   await expectError(await proxy.fetch(v5(state), environment()), 502);
+});
+
+test("v6 lists background commands and returns the background judgment", async (t) => {
+  const { default: currentQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  assert.ok("background" in currentQuestions, "the current question set carries the background question");
+  const { recent_tools: _recent, ...ordinary } = base;
+  const state = { ...ordinary, phase: "replied", transcript_summary: "", background_commands: 1,
+    assistant_text_tail: "The dev server is up on 8080 for later; the fix is pushed.",
+    completion: { stop_reason: "EndTurn", diagnostic: null },
+    background: [{ id: "claude:task-1", command: "npm run dev", started_s_ago: 900 }],
+    final_tool_calls: [{ name: "mcp__mj-agents__handback", status: "completed" }] };
+  const result = { answers: {
+    failure: { type: "choice", choice: "none", confidence: 0.97 },
+    input: { type: "choice", choice: "none", confidence: 0.96 },
+    work: { type: "choice", choice: "finished", confidence: 0.95 },
+    background: { type: "choice", choice: "unneeded", confidence: 0.93 },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: currentQuestions });
+    return Response.json(result);
+  });
+  const v6 = (body: unknown) => new Request("https://proxy.example/v6/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body),
+  });
+  const response = await proxy.fetch(v6(state), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+  assert.equal(calls.callCount(), 1);
+  // An older answer without the background judgment is still valid.
+  calls.restore();
+  const { background: _b, ...three } = result.answers;
+  upstream(t, async () => Response.json({ answers: three }));
+  const older = await proxy.fetch(v6(state), environment());
+  assert.equal(older.status, 200);
+  assert.deepEqual(await older.json(), { answers: three });
+  // The list is bounded and strictly shaped; v5 does not accept it.
+  await expectError(await proxy.fetch(v6({ ...state, background: [{ id: "x", command: "y" }] }), environment()), 400);
+  await expectError(await proxy.fetch(v6({ ...state, final_tool_calls: [{ name: "x" }] }), environment()), 400);
+  await expectError(await proxy.fetch(v6({ ...state, background: Array.from({ length: 17 }, (_, i) => ({ id: `t${i}`, command: "sleep 1", started_s_ago: 1 })) }), environment()), 400);
+  const v5 = new Request("https://proxy.example/v5/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  });
+  await expectError(await proxy.fetch(v5, environment()), 400);
+});
+
+test("v5 and v6 accept the whole-message authorization history and bound it", async (t) => {
+  const { recent_tools: _recent, ...ordinary } = base;
+  const authorization = {
+    messages: [
+      { id: "user:1", role: "user", text: "fix the failing test and push" },
+      { id: "agent:2", role: "assistant", text: "Fixed and pushed." },
+    ],
+    authorization_complete: true, assistant_history_omitted: false, open_assistant_id: null, final_reply_omitted: false,
+  };
+  const state = { ...ordinary, phase: "replied", transcript_summary: "", authorization,
+    completion: { stop_reason: "EndTurn", diagnostic: null } };
+  const result = { answers: {
+    failure: { type: "choice", choice: "none", confidence: 0.99 },
+    input: { type: "choice", choice: "none", confidence: 0.99 },
+    work: { type: "choice", choice: "finished", confidence: 0.97 },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string).state, state);
+    return Response.json(result);
+  });
+  for (const version of ["v5", "v6"]) {
+    const request = (body: unknown) => new Request(`https://proxy.example/${version}/turn-verdict`, {
+      method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body),
+    });
+    const response = await proxy.fetch(request(state), environment());
+    assert.equal(response.status, 200, version);
+    // A message with an unknown role, an extra field, or a user history over 32 KiB is rejected before any upstream call.
+    const before = calls.callCount();
+    await expectError(await proxy.fetch(request({ ...state, authorization: { ...authorization, messages: [{ id: "x", role: "system", text: "y" }] } }), environment()), 400);
+    await expectError(await proxy.fetch(request({ ...state, authorization: { ...authorization, extra: true } }), environment()), 400);
+    await expectError(await proxy.fetch(request({ ...state, authorization: { ...authorization, messages: [{ id: "u", role: "user", text: "x".repeat(32 * 1024 + 1) }] } }), environment()), 400);
+    assert.equal(calls.callCount(), before);
+  }
 });

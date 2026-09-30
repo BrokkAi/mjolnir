@@ -1,0 +1,109 @@
+{
+  "id": "S41",
+  "title": "Running turn silent for minutes with no tool: the model is thinking",
+  "category": "running-silent",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "0305d10cd40fb1342e5ad6171d6ae993",
+    "session_title": "bifrost3 via codex",
+    "decision": "100664-1790652707815-00000000000000000003",
+    "contract": "turn-verdict-v5",
+    "captured_at": "2026-09-29T03:50:53.866Z",
+    "assessed_at": "2026-09-29T03:50:54.075Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "codex",
+    "phase": "running",
+    "silent_for_s": 60,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\n(we used the `tract` repo from /nfs/morannon/nvme/repo-clones as a test candidate. only rust is native so far)\n</user>\n<assistant>\nThat helps: I’ll restrict the workloads to Rust-native analysis and check the local `tract` checkout as a corpus candidate. I’ll keep the current Bifrost source commit as the build under measurement.\n</assistant>\n<assistant>\nTract will be the primary corpus, pinned at its clean commit `26edc98ea88bf973622853fa8f7c35d236d6ffc5`. I’ll specify an isolated local copy so edits leave the shared clone untouched and the timings describe local-disk use.\n\nThe cache audit found no general cache of complete query responses. It did find reusable semantic summaries and specialized type-flow results, so the profile evidence will distinguish those from query execution work.\n</assistant>\n<assistant>\nThe remaining design question is workload selection on tract. I’m checking existing Rust policies against its production code so the semantic case exercises real analysis rather than a small fixture.\n\nI’ll label the incremental table columns as **refresh + query**. The report will also show query-only time after refresh, but the deck number will include the update cost.\n</assistant>\n<assistant>\nThe harness will retain every measured response, including completion status, result counts, errors, and timeouts. It will use nearest-rank percentiles and report min, max, and sample count alongside p50/p95. Workload selection will be fixed before measurement, so it cannot be influenced by which query happens to be fastest.\n</assistant>\n<assistant>\nThere are suitable structural and cross-file candidates: the existing “parsing in a loop” policy and references to tract’s `load_tensor` function across multiple files.\n\nThe deep case needs a tract-specific query. A candidate follows an ONNX external-data path through the resolver to file opening. It exercises meaningful value flow, but tract already checks path components, so a flow result must not be presented as a vulnerability. The pilot will need to establish whether Bifrost can complete that analysis.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "(we used the `tract` repo from /nfs/morannon/nvme/repo-clones as a test candidate. only rust is native so far)",
+    "assistant_text_tail": "There are suitable structural and cross-file candidates: the existing “parsing in a loop” policy and references to tract’s `load_tensor` function across multiple files.\n\nThe deep case needs a tract-specific query. A candidate follows an ONNX external-data path through the resolver to file opening. It exercises meaningful value flow, but tract already checks path components, so a flow result must not be presented as a vulnerability. The pilot will need to establish whether Bifrost can complete that analysis."
+  },
+  "recorded_verdict": {
+    "work_state": "Unclear",
+    "work_state_confidence": 0.44999998807907104,
+    "needs_user_input": 0.06000000238418579,
+    "retryable_server_error": 0.0,
+    "assessment": {
+      "failure": {
+        "choice": "none",
+        "confidence": 0.6600000262260437
+      },
+      "input": {
+        "choice": "none",
+        "confidence": 0.9399999976158142
+      },
+      "work": {
+        "choice": "unclear",
+        "confidence": 0.44999998807907104
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "await_input"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "nothing",
+    "judgment": "right",
+    "next": "agent read files after ten minutes"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T04:01:24.122Z",
+        "kind": "user",
+        "text": "i don't want to scope creep this to new analysis implementation tho, if we can't do that then pick something existing or a minor variant"
+      },
+      {
+        "at": "2026-09-29T04:02:16.744Z",
+        "kind": "agent",
+        "text": "# Benchmark persistent Bifrost checks on tract  ## Summary  Measure ordinary, unprofiled requests through a persistent MCP client, using tract as the primary corpus.  - **Bifrost:** `4b876479cd9d0dcbe"
+      },
+      {
+        "at": "2026-09-29T04:02:24.213Z",
+        "kind": "agent",
+        "text": "Agreed. The benchmark won’t include new analysis implementation. I’ll replace the custom taint case with an existing semantic query or a minor variant, and report any limitations it exposes."
+      },
+      {
+        "at": "2026-09-29T04:10:44.828Z",
+        "kind": "system",
+        "text": "model set to gpt-5.6-luna"
+      },
+      {
+        "at": "2026-09-29T04:10:46.958Z",
+        "kind": "system",
+        "text": "effort set to max"
+      },
+      {
+        "at": "2026-09-29T04:10:52.158Z",
+        "kind": "system",
+        "text": "collaboration_mode set to default"
+      }
+    ]
+  }
+}
