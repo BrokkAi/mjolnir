@@ -1143,70 +1143,124 @@ fn worker_diagnosis_surfaces_a_loader_failure_from_the_installed_binary() {
     assert!(failure.contains("provide a musl worker"), "{failure}");
 }
 
-/// macOS puts worker roots under `~/Library/Application Support/...`.
-/// An unquoted root split the diagnostic script into separate words, so
-/// the probe silently reported nothing exactly when it was needed.
+/// The worker writes its records without a trailing newline. The probe read
+/// them out of a text dump by searching for the next section marker, which
+/// that missing newline hid, so every startup step read as none and the
+/// readiness wait never extended for a worker that was making progress. The
+/// probe now runs the real script and reads one JSON document.
+///
+/// The root contains spaces because macOS puts worker roots under
+/// `~/Library/Application Support/...`; an unquoted root split the script
+/// into separate words.
 #[test]
-fn worker_last_words_reads_a_root_containing_spaces() {
-    struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-    }
-
-    impl CommandExecutor for RecordingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
+fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("Application Support").join("hel worker");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
-        root.join("worker-exit.json"),
-        b"{\n  \"reason\": \"panic\"\n}\n",
+        root.join(mj_core::relay::WORKER_STARTUP_FILE),
+        br#"{
+  "step": "harness-resolve",
+  "pid": 999999999,
+  "steps": [
+    { "step": "start", "at": "2026-09-30T03:20:42.270Z" },
+    { "step": "harness-resolve", "at": "2026-09-30T03:20:44.173Z" }
+  ]
+}"#,
     )
     .unwrap();
     std::fs::write(
-        root.join("worker.log"),
-        b"Mjolnir worker exited with an error\n",
+        root.join(mj_core::relay::WORKER_EXIT_FILE),
+        b"{\n  \"reason\": \"panic\",\n  \"refusal\": null\n}",
     )
     .unwrap();
     let root = root.to_str().unwrap();
-
     let locator = targets::TargetLocator::LocalBare {
         worker_root: root.into(),
     };
-    let reported = worker_last_words(&ProcessExecutor, &locator, root)
-        .expect("the probe reads a root containing spaces");
-    assert!(reported.contains(WORKER_EXIT_RECORD_MARKER), "{reported}");
-    assert!(reported.contains("\"reason\": \"panic\""), "{reported}");
-    assert!(
-        reported.contains("Mjolnir worker exited with an error"),
-        "{reported}"
-    );
-    // No worker runs for this temporary root, so the process section must
-    // say so rather than being omitted.
-    assert!(reported.contains("--- worker process ---"), "{reported}");
-    assert!(reported.contains("absent"), "{reported}");
 
-    let recorder = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
+    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
+
+    assert_eq!(probe.step(), Some("harness-resolve"));
+    assert_eq!(
+        probe.exit.as_ref().map(|exit| exit.reason.as_str()),
+        Some("panic")
+    );
+    // No worker runs for this temporary root.
+    assert!(!probe.alive(), "{probe:?}");
+    assert_eq!(probe.to_string(), "the worker exited: panic");
+}
+
+/// A running worker is found by the process for its root, and a root with
+/// no records yet reads as a running worker that recorded nothing.
+#[test]
+fn probing_a_running_worker_reports_its_process() {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("hel worker");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.to_str().unwrap();
+    // The trailing `:` keeps `sh` from replacing itself with `sleep`, so its
+    // command line keeps the worker's arguments.
+    let worker = Child(
+        std::process::Command::new("sh")
+            .args([
+                "-c",
+                "sleep 60; :",
+                &format!("hel worker run --root {root}"),
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    std::fs::write(
+        std::path::Path::new(root).join(mj_core::relay::WORKER_PID_FILE),
+        worker.0.id().to_string(),
+    )
+    .unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: root.into(),
     };
-    worker_last_words(&recorder, &locator, root);
-    let commands = recorder.commands.borrow();
-    let script = commands
-        .iter()
-        .flat_map(|command| command.args.iter())
-        .find(|argument| argument.contains("worker-exit.json"))
-        .expect("the probe builds a diagnostic script");
+
+    let probe = probe_worker(&ProcessExecutor, &locator, root).unwrap();
+
+    assert_eq!(probe.pids, vec![worker.0.id()]);
+    assert_eq!(probe.step(), None);
+    assert_eq!(
+        probe.to_string(),
+        "the worker is running and recorded no startup step"
+    );
+}
+
+/// Output that is not the probe's document is an error, not a worker with
+/// nothing to report.
+#[test]
+fn a_probe_that_prints_something_else_is_an_error() {
+    struct GarbageExecutor;
+    impl CommandExecutor for GarbageExecutor {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"{\"startup\":{\"step\":\"start\"}--- worker.log".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: "/nonexistent".into(),
+    };
+
+    let error = probe_worker(&GarbageExecutor, &locator, "/nonexistent").unwrap_err();
+
     assert!(
-        script.contains(&format!("'{root}'")),
-        "the root must be single-quoted: {script}"
+        format!("{error:#}").contains("read the worker probe"),
+        "{error:#}"
     );
 }
 
