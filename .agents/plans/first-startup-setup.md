@@ -14,7 +14,7 @@ People who already use Codex or Claude Code should run `mj` and find their accou
 - [x] (2026-09-30) Update CLI behavior, documentation, and behavior tests.
 - [x] (2026-09-30) Pass Clippy, Rust formatting, documentation checks and build, and focused controller/TUI/CLI tests.
 - [x] (2026-09-30) Pass full workspace tests, including the corrected isolated first-run terminal regression and existing startup/upgrade regressions.
-- [ ] Commit and push to origin/master.
+- [x] (2026-09-30) Commit implementation as `0037300c` and push it to origin/master.
 
 ## Surprises & Discoveries
 
@@ -34,7 +34,7 @@ Doctor checks use the existing cancellable background executor with a thirty-sec
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The shell prompt wizard and Codex-only startup initializer are removed. Both automatic startup and explicit reruns share durable, additive discovery; terminal input remains responsive while discovery and doctor run. The full workspace suite, Clippy, formatting, and documentation validation passed. The isolated terminal regression proves both agents are saved, welcome can be dismissed during background checks, login remedies remain visible afterward, no session is automatically created, and the creation wizard receives discovered profiles through the daemon feed. Commit and push remain the final delivery steps. No database or configuration schema migration was required.
+Implementation, validation, and delivery are complete. The shell prompt wizard and Codex-only startup initializer are removed. Both automatic startup and explicit reruns share durable, additive discovery; terminal input remains responsive while discovery and doctor run. The full workspace suite, Clippy, formatting, and documentation validation passed. The isolated terminal regression proves both agents are saved, welcome can be dismissed during background checks, login remedies remain visible afterward, no session is automatically created, and the creation wizard receives discovered profiles through the daemon feed. Implementation commit `0037300c` was pushed to origin/master. No database or configuration schema migration was required. The unrelated Move edits remain uncommitted and untouched.
 
 ## Context and Orientation
 
@@ -73,3 +73,5 @@ Validation evidence: `cargo test` exited zero for the full default workspace, in
 Revision note (2026-09-30): Record completed implementation, the terminal-test notice finding and correction, and validation already completed. Leave full workspace tests and publication pending until their results are known.
 
 Revision note (2026-09-30): Record passing full workspace tests and the corrected terminal acceptance check. Keep commit and push pending until Git confirms delivery.
+
+Revision note (2026-09-30): Git confirmed `8119fe8f..0037300c HEAD -> master`. Mark delivery complete and preserve the validation record in this plan.
