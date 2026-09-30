@@ -1,5 +1,6 @@
 use super::*;
 use crate::acp::verdict_client::{VerdictClient, VerdictSource};
+use crate::test_support::wait_for;
 use mj_core::activity::ActivityState;
 use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
@@ -204,9 +205,8 @@ async fn completed_turn_response(
         })
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), requested_rx)
+    wait_for("the local classifier request", requested_rx)
         .await
-        .unwrap()
         .unwrap();
     // Completion is published even while the classifier HTTP response is blocked.
     assert!(
@@ -223,9 +223,8 @@ async fn completed_turn_response(
     ));
     if matches!(action, WhileClassifying::Stop) {
         events_tx.send(RuntimeEvent::Stopped).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), coordinator)
+        wait_for("classifier coordinator shutdown", coordinator)
             .await
-            .unwrap()
             .unwrap()
             .unwrap();
         drop(release_tx);
@@ -263,7 +262,7 @@ async fn completed_turn_response(
             RelayCommand::BeginCheckpoint { reason: None },
         );
         wakes_tx.send(()).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        wait_for("the checkpoint cut", async {
             while relay
                 .lock()
                 .unwrap()
@@ -274,14 +273,15 @@ async fn completed_turn_response(
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
-        .await
-        .unwrap();
+        .await;
         relay.lock().unwrap().operational_state().checkpoint_ready
     } else {
         None
     };
     release_tx.send(()).unwrap();
-    server.await.unwrap();
+    wait_for("the local classifier response", server)
+        .await
+        .unwrap();
     if let Some(cut) = cut {
         // The answer is back, but the barrier holds its cut: the answer waits.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -299,23 +299,25 @@ async fn completed_turn_response(
             },
         );
         wakes_tx.send(()).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .assessment
-                .as_ref()
-                .is_none_or(|a| a.status == mj_core::assessment::Status::Pending)
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the held classifier answer is applied once the barrier ends");
+        wait_for(
+            "the held classifier answer after checkpoint release",
+            async {
+                while relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .assessment
+                    .as_ref()
+                    .is_none_or(|a| a.status == mj_core::assessment::Status::Pending)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            },
+        )
+        .await;
         assert!(relay.lock().unwrap().operational_state().latest_ordinal > cut.ordinal);
     } else if matches!(action, WhileClassifying::Wait) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        wait_for("the classifier's activity decision", async {
             loop {
                 let state = relay.lock().unwrap().operational_state();
                 if if choice == "background_work" {
@@ -328,8 +330,7 @@ async fn completed_turn_response(
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
-        .await
-        .unwrap();
+        .await;
         let state = relay.lock().unwrap().operational_state();
         assert_eq!(state.background_commands.len(), tasks);
         if choice == "background_work" {
@@ -342,7 +343,7 @@ async fn completed_turn_response(
         }
         // Autonomous output starts a real harness turn and clears the guess.
         events_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"The agent finished."}}) }).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        wait_for("the new autonomous harness turn", async {
             loop {
                 if relay
                     .lock()
@@ -356,10 +357,9 @@ async fn completed_turn_response(
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
-        .await
-        .unwrap();
+        .await;
     } else if matches!(action, WhileClassifying::KeepCurrent) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        wait_for("the classifier assessment result", async {
             while relay
                 .lock()
                 .unwrap()
@@ -378,8 +378,7 @@ async fn completed_turn_response(
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         })
-        .await
-        .unwrap();
+        .await;
         let state = relay.lock().unwrap().operational_state();
         assert!(matches!(
             state.activity_state(),
@@ -395,9 +394,8 @@ async fn completed_turn_response(
         ActivityState::Expecting { .. }
     ));
     events_tx.send(RuntimeEvent::Stopped).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), coordinator)
+    wait_for("classifier coordinator shutdown", coordinator)
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
     let log = std::fs::read_to_string(&log_path).unwrap();

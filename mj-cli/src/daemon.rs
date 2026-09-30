@@ -1085,6 +1085,15 @@ mod tests {
             let mut statuses = statuses.into_iter();
             while let Ok(request) = read_frame::<RequestEnvelope>(&mut stream).await {
                 assert!(matches!(request.action, DaemonAction::Status));
+                let Some(phone_status) = statuses.next() else {
+                    // An exhausted script deliberately leaves this request
+                    // unanswered. The timed-out client closes it; no response
+                    // write can race with that expected disconnect.
+                    use tokio::io::AsyncReadExt;
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+                    break;
+                };
                 write_frame(
                     &mut stream,
                     &ResponseEnvelope {
@@ -1095,7 +1104,7 @@ mod tests {
                             started_at: "test".into(),
                             build_version: "test".into(),
                             attached_clients: 0,
-                            phone_status: statuses.next().unwrap_or(WebViewerStatus::Starting),
+                            phone_status,
                         })),
                     },
                 )

@@ -22,7 +22,7 @@ pub(crate) async fn run_relay_coordinator_with_shells(
     .await
 }
 
-async fn run_relay_coordinator_with_verdict(
+pub(crate) async fn run_relay_coordinator_with_verdict(
     relay: Arc<Mutex<DurableRelay>>,
     mut events: mpsc::Receiver<RuntimeEvent>,
     mut dispatch_wakes: mpsc::Receiver<()>,

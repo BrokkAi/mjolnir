@@ -1,4 +1,4 @@
-use crate::test_support::git;
+use crate::test_support::{git, wait_for};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,24 @@ fn runtime_event_channel() -> (TestRuntimeEventSender, mpsc::Receiver<RuntimeEve
     (TestRuntimeEventSender(sender), receiver)
 }
 
+/// Protocol fixtures have no classifier. Verdict fixtures supply their own
+/// local HTTP endpoint instead of resolving the host's default service.
+async fn run_relay_coordinator(
+    relay: Arc<Mutex<DurableRelay>>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+) -> anyhow::Result<()> {
+    let (shell_events, _shell_events_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        std::env::current_dir()?,
+        BTreeMap::new(),
+        shell_events,
+    );
+    unix::run_relay_coordinator_with_verdict(relay, events, wakes, commands, shells, None, None)
+        .await
+}
+
 fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error>) {
     mpsc::channel(1)
 }
@@ -65,6 +83,24 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
+    }
+}
+
+async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
+    match tokio::time::timeout(
+        crate::test_support::IO_TIMEOUT,
+        unix::run_daemon(root.to_owned(), config),
+    )
+    .await
+    {
+        Ok(result) => {
+            result.expect_err("the fixture cannot start an ACP supervisor");
+        }
+        Err(_) => {
+            let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
+                .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
+            panic!("fixture worker did not finish its launch; startup record: {startup}");
+        }
     }
 }
 
@@ -1549,7 +1585,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -1611,7 +1647,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -1695,7 +1731,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -1873,9 +1909,7 @@ async fn prompt_dispatch_preserves_the_complete_acp_content_vector() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
-        relay, event_rx, wake_rx, command_tx,
-    ));
+    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -1924,9 +1958,7 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
-        relay, event_rx, wake_rx, command_tx,
-    ));
+    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -2018,9 +2050,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
-        relay, event_rx, wake_rx, command_tx,
-    ));
+    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -2149,7 +2179,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     let (command_tx, mut command_rx) = mpsc::channel(2);
     command_tx.try_send(elicitation_request()).unwrap();
     command_tx.try_send(elicitation_request()).unwrap();
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2218,7 +2248,7 @@ async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() 
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2275,9 +2305,7 @@ async fn different_command_types_dispatch_in_acceptance_order() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
-        relay, event_rx, wake_rx, command_tx,
-    ));
+    let coordinator = tokio::spawn(run_relay_coordinator(relay, event_rx, wake_rx, command_tx));
     event_tx
         .send(RuntimeEvent::SessionConfigured {
             config_options: Vec::new(),
@@ -2335,7 +2363,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2392,7 +2420,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2467,7 +2495,7 @@ async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2523,7 +2551,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2606,7 +2634,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -2744,7 +2772,7 @@ async fn wait_for_relay_state(
     relay: &Arc<Mutex<DurableRelay>>,
     predicate: impl Fn(&mj_core::relay::RelayOperationalState) -> bool,
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    wait_for("relay state to reach the expected condition", async {
         loop {
             if predicate(&relay.lock().unwrap().operational_state()) {
                 break;
@@ -2752,8 +2780,7 @@ async fn wait_for_relay_state(
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .expect("relay state did not reach the expected condition");
+    .await;
 }
 
 #[test]
@@ -3135,7 +3162,7 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3267,7 +3294,7 @@ async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3446,7 +3473,7 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3533,7 +3560,7 @@ async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3650,14 +3677,26 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
         command_tx,
     ));
 
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    let before_connection = relay.lock().unwrap().latest_ordinal();
+    event_tx
+        .send(RuntimeEvent::Connected {
+            agent_name: Some("test-agent".into()),
+            agent_version: Some("1".into()),
+            protocol_version: Some(ProtocolVersion::V1),
+            capabilities: Some(Box::new(AgentCapabilities::default())),
+            agent_info: Some(Implementation::new("test-agent", "1")),
+            steering_supported: None,
+            steering_returns_idle_input: false,
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| state.latest_ordinal > before_connection).await;
     assert!(
         relay
             .lock()
@@ -3673,28 +3712,14 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
         })
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if relay
-                .lock()
-                .unwrap()
-                .operational_state()
-                .checkpoint_barrier
-                .as_deref()
-                == Some("checkpoint-1")
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+    wait_for_relay_state(&relay, |state| {
+        state.checkpoint_barrier.as_deref() == Some("checkpoint-1")
     })
-    .await
-    .unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
-            .await
-            .is_err()
-    );
+    .await;
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
     drop(event_tx);
     drop(wake_tx);
     coordinator.await.unwrap().unwrap();
@@ -3723,7 +3748,7 @@ async fn checkpoint_waits_for_an_in_flight_config_command() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -3905,7 +3930,7 @@ async fn checkpoint_wake_records_already_queued_runtime_events_first() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4011,7 +4036,7 @@ async fn checkpoint_wake_is_not_starved_by_a_runtime_event_flood() {
             sequence += 1;
         }
     });
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4071,7 +4096,7 @@ async fn checkpoint_freezes_effectful_commands_submitted_after_the_barrier() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4199,7 +4224,7 @@ async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4450,7 +4475,7 @@ async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4551,7 +4576,7 @@ async fn relay_v1_client_disconnect_does_not_own_command_execution() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -4843,14 +4868,7 @@ async fn daemon_restart_records_one_marker_after_recovering_in_flight_work() {
 
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
     config.cwd = temp.path().to_owned();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     let events = reopened
@@ -4886,14 +4904,7 @@ async fn first_daemon_start_does_not_record_a_restart_marker() {
     let root = temp.path().to_owned();
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
     config.cwd = temp.path().to_owned();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     assert!(
@@ -4915,14 +4926,7 @@ async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
     config.bridge_command = temp.path().join("missing-acp-bridge");
     config.cwd = repository.clone();
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let baseline = std::process::Command::new("git")
         .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
@@ -4943,14 +4947,7 @@ async fn daemon_restart_without_a_baseline_does_not_hide_pending_work() {
     config.bridge_command = temp.path().join("missing-acp-bridge");
     config.cwd = repository.clone();
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root, config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let baseline = std::process::Command::new("git")
         .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
@@ -4980,14 +4977,7 @@ async fn restored_relay_seed_records_a_restart_marker() {
     .unwrap();
     let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
     config.cwd = temp.path().to_owned();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let reopened = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
     let markers = reopened
@@ -5134,14 +5124,7 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
         "CODEX_CONFIG".into(),
         r#"{"default_permissions":"project","tui":"never"}"#.into(),
     );
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
     let pinned: serde_json::Value =
@@ -5167,14 +5150,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
     config
         .environment
         .insert("OPENAI_API_KEY".into(), "sk-svcacct-target".into());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        unix::run_daemon(root.clone(), config),
-    )
-    .await
-    .expect("the scripted worker child must stop")
-    .expect_err("the test executable is not an ACP supervisor");
-    assert!(!format!("{result:#}").is_empty());
+    expect_daemon_launch_failure(&root, config).await;
 
     let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
     assert_eq!(
@@ -6107,7 +6083,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
@@ -6825,7 +6801,7 @@ async fn coordinator_behind_a_ready_barrier(
     let (event_tx, event_rx) = mpsc::channel(capacity);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(4);
-    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+    let coordinator = tokio::spawn(run_relay_coordinator(
         relay.clone(),
         event_rx,
         wake_rx,
