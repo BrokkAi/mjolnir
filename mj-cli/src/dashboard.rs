@@ -57,7 +57,7 @@ use tokio_stream::StreamExt as _;
 use crate::dashboard::composer_drafts::ComposerDraftCache;
 use crate::dashboard::io::{
     ActiveLifecycleOperation, DashboardIoUpdate, LifecycleReload, report,
-    spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_io, spawn_lifecycle_reload,
+    spawn_checkpoint_archive_size_refresh, spawn_clipboard_write, spawn_lifecycle_reload,
     spawn_materialized_session_projection, spawn_project_source_resolution,
     spawn_stopped_subagent_transcript, spawn_stored_session_summary,
 };

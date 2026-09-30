@@ -81,6 +81,7 @@ impl RuntimeState {
             startup_enqueue: tokio::sync::Mutex::new(()),
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
+            projects: Arc::new(crate::project_catalog::Catalog::default()),
             recovery_observer,
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),
@@ -90,6 +91,22 @@ impl RuntimeState {
             review_host,
             wiki: crate::sessionwiki::WikiIndexer::spawn(),
         }
+    }
+
+    pub(crate) fn projects(&self) -> Arc<crate::project_catalog::Catalog> {
+        self.projects.clone()
+    }
+
+    pub async fn project_catalog(
+        &self,
+        refresh: bool,
+        retry: bool,
+    ) -> Result<mj_core::project_catalog::ProjectCatalogView> {
+        if refresh {
+            self.projects.request(retry);
+        }
+        let catalog = self.projects.clone();
+        blocking(move || catalog.view()).await
     }
 
     /// The review host, for the surfaces that project and resolve reviews.

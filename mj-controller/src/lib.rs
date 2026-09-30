@@ -16,6 +16,7 @@ pub mod doctor;
 pub(crate) mod handoff;
 pub mod image;
 pub mod import;
+pub(crate) mod project_catalog;
 pub mod project_picker;
 pub mod quota;
 pub mod readline;

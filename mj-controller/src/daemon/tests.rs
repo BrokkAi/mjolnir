@@ -930,6 +930,7 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,
@@ -1629,6 +1630,15 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
             responses: [
                 r#"{"protocol_version":16,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.4.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                 r#"{"protocol_version":16,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 47,
+            daemon_build: "2.24.0",
+            expected_requests: requests(47),
+            responses: [
+                r#"{"protocol_version":47,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-30T16:21:00Z","build_version":"2.24.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":47,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
     ]

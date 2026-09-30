@@ -22,10 +22,8 @@ impl Controller {
         if session.project_directory.is_some() {
             return Ok(());
         }
-        let bundle = self
-            .config
-            .bundles
-            .get(&session.bundle_id)
+        let bundle = session
+            .project_bundle(&self.config)
             .context("session bundle is missing")?;
         if let Some(checkout) = &session.checkout {
             ensure!(

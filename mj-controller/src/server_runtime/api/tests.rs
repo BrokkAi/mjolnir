@@ -778,6 +778,7 @@ impl ExportRuntime for ParentExports {
 
 fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

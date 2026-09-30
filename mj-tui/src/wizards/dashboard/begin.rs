@@ -394,5 +394,36 @@ impl DashboardState {
     /// database holds now.
     pub fn apply_mount_history(&mut self, history: BTreeMap<String, Vec<std::path::PathBuf>>) {
         self.state.mount_history = history;
+        let entries = self.recent_project_entries();
+        if let Mode::New(wizard) = &mut self.mode {
+            if wizard.step == WizardStep::NewBundle
+                && wizard.project_picker.tab == super::super::projects::ProjectTab::Recent
+            {
+                let selected = wizard
+                    .project_picker
+                    .entries
+                    .get(wizard.project_picker.selected)
+                    .map(|entry| &entry.source);
+                wizard.project_picker.selected = selected
+                    .and_then(|source| entries.iter().position(|entry| &entry.source == source))
+                    .unwrap_or(0);
+                wizard.project_picker.entries = entries;
+            }
+            if wizard.step == WizardStep::ProjectDirectory {
+                let host = self
+                    .config
+                    .targets
+                    .keys()
+                    .nth(wizard.target)
+                    .and_then(|id| self.config.targets.get(id))
+                    .and_then(project_history_host);
+                wizard.project_history = host
+                    .map(|host| self.state.project_directories(host).to_vec())
+                    .unwrap_or_default();
+                wizard.project_history_index = wizard
+                    .project_history_index
+                    .min(wizard.project_history.len().saturating_sub(1));
+            }
+        }
     }
 }

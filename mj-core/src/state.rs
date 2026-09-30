@@ -1329,6 +1329,9 @@ pub struct SessionRecord {
     pub harness_kind: HarnessKind,
     pub last_profile: String,
     pub bundle_id: String,
+    /// Accepted bundle for every target, including a raw directory's bundle of one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<crate::repository::ProjectBundleSnapshot>,
     /// Existing project directory used directly by a local or SSH bare target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
@@ -1614,7 +1617,7 @@ impl SessionRecord {
             )),
             Some(_) => {}
         }
-        if self.project_directory.is_none() && !config.bundles.contains_key(&self.bundle_id) {
+        if self.project_directory.is_none() && self.project_bundle(config).is_none() {
             issues.push(format!("missing bundle {:?}", self.bundle_id));
         }
         if self.target_runtime.is_none() && !config.targets.contains_key(&self.target_template_id) {
@@ -1661,6 +1664,9 @@ impl SessionRecord {
     /// project directory, else the bundle's primary repository, else the
     /// bundle id.
     pub fn project_name(&self, config: &Config) -> String {
+        if let Some(project) = &self.project {
+            return project.name();
+        }
         if let Some(worktree) = &self.managed_worktree {
             return path_leaf(&worktree.source_repository);
         }
@@ -1687,6 +1693,20 @@ impl SessionRecord {
     /// directory until their Git origin is resolved, and bundle sessions use
     /// their complete canonical repository set when configured.
     pub fn project_source(&self, config: &Config) -> ProjectSourceIdentity {
+        if let Some(project) = &self.project {
+            return ProjectSourceIdentity {
+                key: project
+                    .source_key()
+                    .expect("accepted project has complete identities"),
+                short: project.name(),
+                full: project
+                    .identities
+                    .values()
+                    .map(crate::repository::RepositoryIdentity::key)
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+            };
+        }
         if let Some(worktree) = &self.managed_worktree {
             return ProjectSourceIdentity::path(&worktree.source_repository, None);
         }
@@ -1716,13 +1736,24 @@ impl SessionRecord {
     /// Resolve the canonical identity of every repository in a bundle for
     /// grouping and display naming.
     fn bundle_source_identity(&self, config: &Config) -> Option<ProjectSourceIdentity> {
-        let bundle = config.bundles.get(&self.bundle_id)?;
+        let bundle = self.project_bundle(config)?;
         let sources = bundle
             .repositories
             .iter()
             .map(repository_source_identity)
             .collect::<Option<Vec<_>>>()?;
         ProjectSourceIdentity::bundle(sources)
+    }
+
+    /// The accepted definition survives saved-project merges and config edits.
+    pub fn project_bundle<'a>(
+        &'a self,
+        config: &'a Config,
+    ) -> Option<&'a crate::config::ProjectBundle> {
+        self.project
+            .as_ref()
+            .map(|project| &project.bundle)
+            .or_else(|| config.bundles.get(&self.bundle_id))
     }
 
     /// Orders two sessions the way the session list's sequence view does:
@@ -1745,6 +1776,9 @@ impl SessionRecord {
                 "session map key {map_id:?} does not match record id {:?}",
                 self.id
             );
+        }
+        if let Some(project) = &self.project {
+            project.key()?;
         }
         validate_id("workspace", &self.workspace_id)?;
         validate_id("profile", &self.last_profile)?;
@@ -1851,30 +1885,12 @@ impl ProjectSourceIdentity {
     /// Canonicalizes a Git remote so raw checkouts group as the same project
     /// even when their worktree paths differ.
     pub fn git_remote(source: &str) -> Option<Self> {
-        if let Some(normalized) = normalize_github_source(source) {
-            let short = normalized
-                .rsplit_once('/')
-                .map_or(normalized.as_str(), |(_, repository)| repository)
-                .to_owned();
-            return Some(Self {
-                key: format!("github:{}", normalized.to_lowercase()),
-                short,
-                full: normalized,
-            });
-        }
-        let normalized = source.trim().trim_end_matches('/').trim_end_matches(".git");
-        if normalized.is_empty() {
-            return None;
-        }
-        let short = normalized
-            .rsplit(['/', ':'])
-            .find(|part| !part.is_empty())
-            .unwrap_or(normalized)
-            .to_owned();
+        let identity = crate::repository::RepositoryIdentity::from_remote(source)?;
+        let full = crate::repository::RepositoryIdentity::remote_label(source)?;
         Some(Self {
-            key: format!("git:{}", normalized.to_lowercase()),
-            short,
-            full: normalized.to_owned(),
+            key: identity.key(),
+            short: full.rsplit(['/', ':']).next()?.to_owned(),
+            full,
         })
     }
 
@@ -1893,25 +1909,6 @@ impl ProjectSourceIdentity {
             full,
         }
     }
-}
-
-fn normalize_github_source(source: &str) -> Option<String> {
-    let source = source.trim();
-    let path = source
-        .strip_prefix("https://github.com/")
-        .or_else(|| source.strip_prefix("http://github.com/"))
-        .or_else(|| source.strip_prefix("git@github.com:"))
-        .or_else(|| source.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| {
-            (!source.contains("://") && !source.contains('@') && !source.contains(':'))
-                .then_some(source)
-        })?
-        .trim_end_matches(".git");
-    let mut parts = path.split('/');
-    let owner = parts.next()?;
-    let repository = parts.next()?;
-    (!owner.is_empty() && !repository.is_empty() && parts.next().is_none())
-        .then(|| format!("{owner}/{repository}"))
 }
 
 /// Last component of a path, falling back to the whole path when it has none.

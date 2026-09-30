@@ -14,7 +14,7 @@ function fixture() {
     newDraft: null, newError: { textContent: '' }, renderNewForm() {},
     advanceNew: async () => advances.push(context.newDraft.bundleId),
     request: (url, options) => new Promise((resolve, reject) => {
-      requests.push({ url, body: JSON.parse(options.body), signal: options.signal, resolve, reject });
+      requests.push({ url, body: options.body ? JSON.parse(options.body) : null, signal: options.signal, resolve, reject });
     }),
   });
   vm.runInContext(projectFunctions, context);
@@ -140,4 +140,22 @@ test('source failure preserves entered text for retry and a replaced wizard igno
   assert.equal(context.newError.textContent, '');
   assert.equal(context.newDraft.creatingBundle, false);
   assert.deepEqual(advances, []);
+});
+
+test('catalog refresh ignores superseded replies, reports partial failures, and retries explicitly', async () => {
+  const { context, requests, run } = fixture();
+  const old = run('refreshProjectCatalog(newDraft)');
+  const current = run('refreshProjectCatalog(newDraft)');
+  assert.equal(requests[0].signal.aborted, true);
+  requests[0].resolve({ status: { state: 'failed', errors: ['stale error'] } });
+  await old;
+  assert.equal(context.newDraft.catalogStatus.state, 'refreshing');
+  requests[1].resolve({ status: { state: 'failed', errors: ['Missing historical checkout'] } });
+  await current;
+  assert.equal(context.newDraft.catalogStatus.errors[0], 'Missing historical checkout');
+  const retry = run('refreshProjectCatalog(newDraft, true)');
+  assert.equal(requests[2].url, '/api/projects?retry=true');
+  requests[2].resolve({ status: { state: 'ready' } });
+  await retry;
+  assert.equal(context.newDraft.catalogStatus.state, 'ready');
 });

@@ -1080,7 +1080,8 @@ pub(super) fn save_session_with_container_size_to(
             |row| row.get::<_, String>(0),
         )
         .optional()?
-        && existing_bundle != session.bundle_id
+        && existing_bundle
+            != super::projects::session_project_id(&tx, &session.id, &session.bundle_id)?
     {
         bail!(
             "session {} was already associated with bundle {}, not {}",
@@ -1421,14 +1422,16 @@ pub(super) fn rebind_session_bundle_to(
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let canonical_bundle = super::projects::canonical_project_id(&tx, bundle_id)?;
+    tx.execute("INSERT OR IGNORE INTO project_session_aliases(session_id,bundle_id) SELECT session_id,bundle_id FROM session_contexts WHERE session_id=?1",[session_id])?;
     let changed = tx.execute(
         "UPDATE session_contexts SET bundle_id = ?2 WHERE session_id = ?1",
-        params![session_id, bundle_id],
+        params![session_id, canonical_bundle],
     )?;
     if changed == 0 {
         tx.execute(
             "INSERT INTO session_contexts(session_id, bundle_id, created_at) VALUES (?1, ?2, ?3)",
-            params![session_id, bundle_id, Utc::now().to_rfc3339()],
+            params![session_id, canonical_bundle, Utc::now().to_rfc3339()],
         )?;
     }
     tx.commit()?;

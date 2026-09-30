@@ -132,6 +132,13 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            project: Some(crate::project_catalog::snapshot(
+                bundle,
+                &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(
+                    15,
+                )),
+                raw_project.is_none(),
+            )?),
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
@@ -262,7 +269,7 @@ pub(super) fn collect_local_repositories(
                     })
                     .cloned()
             } else {
-                let identity = configured_repository_identity(repository).with_context(|| {
+                let identity = configured_repository_identity(repository)?.with_context(|| {
                     format!("repository {:?} has no usable source", repository.id)
                 })?;
                 detected.get(&identity).cloned()

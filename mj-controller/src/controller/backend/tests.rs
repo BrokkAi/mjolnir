@@ -20,6 +20,59 @@ use crate::targets::{
 
 use super::*;
 
+#[test]
+fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes() {
+    struct NoProbe;
+    impl CommandExecutor for NoProbe {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            panic!(
+                "accepted source must not be recomputed: {}",
+                command.purpose
+            );
+        }
+    }
+    let mut session = crate::database::test_session("accepted-project", "saved");
+    session.project = Some(mj_core::repository::ProjectBundleSnapshot {
+        bundle: ProjectBundle {
+            primary_repo: "original-repository-id".into(),
+            repositories: vec![ProjectRepository {
+                id: "original-repository-id".into(),
+                github: None,
+                local: Some("/removed/checkout".into()),
+                destination: "original-layout".into(),
+                git_ref: None,
+            }],
+        },
+        identities: BTreeMap::from([(
+            "original-repository-id".into(),
+            mj_core::repository::RepositoryIdentity::Github("acme".into(), "app".into()),
+        )]),
+        network_sources: BTreeMap::from([(
+            "original-repository-id".into(),
+            mj_core::remote_git::NetworkGitSource {
+                fetch_url: "https://github.com/acme/app.git".into(),
+                push_urls: vec![
+                    "git@github.com:developer/app.git".into(),
+                    "ssh://mirror.example/app.git".into(),
+                ],
+            },
+        )]),
+    });
+    let spec = backend_session_bundle(&session, &Config::default(), &NoProbe).unwrap();
+    assert_eq!(spec.primary, "original-layout");
+    assert_eq!(
+        spec.repositories[0].url.as_deref(),
+        Some("https://github.com/acme/app.git")
+    );
+    assert_eq!(
+        spec.repositories[0].push_urls,
+        vec![
+            "git@github.com:developer/app.git",
+            "ssh://mirror.example/app.git"
+        ]
+    );
+}
+
 /// A fake executor that fails the SSH probe a fixed number of times.
 struct SshProbeExecutor {
     failures_remaining: RefCell<u32>,
@@ -164,6 +217,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
     std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let record = SessionRecord {
+        project: None,
         target_runtime: None,
         launch_base: None,
         launch_branch: None,

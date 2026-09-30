@@ -1213,21 +1213,16 @@ pub(crate) fn spawn_create_bundle(
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) {
-    spawn_critical_io(
-        tracker,
-        "creating bundle",
+    spawn_async_job(
+        Some(tracker),
+        "creating project",
         updates,
-        move || {
-            // Load fresh so a concurrent background save (e.g. an import
-            // apply) is not clobbered by a stale UI-time config snapshot.
-            let created = mj_controller::controller::create_bundle_from_sources(&sources)?;
+        Duration::from_secs(60),
+        async move {
+            let mut daemon = daemon::connect_or_start().await?;
+            let created = daemon.create_project(sources).await?;
             Ok(CreatedBundleUpdate {
-                bundle: created
-                    .config
-                    .bundles
-                    .get(&created.bundle_id)
-                    .cloned()
-                    .context("created project is missing its configuration")?,
+                bundle: created.project.bundle,
                 bundle_id: created.bundle_id,
             })
         },

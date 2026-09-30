@@ -173,13 +173,35 @@ The first repository is primary, where the agent starts; removing it makes the
 next repository primary. Existing multi-repository configurations remain available
 as saved projects. Edit `config.toml` for a custom repository layout.
 
+**Projects** saves the complete repository set, primary repository, and layout.
+A subdirectory, symlink, linked worktree, and matching GitHub URL resolve to the
+same repository. Identity follows the fetch remote tracked by the default
+branch, so switching feature branches or using a separate push remote does not
+change the project. Selecting a single repository never adds other members of
+a larger saved project.
+
+On first discovery, Mjolnir reads project directories from the ten newest native
+sessions in each configured harness home. It does not import those conversations.
+Later openings of Projects or the raw directory picker refresh from new Mjolnir
+session records. Unavailable directories are reported, other homes continue,
+and **Retry discovery** retries failed candidates. Local resolution uses Git;
+GitHub CLI remains necessary only for the existing GitHub browser/authentication
+integration.
+
+Equivalent saved definitions are consolidated. Existing sessions retain their
+accepted repository IDs, layout, and fetch/push settings, and their history stays
+available through the old project IDs. Custom layouts and different primary
+repositories remain distinct saved projects.
+
 Isolated sessions begin at the fetch remote's default branch. Local unpublished
 commits and working-tree changes are excluded; the review shows the source before
 launch. `git_ref` is obsolete and is rejected with migration guidance.
 
 Bare runtimes work differently. A new bare session, on this machine or on an
 SSH machine, selects an existing absolute Git project directory instead of a
-configured bundle.
+configured bundle. Its directory is represented internally as a project with
+one repository; the selected directory remains the session's working directory.
+Its history and memory share repository identity with a managed project of one.
 The final review offers **Create isolated checkout**, on by default for a
 primary checkout and off for an existing linked worktree. When checked,
 Mjolnir creates a session-specific independent clone under `.mj/clones/` and
@@ -252,10 +274,12 @@ project. It is shared across harnesses and sessions that resolve to the same
 project identity:
 
 - a GitHub repository is identified by lowercased owner and repository;
-- a local project is identified by its canonical repository root;
-- a raw remote project includes its target ID and canonical remote path; and
-- a bundle is identified by its primary repository and member set, independent
-  of member order.
+- another network repository keeps its server's case-sensitive path;
+- a repository without a network remote uses its canonical repository root,
+  qualified by host for SSH directories;
+- raw and managed single-repository projects share repository memory; and
+- a multi-repository project includes its primary repository, members, and layout,
+  independent of member order.
 
 The workspace name is not part of that identity. Two workspaces using the same
 project therefore share project memory; two different bundles do not merely

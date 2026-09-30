@@ -286,6 +286,74 @@ pub fn resolve_local_repository(
     resolve_local_repository_with_remote(path, executor, None)
 }
 
+/// The default branch's fetch remote identifies the project. Feature-branch
+/// tracking and push destinations describe execution, not repository identity.
+pub fn identity_fetch_url(path: &Path, executor: &impl CommandExecutor) -> Result<Option<String>> {
+    let remotes = parse_lines(
+        &git_output(path, ["remote"], executor, "list project remotes")?.stdout,
+        "project remotes",
+    )?;
+    if remotes.is_empty() {
+        return Ok(None);
+    }
+    let initial = default_fetch_remote(&remotes)?;
+    let initial_url = remote_url(path, &initial, false, executor)?;
+    // A filesystem remote cannot identify a network-backed project.
+    if validate_network_url(&initial_url).is_err() {
+        return Ok(None);
+    }
+    let tracking = executor.execute(
+        &git_command(path, ["config", "--get-regexp", r"^branch\..*\.remote$"])
+            .purpose("read project branch remotes"),
+    )?;
+    if !matches!(tracking.status, 0 | 1) {
+        bail!(
+            "could not read project branch remotes (status {})",
+            tracking.status
+        );
+    }
+    let tracking = String::from_utf8(tracking.stdout).context("decode project branch remotes")?;
+    // Avoid a network probe when every possible branch selects the same
+    // remote. This also makes ordinary directory discovery work offline.
+    if !tracking.lines().any(|line| {
+        line.split_whitespace()
+            .nth(1)
+            .is_some_and(|remote| remote != initial)
+    }) {
+        return Ok(Some(initial_url));
+    }
+    let reference = format!("refs/remotes/{initial}/HEAD");
+    let head = executor.execute(
+        &git_command(path, ["symbolic-ref", "--quiet", reference.as_str()])
+            .purpose("read cached project default branch"),
+    )?;
+    let default = match head.status {
+        0 => String::from_utf8(head.stdout)
+            .context("decode project default branch")?
+            .trim()
+            .strip_prefix(&format!("refs/remotes/{initial}/"))
+            .context("project remote HEAD does not name a branch on its remote")?
+            .to_owned(),
+        1 => crate::remote_git::default_branch(
+            &NetworkGitSource {
+                fetch_url: initial_url.clone(),
+                push_urls: Vec::new(),
+            },
+            executor,
+        )?,
+        status => bail!("could not read project default branch (status {status})"),
+    };
+    let remote =
+        git_config(path, &format!("branch.{default}.remote"), executor)?.unwrap_or(initial);
+    ensure_remote_name(&remote, "default branch")?;
+    if !remotes.contains(&remote) {
+        bail!("default branch {default:?} tracks missing Git remote {remote:?}");
+    }
+    let url = remote_url(path, &remote, false, executor)?;
+    validate_network_url(&url).context("default branch needs a network repository remote")?;
+    Ok(Some(url))
+}
+
 /// A concrete, read-only proposal. Applying it requires a separate user action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -520,7 +588,7 @@ fn git_output(
     if executor.cancellation_requested() {
         bail!("operation cancelled while {purpose}");
     }
-    let command = git_command(path, args);
+    let command = git_command(path, args).purpose(purpose);
     let output = executor
         .execute(&command)
         .with_context(|| format!("{purpose} in {}", path.display()))?;
@@ -733,6 +801,65 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         git(directory.path(), &["init", "-q", "-b", "main"]);
         directory
+    }
+
+    #[test]
+    fn project_identity_uses_default_branch_tracking_and_keeps_selected_worktree() {
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(path, &["config", "user.name", "Project Test"]);
+        git(path, &["config", "user.email", "project@example.test"]);
+        fs::write(path.join("tracked"), "base").unwrap();
+        git(path, &["add", "tracked"]);
+        git(path, &["commit", "-qm", "base"]);
+        for (remote, url) in [
+            ("origin", "https://github.com/acme/app.git"),
+            ("upstream", "git@github.com:acme/canonical.git"),
+            ("publish", "https://github.com/me/fork.git"),
+        ] {
+            git(path, &["remote", "add", remote, url]);
+        }
+        git(
+            path,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(path, &["config", "branch.main.remote", "upstream"]);
+        git(path, &["config", "branch.main.pushRemote", "publish"]);
+        let expected = Some("git@github.com:acme/canonical.git".to_owned());
+        assert_eq!(
+            identity_fetch_url(path, &crate::targets::ProcessExecutor).unwrap(),
+            expected
+        );
+        git(path, &["checkout", "-qb", "feature"]);
+        git(path, &["config", "branch.feature.remote", "publish"]);
+        assert_eq!(
+            identity_fetch_url(path, &crate::targets::ProcessExecutor).unwrap(),
+            expected
+        );
+        let selected = directory.path().join("src");
+        fs::create_dir(&selected).unwrap();
+        assert_eq!(
+            crate::repository::local_identity(&selected, &crate::targets::ProcessExecutor).unwrap(),
+            crate::repository::RepositoryIdentity::Github("acme".into(), "canonical".into())
+        );
+        let source = resolve_local_repository(path, &crate::targets::ProcessExecutor).unwrap();
+        assert_eq!(source.fetch_url, "https://github.com/me/fork.git");
+        assert_eq!(source.push_urls, ["https://github.com/me/fork.git"]);
+    }
+
+    #[test]
+    fn no_remote_project_identity_is_its_canonical_repository() {
+        let directory = initialized_repository();
+        let nested = directory.path().join("src");
+        fs::create_dir(&nested).unwrap();
+        assert_eq!(
+            crate::repository::local_identity(&nested, &crate::targets::ProcessExecutor).unwrap(),
+            crate::repository::RepositoryIdentity::Local(directory.path().canonicalize().unwrap())
+        );
     }
 
     fn repair_bundle(path: &Path) -> ProjectBundle {

@@ -2457,6 +2457,7 @@ mod tests {
         state.sessions.insert(
             session_id.into(),
             SessionRecord {
+                project: None,
                 target_runtime: None,
                 launch_base: None,
                 launch_branch: None,

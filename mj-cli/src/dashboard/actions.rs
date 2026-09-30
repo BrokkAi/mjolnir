@@ -456,12 +456,46 @@ pub(crate) async fn apply_dashboard_action(
             context.web_request_cancel = None;
             context.web_request_generation = context.web_request_generation.wrapping_add(1);
         }
-        DashboardAction::LoadMountHistory => {
-            crate::dashboard::spawn_io(
-                "reading recent project directories",
+        action @ (DashboardAction::LoadMountHistory | DashboardAction::RefreshProjects { .. }) => {
+            let retry = matches!(action, DashboardAction::RefreshProjects { retry: true });
+            context.dashboard.set_notice("Refreshing recent projects…");
+            let history_tx = context.dashboard_io_tx.clone();
+            let picker_context = context.dashboard.project_catalog_context();
+            let history_context = picker_context.clone();
+            crate::dashboard::io::spawn_async_job(
+                None,
+                "refreshing projects",
                 context.dashboard_io_tx.clone(),
-                mj_controller::database::load_mount_history,
-                DashboardIoUpdate::MountHistory,
+                std::time::Duration::from_secs(125),
+                async move {
+                    let history =
+                        tokio::task::spawn_blocking(mj_controller::database::load_mount_history)
+                            .await
+                            .context("recent project history task failed")?
+                            .map_err(|error| format!("{error:#}"));
+                    // Publish the history before requesting discovery. A late
+                    // history snapshot cannot erase locations discovery adds.
+                    history_tx
+                        .send(DashboardIoUpdate::MountHistory {
+                            context: history_context,
+                            result: history,
+                        })
+                        .map_err(|_| anyhow::anyhow!("dashboard closed during project refresh"))?;
+                    let mut daemon = daemon::connect_or_start().await?;
+                    let mut view = daemon.project_catalog(true, retry).await?;
+                    while matches!(
+                        view.status,
+                        mj_core::project_catalog::ProjectCatalogStatus::Refreshing
+                    ) {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        view = daemon.project_catalog(false, false).await?;
+                    }
+                    Ok(view)
+                },
+                move |result| DashboardIoUpdate::ProjectCatalog {
+                    context: picker_context,
+                    result,
+                },
             );
         }
         DashboardAction::CheckTargetReadiness {

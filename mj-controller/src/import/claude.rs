@@ -134,52 +134,7 @@ pub fn scan_claude_sessions(
     cache: &NativeScanCache,
     mut report: impl FnMut(SessionScanProgress<LocatedClaudeSession>),
 ) -> Result<()> {
-    let projects = home.join("projects");
-    ensure!(
-        projects.is_dir(),
-        "Claude projects directory is missing: {}",
-        projects.display()
-    );
-    let mut candidates = Vec::new();
-    for project in fs::read_dir(&projects)
-        .with_context(|| format!("read Claude projects directory {}", projects.display()))?
-    {
-        let project = project?;
-        let project_path = project.path();
-        let project_metadata = fs::symlink_metadata(&project_path)?;
-        if project_metadata.file_type().is_symlink() || !project_metadata.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&project_path)? {
-            let entry = entry?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(session_id) = name.strip_suffix(".jsonl") else {
-                continue;
-            };
-            if session_id.is_empty() {
-                continue;
-            }
-            candidates.push(FileScanCandidate {
-                path,
-                modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                size_bytes: metadata.len(),
-            });
-        }
-    }
-
-    candidates.sort_by(|left, right| {
-        right
-            .modified_at
-            .cmp(&left.modified_at)
-            .then_with(|| right.path.cmp(&left.path))
-    });
+    let candidates = claude_candidates(home)?;
     let total = candidates.len();
     report(SessionScanProgress {
         scanned: 0,
@@ -442,4 +397,54 @@ pub(crate) fn directory_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(size)
+}
+
+pub(super) fn claude_candidates(home: &Path) -> Result<Vec<FileScanCandidate>> {
+    let projects = home.join("projects");
+    ensure!(
+        projects.is_dir(),
+        "Claude projects directory is missing: {}",
+        projects.display()
+    );
+    let mut candidates = Vec::new();
+    for project in fs::read_dir(&projects)
+        .with_context(|| format!("read Claude projects directory {}", projects.display()))?
+    {
+        let project = project?;
+        let project_path = project.path();
+        let project_metadata = fs::symlink_metadata(&project_path)?;
+        if project_metadata.file_type().is_symlink() || !project_metadata.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&project_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(session_id) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if session_id.is_empty() {
+                continue;
+            }
+            candidates.push(FileScanCandidate {
+                path,
+                modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                size_bytes: metadata.len(),
+            });
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    Ok(candidates)
 }

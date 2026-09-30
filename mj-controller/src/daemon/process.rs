@@ -246,6 +246,8 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     );
 
+    let project_catalog = tokio::spawn(state.projects().run(cancellation.child_token()));
+
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
         cancellation.clone(),
@@ -683,6 +685,11 @@ pub(super) async fn run_daemon_runtime(
             .shutdown()
             .await
             .map_err(anyhow::Error::msg),
+    );
+    record_daemon_cleanup(
+        &mut outcome,
+        "join project discovery",
+        project_catalog.await.map_err(anyhow::Error::from),
     );
     record_daemon_cleanup(
         &mut outcome,

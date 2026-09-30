@@ -131,7 +131,7 @@ fn workspace_to_raw_compatibility(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<ResumePlan, String> {
-    let Some(bundle) = config.bundles.get(&session.bundle_id) else {
+    let Some(bundle) = session.project_bundle(config) else {
         return Err(BUNDLE_ON_LOCAL_BARE.to_owned());
     };
     let [repository] = bundle.repositories.as_slice() else {

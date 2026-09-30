@@ -32,6 +32,7 @@ pub(crate) struct ProjectPicker {
     pub request: Option<ProjectDiscoveryRequest>,
     pub pending: bool,
     pub focus_results: bool,
+    retry_catalog: bool,
     id: u64,
     generation: u64,
 }
@@ -55,6 +56,7 @@ impl Default for ProjectPicker {
             request: None,
             pending: false,
             focus_results: false,
+            retry_catalog: false,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             generation: 0,
         }
@@ -97,36 +99,10 @@ impl NewWizard {
         self.project_picker.truncated = false;
         match tab {
             ProjectTab::Recent => {
-                let mut entries = Vec::new();
-                for path in dashboard
-                    .launch_project_directory
-                    .iter()
-                    .chain(dashboard.state.project_directories("local").iter())
-                {
-                    let source = path.to_string_lossy().into_owned();
-                    if entries
-                        .iter()
-                        .any(|entry: &ProjectEntry| entry.source == source)
-                    {
-                        continue;
-                    }
-                    let current = dashboard.launch_project_directory.as_ref() == Some(path);
-                    entries.push(ProjectEntry {
-                        name: path
-                            .file_name()
-                            .unwrap_or(path.as_os_str())
-                            .to_string_lossy()
-                            .into_owned(),
-                        source: source.clone(),
-                        description: if current {
-                            format!("Current project · {source}")
-                        } else {
-                            source
-                        },
-                        kind: ProjectEntryKind::Repository,
-                    });
-                }
-                self.project_picker.entries = entries;
+                self.project_picker.entries = dashboard.recent_project_entries();
+                self.project_picker.retry_catalog = false;
+                self.project_picker.pending = true;
+                self.project_picker.request = None;
             }
             ProjectTab::Github => self.project_picker.load(ProjectDiscoveryRequest::Github {
                 query: self.project_picker.query.trim().to_owned(),
@@ -246,6 +222,64 @@ impl NewWizard {
 }
 
 impl DashboardState {
+    pub fn project_catalog_context(&self) -> Option<String> {
+        match &self.mode {
+            Mode::New(wizard) => Some(wizard.project_picker.context()),
+            _ => None,
+        }
+    }
+    pub(super) fn recent_project_entries(&self) -> Vec<ProjectEntry> {
+        let mut entries = Vec::new();
+        for path in self
+            .launch_project_directory
+            .iter()
+            .chain(self.state.project_directories("local").iter())
+        {
+            let source = path.to_string_lossy().into_owned();
+            if entries
+                .iter()
+                .any(|entry: &ProjectEntry| entry.source == source)
+            {
+                continue;
+            }
+            let current = self.launch_project_directory.as_ref() == Some(path);
+            entries.push(ProjectEntry {
+                name: path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into_owned(),
+                source: source.clone(),
+                description: if current {
+                    format!("Current project · {source}")
+                } else {
+                    source
+                },
+                kind: ProjectEntryKind::Repository,
+            });
+        }
+        entries
+    }
+
+    pub fn apply_project_catalog_status(
+        &mut self,
+        status: mj_core::project_catalog::ProjectCatalogStatus,
+    ) {
+        let Mode::New(wizard) = &mut self.mode else {
+            return;
+        };
+        if wizard.step != WizardStep::NewBundle || wizard.project_picker.tab != ProjectTab::Recent {
+            return;
+        }
+        wizard.project_picker.loading = false;
+        wizard.project_picker.error = match status {
+            mj_core::project_catalog::ProjectCatalogStatus::Failed { errors } => {
+                Some(errors.join("; "))
+            }
+            _ => None,
+        };
+    }
+
     pub fn take_project_discovery(&mut self) -> Option<DashboardAction> {
         let Mode::New(wizard) = &mut self.mode else {
             return None;
@@ -254,10 +288,16 @@ impl DashboardState {
             return None;
         }
         wizard.project_picker.pending = false;
-        Some(DashboardAction::DiscoverProjects {
-            context: wizard.project_picker.context(),
-            request: wizard.project_picker.request.clone()?,
-        })
+        match wizard.project_picker.request.clone() {
+            Some(request) => Some(DashboardAction::DiscoverProjects {
+                context: wizard.project_picker.context(),
+                request,
+            }),
+            None if std::mem::take(&mut wizard.project_picker.retry_catalog) => {
+                Some(DashboardAction::RefreshProjects { retry: true })
+            }
+            None => Some(DashboardAction::LoadMountHistory),
+        }
     }
 
     pub fn apply_project_discovery(
@@ -368,6 +408,13 @@ impl DashboardState {
                 }
                 if let Some(request) = wizard.project_picker.request.clone() {
                     wizard.project_picker.load(request);
+                } else if wizard.project_picker.tab == ProjectTab::Recent {
+                    wizard.project_picker.generation =
+                        wizard.project_picker.generation.wrapping_add(1);
+                    wizard.project_picker.retry_catalog = true;
+                    wizard.project_picker.pending = true;
+                    wizard.project_picker.loading = true;
+                    wizard.project_picker.error = None;
                 }
             }
             WizardControl::ProjectResults | WizardControl::Next => {
