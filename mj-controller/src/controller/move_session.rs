@@ -954,7 +954,7 @@ impl Controller {
     }
 
     fn finish_move_result(
-        &self,
+        &mut self,
         operation: &mut MoveOperation,
         result: Result<()>,
         executor: &impl CommandExecutor,
@@ -973,12 +973,36 @@ impl Controller {
                 Some("Move will continue after the daemon upgrade".into()),
             ));
         }
+        let session_id = operation.selection.session_id.clone();
+        let mut last_error = self
+            .state
+            .sessions
+            .get(&session_id)
+            .context("Move outcome session is missing")?
+            .last_error
+            .clone();
         let (status, error, recovery) = match result {
             Ok(()) => {
                 operation.phase = MovePhase::Completed;
+                operation.error = None;
+                if last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with(mj_core::state::MOVE_FAILURE_PREFIX))
+                {
+                    last_error = None;
+                }
                 ("completed", None, None)
             }
             Err(error) => {
+                let phase = match operation.phase {
+                    MovePhase::Preparing => "preparing the destination",
+                    MovePhase::ClosingSource => "checkpointing and suspending the source",
+                    MovePhase::ResumingDestination => "resuming the destination",
+                    MovePhase::StartingQueue => "starting the destination queue",
+                    MovePhase::Completed | MovePhase::Failed | MovePhase::Cancelled => {
+                        "recovering the move"
+                    }
+                };
                 let cancelled =
                     executor.cancellation_requested() || operation.cancellation_requested;
                 operation.phase = if cancelled {
@@ -992,6 +1016,20 @@ impl Controller {
                     self.state.sessions.get(&operation.selection.session_id),
                 );
                 let error = format!("{error:#}");
+                tracing::warn!(
+                    %session_id,
+                    reference = %operation.operation_id,
+                    phase,
+                    cancelled,
+                    %error,
+                    "session move did not finish"
+                );
+                last_error = Some(format!(
+                    "{} while {phase}{}. {recovery} The daemon log records the reason under reference {}",
+                    mj_core::state::MOVE_FAILURE_PREFIX,
+                    if cancelled { " (cancelled)" } else { "" },
+                    operation.operation_id,
+                ));
                 operation.error = Some(error.clone());
                 (
                     if cancelled { "cancelled" } else { "failed" },
@@ -1001,7 +1039,14 @@ impl Controller {
             }
         };
         operation.updated_at = now();
-        crate::database::save_move_operation(operation)?;
+        crate::database::save_move_outcome(operation, last_error.as_deref())?;
+        let record = self
+            .state
+            .sessions
+            .get_mut(&session_id)
+            .expect("Move outcome session");
+        record.last_error = last_error;
+        record.updated_at = operation.updated_at.clone();
         Ok(outcome(
             &operation.operation_id,
             &operation.selection,

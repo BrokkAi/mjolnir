@@ -68,9 +68,9 @@ pub struct ApiSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_state: Option<mj_core::activity::ActivityState>,
     pub has_error: bool,
-    /// Why a launch failed, for a session in the error state. Absent
-    /// otherwise: raw runtime error text is deliberately not published for a
-    /// running session. Why a *turn* failed travels in `last_turn_diagnostic`,
+    /// A launch failure or a safe lifecycle failure, including a failed Move.
+    /// Raw runtime error text is deliberately not published for a running
+    /// session. Why a *turn* failed travels in `last_turn_diagnostic`,
     /// which a single-session query fills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
