@@ -25,9 +25,13 @@ and continue to reuse a daemon already running the invoking build.
   terminal PTY: 11 passed. Real Codex handoff, checkpoint/suspend/resume, staged
   login and viewer durable logout passed; kitty custom prefix and packaged
   Docker smoke passed. Fix the discovered legacy checkpoint home-alias defect.
-- [ ] Commit the #1135 verification evidence and any necessary fixes separately.
-- [ ] Run full dev-profile Cargo tests and all-targets Clippy, then publish.
-- [ ] Update issue evidence and leave any unexercised missions clearly open.
+- [x] (2026-09-30) Commit #1135 fix and acceptance evidence separately as
+  `f896b3a4`; merge upstream cleanly as `adb1a4d3`.
+- [x] (2026-09-30) Full dev-profile `cargo test` passed on `adb1a4d3`;
+  all-targets Clippy passed. Web unit tests: 70 passed; documentation check:
+  zero diagnostics. Push `adb1a4d3` to origin/master succeeded.
+- [x] (2026-09-30) Publish finding and verification comments, clear both work
+  labels, and confirm #1184 closed. #1135 remains open for unexercised missions.
 
 ## Surprises & Discoveries
 
@@ -78,8 +82,9 @@ Both implementations pass focused checks and real Mac acceptance. The launch
 verification found a released upgrade checkpoint failure that required resolving
 the installed worker home before invoking even a compatible legacy exporter.
 The evidence report records five passing real-harness checks and remaining
-manual/authentication/OS missions. Full integrated validation and publication
-are pending; #1135 must remain open for its unexercised missions.
+manual/authentication/OS missions. Full integrated validation passed and `adb1a4d3` was pushed to origin/master.
+#1135 remains open for its unexercised missions. All isolated Mac daemons and
+workers were cleaned up; Docker Desktop was restored to its stopped state.
 
 ## Context and Orientation
 
@@ -182,3 +187,15 @@ compatibility check and add a refusal regression; focused Linux checks pass.
 
 Revision note (2026-09-30): Record real Mac acceptance and the released legacy
 checkpoint-home defect; preserve manual mission limits in the evidence report.
+
+Revision note (2026-09-30): Full validation passed after an unrelated two-second
+chat image-delivery test timeout on the first run. The same full-suite binary
+passed that test directly in 0.04 seconds, its Cargo-focused recheck passed,
+and the full rerun passed. No source change was required. Publication succeeded.
+
+Publication evidence: #1135 finding comment is
+`https://github.com/BrokkAi/mjolnir/issues/1135#issuecomment-5920101253`; the
+verification comment is
+`https://github.com/BrokkAi/mjolnir/issues/1135#issuecomment-5920101526`. #1184
+closed through its fixing commit. The final documentation-only checkpoint
+records these outcomes; it does not change the validated implementation.

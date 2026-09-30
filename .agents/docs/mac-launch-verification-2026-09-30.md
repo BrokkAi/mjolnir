@@ -94,8 +94,14 @@ local bare and Docker Desktop support without requiring an OS upgrade.
 Mac test logs are `~/mj-tier1135-build-tests.log`,
 `~/mj-tier1135-checkpoint-tests.log`, and `~/mj-tier1135-termination-pty.log`.
 The new Mac probe is included in the macOS-sensitive CI path list.
-Full integrated validation and publication are recorded in the accompanying
-ExecPlan and issue comments after they complete.
+Full integrated validation on merge `adb1a4d3` passed: dev-profile `cargo test`,
+`cargo clippy --all-targets -- -D warnings`, 70 web unit tests, and documentation
+checks with zero diagnostics. The first full run hit a two-second image-delivery
+test timeout; a direct same-binary recheck, focused Cargo recheck and complete
+rerun passed without source changes. Logs are on the Linux host under
+`/tmp/mj-1135-1184-full-tests-recheck.log` and
+`/tmp/mj-1135-1184-clippy.log`. The implementation commits `79f2ad0a` (#1184)
+and `f896b3a4` (#1135 finding) were pushed to origin/master with that merge.
 
 ## Remaining mission coverage
 
