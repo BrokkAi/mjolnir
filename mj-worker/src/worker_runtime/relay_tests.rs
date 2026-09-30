@@ -6647,9 +6647,13 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
+    let appeared = control_socket_appears(&root, std::time::Duration::from_secs(30)).await;
+    // The startup record names the step a slow start stalled in.
+    let steps =
+        std::fs::read_to_string(root.join(mj_core::relay::WORKER_STARTUP_FILE)).unwrap_or_default();
     assert!(
-        control_socket_appears(&root, std::time::Duration::from_secs(30)).await,
-        "an unreviewed session must not wait for a working-tree capture"
+        appeared,
+        "an unreviewed session must not wait for a working-tree capture; startup steps: {steps}"
     );
     daemon.abort();
     let _ = daemon.await;

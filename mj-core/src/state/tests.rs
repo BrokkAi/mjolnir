@@ -263,6 +263,7 @@ fn sample_config() -> Config {
         sessionwiki: Default::default(),
         subagents: Default::default(),
         legacy_startup: (),
+        default_targets: Default::default(),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),

@@ -3756,6 +3756,17 @@ function freshness(reading) {
   return null;
 }
 
+// The ids a host card lists. A default candidate (one Mjolnir supplies and the
+// user did not write in config.toml) whose runtime is missing is left out; a
+// configured target stays listed.
+function listedTargetIds(reading) {
+  const byId = new Map((snapshot.targets || []).map(target => [target.id, target]));
+  return (reading.target_ids || []).filter(id => {
+    const target = byId.get(id);
+    return !(target?.default_candidate && target.runtime_missing);
+  });
+}
+
 function renderTargets() {
   const readings = snapshot.capacity || [];
   if (!readings.length) {
@@ -3770,7 +3781,7 @@ function renderTargets() {
       const state = freshness(reading);
       if (state) heading.append(el('span', `pill ${state.className}`, state.word));
       card.append(heading);
-      card.append(el('p', 'dim', reading.target_ids.join(', ')));
+      card.append(el('p', 'dim', listedTargetIds(reading).join(', ')));
 
       const rows = [];
       if (reading.cpu_percent !== undefined) {

@@ -3218,6 +3218,128 @@ async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessio
     );
 }
 
+/// Withdrawing a queued prompt before delivery cancels it: nothing is
+/// submitted when the harness becomes ready, the drain still delivers what is
+/// queued afterwards, and no durable row is left to send it later.
+#[tokio::test]
+async fn withdrawing_a_queued_startup_prompt_before_delivery_cancels_it() {
+    let Some(_writer) =
+        startup_prompt_test_store("withdrawing_a_queued_startup_prompt_before_delivery_cancels_it")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    handle_action(
+        queued_prompt_action("edit me"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the prompt");
+    let reply = handle_action(
+        DaemonAction::WithdrawStartupPrompt {
+            session_id: "session-1".into(),
+            text: "edit me".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("withdraw the queued prompt");
+    assert!(
+        matches!(reply, DaemonReply::PromptWithdrawn(true)),
+        "{reply:?}"
+    );
+
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), manager.requests.recv())
+            .await
+            .is_err(),
+        "a withdrawn prompt was delivered"
+    );
+
+    handle_action(
+        queued_prompt_action("the edited prompt"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the edited prompt");
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "the edited prompt");
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+    assert!(
+        notice_texts(&state).is_empty(),
+        "withdrawal posted a notice"
+    );
+}
+
+/// Once the daemon has started delivering, the prompt is on its way and a
+/// withdrawal is refused with the fact that it was sent.
+#[tokio::test]
+async fn withdrawing_a_startup_prompt_after_delivery_started_is_refused() {
+    let Some(_writer) =
+        startup_prompt_test_store("withdrawing_a_startup_prompt_after_delivery_started_is_refused")
+    else {
+        return;
+    };
+    let mut manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    insert_starting_session(&state, "");
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+
+    handle_action(
+        queued_prompt_action("already going"),
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("queue the prompt");
+    manager
+        .publisher
+        .publish("session-1".into(), ready_startup_view())
+        .await
+        .expect("publish the ready view");
+    let (text, reply) = next_submit(&mut manager).await;
+    assert_eq!(text, "already going");
+
+    let answer = handle_action(
+        DaemonAction::WithdrawStartupPrompt {
+            session_id: "session-1".into(),
+            text: "already going".into(),
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("the daemon answers a late withdrawal");
+    assert!(
+        matches!(answer, DaemonReply::PromptWithdrawn(false)),
+        "a prompt being delivered was withdrawn: {answer:?}"
+    );
+    reply
+        .send(Ok(1))
+        .expect("the drain awaits the submit reply");
+}
+
 async fn wait_for_startup_pause(state: &Arc<RuntimeState>) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !notice_texts(state)

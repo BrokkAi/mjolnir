@@ -81,6 +81,36 @@ fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
     assert_eq!(snapshot.sessions[0].title, "Fix the parser");
 }
 
+/// The snapshot says which targets Mjolnir supplied (default candidates) and
+/// which the user wrote, so clients can hide a default whose runtime is
+/// missing and keep a configured one as unavailable.
+#[test]
+fn the_snapshot_marks_default_candidates_apart_from_configured_targets() {
+    let (_, state) = sample_config_state();
+    let mut docker = mj_core::config::Config::default()
+        .with_local_targets()
+        .targets["docker"]
+        .clone();
+    if let mj_core::config::TargetTemplate::LocalDocker { container } = &mut docker {
+        container.image = "example.test/own:latest".into();
+    }
+    let mut written = mj_core::config::Config::default();
+    written.targets.insert("sandbox".into(), docker);
+    let config = written.with_local_targets();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let default_candidate = |id: &str| {
+        snapshot
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} is published"))
+            .default_candidate
+    };
+    assert!(default_candidate("docker"));
+    assert!(default_candidate("podman"));
+    assert!(!default_candidate("sandbox"));
+}
+
 #[tokio::test]
 async fn a_finished_wait_does_not_report_the_session_still_running() {
     // F-12: `prompt --wait --json` answered with `chat_phase: running` because
@@ -4224,6 +4254,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 kind: "local-docker".into(),
                 requires_project_directory: false,
                 runtime_missing: false,
+                default_candidate: false,
                 availability: crate::server::api::LaunchAvailability::Unknown,
                 unavailable_reason: None,
                 recent_project_directories: Vec::new(),
@@ -4284,6 +4315,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             kind: "local-docker".into(),
             requires_project_directory: false,
             runtime_missing: true,
+            default_candidate: false,
             availability: crate::server::api::LaunchAvailability::Unknown,
             unavailable_reason: None,
             recent_project_directories: Vec::new(),
@@ -4333,6 +4365,7 @@ async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
                 kind: "local-docker".into(),
                 requires_project_directory: false,
                 runtime_missing: true,
+                default_candidate: false,
                 availability: crate::server::api::LaunchAvailability::Unknown,
                 unavailable_reason: None,
                 recent_project_directories: Vec::new(),

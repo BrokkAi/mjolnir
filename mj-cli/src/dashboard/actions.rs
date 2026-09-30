@@ -24,8 +24,9 @@ use crate::dashboard::io::{
     spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
     spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
     spawn_remove_bundle, spawn_review_settings_discovery, spawn_startup_prompt,
-    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
-    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_withdraw_startup_prompt, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -716,6 +717,14 @@ pub(crate) async fn apply_dashboard_action(
                 session_id,
                 text,
                 inherited_draft,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::WithdrawStartupPrompt { session_id, text } => {
+            spawn_withdraw_startup_prompt(
+                session_id,
+                text,
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

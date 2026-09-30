@@ -101,6 +101,11 @@ impl ChatState {
         self.set_input(String::new());
     }
 
+    /// Empties the composer's input.
+    pub fn clear_draft(&mut self) {
+        self.clear_input();
+    }
+
     /// Reinstate the input saved when the user last detached, leaving the
     /// cursor at the end. An empty draft leaves the composer alone.
     pub(crate) fn restore_draft(&mut self, draft: String) {
@@ -445,6 +450,20 @@ impl ChatState {
             .iter()
             .map(|queued| queued.text.clone())
             .collect()
+    }
+
+    /// Shows a prompt as queued again: the daemon could not confirm it was
+    /// withdrawn, so it may still be delivered.
+    pub fn restore_queued_prompt_text(&mut self, text: &str) {
+        let id = mj_client::session::new_command_id("standby")
+            .unwrap_or_else(|_| format!("standby-{}", self.queued_prompts.len()));
+        self.queued_prompts.push_back(QueuedPrompt {
+            id,
+            text: text.to_owned(),
+            kind: QueuedCommandKind::Prompt,
+            images: Vec::new(),
+            attachments_unsupported: false,
+        });
     }
 
     /// Removes the oldest queued-prompt preview with this text and says

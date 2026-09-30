@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, TextContent};
 use anyhow::Result;
 
-use super::{
-    Controller, MoveMutationGuard, MoveSourceRelay, move_owns_session, move_refuses_command,
-};
+#[cfg(unix)]
+use super::MoveSourceRelay;
+use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
 use crate::controller::test_support::{
     IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository, local_bundle,
     managed_raw_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,

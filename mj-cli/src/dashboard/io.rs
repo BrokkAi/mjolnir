@@ -179,6 +179,13 @@ pub(crate) enum DashboardIoUpdate {
         text: String,
         result: std::result::Result<(), String>,
     },
+    /// The daemon's answer to taking a recalled prompt back: `Ok(true)` it is
+    /// withdrawn, `Ok(false)` it had already been sent.
+    StartupPromptWithdrawn {
+        session_id: String,
+        text: String,
+        result: std::result::Result<bool, String>,
+    },
     ContainerSettings {
         session_id: String,
         result: std::result::Result<DashboardMetadata, String>,
@@ -971,6 +978,35 @@ impl DashboardContext {
                         "Could not queue the prompt for session {}: {error}",
                         self.session_notice_name(&session_id)
                     ));
+                }
+            }
+            DashboardIoUpdate::StartupPromptWithdrawn {
+                session_id,
+                text,
+                result,
+            } => {
+                let name = self.session_notice_name(&session_id);
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let dropped = self.dashboard.standby_prompt_was_sent(&session_id, &text);
+                        self.dashboard.set_notice(if dropped {
+                            format!(
+                                "That prompt had already been sent to session {name}, so it is not in the composer any more."
+                            )
+                        } else {
+                            format!(
+                                "That prompt had already been sent to session {name}; the composer still holds your edit, and Enter sends it as a new prompt."
+                            )
+                        });
+                    }
+                    Err(error) => {
+                        self.dashboard
+                            .standby_prompt_withdrawal_unconfirmed(&session_id, &text);
+                        self.dashboard.set_failure_notice(format!(
+                            "Could not take the prompt back from session {name} ({error}); it is still queued and will be sent when the session is live."
+                        ));
+                    }
                 }
             }
             DashboardIoUpdate::RenameSession { title, result } => match result {

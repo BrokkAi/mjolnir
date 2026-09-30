@@ -6,7 +6,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 
-use mj_core::config::{Config, HarnessKind};
+use mj_core::config::{Config, HarnessKind, TargetTemplate};
 use mj_core::state::{
     MaterializedExecutionState, STATE_VERSION, SessionState, State, TranscriptBody,
 };
@@ -3372,6 +3372,50 @@ fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
 
     let rendered = render_text(&mut dashboard);
     assert!(rendered.contains("podman (unavailable)"), "{rendered}");
+}
+
+/// A default candidate whose engine is missing (the user has no Docker and
+/// wrote no `docker` target) is not listed in the host row. A target the
+/// user wrote whose engine is missing stays, marked unavailable.
+#[test]
+fn host_row_hides_a_default_candidate_with_a_missing_runtime_but_keeps_a_configured_one() {
+    let mut config = Config::default();
+    let mut sandbox = Config::default().with_local_targets().targets["docker"].clone();
+    if let TargetTemplate::LocalDocker { container } = &mut sandbox {
+        container.image = "example.test/own:latest".into();
+    }
+    config.targets.insert("sandbox".into(), sandbox);
+    let mut dashboard = DashboardState::new(
+        config.with_local_targets(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    let mut target = test_capacity_target();
+    target.target_ids = vec![
+        "docker".into(),
+        "localhost".into(),
+        "podman".into(),
+        "sandbox".into(),
+    ];
+    dashboard.set_deployment_capacity_targets(vec![target]);
+    let Some(crate::DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_target_availability_check()
+    else {
+        panic!("the Targets pane must check its local container targets");
+    };
+    assert!(target_ids.contains(&"docker".to_owned()));
+    for id in ["docker", "sandbox"] {
+        dashboard.apply_target_runtime_missing(generation, id.into(), "docker: not found".into());
+    }
+
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+
+    assert!(rendered.contains("sandbox (unavailable)"), "{rendered}");
+    assert!(rendered.contains("localhost, podman"), "{rendered}");
+    assert!(!rendered.contains("docker (unavailable)"), "{rendered}");
+    assert!(!rendered.contains("docker,"), "{rendered}");
 }
 
 /// A capacity sample the poller keeps refreshing carries no clock column

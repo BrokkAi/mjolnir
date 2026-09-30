@@ -996,7 +996,7 @@ fn builtin_target_availability(
         check.id,
         check.title,
         format!(
-            "{engine} is not available, so the built-in `{target_id}` target is marked unavailable: {}",
+            "{engine} is not available and no configured target uses it, so the built-in `{target_id}` target is marked unavailable, which does not fail the check: {}",
             check.detail
         ),
     )
