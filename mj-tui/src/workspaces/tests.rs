@@ -911,3 +911,39 @@ fn a_rename_opened_from_the_list_returns_to_the_list() {
         matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.view == WorkspaceManagerView::List)
     );
 }
+
+/// The product name sits on the right beside the build number; the left keeps
+/// the glyph and the pane name. The title is the pane's first row.
+#[test]
+fn workspace_title_puts_the_product_name_beside_the_version() {
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let tail = format!(" MJOLNIR {version} ╮");
+    for width in [140, 80] {
+        let mut dashboard = dashboard_with_session(running_session());
+        let line = drawn(&mut dashboard, width, 40)[0].clone();
+        assert!(line.starts_with("╭ ✦ Workspaces ─"), "{line}");
+        assert!(line.contains(&tail), "{line}");
+    }
+    let mut dashboard = dashboard_with_session(running_session());
+    let narrow = drawn(&mut dashboard, 60, 40)[0].clone();
+    assert!(narrow.starts_with("╭ ✦ Workspaces ─"), "{narrow}");
+    assert!(narrow.ends_with(&tail), "{narrow}");
+    assert_eq!(narrow.chars().count(), 60, "{narrow}");
+}
+
+#[test]
+fn workspace_title_keeps_the_ascii_glyph_and_right_side_order() {
+    let mut config = crate::test_support::config();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    let mut dashboard = DashboardState::new(
+        config,
+        mj_core::state::State::default(),
+        std::collections::BTreeMap::new(),
+    );
+    let line = drawn(&mut dashboard, 80, 40)[0].clone();
+    let name = line.find("Workspaces").expect("name");
+    let brand = line.find("MJOLNIR v").expect("brand");
+    assert!(name < brand, "{line}");
+    assert!(!line.contains('✦'), "{line}");
+    println!("{line}");
+}
