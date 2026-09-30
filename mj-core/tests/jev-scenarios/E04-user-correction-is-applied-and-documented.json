@@ -1,0 +1,191 @@
+{
+  "id": "E04",
+  "title": "User correction is applied and documented",
+  "category": "authorized-correction",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "418f5bfcd099c0cb562b053262e44072",
+    "session_title": "/home/jonathan/Projects/hel/ via claude",
+    "reply_position": 6904,
+    "captured_at": "2026-08-17T03:47:50.303Z",
+    "note": "The user clarifies that Grok should auto-approve bare-local commands and asks for the distinction to be documented. The assistant reports the behavior and documentation changes complete."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:11",
+          "role": "user",
+          "text": "add Grok as a profile flavor, grok build source is in ~/Projects/grok, logged in in ~/.grok, add it to my hell config; include best effort compatibility support for /plan and /goal, test standalone as possible but do an integration test with tmux when complete; DRY across our harnesses (codex/claude/kimi/grok) where you see potential for doing so\n\n(all this assumes that grok build does include acp server support as my quick web search indicated)"
+        },
+        {
+          "id": "user:2521",
+          "role": "user",
+          "text": "ok hang on why is import not supported and why does grok do broken shit for model/effort, are tickets open for this?"
+        },
+        {
+          "id": "user:2561",
+          "role": "user",
+          "text": "is grok using a newer version of acp then?"
+        },
+        {
+          "id": "user:2636",
+          "role": "user",
+          "text": "ok, implement import + old-style model+effort support, then push to origin/master & file a ticket for grok to upgrade its acp server"
+        },
+        {
+          "id": "user:3642",
+          "role": "user",
+          "text": "push to origin/master and then add grok back to my config (had to r/m it b/c then current-master wouldn't start)"
+        },
+        {
+          "id": "user:4423",
+          "role": "user",
+          "text": "how do we get quota-read working for grok"
+        },
+        {
+          "id": "user:4570",
+          "role": "user",
+          "text": "do it"
+        },
+        {
+          "id": "user:5651",
+          "role": "user",
+          "text": "we can remove the \"funding source\" from it"
+        },
+        {
+          "id": "agent:5654",
+          "role": "assistant",
+          "text": "That's the \"· X Premium+\" tier suffix in the Resets cell — removing it directly (it's a small change).That's the \"· X Premium+\" tier suffix in the Resets cell — removing it directly (it's a small change).That's the \"· X Premium+\" tier suffix in the Resets cell — removing it directly (it's a small change)."
+        },
+        {
+          "id": "agent:5680",
+          "role": "assistant",
+          "text": "Removing the tier from the report entirely (nothing else consumes it):Removing the tier from the report entirely (nothing else consumes it):Removing the tier from the report entirely (nothing else consumes it):"
+        },
+        {
+          "id": "agent:5701",
+          "role": "assistant",
+          "text": "Now the test assertions that referenced the tier:Now the test assertions that referenced the tier:Now the test assertions that referenced the tier:"
+        },
+        {
+          "id": "agent:5784",
+          "role": "assistant",
+          "text": "Done — the tier is gone from the quota row. The grok line now reads just `██████████ 100% · 00:22 Aug 18`, matching the other harnesses' format. The `GrokUsageReport` no longer carries the field at all; the test fixtures keep `subscription_tier` on the wire side to prove the parser tolerates and ignores it. Committed as `e5f94ed` and pushed to master (779 lib tests green, clippy clean).Done — the tier is gone from the quota row. The grok line now reads just `██████████ 100% · 00:22 Aug 18`, matching the other harnesses' format. The `GrokUsageReport` no longer carries the field at all; the test fixtures keep `subscription_tier` on the wire side to prove the parser tolerates and ignores it. Committed as `e5f94ed` and pushed to master (779 lib tests green, clippy clean).Done — the tier is gone from the quota row. The grok line now reads just `██████████ 100% · 00:22 Aug 18`, matching the other harnesses' format. The `GrokUsageReport` no longer carries the field at all; the test fixtures keep `subscription_tier` on the wire side to prove the parser tolerates and ignores it. Committed as `e5f94ed` and pushed to master (779 lib tests green, clippy clean)."
+        },
+        {
+          "id": "user:5793",
+          "role": "user",
+          "text": "push"
+        },
+        {
+          "id": "agent:5804",
+          "role": "assistant",
+          "text": "Already there — the tier-removal commit `e5f94ed` went up with the previous push, and `origin/master` matches your local tip exactly, with a clean working tree. Nothing was left to push.Already there — the tier-removal commit `e5f94ed` went up with the previous push, and `origin/master` matches your local tip exactly, with a clean working tree. Nothing was left to push.Already there — the tier-removal commit `e5f94ed` went up with the previous push, and `origin/master` matches your local tip exactly, with a clean working tree. Nothing was left to push."
+        },
+        {
+          "id": "user:6675",
+          "role": "user",
+          "text": "do we correctly hook up grok to auto permissions in raw mode / always-approve when containerized/vm'd ?"
+        },
+        {
+          "id": "agent:6678",
+          "role": "assistant",
+          "text": "Yes on both, with one nuance in raw mode worth spelling out.\n\n**Containerized/VM'd (podman, ssh-bare, aws-ec2): yes, verified live.** `force_unrestricted_mode()` is true for every backend except `LocalBare` (`src/hel_controller.rs:5486`), and for grok that decision is applied at **bridge launch** rather than post-session ACP mode selection, because grok has no ACP permission mode: `bridge_launch` inserts `--always-approve` between `agent` and `stdio` in both the default shell-fallback script and the `profile.executable` override path (`UnrestrictedEnforcement::LaunchFlag`). The ACP runtime then skips mode enforcement but still reports \"always-approve\" in the `SessionStarted` event. Evidence beyond the unit tests (`grok_default_bridge_adds_the_always_approve_flag_when_unrestricted`, the override-args test asserting `[\"agent\", \"--always-approve\", \"stdio\"]`): in the podman integration test, grok planned, hel auto-approved the plan exit (\"Hel approved it, because this target runs unrestricted\"), and grok created *and committed* a file with zero permission prompts.\n\n**Raw mode (raw-localhost): correct per hel's design, which means *restricted*, not auto.** On `LocalBare`, hel deliberately doesn't force unrestricted — so grok runs in its own default \"ask\" mode. Grok auto-allows read-only tools itself, but a write triggers `session/request_permission`, and hel answers **Cancelled** (hel has no interactive approval UI by design — `auto_approve_permissions = force_unrestricted_mode`, `src/hel_acp.rs:357`), along with the \"permission policy is misconfigured\" warning in the transcript. Same for plan-exit approval: on raw targets hel declines it and plan mode stays active for you to accept.\n\nThe nuance: this puts grok in the same camp as Claude on raw localhost (writes denied until you act), *unlike* kimi, whose own default mode is `auto` — which is exactly why kimi alone gets the \"DANGER: auto mode allows commands without approval\" banner. The escape hatch for grok is its native `/always-approve on` slash command, which passes straight through hel's chat — I used it in the raw-localhost integration test and writes worked immediately after.\n\nSo: nothing is miswired. But if what you'd *prefer* is grok auto-approving on raw-localhost too (kimi-style, presumably with the same danger banner), that's a one-line change — add `--always-approve` unconditionally in the grok bridge arm — plus the banner predicate. I'd advise against it as a default (raw mode touches your real filesystem, and grok's own default is \"ask\" for a reason), but it's your call.Yes on both, with one nuance in raw mode worth spelling out.\n\n**Containerized/VM'd (podman, ssh-bare, aws-ec2): yes, verified live.** `force_unrestricted_mode()` is true for every backend except `LocalBare` (`src/hel_controller.rs:5486`), and for grok that decision is applied at **bridge launch** rather than post-session ACP mode selection, because grok has no ACP permission mode: `bridge_launch` inserts `--always-approve` between `agent` and `stdio` in both the default shell-fallback script and the `profile.executable` override path (`UnrestrictedEnforcement::LaunchFlag`). The ACP runtime then skips mode enforcement but still reports \"always-approve\" in the `SessionStarted` event. Evidence beyond the unit tests (`grok_default_bridge_adds_the_always_approve_flag_when_unrestricted`, the override-args test asserting `[\"agent\", \"--always-approve\", \"stdio\"]`): in the podman integration test, grok planned, hel auto-approved the plan exit (\"Hel approved it, because this target runs unrestricted\"), and grok created *and committed* a file with zero permission prompts.\n\n**Raw mode (raw-localhost): correct per hel's design, which means *restricted*, not auto.** On `LocalBare`, hel deliberately doesn't force unrestricted — so grok runs in its own default \"ask\" mode. Grok auto-allows read-only tools itself, but a write triggers `session/request_permission`, and hel answers **Cancelled** (hel has no interactive approval UI by design — `auto_approve_permissions = force_unrestricted_mode`, `src/hel_acp.rs:357`), along with the \"permission policy is misconfigured\" warning in the transcript. Same for plan-exit approval: on raw targets hel declines it and plan mode stays active for you to accept.\n\nThe nuance: this puts grok in the same camp as Claude on raw localhost (writes denied until you act), *unlike* kimi, whose own default mode is `auto` — which is exactly why kimi alone gets the \"DANGER: auto mode allows commands without approval\" banner. The escape hatch for grok is its native `/always-approve on` slash command, which passes straight through hel's chat — I used it in the raw-localhost integration test and writes worked immediately after.\n\nSo: nothing is miswired. But if what you'd *prefer* is grok auto-approving on raw-localhost too (kimi-style, presumably with the same danger banner), that's a one-line change — add `--always-approve` unconditionally in the grok bridge arm — plus the banner predicate. I'd advise against it as a default (raw mode touches your real filesystem, and grok's own default is \"ask\" for a reason), but it's your call."
+        },
+        {
+          "id": "user:6710",
+          "role": "user",
+          "text": "yeah that's broken, grok should be auto for bare\n\nthe difference, and this needs to be documented, is that kimi's \"auto\" is completely fucking misleading, everywhere else auto means \"there is a reviwer model wired in to auto-approve low risk calls\", in kimi it means something very close to yolo"
+        },
+        {
+          "id": "agent:6712",
+          "role": "assistant",
+          "text": "Agreed — and that's a genuinely useful distinction to pin down in the docs: kimi's `auto` is blanket approval wearing a reviewed-approval name. Delegating the change:Agreed — and that's a genuinely useful distinction to pin down in the docs: kimi's `auto` is blanket approval wearing a reviewed-approval name. Delegating the change:"
+        },
+        {
+          "id": "agent:6723",
+          "role": "assistant",
+          "text": "Delegated. When it lands I'll verify the fix the way the original gap was found — a raw-localhost grok session in tmux must write a file with *no* `/always-approve` escape hatch, and the profile wizard must show the danger banner for grok — then merge any master movement, push, and update my notes.Delegated. When it lands I'll verify the fix the way the original gap was found — a raw-localhost grok session in tmux must write a file with *no* `/always-approve` escape hatch, and the profile wizard must show the danger banner for grok — then merge any master movement, push, and update my notes."
+        },
+        {
+          "id": "agent:6825",
+          "role": "assistant",
+          "text": "Reviewing briefly, then the live proof:Reviewing briefly, then the live proof:"
+        },
+        {
+          "id": "agent:6844",
+          "role": "assistant",
+          "text": "The picker line is exactly right — real quota plus the new danger wording. Continuing to the raw-localhost review step (which should show the full banner) and the write test:The picker line is exactly right — real quota plus the new danger wording. Continuing to the raw-localhost review step (which should show the full banner) and the write test:"
+        },
+        {
+          "id": "agent:6864",
+          "role": "assistant",
+          "text": "Verified — on raw-localhost, grok wrote the file immediately, no prompts and no manual `/always-approve`. Cleaning up and pushing:Verified — on raw-localhost, grok wrote the file immediately, no prompts and no manual `/always-approve`. Cleaning up and pushing:"
+        },
+        {
+          "id": "agent:6904",
+          "role": "assistant",
+          "text": "Done and pushed (`26fdd7f` on master after one more merge; 967 tests green, clippy clean).\n\n**The fix** (`8d06620`): grok's bridge now carries `--always-approve` on every target, bare included. The design keeps the semantics explicit rather than special-cased: a new `HarnessKind::auto_approves_on_bare_targets()` predicate (true for kimi and grok) feeds both the launch-flag decision and the danger banners, and a guard test forces the predicate and warning text to move together for any future flavor. Bare grok sessions now honestly report `unrestricted_mode: \"always-approve\"` since the flag genuinely is on. Kimi's behavior is untouched — it reaches the same end state through its own default mode, and hel still selects nothing for it on bare.\n\n**Verified live on raw-localhost:** the wizard review pane shows the new banner (\"⚠ DANGER: Grok Build approves every command through Hel's --always-approve launch flag. On raw localhost it can change this machine without asking.\"), the profile picker shows the short form next to the real quota bar, and a fresh session created `bare.txt` on disk with zero prompts and zero manual toggling.\n\n**The naming trap is documented** the way you framed it (in plain language): a new \"What *auto* means\" section in cli-reference.md states that the generic meaning of an auto mode is a review policy approving only low-risk calls; Kimi Code's `auto` is not that — it approves everything, equivalent to other harnesses' bypass/YOLO modes; grok's `--always-approve` is the same behavior under an honest name. containers.md and the README's permission paragraphs were aligned, and all three banner surfaces now say \"approves every command\" instead of leaning on the word \"auto\".\n\nOne deliberate asymmetry, noted in a code comment so it reads as intended: writes auto-approve on bare now, but a `/plan` exit still routes to you — plan approval is a user decision, not a tool permission.Done and pushed (`26fdd7f` on master after one more merge; 967 tests green, clippy clean).\n\n**The fix** (`8d06620`): grok's bridge now carries `--always-approve` on every target, bare included. The design keeps the semantics explicit rather than special-cased: a new `HarnessKind::auto_approves_on_bare_targets()` predicate (true for kimi and grok) feeds both the launch-flag decision and the danger banners, and a guard test forces the predicate and warning text to move together for any future flavor. Bare grok sessions now honestly report `unrestricted_mode: \"always-approve\"` since the flag genuinely is on. Kimi's behavior is untouched — it reaches the same end state through its own default mode, and hel still selects nothing for it on bare.\n\n**Verified live on raw-localhost:** the wizard review pane shows the new banner (\"⚠ DANGER: Grok Build approves every command through Hel's --always-approve launch flag. On raw localhost it can change this machine without asking.\"), the profile picker shows the short form next to the real quota bar, and a fresh session created `bare.txt` on disk with zero prompts and zero manual toggling.\n\n**The naming trap is documented** the way you framed it (in plain language): a new \"What *auto* means\" section in cli-reference.md states that the generic meaning of an auto mode is a review policy approving only low-risk calls; Kimi Code's `auto` is not that — it approves everything, equivalent to other harnesses' bypass/YOLO modes; grok's `--always-approve` is the same behavior under an honest name. containers.md and the README's permission paragraphs were aligned, and all three banner surfaces now say \"approves every command\" instead of leaning on the word \"auto\".\n\nOne deliberate asymmetry, noted in a code comment so it reads as intended: writes auto-approve on bare now, but a `/plan` exit still routes to you — plan approval is a user decision, not a tool permission."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yeah that's broken, grok should be auto for bare\n\nthe difference, and this needs to be documented, is that kimi's \"auto\" is completely fucking misleading, everywhere else auto means \"there is a reviwer model wired in to auto-approve low risk calls\", in kimi it means something very close to yolo",
+    "assistant_text_tail": "ove on bare now, but a `/plan` exit still routes to you — plan approval is a user decision, not a tool permission.Done and pushed (`26fdd7f` on master after one more merge; 967 tests green, clippy clean).\n\n**The fix** (`8d06620`): grok's bridge now carries `--always-approve` on every target, bare included. The design keeps the semantics explicit rather than special-cased: a new `HarnessKind::auto_approves_on_bare_targets()` predicate (true for kimi and grok) feeds both the launch-flag decision and the danger banners, and a guard test forces the predicate and warning text to move together for any future flavor. Bare grok sessions now honestly report `unrestricted_mode: \"always-approve\"` since the flag genuinely is on. Kimi's behavior is untouched — it reaches the same end state through its own default mode, and hel still selects nothing for it on bare.\n\n**Verified live on raw-localhost:** the wizard review pane shows the new banner (\"⚠ DANGER: Grok Build approves every command through Hel's --always-approve launch flag. On raw localhost it can change this machine without asking.\"), the profile picker shows the short form next to the real quota bar, and a fresh session created `bare.txt` on disk with zero prompts and zero manual toggling.\n\n**The naming trap is documented** the way you framed it (in plain language): a new \"What *auto* means\" section in cli-reference.md states that the generic meaning of an auto mode is a review policy approving only low-risk calls; Kimi Code's `auto` is not that — it approves everything, equivalent to other harnesses' bypass/YOLO modes; grok's `--always-approve` is the same behavior under an honest name. containers.md and the README's permission paragraphs were aligned, and all three banner surfaces now say \"approves every command\" instead of leaning on the word \"auto\".\n\nOne deliberate asymmetry, noted in a code comment so it reads as intended: writes auto-approve on bare now, but a `/plan` exit still routes to you — plan approval is a user decision, not a tool permission.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The user’s correction directly specifies the desired result, so no follow-up approval is needed.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-19T23:16:30.302Z",
+        "kind": "system",
+        "text": "harness session resumed"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "418f5bfcd099c0cb562b053262e44072"
+  }
+}

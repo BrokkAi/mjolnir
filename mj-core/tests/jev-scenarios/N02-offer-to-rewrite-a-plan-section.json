@@ -1,6 +1,6 @@
 {
   "id": "N02",
-  "title": "Offer to rewrite a plan section after an advice question",
+  "title": "Advice delivered with an optional plan rewrite",
   "category": "control-offer",
   "harness": "claude",
   "source": {

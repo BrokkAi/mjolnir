@@ -1,6 +1,6 @@
 {
   "id": "S09",
-  "title": "Plan presented for approval scored as needing no input",
+  "title": "Plan reply lacks the planning-mode approval context",
   "category": "awaiting-input-false-negative",
   "harness": "codex",
   "source": {

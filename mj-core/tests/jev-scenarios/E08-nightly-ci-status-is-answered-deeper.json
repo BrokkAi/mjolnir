@@ -1,0 +1,106 @@
+{
+  "id": "E08",
+  "title": "Nightly CI status is answered; deeper investigation is optional",
+  "category": "optional-investigation-offer",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "cfaf0702664b39f3d199a8403dd41a6d",
+    "session_title": "bifrost via claude2",
+    "reply_position": 185,
+    "captured_at": "2026-09-11T20:32:47.331Z",
+    "note": "The user asks why nightly CI is failing. The assistant summarizes the actionable failure and asks whether to investigate it further."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:13",
+          "role": "user",
+          "text": "why is nightly CI failing?"
+        },
+        {
+          "id": "agent:16",
+          "role": "assistant",
+          "text": "I'll check the nightly workflow runs."
+        },
+        {
+          "id": "agent:185",
+          "role": "assistant",
+          "text": "Nightly is red because of the Windows ARM64 Rust leg, plus infrastructure on the Python legs. Latest run ([34580060132](https://github.com/BrokkAi/bifrost-dev/actions/runs/34580060132), 2026-09-11):\n\n**One real test failure** — `os matrix / rust (aarch64-pc-windows-msvc)`: 16687/16688 passed, and the one failure was `brokk-bifrost-mcp::bifrost_mcp_server::output_schema_describes_real_workspace_and_policy_results` at `crates/bifrost-mcp/tests/bifrost_mcp_server.rs:2509`:\n\n```\nblast_radius exhausted its 60s request budget; cancellation continues in the background\n```\n\nThe test wedged at 60.833s. The same test on aarch64-apple-darwin in the same run passed in **0.547s**. This is the known intermittent tracked in **#3170** (\"Windows hourly intermittently wedges cyclomatic_complexity schema contract request\") — the tool that wedges rotates (09-10 it was `cyclomatic_complexity` at 61s, 09-11 `blast_radius`), but the mechanism is the same: the request stalls somewhere in immutable-endpoint materialization / analyzer-cache build locking on Windows and blows the server's 60s budget before schema validation runs. #3170 has a thorough mechanism writeup and is not tagged `agent-in-progress`.\n\n**Two infrastructure failures** — both `os matrix / python` legs (x86_64 and aarch64 linux) died ~2 minutes in with `The runner has received a shutdown signal` (exit 143 / \"operation was canceled\") while cargo was still compiling the maturin extension. No assertion failed. That is spot-runner reclamation, tracked in **#3192**. `fail-fast: false` is set throughout `ci-os-matrix.yml`, so these were independent reclamations, not collateral from the Windows failure.\n\nWeek-over-week, the Windows ARM leg has failed every scheduled nightly since 09-05, but on a rotating test:\n\n| Date | Failing test | Status |\n|---|---|---|\n| 09-07, 09-09 | `diff_analysis_test::analyze_diff_tree_base_without_target_...` (missing `SnapshotBase` deleted symbol) | Fixed — #3136 closed 09-09, test passes 09-10/09-11 |\n| 09-08 | `reference_differential::tests::census_sampling_does_not_materialize_cpp_declaration_overlays` (also failed on darwin) | Not recurring since |\n| 09-10, 09-11 | MCP 60s request budget | Open — #3170 |\n\nSo the actionable one is #3170. Everything else in the matrix — property stress, release assurance, macOS Rust and Python, extension boundary, Pi package, agent plugin — is green. Want me to dig into the request-budget wedge?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "why is nightly CI failing?",
+    "assistant_text_tail": "policy_results` at `crates/bifrost-mcp/tests/bifrost_mcp_server.rs:2509`:\n\n```\nblast_radius exhausted its 60s request budget; cancellation continues in the background\n```\n\nThe test wedged at 60.833s. The same test on aarch64-apple-darwin in the same run passed in **0.547s**. This is the known intermittent tracked in **#3170** (\"Windows hourly intermittently wedges cyclomatic_complexity schema contract request\") — the tool that wedges rotates (09-10 it was `cyclomatic_complexity` at 61s, 09-11 `blast_radius`), but the mechanism is the same: the request stalls somewhere in immutable-endpoint materialization / analyzer-cache build locking on Windows and blows the server's 60s budget before schema validation runs. #3170 has a thorough mechanism writeup and is not tagged `agent-in-progress`.\n\n**Two infrastructure failures** — both `os matrix / python` legs (x86_64 and aarch64 linux) died ~2 minutes in with `The runner has received a shutdown signal` (exit 143 / \"operation was canceled\") while cargo was still compiling the maturin extension. No assertion failed. That is spot-runner reclamation, tracked in **#3192**. `fail-fast: false` is set throughout `ci-os-matrix.yml`, so these were independent reclamations, not collateral from the Windows failure.\n\nWeek-over-week, the Windows ARM leg has failed every scheduled nightly since 09-05, but on a rotating test:\n\n| Date | Failing test | Status |\n|---|---|---|\n| 09-07, 09-09 | `diff_analysis_test::analyze_diff_tree_base_without_target_...` (missing `SnapshotBase` deleted symbol) | Fixed — #3136 closed 09-09, test passes 09-10/09-11 |\n| 09-08 | `reference_differential::tests::census_sampling_does_not_materialize_cpp_declaration_overlays` (also failed on darwin) | Not recurring since |\n| 09-10, 09-11 | MCP 60s request budget | Open — #3170 |\n\nSo the actionable one is #3170. Everything else in the matrix — property stress, release assurance, macOS Rust and Python, extension boundary, Pi package, agent plugin — is green. Want me to dig into the request-budget wedge?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The status question is answered. The additional root-cause investigation is a new optional task.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-11T20:38:18.289Z",
+        "kind": "user",
+        "text": "yes, please root cause this and report your findings on the ticket. you won't be able to launch an ARM vm from here to verify, but I can do that after you post your comment"
+      },
+      {
+        "at": "2026-09-11T20:50:44.297Z",
+        "kind": "agent",
+        "text": "The build finished. Let me drive the server directly to get a phase breakdown."
+      },
+      {
+        "at": "2026-09-11T20:52:37.708Z",
+        "kind": "agent",
+        "text": "Confirmed GC runs on a fresh store. Now let me prove the causal chain end to end."
+      },
+      {
+        "at": "2026-09-11T20:55:51.138Z",
+        "kind": "agent",
+        "text": "Posted: https://github.com/BrokkAi/bifrost-dev/issues/3170#issuecomment-5640529539 (also tagged the issue `agent-in-progress`). Working tree is clean — no code changes.  **Root cause.** The \"exhausted"
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "cfaf0702664b39f3d199a8403dd41a6d"
+  }
+}

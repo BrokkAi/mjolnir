@@ -1,0 +1,321 @@
+{
+  "id": "E07",
+  "title": "Latency recommendation is complete; filing an issue is optional",
+  "category": "optional-issue-offer",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "2f88c7f26089ed109ffe71820f9234ef",
+    "session_title": "/home/jonathan/Projects/bifrost via claude",
+    "reply_position": 11283,
+    "captured_at": "2026-08-28T13:25:55.297Z",
+    "note": "The user asks whether another latency pass is justified. The assistant reports measured bottlenecks, recommends an alternative, and asks whether to file a follow-up issue."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:7",
+          "role": "user",
+          "text": "what is pwd here"
+        },
+        {
+          "id": "user:27",
+          "role": "user",
+          "text": "great. figure out what branch the blast_radius work got pushed to, and switch to that"
+        },
+        {
+          "id": "user:63",
+          "role": "user",
+          "text": "great. there should be an execplan w/ blast_radius status, where are we"
+        },
+        {
+          "id": "user:115",
+          "role": "user",
+          "text": "what exactly is the 120s ceiling? that's a really fucking long time for something i want to be called interactively, do we have recent profiling data?"
+        },
+        {
+          "id": "user:210",
+          "role": "user",
+          "text": "> nearly all of that time is building the immutable revision image and its analyzer\n\nwe shouldn't need to build the entire revision image right? i would think this should be O(changes) + O(graph traversal) not O(files in repo)"
+        },
+        {
+          "id": "user:245",
+          "role": "user",
+          "text": "> an immutable target gets a complete tree export + ephemeral analyzer with ephemeral caches, so\n│ it \"cannot pollute the persisted workspace.\"\n\nfuck. i told past-you to fix this once already, it's fucking content-based hashing, there's no \"pollution\" to worry about\n\ngive me a plan to fix this pls and make sure any decisions to the contrary are updated/removed"
+        },
+        {
+          "id": "user:721",
+          "role": "user",
+          "text": "\"saved to memory\" is nice but have Opus go through all our execplans and CLAUDE.md to make sure it's excised there as well"
+        },
+        {
+          "id": "user:861",
+          "role": "user",
+          "text": "> Store-visible fact tier\n\nsorry, are you proposing new db tables, views, or something else?"
+        },
+        {
+          "id": "user:896",
+          "role": "user",
+          "text": "when/why did we add \"optional facts?\" facts are cheap, imo we should never write a fact-incomplete blob entry"
+        },
+        {
+          "id": "user:941",
+          "role": "user",
+          "text": "hang on what is this build_mode shit, the ergonomics here are terrible, that sounds like a massive footgun\n\nsame question, where/why did that get introduced"
+        },
+        {
+          "id": "user:992",
+          "role": "user",
+          "text": "i think that makes sense but pls elaborate on what \"graph only\" means and how it makes builds 10x faster"
+        },
+        {
+          "id": "user:1031",
+          "role": "user",
+          "text": "ok i think this is mostly a misfeature, in production nobody's going to be asking for blast_radius against a completely empty facts db, and if they are [because it's genuinely the first build ever] then they won't be the next time, i really don't want a completely separate build path just for this. so i'm explicitly accepting that i will pay for 1 and 2.\n\n> Full mode stores the source text in the store for later hydration\n\nwhy the fuck would we do that, we have git right there\n\n> parsing twice\n\nthis also sounds like a bad idea, how do we fix globally"
+        },
+        {
+          "id": "user:1362",
+          "role": "user",
+          "text": "> The grounded global fix is cheap and contained\n\nis this complexity warranted? let's measure before doing this pls"
+        },
+        {
+          "id": "user:1440",
+          "role": "user",
+          "text": "great, launch the agents"
+        },
+        {
+          "id": "user:3570",
+          "role": "user",
+          "text": "host restarted, pls resume"
+        },
+        {
+          "id": "user:3681",
+          "role": "user",
+          "text": "(host died again)"
+        },
+        {
+          "id": "user:3920",
+          "role": "user",
+          "text": "sorry, if M2 is complete what is \"M2 prefilter\""
+        },
+        {
+          "id": "user:4080",
+          "role": "user",
+          "text": "pause after M3 pls"
+        },
+        {
+          "id": "user:4323",
+          "role": "user",
+          "text": "a revert\nb i think we can just share artifacts without a gate, that seems pretty straightforward\n\nthen go ahead and finish 4-6"
+        },
+        {
+          "id": "user:9263",
+          "role": "user",
+          "text": "have opus merge+push"
+        },
+        {
+          "id": "user:9411",
+          "role": "user",
+          "text": "merge+push means \"to origin/master\""
+        },
+        {
+          "id": "user:9427",
+          "role": "user",
+          "text": "merge+push means \"to origin/master\""
+        },
+        {
+          "id": "user:9613",
+          "role": "user",
+          "text": "next, on startup: 1. why is analyzer construction so slow in a \"warm\" target? 2. why is pack activation so slow? again assuming warm and this doesn't mean \"derive the pack\"\n\n1.3-core C++ build and pyproject.toml: your explanation got buried in the noise, pls elaborate"
+        },
+        {
+          "id": "user:10016",
+          "role": "user",
+          "text": "C++ / persistence: your theory is credible but are there any knobs left to make persistence faster?\n\npyproject.toml: yes, add to config classification"
+        },
+        {
+          "id": "agent:10018",
+          "role": "assistant",
+          "text": "Both dispatched as follows — the persistence question needs an experiment-driven investigation (it's exactly the \"which knob binds\" question my earlier answer left open), and the pyproject fix is a tight implementation task."
+        },
+        {
+          "id": "agent:10049",
+          "role": "assistant",
+          "text": "Both agents are running:\n\n**Persistence knobs (Opus).** It first commits the worthwhile subset of the startup investigation's uncommitted instrumentation (the spans whose absence made those phases opaque) and reverts the exploratory rest, so the tree is clean. Then the real work, in your measure-first shape: **Phase A** instruments the writer's busy-fraction versus worker block-time on in-flight slots — establishing whether the writer is saturated, the admission cap is too low, or the theory is wrong outright (with instructions to say so plainly if it is). **Phase B** tests knobs the data implicates: the in-flight cap and batch limits, where batch serialization happens (writer thread vs workers), and the SQLite pragma set — with `synchronous` the headline candidate, since WAL+FULL→WAL+NORMAL is the documented safe pairing and this is a rebuildable, integrity-checked, version-named cache. Landing rules: conservative wins land with gates; anything trading durability, memory, or cross-workspace behavior (e.g. `synchronous=OFF`, schema changes) is report-only for your decision. The build lock and generation gating are explicitly untouchable.\n\n**pyproject.toml (Sonnet).** Adds it to the config classification following the existing manifest patterns (including any content-identity role, for consistency with what M5 did), with a src-layout regression — `where = [\"src\"]`, `src/mypkg/service.py`, a test importing it — that it must run *before* the fix and watch fail for the right reason (file absent from the image → edge missing) before certifying the pass. It also checks whether `setup.cfg`/`setup.py` have the same raw-read problem and reports.\n\nI'll bring you Phase A's verdict with numbers, whatever gets landed versus recommended, and the pyproject fail-then-pass evidence when they report."
+        },
+        {
+          "id": "agent:10318",
+          "role": "assistant",
+          "text": "That was an interim stop from the pyproject agent (it's waiting on one of its own background test runs, not finished). Both agents still in flight; nothing to act on yet."
+        },
+        {
+          "id": "agent:10375",
+          "role": "assistant",
+          "text": "Another interim stop from the pyproject agent — still holding on its own test monitor. Both agents remain in flight."
+        },
+        {
+          "id": "agent:10412",
+          "role": "assistant",
+          "text": "Still interim — the pyproject agent is progressing (its work count keeps advancing) but waiting on test monitors between steps. No results yet from either agent."
+        },
+        {
+          "id": "agent:10424",
+          "role": "assistant",
+          "text": "Interim again — the pyproject agent is waiting on its blast_radius suite run. Both agents still working."
+        },
+        {
+          "id": "agent:10446",
+          "role": "assistant",
+          "text": "The pyproject.toml task is done, with a twist worth knowing: **the gap had already been closed by upstream** — commit `e696fa8b1` (the typeshed Python stdlib pack work, #1869/#2720) added `pyproject.toml` to Python's `dependency_inputs()` for an unrelated reason (reading the pack's `requires-python` bound), and it reached this branch through the master merge — *after* the M5 audit documented the gap, so the audit was accurate when written and stale by the time the fix task started.\n\nThe agent handled this exactly right rather than declaring victory on someone else's commit: it wrote the src-layout regression (`pyproject.toml` with `where = [\"src\"]` → immutable request must reach `tests/test_service.py` at distance 1), then **causally verified the mechanism** by temporarily deleting the classification entry — reproducing the audit's precise predicted failure (manifest absent from image → where-entries unread → module identity mis-roots as `src.mypkg.service` → zero reached tests) — and restoring it. So the contract is now pinned by a permanent test (`blast_radius` suite is 34/34) regardless of why the upstream entry exists, the stale plan entry is corrected with the timeline, and the `setup.cfg`/`setup.py` neighbors were checked and are clean. Committed as `541afb34e`.\n\nThe persistence-knobs investigation (Opus) is still running — its report will carry the Phase A verdict on what actually binds the 1.3-core builds, plus measured knob results."
+        },
+        {
+          "id": "agent:10774",
+          "role": "assistant",
+          "text": "The persistence investigation is done, and it corrects my theory — the honest answer to \"are there any knobs left\" is: **the cheap knobs are already turned; the real problem wasn't persistence at all.**\n\n## The verdict, with numbers\n\n**My backpressure theory was wrong at headline scale.** The writer is *idle* 76–79% of the C++ phase, and the \"pinned cap of 280\" I cited was a misread — 280 is just `parallelism(16) + channel(8) + max_blobs(256)`, a descriptive statistic; **no in-flight admission control exists at all** (the only backpressure is an 8-slot channel).\n\n**What actually binds the Godot cold build: one file.** `thirdparty/vulkan/include/vulkan/vulkan_structs.hpp` — 7.25 MB of generated C++ — costs **179–224 seconds of adapter walk**, ~78% of the phase. The tree-sitter *parse* is budget-bounded at 10s (#1690); the declaration walk after it is unbounded. Fifteen workers finish their ~500 files in 4–7s each and then wait three minutes for worker sixteen. The per-thread sampler shows exactly that: 1 running thread, 18 in futex-wait — which is your 1.3-core mystery.\n\n**The theory survives at smaller scale.** Strip that file and the phase is genuinely writer-bound: the other 8,221 files analyze in ~5s of parse-work but take ~50s wall, with the writer at ~100% busy for that window and workers blocking 42–46s each on send. So persistence is the *second* problem, hidden behind the first.\n\n## Knobs: tested and mostly already exhausted\n\nChannel capacity 8→256 — no effect (throughput deficit, not buffering). `wal_autocheckpoint` 2000→32000 — rejected, no win and one arm worse. The hoped-for `synchronous` win doesn't exist: **WAL+NORMAL, memory temp-store, 512MB cache, 256MB mmap are already set**. Row serialization is already off the writer thread (0.06% of the phase). All reverted; what landed (`87d8086d7`, `2d33f8e27`) is the instrumentation trim plus permanent writer busy/idle accounting and a `slow_file_analysis` note that names any >5s file — the diagnostic that would have found vulkan_structs in one run instead of five.\n\n## The two levers that remain, both report-only pending your call\n\n1. **Bound the adapter walk** (or degrade oversized generated headers) the way #1690 bounded the parse — worth ~180s of a ~290s cold Godot build. Not a persistence knob at all. Deserves its own issue.\n2. **Intern `blob_oid` to an integer id**: `code_units` is WITHOUT ROWID keyed on `(blob_oid, lang, unit_key)`, so all **14 secondary indexes** carry a 40-char hex string in every entry, at 4.58M rows / ~85k rows/s per cold build. One interning migration narrows 14 b-trees at once — the largest genuine persistence lever, excluded here because it's a schema change.\n\n(Caveat the agent flagged: the host never went quiet — load 36–98 — so only interleaved within-pair comparisons are quoted.)\n\nThat closes both of your questions with the pyproject regression already landed (`541afb34e`). Ready when you are: issues and/or fix briefs for the vulkan walk bound, the blob-oid interning migration, the warm-startup trio (listing cache, reverse-TU predicate, pack-discovery-from-facts), and the pack-activation abort bug."
+        },
+        {
+          "id": "user:10798",
+          "role": "user",
+          "text": "fix the analyzer construction and pack activation redundant/unnecessary work. file a ticket for the latin-1 byte problem. discard exploratory-only code, use your judgement on what if any to refactor into something permanent."
+        },
+        {
+          "id": "agent:10800",
+          "role": "assistant",
+          "text": "Three directives. The exploratory-code cleanup is likely already satisfied — the persistence agent's step-0 commit (`87d8086d7`) kept exactly four permanent-quality spans and reverted the rest, then added permanent writer accounting (`2d33f8e27`) — but let me verify the tree, then launch the fix agent, then file the ticket."
+        },
+        {
+          "id": "agent:10809",
+          "role": "assistant",
+          "text": "Tree is clean and the exploratory-code triage is confirmed done (four permanent spans kept, scaffolding dropped, writer accounting added). Launching the startup-fixes agent now."
+        },
+        {
+          "id": "agent:10819",
+          "role": "assistant",
+          "text": "Now the ticket. Per repo rules, searching existing issues first."
+        },
+        {
+          "id": "agent:10844",
+          "role": "assistant",
+          "text": "No existing issue covers it (closed #469 is the closest relative — the same strict-vs-lossy decoding class on a different path — worth cross-referencing). Filing."
+        },
+        {
+          "id": "agent:10868",
+          "role": "assistant",
+          "text": "All three directives are in motion:\n\n1. **Fixes launched** (Opus, running): the one-shot listing cache (scoped carefully so a long-lived watcher-off `Manual` server *doesn't* inherit a stale cache), the C-reading reachability predicate (replacing the 1.89M-pair index materialization for the mount while keeping the index for its other consumers, with a per-file agreement test between predicate and index), and pack discovery served from persisted angle-include facts (with a capture-old/compare-new equivalence test written *before* the swap, and a preserved diagnostics contract). Acceptance is the re-run warm measurement itself: construction ~22–25s → ~3s expected, activation 26–32s → sub-second, byte-identical JSON against the saved baseline stdout.\n\n2. **Ticket filed**: [#2750](https://github.com/BrokkAi/bifrost-dev/issues/2750) — the latin-1 abort, framed as two distinct defects (wrong read primitive vs wrong failure scope: one bad byte silently discards the whole ecosystem's discovery, and absence of activation is indistinguishable from \"nothing to activate\"). It cross-references #469 (the same strict-vs-lossy class fixed on the pinned-revision path) and notes the failure direction on clean repos — fixing only the abort would make Godot *slower* — so it's scoped to whatever raw-read path survives the fact-based discovery fix.\n\n3. **Exploratory code**: already resolved — the tree is clean; `87d8086d7` kept exactly the four spans whose absence made the startup opaque and dropped the bisect scaffolding, and `2d33f8e27` added the permanent writer-attribution and slow-file diagnostics. Nothing further to discard.\n\nI'll report the measured before/after spans and gate results when the fix agent lands."
+        },
+        {
+          "id": "agent:11141",
+          "role": "assistant",
+          "text": "A verification wrap-up from the persistence agent, with one useful cross-check: the startup-fix agent has already landed its first checkpoint (`55616f70e`, the pack-discovery fix), and it used one of the deliberately preserved spans as its evidence — the 31.5s serial scan was discovering *nothing* on Godot, which ships no `compile_commands.json`. The persistence agent also confirms the accounting stays coherent: pack discovery sat outside the C++ reconcile phase it attributed, so the ~26s discovery win and the ~180s `vulkan_structs.hpp` cold-build tail are independent, and the vulkan tail remains the dominant cold-build term.\n\nIts own commits are intact, tree clean, nothing stray. The startup-fix agent continues on the remaining two fixes; full before/after report when it completes."
+        },
+        {
+          "id": "agent:11229",
+          "role": "assistant",
+          "text": "All three fixes are landed and the headline is: **warm Godot `blast_radius` went from 47–56 seconds to 5.5 seconds**, byte-identical JSON, all gates green. Before summarizing, one accuracy chore: the pack-discovery fix changed the surface of the ticket I just filed, so I'm annotating it."
+        },
+        {
+          "id": "agent:11240",
+          "role": "assistant",
+          "text": "Done across the board. Summary of your three directives:\n\n## The fixes (measured, interleaved A/B, byte-identical JSON)\n\n| | before | after |\n|---|---|---|\n| ignore-probe (listing cache) | 9.3–12.0s | **0.2ms** |\n| C-reading mount question | 8.4–8.9s | **1.45s** |\n| analyzer construction total | 20.2–23.3s | **3.2s** |\n| pack activation | 24.4–28.2s | **33ms** |\n| **warm wall total** | **46.8–55.7s** | **5.5s** |\n\nThree commits (`a456913fc`, `90a49f219`, `55616f70e`), each with sabotage-verified regressions. Two judgment calls the agent made that I endorse on review: it **rejected my specified fact-based discovery path** on checked evidence — the persisted include facts lack preprocessor context (conditional includes are deliberately excluded from discovery, and a pinned test says so), so a facts swap would have widened the discovered sets and failed equivalence; what landed instead is a general truth of the resolver's own data model (a source with no compile-database contexts can contribute nothing at any depth). And it declined the debug agreement assert for the reachability predicate because that assert would materialize the 1.9M-entry index in exactly the debug builds where it hurts — the equivalence tests carry the burden instead. Gates: 34/34, 29/29, cpp 156/156, analysis+jvm+cpp 2,302/2,302, mcp 214/214, suites 3,634/3,634, fmt, workspace clippy clean.\n\n## The ticket\n\n**#2750** filed for the latin-1 abort, and now annotated with the narrowed post-fix scope: on compile-db-less repos (the Godot case) the scan no longer runs at all; unlisted unreadable files no longer abort anywhere; the strict-read and failure-scope defects remain only for *database-named* sources, with a landed regression (`cpp.header_discovery_failed`) as the seam for the eventual fix.\n\n## Exploratory code\n\nAlready triaged before your message arrived: four load-bearing spans kept permanent, bisect scaffolding dropped, writer-attribution and slow-file diagnostics added. Tree is clean.\n\n**Where the remaining 5.5s lives**, for whenever you want another pass: construction 3.2s (the predicate itself is 1.45s of it), `diff_symbols.snapshot_base` 1.67s — right at the edge of your 5-second expectation rather than 10x over it. On the shelf, unchanged: the `vulkan_structs.hpp` walk bound (~180s of cold builds, issue-worthy), the blob-OID interning migration, the dotnet/runtime frozen replay, and the campaign resume. Branch is ready for merge+push to origin/master on your word."
+        },
+        {
+          "id": "agent:11263",
+          "role": "assistant",
+          "text": "That was the persistence agent's final stale poller draining — everything it reports was already relayed: its commits and plan entries are intact, and its verdict stands (persistence isn't the cold-build constraint; the `vulkan_structs.hpp` walk bound and the blob-OID interning are the two evidence-backed levers, both deliberately left as report-only with no issues opened yet).\n\nNothing in flight anymore. The branch sits at the startup fixes (`55616f70e` tip series), fully gated, ready for merge+push to origin/master whenever you give the word — and the shelf items (vulkan walk bound issue, blob-OID interning, dotnet replay, campaign resume) await your priorities."
+        },
+        {
+          "id": "user:11281",
+          "role": "user",
+          "text": "> Where the remaining 5.5s lives, for whenever you want another pass\n\nare you just in the mood to bulldog down latency today or did you see something that makes you think we have especially low hanging fruit left"
+        },
+        {
+          "id": "agent:11283",
+          "role": "assistant",
+          "text": "Honest answer: momentum, mostly. I listed the breakdown because the measurement was sitting in my hand, not because I saw fruit — and I should distinguish those, so fair challenge.\n\nThe signature that made the last three fixes low-hanging was specific: **work whose output was discarded or recomputed**. 129 identical workspace walks, a 31-second scan that produced zero catalog rows, 1.9M set entries materialized to answer one boolean per file. You could see the waste in the span names before touching any code, and the wins were 10–100x. Nothing in the remaining 5.5s has that signature. The predicate (1.45s) computes something the C-reading mount genuinely consumes, once per process; `Cpp::build_state` (0.8s) and `sync_path_symbol_units` (0.5s) are real hydration; `snapshot_base` (1.67s) is real endpoint materialization for diff pairing. Could each be shaved 2x with effort? Probably some of them. Is there evidence any is pathological? No — and after three rounds of \"measure first,\" I shouldn't imply otherwise.\n\nThere's also a structural argument for stopping here: the remaining cost is dominated by per-process construction that the persistent MCP server already amortizes to ~0.1ms per call. Shaving the one-shot CLI floor from 5.5s to 3s buys little for interactive use (which should ride the server) and nothing for the campaign harness (which is throughput-bound elsewhere).\n\nWhere the evidence *does* say fruit remains is the **cold** path, and I'd rank it: (1) the `vulkan_structs.hpp` adapter-walk bound — one file is ~180s of a ~290s cold Godot build, fifteen workers idle behind it, and #1690 already established the pattern for bounding exactly this; (2) behind that file, the writer genuinely saturates for a ~50s window with workers blocking 42–46s on send, and the blob-OID interning (40-char hex keys in 14 secondary b-trees) is the measured lever there — but it's a schema migration, so medium-hanging at best.\n\nSo my actual recommendation: warm is done; if anything gets another pass it's the vulkan walk bound, which still has no issue filed. Want me to file it?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "> Where the remaining 5.5s lives, for whenever you want another pass\n\nare you just in the mood to bulldog down latency today or did you see something that makes you think we have especially low hanging fruit left",
+    "assistant_text_tail": "cause the measurement was sitting in my hand, not because I saw fruit — and I should distinguish those, so fair challenge.\n\nThe signature that made the last three fixes low-hanging was specific: **work whose output was discarded or recomputed**. 129 identical workspace walks, a 31-second scan that produced zero catalog rows, 1.9M set entries materialized to answer one boolean per file. You could see the waste in the span names before touching any code, and the wins were 10–100x. Nothing in the remaining 5.5s has that signature. The predicate (1.45s) computes something the C-reading mount genuinely consumes, once per process; `Cpp::build_state` (0.8s) and `sync_path_symbol_units` (0.5s) are real hydration; `snapshot_base` (1.67s) is real endpoint materialization for diff pairing. Could each be shaved 2x with effort? Probably some of them. Is there evidence any is pathological? No — and after three rounds of \"measure first,\" I shouldn't imply otherwise.\n\nThere's also a structural argument for stopping here: the remaining cost is dominated by per-process construction that the persistent MCP server already amortizes to ~0.1ms per call. Shaving the one-shot CLI floor from 5.5s to 3s buys little for interactive use (which should ride the server) and nothing for the campaign harness (which is throughput-bound elsewhere).\n\nWhere the evidence *does* say fruit remains is the **cold** path, and I'd rank it: (1) the `vulkan_structs.hpp` adapter-walk bound — one file is ~180s of a ~290s cold Godot build, fifteen workers idle behind it, and #1690 already established the pattern for bounding exactly this; (2) behind that file, the writer genuinely saturates for a ~50s window with workers blocking 42–46s on send, and the blob-OID interning (40-char hex keys in 14 secondary b-trees) is the measured lever there — but it's a schema migration, so medium-hanging at best.\n\nSo my actual recommendation: warm is done; if anything gets another pass it's the vulkan walk bound, which still has no issue filed. Want me to file it?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Fresh local-log control case for input detection.",
+    "judgment": "The question is answered; issue filing is an extra action not required to answer it.",
+    "next": "n/a"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-28T13:28:58.320Z",
+        "kind": "user",
+        "text": "ooh right speaking of saturated writers, i didn't see your response earlier to the sqlite writer bottleneck (was that this session? if not, don't worry about it)"
+      },
+      {
+        "at": "2026-08-28T13:29:06.319Z",
+        "kind": "agent",
+        "text": "Yes, this session — it was the \"persistence knobs\" report a few messages back, easy to lose in the traffic. The short recap:  **The writer bottleneck is real but second-order.** Overall the writer is "
+      },
+      {
+        "at": "2026-08-28T13:29:56.062Z",
+        "kind": "user",
+        "text": "why do you and/or GPT prefer WITHOUT ROWID btw? is that some kind of best practice? if so where?"
+      },
+      {
+        "at": "2026-08-28T13:30:22.979Z",
+        "kind": "agent",
+        "text": "Let me check what the schema actually does before answering."
+      },
+      {
+        "at": "2026-08-28T13:30:40.586Z",
+        "kind": "agent",
+        "text": "It *is* a documented SQLite recommendation — but with fine print that got dropped, and your cache schema applies it as a blanket rule: **59 tables** in the migrations are `WITHOUT ROWID, STRICT`, esse"
+      },
+      {
+        "at": "2026-08-28T13:34:14.019Z",
+        "kind": "user",
+        "text": "ok so coming from a pg background i would interpret as  - rowid is a synthetic key that sqlite knows how to autogenerate - i think int pks get aliased to it? - for historical reasons it's the default "
+      }
+    ],
+    "strict_input_scoring": true,
+    "session_group": "2f88c7f26089ed109ffe71820f9234ef"
+  }
+}

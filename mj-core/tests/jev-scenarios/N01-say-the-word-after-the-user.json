@@ -1,6 +1,6 @@
 {
   "id": "N01",
-  "title": "'Say the word' after the user asked how to proceed",
+  "title": "Advice delivered with an optional implementation offer",
   "category": "control-plan-approval",
   "harness": "codex",
   "source": {

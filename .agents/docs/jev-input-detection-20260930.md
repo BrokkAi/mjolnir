@@ -2,6 +2,8 @@
 
 This experiment implements `.agents/plans/jev-user-decision-detection.md`. Luna mined local session logs; the main agent reviewed the labels against each reply and preceding instructions. The selected input question treats unresolved user decisions as needing input even while independent work continues, and distinguishes them from optional offers after a delivered answer. Only the input question changed; the 0.85 attention and 0.90 automation thresholds stayed fixed.
 
+The later [five-iteration experiment](jev-input-five-20260930.md) corrects several fixture labels and adopts a subsequent prompt. Counts below preserve this earlier experiment’s original labels.
+
 ## Questions and provenance
 
 The motivating 06:50 CDT assessment in session `2ddbd4ceaa5916f6c58138d97e62d8c1` did fire. Its installed 2.23.3 worker chose required input at 0.41 and authorized unfinished work at 0.75, yielding `assessment_uncertain -> KeepCurrent`; one background command kept the TUI busy. The full decision handoff was in the evidence. The exact older three-axis prompt is [incident-questions.json](jev-input-detection-20260930/incident-questions.json); its recorded 0.41 is not a replay of the current four-axis baseline.

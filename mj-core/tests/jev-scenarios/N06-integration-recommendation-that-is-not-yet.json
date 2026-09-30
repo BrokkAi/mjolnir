@@ -1,6 +1,6 @@
 {
   "id": "N06",
-  "title": "Integration recommendation that is not yet a decision",
+  "title": "Replacement recommendation delivered without an approval request",
   "category": "control-plan-approval",
   "harness": "codex",
   "source": {

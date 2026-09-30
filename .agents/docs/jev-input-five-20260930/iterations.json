@@ -1,0 +1,26 @@
+{
+  "baseline": {
+    "hypothesis": "Re-run current prompt C on all known cases to compare within this experiment."
+  },
+  "round-1": {
+    "hypothesis": "Read final reply first and explicitly enumerate approval gates, external actions, and completed handbacks.",
+    "finding": "Required recall rose, but permission already given and advice followups became false alerts. Reject."
+  },
+  "round-2": {
+    "hypothesis": "Retain chronological scope-first baseline and add targeted general rules for new approval gates, external action, and missing facts.",
+    "finding": "No false alerts, but fewer required detections than baseline and one additional harmful continue on the mode-ambiguous plan. Reject."
+  },
+  "round-3": {
+    "hypothesis": "Short contrasting rules for prior authorization, optional offers, explicit decisions, approval gates, parent requests, and handbacks.",
+    "status": "Completed after user replenished credits; original billing-error run preserved.",
+    "finding": "32/54 required detections, but six false alerts (optional cleanup and already authorized work). Reject."
+  },
+  "round-4": {
+    "hypothesis": "Minimal baseline edit: distinguish explicit fresh approval gates and clarify completed handbacks, with other baseline rules retained.",
+    "finding": "36/54 required detections, zero false alerts, 27/69 finished, same three listed wrong actions as baseline. Qualifies for selection. D01 loses one detection; P13 loses three continues; S16/S17 recover finished states."
+  },
+  "round-5": {
+    "hypothesis": "Extend round4 with explicit reserved decisions about project direction, acceptance, or scope; a recommendation does not resolve the user decision.",
+    "finding": "46/54 required detections, but D07 optional followup false-alerts three times; S16 finished recovery also lost. Reject under frozen guardrails."
+  }
+}
