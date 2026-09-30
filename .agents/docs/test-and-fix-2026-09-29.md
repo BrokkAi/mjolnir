@@ -618,3 +618,7 @@ The manually dispatched macOS workflow on `f651860c` succeeded, so the pushed ma
 ### User report (21:20): editing a queued prompt did not withdraw it
 
 A prompt queued while a session was launching was recalled into the composer with Up for editing; the session came live before Enter and the daemon's startup delivery sent the original queued text. Decision: recalling a queued prompt withdraws it from the queue (the composer becomes its only owner, as a draft); Enter re-queues or sends the edited text; a withdrawal that arrives after delivery started is refused with a notice. Fix wave F32.
+
+### User request (21:30): the Targets pane's `docker (unavailable)`
+
+The user's config held an explicit `[targets.docker]` block; removed at the user's request (backup `~/.config/mjolnir/config.toml.bak-2026-09-29-docker`). The in-memory default candidate from `Config::with_local_targets` still shows in the Targets pane; decision: a default candidate whose runtime is missing is not listed anywhere, while a target the user wrote keeps its "(unavailable)" row with the reason — one origin fact carried on the target. Fix wave F33.
