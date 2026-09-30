@@ -17,17 +17,17 @@ spec.loader.exec_module(module)
 
 
 def verdict(failure=("none", 0.95), input_=("none", 0.95), work=("finished", 0.95)):
-    return {
-        "failure": {"choice": failure[0], "confidence": failure[1]},
-        "input": {"choice": input_[0], "confidence": input_[1]},
-        "work": {"choice": work[0], "confidence": work[1]},
-    }
+    result = {}
+    for axis, (choice, confidence) in zip(("failure", "input", "work"), (failure, input_, work)):
+        probabilities = {name: (confidence if name == choice else (1-confidence)/(len(module.CHOICES[axis])-1)) for name in module.CHOICES[axis]}
+        result[axis] = {"choice": choice, "confidence": confidence, "probabilities": probabilities}
+    return result
 
 
 class Experiments(unittest.TestCase):
     def test_replay_preserves_probabilities_separately_from_provider_confidence(self):
         answers = {
-            axis: {"type": "choice", **answer, "probabilities": {answer["choice"]: 0.8, "unclear": 0.2}}
+            axis: {"type": "choice", **answer, "probabilities": {name: (0.8 if name == answer["choice"] else 0.2/(len(module.CHOICES[axis])-1)) for name in module.CHOICES[axis]}}
             for axis, answer in verdict(input_=("required", 0.42)).items()
         }
 
@@ -47,7 +47,7 @@ class Experiments(unittest.TestCase):
             result = module.ask("offline-test", {}, self.fixture()["evidence"])
         finally:
             module.urllib.request.urlopen = original
-        self.assertEqual(result["verdict"]["input"], {"choice": "required", "confidence": 0.42})
+        self.assertEqual(result["verdict"]["input"], {"choice": "required", "confidence": 0.42, "probabilities": answers["input"]["probabilities"]})
         self.assertEqual(result["answers"], answers)
         self.assertEqual(result["answers"]["input"]["probabilities"]["required"], 0.8)
 
@@ -136,6 +136,30 @@ class Experiments(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "new output directory"):
                 module.prepare_run(output, questions, changed)
 
+    def test_policy_change_prevents_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            module.prepare_run(output, {}, [self.fixture()])
+            manifest = json.loads((output / "run.json").read_text())
+            del manifest["policy"]
+            (output / "run.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "policy.*new output directory"):
+                module.prepare_run(output, {}, [self.fixture()])
+
+    def test_historical_report_keeps_its_original_confidence_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            module.prepare_run(output, {}, [self.fixture()])
+            record = {"id": "D01", "repeat": 0, "verdict": verdict(input_=("required", .6)), "action": "await_input"}
+            (output / "results.jsonl").write_text(json.dumps(record) + "\n")
+            module.report(SimpleNamespace(output=output))
+            self.assertIn("| required | 1 | 1 | 0 | 1 | 0 | 0 | 0 |", (output / "report.md").read_text())
+            manifest = json.loads((output / "run.json").read_text())
+            del manifest["policy"]
+            (output / "run.json").write_text(json.dumps(manifest))
+            module.report(SimpleNamespace(output=output))
+            self.assertIn("| required | 1 | 1 | 0 | 0 | 1 | 0 | 0 |", (output / "report.md").read_text())
+
     def test_existing_unidentified_results_cannot_be_resumed(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -170,9 +194,33 @@ class Experiments(unittest.TestCase):
 
 
 class ActionPolicy(unittest.TestCase):
+    def test_shared_rust_probability_gate_cases(self):
+        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                parsed = module.parse_answers(case["answers"])
+                self.assertEqual(module.action(parsed, case["authorization_complete"]), case["action"])
+                self.assertEqual(module.requires_input(parsed["input"]), case["requires_input"])
+
+    def test_malformed_distributions_fail_visibly(self):
+        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        for bad in (None, {}, {"required": 1}, {"required": .5, "none": .2, "redundant_request": .2, "unclear": -.1}):
+            answers = json.loads(json.dumps(cases[0]["answers"]))
+            answers["input"]["probabilities"] = bad
+            with self.assertRaises(ValueError):
+                module.parse_answers(answers)
+
+    def test_confidence_requires_a_bounded_number_like_the_runtime(self):
+        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        for bad in (True, "0.99", None, float("nan"), float("inf"), -.1, 1.1):
+            answers = json.loads(json.dumps(cases[0]["answers"]))
+            answers["input"]["confidence"] = bad
+            with self.assertRaises(ValueError):
+                module.parse_answers(answers)
+
     def test_required_input_beats_everything(self):
         self.assertEqual(module.action(verdict(input_=("required", 0.85), failure=("transient_provider", 0.99)), True), "await_input")
-        self.assertEqual(module.action(verdict(input_=("required", 0.84), failure=("none", 0.99)), True), "uncertain")
+        self.assertEqual(module.action(verdict(input_=("required", 0.49), failure=("none", 0.99)), True), "uncertain")
 
     def test_provider_recovery_is_independent_of_work(self):
         self.assertEqual(module.action(verdict(failure=("transient_provider", 0.91), work=("unclear", 0.3)), False), "retry_provider")
@@ -196,7 +244,7 @@ class ActionPolicy(unittest.TestCase):
     def test_finished_and_wait_need_the_activity_bar(self):
         self.assertEqual(module.action(verdict(work=("finished", 0.85), input_=("none", 0.85)), False), "finished")
         self.assertEqual(module.action(verdict(work=("waiting", 0.85), input_=("none", 0.85)), False), "wait")
-        self.assertEqual(module.action(verdict(work=("finished", 0.84)), False), "uncertain")
+        self.assertEqual(module.action(verdict(work=("finished", 0.79)), False), "uncertain")
         self.assertEqual(module.action(verdict(work=("finished", 0.95), input_=("redundant_request", 0.95)), False), "uncertain")
 
 

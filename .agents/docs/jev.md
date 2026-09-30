@@ -24,9 +24,9 @@ Diagnostics go to logs, not the UI. Each decision is recorded with its exact evi
 
 Simplicity over bulletproofing. Where a person retries, a notice is enough. Durability is spent only where a program would otherwise double-execute (continuation, retries, quota resume).
 
-## The contract today: turn-verdict-v5
+## The contract today: turn-verdict-v6
 
-Constants: `mj_core::assessment::PROTOCOL` = 25, `AUTOMATION_CONFIDENCE` = 0.90; `mj_core::activity::verdict::ACT_CONFIDENCE` = 0.85, `NO_INPUT_CONFIDENCE` = 0.15, `SERVER_RETRY_CONFIDENCE` = 0.90. Questions are the bundled `mj-core/src/activity/verdict_questions.json`, shared byte-for-byte with the proxy. Older question files (`_v1` to `_v4`) are frozen for released workers.
+Constants: `mj_core::assessment::PROTOCOL` = 25, `AUTOMATION_CONFIDENCE` = 0.90, `REQUIRED_INPUT_PROBABILITY` = 0.50, `REQUIRED_INPUT_RATIO` = 2.5, `FINISHED_WORK_PROBABILITY` = 0.80; `mj_core::activity::verdict::ACT_CONFIDENCE` = 0.85, `NO_INPUT_CONFIDENCE` = 0.15, `SERVER_RETRY_CONFIDENCE` = 0.90. Questions are the bundled `mj-core/src/activity/verdict_questions.json`, shared byte-for-byte with the proxy. Older question files (`_v1` to `_v4`) are frozen for released workers.
 
 ### Evidence
 
@@ -43,7 +43,7 @@ The evidence collector lives in `mj-transcript/src/turn_context.rs` (process-loc
 
 ### Questions and answers
 
-Provider `confidence` is a statistic derived from the distribution, not the probability of the winning choice. Runtime gates currently use confidence; the scenario evaluator also retains the full distribution for offline comparisons. See [TypeSafe confidence](https://docs.typesafe.ai/confidence).
+Provider `confidence` is a statistic derived from the distribution, not the probability of the winning choice. Runtime and evaluator retain the full distribution. Required-input and finished-work gates use probabilities; the other gates still use confidence. See [TypeSafe confidence](https://docs.typesafe.ai/confidence).
 
 Four Choice questions, each returning `choice`, `probabilities`, and `confidence` (the fourth was added on 2026-09-29 with the `/v6/turn-verdict` route; v5 is frozen in `verdict_questions_v5.json`):
 
@@ -53,26 +53,28 @@ Four Choice questions, each returning `choice`, `probabilities`, and `confidence
 - `input`: `none`, `redundant_request`, `required`, `unclear`. Does the assistant currently need a response from this user? An unresolved decision, choice, missing fact, approval, review, or external action counts even without a question mark and while independent work continues. Chronological authorization distinguishes decisions governing requested work from optional offers after a delivered answer; already given permission is `redundant_request`. A fresh explicit approval gate after a denial or for a deferred change still requires a response; a completed handback with no current request does not.
 - `work`: `finished`, `authorized_unfinished`, `waiting`, `unclear`. Assessed against all chronological user instructions; later status questions do not cancel earlier tasks; runtime facts distinguish real background work from historical tool output.
 
-`mj_core::activity::verdict::TurnVerdict::parse` also accepts the older v3/v4 shape (`needs_user_input`, `work_state`, `retryable_server_error`) and maps v5 onto it, so both proxies' answers feed one decision path.
+`mj_core::activity::verdict::TurnVerdict::parse` also accepts the older v3/v4 shape (`needs_user_input`, `work_state`, `retryable_server_error`) and retains its frozen confidence policy. Modern responses use the shared `Verdict` policy for both phases; the legacy mapped scores remain diagnostic values only. Fresh modern responses require complete, bounded probability distributions whose selected choice is a maximum. Hundredth rounding of the total is allowed. The v6 proxy validates and forwards these distributions; the v5 route stays frozen.
 
 ### Action policy
 
 `mj_core::assessment::Verdict::action(authorization_complete)`, in order:
 
-1. `input = required` at 0.85 or more: `AwaitInput`.
+1. `input = required`, `P(required) >= 0.50`, and `P(required) >= 2.5 * max(P(other input choices))`: `AwaitInput`.
 2. `failure` at 0.90 or more: `transient_provider` gives `RetryProvider`, `quota` gives `RecoverQuota`, `other` gives `AwaitInput`.
 3. Any failure choice other than a confident `none`: `Uncertain`. Unknown failures must not become nudges.
 4. `work = authorized_unfinished` at 0.90 and `input` in {`none`, `redundant_request`} at 0.90 and authorization history complete: `Continue`.
-5. `work` at 0.85 and `input = none` at 0.85: `finished` gives `Finished`, `waiting` gives `Wait`.
+5. `input = none` with confidence at least 0.85: `work = finished` with probability at least 0.80 gives `Finished`; `work = waiting` with confidence at least 0.85 gives `Wait`.
 6. Otherwise `Uncertain`.
+
+Old durable judgments without probability maps remain readable; their stored actions stay authoritative. Missing maps do not qualify for a new probability decision if reevaluated. This adds optional JSON data without changing the SQL schema or the relay request protocol. Deploy the updated v6 proxy before distributing workers that require its probability fields.
 
 The worker (`mj-worker/src/relay/verdict.rs::apply_turn_assessment`) stores the verdict and action in the durable `TurnAssessment`, sets a status (`Assessed`, `Scheduled` for an armed retry, `Deferred` for continuation or quota resume, `Superseded` when a question, paused goal, budget limit, or queued prompt suppresses automatic action) and a reason string, then maps the action to a process-local activity `Decision`: `AwaitInput` to `AwaitingInput`, `Finished` to `InferIdle`, `Wait` to `ExpectContinuation`, everything else `KeepCurrent`.
 
 The activity decision is applied only if the turn generation is unchanged and nothing "blocks" it: a foreground turn or tool, a running goal, a queued prompt, or a closed session. It is process-local, lost on restart, and invalidated by any new foreground activity or a change of background-task identity. A valid answer, including an uncertain one, is cached until the relevant evidence changes (`background_commands` or `queued_commands`, a new prompt, a harness turn). Only request failures (transport, malformed reply) retry, after 60 s doubling to 300 s. (`docs/src/content/docs/sessions.md` still says uncertain answers retry; that sentence is stale.)
 
-Note two things the policy does that no plan stated: `failure = other` at 0.90 or more yields `AwaitInput`, so a confidently classified local error looks like a question to the user; and `Finished`, `Wait`, and `Continue` all require `failure = none` at 0.90 or more, so the effective threshold for idle inference is higher than the stated 0.85 whenever the failure axis is unsure.
+Note two things the policy does that no plan stated: `failure = other` at 0.90 or more yields `AwaitInput`, so a confidently classified local error looks like a question to the user; and `Finished`, `Wait`, and `Continue` all require `failure = none` at 0.90 or more, so probability-qualified completion still cannot infer idle when failure is unsure.
 
-For a running turn, the worker asks after 60 s of silence (doubling to 5 min) with `phase = running`; the only decision it may take is `AwaitingInput`, which ends Mjolnir's tracked turn with stop reason `awaiting_input` while the harness keeps serving; a late harness reply is discarded.
+For a running turn, the worker asks after 60 s of silence (doubling to 5 min) with `phase = running`; it applies the same `requires_input` probability predicate. The only decision it may take is `AwaitingInput`, which ends Mjolnir's tracked turn with stop reason `awaiting_input` while the harness keeps serving; a late harness reply is discarded.
 
 ### Where the result is visible
 
@@ -86,8 +88,8 @@ Each row is a consumer of the verdict or of the activity inference derived from 
 
 | Stakeholder | Reads | Threshold | Action |
 | --- | --- | --- | --- |
-| Running-turn input detection (`mj-worker/src/acp/verdict_client.rs`, `acp/session.rs`) | `input = required`, phase running | 0.85 | Ends tracked turn with `awaiting_input`; transcript notice; `mj wait` returns `input_required` |
-| Replied-phase activity inference (`mj-worker/src/relay/verdict.rs`, `mj-core/src/activity.rs`) | `Finished`, `Wait`, `AwaitInput` actions | 0.85 | `ActivityState::Idle` (inferred) or `Expecting`; never makes a worker replaceable |
+| Running-turn input detection (`mj-worker/src/acp/verdict_client.rs`, `acp/session.rs`) | `input = required`, phase running | probability >= 0.50 and >= 2.5x runner-up | Ends tracked turn with `awaiting_input`; transcript notice; `mj wait` returns `input_required` |
+| Replied-phase activity inference (`mj-worker/src/relay/verdict.rs`, `mj-core/src/activity.rs`) | `Finished`, `Wait`, `AwaitInput` actions | shared action policy above | `ActivityState::Idle` (inferred) or `Expecting`; never makes a worker replaceable |
 | Automatic authorized continuation (`mj-controller/src/daemon/continuation.rs`, `mj-core/src/continuation.rs`) | `Continue` action, `continuation.eligible()` | 0.90 on work and input | Submits the fixed Continue prompt, at most three per user message; review waits for the chain to settle |
 | Transient provider retry (`mj-worker/src/worker_runtime/unix/dispatch.rs`) | `RetryProvider` | 0.90 | Arms durable 1/2/4/8/16-minute backoff, submits `Continue` when due and quiet, preserving the original authorization |
 | Quota recovery (`mj-controller/src/daemon/continuation.rs`, `mj-controller/src/quota.rs`) | `RecoverQuota` | 0.90 | Daemon computes the reset deadline from quota reports and schedules one resume 60 s after all exhausted windows reset; separate allowance |
@@ -143,7 +145,7 @@ These findings shaped the current evidence and thresholds. Details, tables, and 
 
 - Current decisions and optional scope (2026-09-30): Luna mined 17 additional real cases from 11 sessions, split by session before comparison. The selected input wording detected 9/9 required tuning requests versus 3/9 baseline, 6/12 held-out versus 3/12, and 16/42 existing-suite requests versus 9/42, with three repeats and no confident input alerts on 210 scored controls. It catches the 06:50 decision alongside a background benchmark, but misses two held-out requests, loses some finished/wait inferences, and retains the baseline's three harmful A03 goal-completion actions. The prompt was frozen before held-out evaluation; labels and thresholds stayed fixed. Details and digests: [input-detection experiment](jev-input-detection-20260930.md).
 - Five further input iterations (2026-09-30): corrected three optional-offer labels, one explicit-decision label, and one evidence-ambiguous plan case. The selected fourth candidate detects 36/54 required development replays versus 29/54 for the then-current prompt, restores finished detections from 22/69 to 27/69, and produces no confident false input alerts among 216 development and 21 fresh-session control replays. It loses one original-incident detection and three automatic continuations; broader misses remain. The fresh corpus contains no required-input cases, so recall generalization is unmeasured. Full prompts, corrected-label provenance, all five comparisons, and limitations: [five-iteration report](jev-input-five-20260930.md).
-- Probability gates (2026-09-30): a 113-setting offline sweep and two three-repeat replays support separate input and finished gates as a candidate improvement. Input at 2.5x runner-up with probability >= 0.50 detects 102/108 versus 71/108, at 13/474 versus 1/474 false alerts. Finished probability >= 0.80, keeping other gates, detects 104/174 versus 63/174 with the same six A03 false finishes. Grouped validation shows residual generalization risk; runtime gates remain unchanged. [Full comparison](jev-probability-gates-20260930.md).
+- Probability gates (2026-09-30): a 113-setting offline sweep and two three-repeat replays support separate input and finished gates as a candidate improvement. Input at 2.5x runner-up with probability >= 0.50 detects 102/108 versus 71/108, at 13/474 versus 1/474 false alerts. Finished probability >= 0.80, keeping other gates, detects 104/174 versus 63/174 with the same six A03 false finishes. Grouped validation shows residual generalization risk. The user approved these gates; runtime implementation is tracked in [the implementation plan](../plans/jev-runtime-probability-gates.md). [Full comparison](jev-probability-gates-20260930.md).
 
 ## What the live logs show (2026-09-26 to 2026-09-29)
 
@@ -163,7 +165,7 @@ The per-worker decision logs on Jonathan's host hold 502 decisions across 22 ses
 - (Closed 2026-09-30.) The worker used to record `Continue` as `Deferred` whether or not `[continuation]` was enabled. The setting now travels to the worker at launch (`MJ_CONTINUATION_DISABLED`), and a `Continue` verdict is recorded as `Assessed` with reason `continuation_disabled` when nobody will act on it. Children are excluded by the daemon; they also cannot reach `Continue` because their history holds no user message.
 - Provider-retry submission requires `is_quiet`, so a leftover background command blocks an armed retry.
 - (Closed 2026-09-29.) The dead `RuntimeEvent::ContinuationExpected` and `TurnVerdict::should_retry_server_error` are removed.
-- The proxy runbook now records v5 and v6; v6 is not deployed as of 2026-09-29 and must be before a worker that calls it ships.
+- The v6 proxy was deployed on 2026-09-30. Its probability-forwarding update is version `14ca6393-f397-40c7-a1c2-615c9bb32b6e`; see the proxy runbook for verification.
 - Turn-imminent detection: Mjolnir cannot see a harness turn that has started but produced no output. For Claude, the settle signal (`async_task_state_update`) is available and unused for this purpose. For Codex exec cards, Kimi tasks, and the other harnesses, whether an equivalent signal exists is unchecked.
 - The uncertain rate is high; there is no measurement of why (evidence missing, question wording, or genuinely ambiguous cases).
 - Real-scenario tests: existing tests pin mechanics with fixed fake probabilities; model behavior is checked only by small synthetic runs and two one-off replays. Nothing replays a live-log scenario end to end.

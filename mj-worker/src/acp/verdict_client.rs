@@ -236,7 +236,7 @@ impl VerdictClient {
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v6", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v6", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -265,12 +265,10 @@ impl VerdictClient {
                 Ok(answer) => {
                     attempt.decision =
                         Some(mj_core::activity::verdict::decide(evidence.phase, answer));
-                    attempt.uncertain = answer.needs_user_input
-                        < mj_core::activity::verdict::ACT_CONFIDENCE
-                        && (answer.needs_user_input
-                            > mj_core::activity::verdict::NO_INPUT_CONFIDENCE
-                            || answer.work_state_confidence
-                                < mj_core::activity::verdict::ACT_CONFIDENCE);
+                    attempt.uncertain = answer
+                        .assessment
+                        .as_ref()
+                        .is_some_and(|v| v.action(false) == mj_core::assessment::Action::Uncertain);
                     diagnostic.update(Some("Jev assessed user input need, remaining work, and transient server failures independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input, "retryable_server_error":answer.retryable_server_error,"assessment":answer.assessment}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
                 }
                 Err(error) => diagnostic.update(
@@ -594,6 +592,13 @@ mod tests {
             technical["no_input_threshold"],
             serde_json::json!(mj_core::activity::verdict::NO_INPUT_CONFIDENCE)
         );
+        assert_eq!(technical["required_input_probability"], 0.5);
+        assert_eq!(technical["required_input_ratio"], 2.5);
+        assert_eq!(technical["finished_work_probability"], 0.8);
+        assert_eq!(
+            technical["result"]["assessment"]["input"]["probabilities"]["required"],
+            0.5
+        );
         let scores = technical["result"].as_object().unwrap();
         assert_eq!(scores.len(), 5);
         assert_eq!(scores["work_state"], "BackgroundWork");
@@ -601,7 +606,7 @@ mod tests {
             scores["work_state_confidence"].as_f64().unwrap() as f32,
             0.95
         );
-        assert_eq!(scores["needs_user_input"].as_f64().unwrap() as f32, 0.96);
+        assert_eq!(scores["needs_user_input"].as_f64().unwrap() as f32, 0.42);
         assert_eq!(technical["proposed_decision"], "AwaitingInput");
         assert_eq!(technical["applied_decision"], "AwaitingInput");
         assert_eq!(technical["outcome"], "applied");
@@ -753,9 +758,9 @@ mod tests {
     async fn classifier_sends_bounded_evidence_and_parses_typed_answers() {
         let (client, server) = server(
             serde_json::json!({"answers": {
-                "work":{"type":"choice","choice":"waiting","confidence":0.95},
-                "input":{"type":"choice","choice":"required","confidence":0.96},
-                "failure":{"type":"choice","choice":"none","confidence":0.99}
+                "work": {"type":"choice","choice":"waiting","confidence":0.95, "probabilities": {"finished": 0.0, "authorized_unfinished": 0.0, "waiting": 1.0, "unclear": 0.0}},
+                "input": {"type":"choice","choice":"required","confidence":0.96, "probabilities": {"none": 0.0, "redundant_request": 0.0, "required": 1.0, "unclear": 0.0}},
+                "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
             }})
             .to_string(),
         )
@@ -790,16 +795,22 @@ mod tests {
     }
 
     fn response(choice: &str) -> String {
+        let work = if choice == "user" || choice == "background_work" {
+            "waiting"
+        } else {
+            choice
+        };
+        let input = if choice == "user" { "required" } else { "none" };
         serde_json::json!({"answers": {
-            "work":{"type":"choice","choice":if choice == "user" || choice == "background_work" { "waiting" } else { choice },"confidence":0.95},
-            "input":{"type":"choice","choice":if choice == "user" { "required" } else { "none" },"confidence":if choice == "user" { 0.96 } else { 0.99 }},
-            "failure":{"type":"choice","choice":"none","confidence":0.99}
+            "work": {"type":"choice","choice":work,"confidence":0.95, "probabilities": {"finished": if work == "finished" { 1.0 } else { 0.0 }, "authorized_unfinished": if work == "authorized_unfinished" { 1.0 } else { 0.0 }, "waiting": if work == "waiting" { 1.0 } else { 0.0 }, "unclear": if work == "unclear" { 1.0 } else { 0.0 }}},
+            "input": {"type":"choice","choice":input,"confidence":if choice == "user" { 0.42 } else { 0.99 }, "probabilities": {"none": if input == "none" { 1.0 } else { 0.2 }, "redundant_request": if input == "required" { 0.2 } else { 0.0 }, "required": if input == "required" { 0.5 } else { 0.0 }, "unclear": if input == "required" { 0.1 } else { 0.0 }}},
+            "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
         }})
         .to_string()
     }
 
     #[tokio::test]
-    async fn a_running_turn_ends_only_for_a_confident_user_handoff() {
+    async fn a_running_turn_ends_for_a_probability_qualified_user_handoff() {
         for choice in ["user", "background_work", "unclear"] {
             let (client, server) = server(response(choice)).await;
             let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {

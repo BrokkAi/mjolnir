@@ -116,7 +116,7 @@ pub enum WorkState {
     Unclear,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnVerdict {
     pub assessment: Option<crate::assessment::Verdict>,
     pub work_state: WorkState,
@@ -132,7 +132,6 @@ impl TurnVerdict {
             use crate::assessment::{Failure, Input, Work};
             let v = crate::assessment::Verdict::parse(response)?;
             return Ok(Self {
-                assessment: Some(v),
                 work_state: match v.work.choice {
                     Work::Finished => WorkState::Finished,
                     Work::Waiting => WorkState::BackgroundWork,
@@ -150,6 +149,7 @@ impl TurnVerdict {
                 } else {
                     0.0
                 }),
+                assessment: Some(v),
             });
         }
         let answers = response.get("answers").context("missing verdict answers")?;
@@ -213,6 +213,22 @@ pub struct TurnCompletion {
 }
 
 pub fn decide(phase: TurnPhase, verdict: &TurnVerdict) -> Decision {
+    if let Some(assessment) = &verdict.assessment {
+        if phase == TurnPhase::Running {
+            return if assessment.requires_input() {
+                Decision::AwaitingInput
+            } else {
+                Decision::KeepCurrent
+            };
+        }
+        return match assessment.action(false) {
+            crate::assessment::Action::AwaitInput => Decision::AwaitingInput,
+            crate::assessment::Action::Finished => Decision::InferIdle,
+            crate::assessment::Action::Wait => Decision::ExpectContinuation,
+            _ => Decision::KeepCurrent,
+        };
+    }
+    // Frozen v3/v4 responses have Noul scores rather than choice distributions.
     if !(0.0..=1.0).contains(&verdict.needs_user_input) {
         return Decision::KeepCurrent;
     }

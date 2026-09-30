@@ -12,6 +12,36 @@ evaluator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evaluator)
 
 
+def legacy_action(verdict, authorization_complete):
+    """Frozen confidence policy used by the September 30 experiment."""
+    failure, input_, work = verdict["failure"], verdict["input"], verdict["work"]
+    if input_["choice"] == "required" and input_["confidence"] >= .85:
+        return "await_input"
+    if failure["confidence"] >= .90:
+        if failure["choice"] == "transient_provider":
+            return "retry_provider"
+        if failure["choice"] == "quota":
+            return "recover_quota"
+        if failure["choice"] == "other":
+            return "await_input"
+    if failure["choice"] != "none" or failure["confidence"] < .90:
+        return "uncertain"
+    if (
+        authorization_complete
+        and work["choice"] == "authorized_unfinished"
+        and work["confidence"] >= .90
+        and input_["choice"] in ("none", "redundant_request")
+        and input_["confidence"] >= .90
+    ):
+        return "continue"
+    if work["confidence"] >= .85 and input_["choice"] == "none" and input_["confidence"] >= .85:
+        if work["choice"] == "finished":
+            return "finished"
+        if work["choice"] == "waiting":
+            return "wait"
+    return "uncertain"
+
+
 def passes(answer, ratio, floor):
     probabilities = answer['probabilities']
     winner = probabilities[answer['choice']]
@@ -27,13 +57,13 @@ def action(record, fixture, ratio, floor, all_gates, input_only=False):
     if all_gates:
         for axis in ('failure', 'input', 'work'):
             verdict[axis]['confidence'] = float(passes(answers[axis], ratio, floor))
-        return evaluator.action(verdict, evaluator.authorization_complete(evaluator.fit_to_wire(fixture['evidence'])))
+        return legacy_action(verdict, evaluator.authorization_complete(evaluator.fit_to_wire(fixture['evidence'])))
     if verdict['input']['choice'] == 'required' and passes(answers['input'], ratio, floor):
         return 'await_input'
     if input_only:
         if verdict['input']['choice'] == 'required':
             verdict['input']['confidence'] = 0
-        return evaluator.action(verdict, evaluator.authorization_complete(evaluator.fit_to_wire(fixture['evidence'])))
+        return legacy_action(verdict, evaluator.authorization_complete(evaluator.fit_to_wire(fixture['evidence'])))
     # Keep recovery and automatic continuation gates exactly as shipped.
     if record['action'] in ('retry_provider', 'recover_quota', 'continue'):
         return record['action']

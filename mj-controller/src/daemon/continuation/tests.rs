@@ -838,14 +838,17 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
                 failure: Judgment {
                     choice: Failure::Quota,
                     confidence: 0.99,
+                    probabilities: Default::default(),
                 },
                 input: Judgment {
                     choice: Input::Unclear,
                     confidence: 0.5,
+                    probabilities: Default::default(),
                 },
                 work: Judgment {
                     choice: Work::Unclear,
                     confidence: 0.5,
+                    probabilities: Default::default(),
                 },
                 background: None,
             });

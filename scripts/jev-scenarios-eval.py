@@ -7,7 +7,7 @@ TypeSafe directly, three times each, and writes `results.jsonl` plus `report.md`
 under --output. The report compares the model's answers and the resulting
 Mjolnir action with each fixture's `expected`, per category. It never runs in
 CI. Input detection and false required-input alerts are also scored separately
-at the UI's 0.85 threshold; cases marked context.strict_input_scoring=false are
+using the recorded policy (currently probability >= 0.50 and >= 2.5x runner-up); cases marked context.strict_input_scoring=false are
 excluded from that count. The key comes from TYPESAFE_API_KEY or ~/.secrets/typesafe_api_key and is
 never printed. Standard library only.
 
@@ -24,6 +24,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -37,6 +38,13 @@ FIXTURES = ROOT / "mj-core/tests/jev-scenarios"
 QUESTIONS = ROOT / "mj-core/src/activity/verdict_questions.json"
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
+POLICY = "input-ratio2.5-floor0.5-finished0.8"
+CHOICES = {
+    "failure": ("none", "transient_provider", "quota", "other", "unclear"),
+    "input": ("none", "redundant_request", "required", "unclear"),
+    "work": ("finished", "authorized_unfinished", "waiting", "unclear"),
+    "background": ("needed", "unneeded", "unclear"),
+}
 ACT_CONFIDENCE = 0.85
 AUTOMATION_CONFIDENCE = 0.90
 USER_BYTES = 32 * 1024
@@ -44,10 +52,17 @@ ASSISTANT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 64 * 1024
 
 
+def requires_input(input_):
+    probabilities = input_.get("probabilities", {})
+    winner = probabilities.get("required", 0.0)
+    runner_up = max((p for name, p in probabilities.items() if name != "required"), default=0.0)
+    return input_["choice"] == "required" and winner + 1e-12 >= .50 and winner + 1e-12 >= 2.5 * runner_up
+
+
 def action(verdict, authorization_complete):
     """Python port of `mj_core::assessment::Verdict::action`. Pinned by the test file."""
     failure, input_, work = verdict["failure"], verdict["input"], verdict["work"]
-    if input_["choice"] == "required" and input_["confidence"] >= ACT_CONFIDENCE:
+    if requires_input(input_):
         return "await_input"
     if failure["confidence"] >= AUTOMATION_CONFIDENCE:
         if failure["choice"] == "transient_provider":
@@ -66,10 +81,10 @@ def action(verdict, authorization_complete):
         and input_["confidence"] >= AUTOMATION_CONFIDENCE
     ):
         return "continue"
-    if work["confidence"] >= ACT_CONFIDENCE and input_["choice"] == "none" and input_["confidence"] >= ACT_CONFIDENCE:
-        if work["choice"] == "finished":
+    if input_["choice"] == "none" and input_["confidence"] >= ACT_CONFIDENCE:
+        if work["choice"] == "finished" and work.get("probabilities", {}).get("finished", 0.0) + 1e-12 >= .80:
             return "finished"
-        if work["choice"] == "waiting":
+        if work["choice"] == "waiting" and work["confidence"] >= ACT_CONFIDENCE:
             return "wait"
     return "uncertain"
 
@@ -100,12 +115,22 @@ def parse_answers(answers):
         answer = answers.get(axis)
         if answer is None and axis == "background":
             continue
-        if answer.get("type") != "choice":
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
             raise ValueError(f"{axis}: not a choice answer")
-        confidence = float(answer["confidence"])
-        if not 0.0 <= confidence <= 1.0:
+        confidence = answer["confidence"]
+        if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
             raise ValueError(f"{axis}: confidence out of range")
-        verdict[axis] = {"choice": answer["choice"], "confidence": confidence}
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, dict) or set(probabilities) != set(CHOICES[axis]):
+            raise ValueError(f"{axis}: incomplete probabilities")
+        if any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values()):
+            raise ValueError(f"{axis}: invalid probabilities")
+        if abs(sum(probabilities.values()) - 1) > .005 * len(probabilities) + 1e-12:
+            raise ValueError(f"{axis}: invalid distribution total")
+        choice = answer["choice"]
+        if choice not in probabilities or probabilities[choice] + 1e-12 < max(probabilities.values()):
+            raise ValueError(f"{axis}: choice is not a probability winner")
+        verdict[axis] = {"choice": choice, "confidence": confidence, "probabilities": probabilities}
     return verdict
 
 
@@ -264,6 +289,7 @@ def digest(value):
 def prepare_run(output, questions, fixtures):
     """Freeze prompts and labeled cases before sending requests; never mix experiments."""
     manifest = {
+        "policy": POLICY,
         "model": "jev-latest",
         "endpoint": ENDPOINT,
         "questions_sha256": digest(questions),
@@ -274,7 +300,7 @@ def prepare_run(output, questions, fixtures):
     manifest_path = output / "run.json"
     if manifest_path.exists():
         if json.loads(manifest_path.read_text()) != manifest:
-            raise ValueError("prompt or fixtures changed; use a new output directory")
+            raise ValueError("policy, prompt or fixtures changed; use a new output directory")
         for name, expected in (("questions.json", questions), ("fixtures.json", fixtures)):
             if json.loads((output / name).read_text()) != expected:
                 raise ValueError(f"{name} differs from the frozen experiment; use a new output directory")
@@ -287,6 +313,10 @@ def prepare_run(output, questions, fixtures):
 
 
 def report(args):
+    manifest_path = args.output / "run.json"
+    policy = json.loads(manifest_path.read_text()).get("policy", "confidence-0.85") if manifest_path.exists() else "confidence-0.85"
+    if policy not in (POLICY, "confidence-0.85"):
+        raise ValueError(f"unknown report policy: {policy}")
     snapshot = args.output / "fixtures.json"
     fixtures = {f["id"]: f for f in (json.loads(snapshot.read_text()) if snapshot.exists() else load_fixtures(None))}
     by_id = defaultdict(list)
@@ -319,7 +349,8 @@ def report(args):
             verdict = record["verdict"]
             predicted_input = verdict["input"]
             input_agrees = predicted_input["choice"] == expected["input"]
-            required_high = predicted_input["choice"] == "required" and predicted_input["confidence"] >= ACT_CONFIDENCE
+            required_high = (requires_input(predicted_input) if policy == POLICY else
+                             predicted_input["choice"] == "required" and predicted_input["confidence"] >= ACT_CONFIDENCE)
             if input_stats is not None:
                 input_stats["agree"] += input_agrees
                 input_stats["agree_high"] += input_agrees and predicted_input["confidence"] >= ACT_CONFIDENCE
@@ -345,9 +376,9 @@ def report(args):
         stopped = json.loads((args.output / "stopped.json").read_text())
         lines += [f"Incomplete run: {stopped['reason']}. Counts below cover recorded requests only; remaining requests were not sent.", ""]
     lines += [
-        "Input is scored independently of failure and work. Detection uses the UI's 0.85 threshold. Errors are reported separately and count as unsuccessful requests.",
+        f"Input is scored independently of failure and work. Detection policy: `{policy}`. Confidence columns remain separate diagnostics. Errors count as unsuccessful requests.",
         f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.", "",
-        "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required >= 0.85 | errors |",
+        "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required | errors |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for label, s in sorted(inputs.items()):

@@ -12,6 +12,7 @@ include = [
     "build.rs",
     "src/**/*.rs",
     "tests/fixtures/fake-command.sh",
+    "tests/jev-gates.json",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
     "src/help_search/question.json",

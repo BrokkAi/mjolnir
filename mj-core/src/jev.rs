@@ -168,11 +168,11 @@ impl DecisionLog {
             updated_at_ms: crate::clock::epoch_millis(),
             status: serde_json::to_value(assessment.status).expect("assessment status").as_str().unwrap().into(),
             checked: "What failed, is input required, and what authorized work remains?".into(),
-            answer: assessment.verdict.map_or_else(|| "No usable Jev answer yet.".into(), |v| format!("Failure: {:?}; input: {:?}; work: {:?}.", v.failure.choice, v.input.choice, v.work.choice)),
+            answer: assessment.verdict.as_ref().map_or_else(|| "No usable Jev answer yet.".into(), |v| format!("Failure: {:?}; input: {:?}; work: {:?}.", v.failure.choice, v.input.choice, v.work.choice)),
             action: assessment.reason.replace('_', " "),
             scope: "Whole retained authorization messages and current completion evidence; omitted context is explicit.".into(),
             owner: owner().into(),
-            technical: Some(serde_json::json!({"contract":"turn-verdict-v5", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE})),
+            technical: Some(serde_json::json!({"contract":"turn-verdict-v6", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE, "required_input_probability":crate::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":crate::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":crate::assessment::FINISHED_WORK_PROBABILITY})),
         });
     }
 

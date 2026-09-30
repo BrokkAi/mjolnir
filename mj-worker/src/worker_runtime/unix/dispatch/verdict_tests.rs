@@ -61,7 +61,7 @@ async fn completed_turn_with_background(
     choice: &'static str,
     tasks: usize,
 ) {
-    completed_turn_response(action, choice, tasks, 0.95, 200).await;
+    completed_turn_response(action, choice, tasks, 0.95, 0.95, 200).await;
 }
 
 async fn completed_turn_response(
@@ -69,6 +69,7 @@ async fn completed_turn_response(
     choice: &'static str,
     tasks: usize,
     confidence: f32,
+    work_probability: f64,
     status: u16,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -102,10 +103,16 @@ async fn completed_turn_response(
         if release_rx.await.is_err() {
             return;
         }
+        let work = if choice == "user" || choice == "background_work" {
+            "waiting"
+        } else {
+            choice
+        };
+        let input = if choice == "user" { "required" } else { "none" };
         let body = serde_json::json!({"answers": {
-            "work": {"type":"choice", "choice":if choice == "user" || choice == "background_work" { "waiting" } else { choice }, "confidence":confidence},
-            "input": {"type":"choice", "choice":if choice == "user" { "required" } else { "none" }, "confidence":if choice == "user" { confidence } else { 0.99 }},
-            "failure": {"type":"choice", "choice":"none", "confidence":0.99}
+            "work": {"type":"choice", "choice":work, "confidence":confidence, "probabilities": {"finished": if work == "finished" { work_probability } else { (1.0 - work_probability) / 3.0 }, "authorized_unfinished": if work == "authorized_unfinished" { work_probability } else { (1.0 - work_probability) / 3.0 }, "waiting": if work == "waiting" { work_probability } else { (1.0 - work_probability) / 3.0 }, "unclear": if work == "unclear" { work_probability } else { (1.0 - work_probability) / 3.0 }}},
+            "input": {"type":"choice", "choice":input, "confidence":if choice == "user" { confidence } else { 0.99 }, "probabilities": {"none": if input == "none" { 1.0 } else { 0.0 }, "redundant_request": if input == "redundant_request" { 1.0 } else { 0.0 }, "required": if input == "required" { 1.0 } else { 0.0 }, "unclear": if input == "unclear" { 1.0 } else { 0.0 }}},
+            "failure": {"type":"choice", "choice":"none", "confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
         }})
         .to_string();
         stream
@@ -411,7 +418,7 @@ async fn completed_turn_response(
     assert!(!log.contains("fake-key"));
     if matches!(action, WhileClassifying::Wait) {
         assert!(log.contains("Jev classification received"), "{log}");
-        assert!(log.contains("confidence=0.95"), "{log}");
+        assert!(log.contains(&format!("confidence={confidence}")), "{log}");
         assert!(log.contains("applied"), "{log}");
     }
 }
@@ -451,10 +458,25 @@ async fn replied_idle_verdict_cannot_override_a_new_prompt() {
 }
 
 #[tokio::test]
+async fn probability_qualified_completion_and_input_reach_activity_at_low_confidence() {
+    for choice in ["finished", "user"] {
+        completed_turn_response(WhileClassifying::Wait, choice, 4, 0.2, 0.8, 200).await;
+    }
+}
+
+#[tokio::test]
 async fn uncertain_verdicts_are_cached_and_transport_failures_back_off() {
-    completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.5, 200).await;
-    completed_turn_response(WhileClassifying::KeepCurrent, "unclear", 4, 0.95, 200).await;
-    completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.95, 503).await;
+    completed_turn_response(WhileClassifying::KeepCurrent, "finished", 4, 0.5, 0.5, 200).await;
+    completed_turn_response(WhileClassifying::KeepCurrent, "unclear", 4, 0.95, 0.95, 200).await;
+    completed_turn_response(
+        WhileClassifying::KeepCurrent,
+        "finished",
+        4,
+        0.95,
+        0.95,
+        503,
+    )
+    .await;
 }
 
 /// Sends one classification to a closed port, logging through whatever

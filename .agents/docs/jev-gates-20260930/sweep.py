@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-from compare import evaluator
+from compare import evaluator, legacy_action
 
 
 def candidates():
@@ -61,7 +61,7 @@ def load(run):
     for r in records:
         assert 'error' not in r
         f = fixtures[r['id']]
-        assert r['action'] == evaluator.action(r['verdict'], evaluator.authorization_complete(evaluator.fit_to_wire(f['evidence'])))
+        assert r['action'] == legacy_action(r['verdict'], evaluator.authorization_complete(evaluator.fit_to_wire(f['evidence'])))
         strict = f.get('context', {}).get('strict_input_scoring', True)
         e = f['expected']
         finished = e['action'] == 'finished'

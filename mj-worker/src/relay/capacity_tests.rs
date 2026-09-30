@@ -303,14 +303,17 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
         failure: Judgment {
             choice: Failure::TransientProvider,
             confidence: 0.91,
+            probabilities: Default::default(),
         },
         input: Judgment {
             choice: Input::Unclear,
             confidence: 0.32,
+            probabilities: Default::default(),
         },
         work: Judgment {
             choice: Work::Unclear,
             confidence: 0.24,
+            probabilities: Default::default(),
         },
         background: None,
     };
@@ -359,14 +362,17 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
         failure: Judgment {
             choice: Failure::TransientProvider,
             confidence: 1.0,
+            probabilities: Default::default(),
         },
         input: Judgment {
             choice: Input::None,
             confidence: 1.0,
+            probabilities: Default::default(),
         },
         work: Judgment {
             choice: Work::Unclear,
             confidence: 0.5,
+            probabilities: Default::default(),
         },
         background: None,
     };
@@ -398,14 +404,17 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
         failure: Judgment {
             choice: Failure::Unclear,
             confidence: 0.5,
+            probabilities: Default::default(),
         },
         input: Judgment {
             choice: Input::Unclear,
             confidence: 0.5,
+            probabilities: Default::default(),
         },
         work: Judgment {
             choice: Work::Unclear,
             confidence: 0.5,
+            probabilities: Default::default(),
         },
         background: None,
     };
