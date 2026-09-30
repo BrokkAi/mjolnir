@@ -26,7 +26,7 @@ image = "localhost/mjolnir/agent-dev:latest"
 
 Mjolnir invokes the local `podman` CLI as the user running Mjolnir; it does not use
 `sudo`, a shared Podman socket, or a remote Podman connection. Before each
-Podman session and while `mj setup` evaluates Podman, Mjolnir performs
+Podman session and while `mj doctor` evaluates Podman, Mjolnir performs
 these fast runtime checks:
 
 ```console
@@ -92,8 +92,8 @@ tags stay cached, and a digest-pinned image is never replaced. Set `pull_policy`
 to `always`, `newer`, `missing`, or `never` to override that inference; `always`
 and `newer` pull during the launch as well. Podman's `newer` policy retains a
 cached image when its registry is temporarily unavailable.
-`mj setup` additionally creates, executes `true` in, and removes a disposable
-container from the configured image. The fast runtime probes themselves never
+`mj doctor --smoke` additionally creates, executes `true` in, and removes a
+disposable container from the configured image. The fast runtime probes themselves never
 pull an image; a pull happens in the daemon's background refresh, or during
 provisioning when the host has no copy of the image or the target sets an
 explicit `always` or `newer` policy.
@@ -127,7 +127,7 @@ Verification sections 3 and 4 for every configured image.
 A Podman runtime on an SSH machine gets the same probes and the same smoke test, each
 wrapped in a noninteractive `ssh` call to the configured host. Every
 remediation below then applies on that remote host, as the user that SSH logs
-in as. The probes run in `mj setup`, in `mj doctor`, and when you test the
+in as. The probes run in `mj doctor` and when you test the
 target in the dashboard's Targets pane. Before each session on an SSH machine,
 Mjolnir checks only that the host answers over SSH and assumes Podman there is
 still as those checks found it, so rerun `mj doctor` after changing Podman on

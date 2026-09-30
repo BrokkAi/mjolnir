@@ -575,6 +575,16 @@ fn spawn_dashboard_pty_with_prefix(
     local_target: bool,
     prefix: Option<&str>,
 ) -> DashboardPty {
+    spawn_dashboard_pty_with_setup(exit_when_idle, pending_session, local_target, prefix, false)
+}
+
+fn spawn_dashboard_pty_with_setup(
+    exit_when_idle: bool,
+    pending_session: bool,
+    local_target: bool,
+    prefix: Option<&str>,
+    first_run: bool,
+) -> DashboardPty {
     let directory = tempfile::tempdir().expect("create Hel test storage");
     let config_directory = directory.path().join("config/hel");
     let data_directory = directory.path().join("data/hel");
@@ -639,6 +649,32 @@ image = "ubuntu:24.04"
                 .insert(id.into(), mj_core::config::TargetTemplate::LocalBare);
         }
         config.save_to(&path).unwrap();
+    }
+    if first_run {
+        fs::write(
+            config_root.join("hel/config.toml"),
+            "version = 14\n[phone]\nenabled = false\n",
+        )
+        .unwrap();
+        let tools = storage.path().join("first-run-tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(storage.path().join(".codex")).unwrap();
+        fs::create_dir_all(storage.path().join(".claude")).unwrap();
+        mj_core::test_hooks::install_fake_command(&tools, "codex", "#!/bin/sh\nexit 0\n");
+        // Make login checking visibly slower than dismissal, without real accounts.
+        mj_core::test_hooks::install_fake_command(
+            &tools,
+            "claude",
+            "#!/bin/sh\nif [ \"$1\" = auth ]; then /bin/sleep 2; exit 1; fi\nexit 0\n",
+        );
+        mj_core::test_hooks::install_fake_command(
+            &tools,
+            "podman",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 2; fi\nexit 1\n",
+        );
+        for name in ["node", "npm"] {
+            mj_core::test_hooks::install_fake_command(&tools, name, "#!/bin/sh\necho 24.0.0\n");
+        }
     }
     let seeded_workspace = pending_session.then(|| {
         let database = storage.path().join("data/hel/mj.sqlite3");
@@ -712,6 +748,18 @@ image = "ubuntu:24.04"
         // into thousands of threads on large CI machines during parallel runs.
         .env("TOKIO_WORKER_THREADS", "2")
         .env("RAYON_NUM_THREADS", "2");
+    if first_run {
+        command
+            .env("HOME", storage.path())
+            .env("XDG_CONFIG_HOME", storage.path().join("config"))
+            .env("XDG_DATA_HOME", storage.path().join("data"))
+            .env("PATH", storage.path().join("first-run-tools"))
+            .env("CODEX_HOME", storage.path().join(".codex"))
+            .env("CLAUDE_CONFIG_DIR", storage.path().join(".claude"))
+            .env_remove("KIMI_CODE_HOME")
+            .env_remove("GROK_HOME")
+            .env_remove("MUSE_HOME");
+    }
     command.args(["--instance", "terminal-regression"]);
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {
@@ -1265,5 +1313,64 @@ fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
     assert!(
         started.elapsed() < TIMEOUT,
         "startup failure waited for its deadline"
+    );
+}
+
+#[test]
+fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
+    let mut fixture = spawn_dashboard_pty_with_setup(false, false, false, None, true);
+    let mut output = PtyOutput::new();
+    wait_for_ready(
+        fixture.child.child_mut(),
+        &mut fixture.master,
+        &mut output,
+        b"Welcome to Mjolnir",
+    );
+    fixture.master.write_all(b"\r").unwrap();
+    wait_for_output_until(
+        &mut fixture.master,
+        &mut output,
+        ExpectedOutput::Hidden(b"Welcome to Mjolnir"),
+        Instant::now() + TIMEOUT,
+        None,
+    );
+    wait_for_screen(
+        &mut fixture.master,
+        &mut output,
+        b"mj login",
+        Instant::now() + STARTUP_TIMEOUT,
+    );
+    let path = fixture._storage.path();
+    let config = mj_core::config::Config::load_from(&path.join("config/hel/config.toml")).unwrap();
+    assert_eq!(config.profiles.len(), 2);
+    assert_eq!(config.profiles["codex"].home, path.join(".codex"));
+    assert_eq!(config.profiles["claude"].home, path.join(".claude"));
+    assert_eq!(
+        fs::read(path.join("data/hel/setup-state")).unwrap(),
+        b"complete\n"
+    );
+    assert!(
+        mj_controller::database::load_state_from(&path.join("data/hel/mj.sqlite3"))
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    // The daemon feed must publish discovered profiles before the creation wizard opens.
+    fixture.master.write_all(NEW_SESSION_KEY).unwrap();
+    wait_for_screen(
+        &mut fixture.master,
+        &mut output,
+        b"New session",
+        Instant::now() + TIMEOUT,
+    );
+    fixture.master.write_all(QUIT_KEY).unwrap();
+    assert!(
+        wait_for_exit(
+            fixture.child.child_mut(),
+            &mut fixture.master,
+            &mut output,
+            "quit first-run terminal"
+        )
+        .success()
     );
 }

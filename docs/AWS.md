@@ -57,9 +57,9 @@ AMIs. Prepare those resources before you point a target at AWS.
   (typically via `cloud-init`/user data baked into the AMI or launch
   template).
 
-Mjolnir does not create those prerequisites. `mj setup` checks for a usable AWS
-CLI identity before offering AWS setup, `mj doctor` checks the configured
-identity and launch template, and session preflight checks the identity and
+Mjolnir does not create those prerequisites. Add the AWS machine and target
+in Settings. `mj doctor` checks the configured identity and launch template,
+and session preflight checks the identity and
 configured launch-template version. These checks do not replace configuring
 the launch template, network, and SSH access correctly.
 
@@ -168,9 +168,9 @@ Grant only what you need. The updater's wider write permissions belong only to
 the identity that runs that maintenance script; they are not part of ordinary
 Mjolnir session operation.
 
-## `mj setup` and `mj doctor`
+## Settings and `mj doctor`
 
-`mj setup` can offer an AWS target when a configured `aws` CLI is detected;
-`mj doctor` validates the prerequisites it's able to check without launching
-an instance. Neither replaces the manual steps above: creating the launch
-template, security group, and key material is still on you.
+Configure the AWS machine and target in Settings. `mj setup` discovers local
+agent accounts and repositories; it does not configure AWS. `mj doctor`
+validates prerequisites without launching an instance. Creating the launch
+template, security group, and key material still requires the steps above.

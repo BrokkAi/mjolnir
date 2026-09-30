@@ -18,6 +18,7 @@ impl DashboardState {
     }
 
     pub(crate) fn prepare_dialog_state(&mut self) {
+        self.show_pending_welcome();
         if let Some(modal) = self.active_modal_mut() {
             modal.prepare_dialog_state();
         }
@@ -108,6 +109,7 @@ impl DashboardState {
         match std::mem::replace(&mut self.mode, Mode::Dashboard) {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
+            Mode::Welcome(dialog) => self.handle_welcome_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
             Mode::ChangedFiles(dialog) => self.handle_changed_files_event(event, dialog),
             Mode::NoticeLog(dialog) => self.handle_notice_log_event(event, dialog),
