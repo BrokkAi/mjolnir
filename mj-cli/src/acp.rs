@@ -63,9 +63,6 @@ pub(crate) struct AcpArgs {
     /// Record this Git revision as the diff base, when it should not be --at.
     #[arg(long, value_name = "REV")]
     pub(crate) base: Option<String>,
-    /// Require the saved target runtime identity before any task prompt.
-    #[arg(long)]
-    pub(crate) expected_runtime_identity: Option<String>,
     #[command(flatten)]
     pub(crate) workspace: crate::WorkspaceName,
     /// What happens to the sessions this process created when it exits.
@@ -1032,7 +1029,6 @@ fn start_request(
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
         bundle_id: args.bundle.clone(),
-        expected_runtime_identity: args.expected_runtime_identity.clone(),
         at: args.at.clone(),
         branch: args.branch.clone(),
         base: args.base.clone(),
@@ -1591,51 +1587,6 @@ mod tests {
             consumer.response(4).await["result"]["stopReason"],
             "end_turn"
         );
-    }
-
-    #[tokio::test]
-    async fn runtime_identity_constraint_is_forwarded_and_mismatch_prevents_prompting() {
-        use clap::Parser;
-        let parsed = crate::Cli::try_parse_from([
-            "mj",
-            "--instance",
-            "runtime-identity-1163",
-            "acp",
-            "--expected-runtime-identity",
-            "mj-runtime-v1:saved",
-        ])
-        .unwrap();
-        let Some(crate::Command::Acp(args)) = parsed.command else {
-            panic!("expected ACP command")
-        };
-        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
-        daemon.script(
-            "session-1",
-            &[Look::Session {
-                lifecycle: "failed",
-                state: "error",
-                chat_phase: "closed",
-                error: Some("runtime identity mismatch: discover the current runtime"),
-            }],
-        );
-        let adapter = Arc::new(Adapter::new(args, None, Some(client)));
-        let error = Arc::clone(&adapter)
-            .new_session(NewSessionRequest::new(std::path::PathBuf::from(
-                "/work/project",
-            )))
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("runtime identity mismatch"),
-            "{error:#}"
-        );
-        assert_eq!(
-            daemon.start.lock().unwrap()[0]["expected_runtime_identity"],
-            "mj-runtime-v1:saved"
-        );
-        assert!(daemon.prompt.lock().unwrap().is_empty());
-        assert_eq!(adapter.owned_sessions(), ["session-1"]);
-        adapter.apply_exit_policy().await.unwrap();
     }
 
     #[tokio::test]

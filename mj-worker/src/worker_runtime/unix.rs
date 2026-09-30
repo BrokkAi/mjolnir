@@ -498,14 +498,6 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // harness, and the supervisor that starts it, do not get the variables
     // this profile excludes (#1160).
     session_environment = prepared_harness.environment.clone();
-    let runtime_identity = prepared_harness.runtime_identity().await?;
-    relay
-        .lock()
-        .expect("relay lock poisoned")
-        .configure_runtime_identity(
-            runtime_identity.clone(),
-            config.expected_runtime_identity.clone(),
-        );
     let supervisor_path = root.join("acp-supervisor.json");
     prepared_harness.spec.write_spec(&supervisor_path)?;
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
@@ -575,7 +567,6 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             })),
         }));
         let acp_spec = LaunchSpec {
-            runtime_constraint: config.expected_runtime_identity.clone().map(|expected| (runtime_identity.clone(), expected)),
             clear_context_request: None,
         context_restore: None,
             goal_recovery,
@@ -1102,7 +1093,7 @@ pub(super) async fn serve_client_with_memory(
                 let protocol_version = envelope.protocol_version;
                 let body = match (&subagents, envelope.request) {
                     (Some(endpoint), RelayRequest::SubagentRequests) => {
-                        let (requests, results) = endpoint.snapshot();
+                        let (requests, results) = endpoint.collect_for_daemon();
                         RelayResponseBody::Ok {
                             payload: RelayResponsePayload::SubagentRequests { requests, results },
                         }

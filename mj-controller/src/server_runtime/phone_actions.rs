@@ -137,7 +137,10 @@ pub(super) fn admit_phone_action(
         ControllerAction::Suspend { .. } | ControllerAction::Destroy { .. }
     );
     if !closing && !phone_action_capacity_available(running_actions) {
-        return Err(ActionOutcome::Busy);
+        return Err(ActionOutcome::Busy {
+            running: running_actions,
+            limit: MAX_CONCURRENT_PHONE_ACTIONS,
+        });
     }
     let session_id = controller_action_session_id(action);
     if let Some(session_id) = &session_id

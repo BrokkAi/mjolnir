@@ -782,7 +782,6 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
         create_managed_worktree: None,

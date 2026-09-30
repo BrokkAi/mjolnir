@@ -505,3 +505,90 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
         .context("lifecycle stop did not terminate the worker before its deadline")
         .unwrap();
 }
+
+/// Start a container worker whose launcher environment carries the GitHub
+/// token the controller put in the container, as `podman exec` does, and
+/// return the session's token once the worker has passed its GitHub setup.
+fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> {
+    use std::time::Instant;
+    let root = tempfile::tempdir().unwrap();
+    let worker_root = root.path().join("worker");
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let token_path = worker_root.join("github-token");
+    if let Some(existing) = existing {
+        mj_core::credentials::write_github_token(&token_path, existing.as_bytes()).unwrap();
+    }
+    let config = worker_root.join("launch.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "session_id": "018f9dd2-a3b4-7c8d-9000-123456789abc", "harness": "codex",
+            "seed_image_environment": true,
+            "bridge_command": "/missing-harness", "bridge_args": [],
+            "environment": {"CODEX_HOME": root.path().join("profile")},
+            "target_environment": {}, "cwd": root.path(),
+            "execution_policy": "configured_approvals"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut command = CommandSpec::new(
+        env!("CARGO_BIN_EXE_mj-worker"),
+        [
+            "worker",
+            "run",
+            "--root",
+            worker_root.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ],
+    );
+    command
+        .env
+        .insert("GH_TOKEN".into(), "container-token".into());
+    let worker = std::thread::spawn(move || {
+        BoundedProcessExecutor::new(Duration::from_secs(15)).execute(&command)
+    });
+    // The harness step comes after the GitHub setup.
+    let startup = worker_root.join(mj_core::relay::WORKER_STARTUP_FILE);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !worker.is_finished()
+        && Instant::now() < deadline
+        && !std::fs::read_to_string(&startup).is_ok_and(|steps| steps.contains("harness-resolve"))
+    {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
+    let _ = BoundedProcessExecutor::new(Duration::from_secs(8))
+        .execute(&CommandSpec::new("sh", ["-c", &script]));
+    if let Ok(output) = worker.join().expect("worker owner panicked") {
+        for stream in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(stream).contains("container-token"));
+        }
+    }
+    mj_core::credentials::read_github_token(&token_path)
+        .unwrap()
+        .1
+}
+
+#[test]
+fn container_worker_has_the_container_github_token_when_it_starts() {
+    // The worker re-executes itself with a cleared environment before it sets
+    // up the session, so the token has to be kept from the launcher. Without
+    // it the first turn ran with no GitHub credentials until the controller's
+    // periodic sync caught up (#1194).
+    assert_eq!(
+        container_worker_token_after_start(None).as_deref(),
+        Some("container-token")
+    );
+}
+
+#[test]
+fn container_worker_restart_keeps_a_newer_synced_github_token() {
+    // The container's variable is fixed when the container is created. The
+    // credential sync owns every later change, so a restart must not undo it.
+    assert_eq!(
+        container_worker_token_after_start(Some("synced-token")).as_deref(),
+        Some("synced-token")
+    );
+}

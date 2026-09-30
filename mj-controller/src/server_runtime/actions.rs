@@ -139,7 +139,6 @@ pub(super) async fn apply_phone_action(
             at,
             branch,
             base,
-            expected_runtime_identity,
             subagents,
             dirty_ack: _dirty_ack,
         } => {
@@ -183,7 +182,6 @@ pub(super) async fn apply_phone_action(
                         at,
                         branch,
                         base,
-                        expected_runtime_identity,
                         subagents,
                         initial_prompt: None,
                         workspace_id,

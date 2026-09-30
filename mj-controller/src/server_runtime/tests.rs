@@ -1186,7 +1186,6 @@ fn new_action() -> ControllerAction {
         at: None,
         branch: None,
         base: None,
-        expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,
         workspace_id: String::new(),
@@ -1205,7 +1204,6 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -1410,7 +1408,10 @@ fn a_refused_action_reports_the_reason_the_phone_can_act_on() {
     );
     assert_eq!(
         admit_phone_action(&new_action(), MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
-        Err(ActionOutcome::Busy)
+        Err(ActionOutcome::Busy {
+            running: MAX_CONCURRENT_PHONE_ACTIONS,
+            limit: MAX_CONCURRENT_PHONE_ACTIONS,
+        })
     );
     // A refusal must not consume the session slot it did not take.
     assert_eq!(active.len(), 1);

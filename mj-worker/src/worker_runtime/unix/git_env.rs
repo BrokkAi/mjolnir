@@ -192,15 +192,35 @@ fi
     }
     environment.insert("BASH_ENV".into(), shell_environment_text);
     configure_git_config_file(root, environment, &paths)?;
+    Ok(())
+}
 
-    let inherited_token = std::env::var("GH_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
-    if let Some(token) = inherited_token
-        && mj_core::credentials::validate_github_token(token.as_bytes()).is_ok()
-    {
-        mj_core::credentials::write_github_token(&root.join("github-token"), token.as_bytes())?;
+/// Keep the GitHub token that the controller put in a container's
+/// environment as the session's token, so the first turn has it.
+///
+/// The worker re-executes itself with a cleared environment before it sets up
+/// the session, so this must run before that re-exec, while the launcher's
+/// environment is still the container's. The container's value is fixed when
+/// the container is created. The controller's credential sync owns every later
+/// change, so a token that is already there is left alone.
+pub fn seed_container_github_token(
+    root: &std::path::Path,
+    launcher_environment: impl IntoIterator<Item = (String, String)>,
+) -> Result<()> {
+    let path = root.join("github-token");
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Ok(());
     }
+    let launcher_environment: BTreeMap<String, String> = launcher_environment.into_iter().collect();
+    let Some(token) = ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find_map(|name| {
+        launcher_environment
+            .get(name)
+            .filter(|value| !value.is_empty())
+    }) else {
+        return Ok(());
+    };
+    mj_core::credentials::write_github_token(&path, token.as_bytes())
+        .context("keep the container's GitHub token for the session")?;
     Ok(())
 }
 

@@ -133,22 +133,42 @@ impl ProjectRepository {
     }
 }
 
-/// Per-target overrides for the mbx build cache. Every field is optional:
-/// an unset field keeps the resolved default for that target's host.
+/// Machine policy for the mbx build cache. Every field is optional:
+/// an unset field keeps the resolved default for that host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(from = "BuildCacheSettings")]
 pub struct TargetBuildCache {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// Cache directory on the target's own host, not on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
-    /// An mbx size string such as `100GiB`.
+    /// Shared storage budget, an mbx size string such as `100GiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_size: Option<String>,
-    /// Aggregate managed worktree budget, not a limit for each worktree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_max_size: Option<String>,
+    pub max_total_size: Option<String>,
+}
+
+/// Consume obsolete budgets without interpreting or migrating their values.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BuildCacheSettings {
+    enabled: Option<bool>,
+    directory: Option<PathBuf>,
+    max_total_size: Option<String>,
+    #[serde(rename = "max_size")]
+    _legacy_max_size: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "target_max_size")]
+    _legacy_target_max_size: Option<serde::de::IgnoredAny>,
+}
+
+impl From<BuildCacheSettings> for TargetBuildCache {
+    fn from(settings: BuildCacheSettings) -> Self {
+        Self {
+            enabled: settings.enabled,
+            directory: settings.directory,
+            max_total_size: settings.max_total_size,
+        }
+    }
 }
 
 impl TargetBuildCache {
@@ -163,18 +183,11 @@ impl TargetBuildCache {
         {
             bail!("target template {template_id:?} build cache directory must be absolute");
         }
-        if let Some(max_size) = &self.max_size
+        if let Some(max_size) = &self.max_total_size
             && parse_build_cache_size(max_size).is_none()
         {
             bail!(
                 "target template {template_id:?} build cache size {max_size:?} is not a size such as 100GiB"
-            );
-        }
-        if let Some(size) = &self.target_max_size
-            && parse_build_cache_size(size).is_none()
-        {
-            bail!(
-                "target template {template_id:?} worktree build budget {size:?} is not a size such as 100GiB"
             );
         }
         Ok(())

@@ -325,6 +325,26 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
 }
 
 #[tokio::test]
+async fn subagent_discovery_does_not_hold_handoff_and_stops_when_the_daemon_shuts_down() {
+    let action = DaemonAction::SubagentOptions {
+        profile: "codex".into(),
+        model: Some("gpt-6-luna".into()),
+    };
+    assert!(upgrade_request_activity(&action).unwrap().is_none());
+    let state = test_runtime_state();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = handle_action(action, &metadata, &state, &cancellation)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "subagent discovery cancelled by daemon shutdown"
+    );
+}
+
+#[tokio::test]
 async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one() {
     let state = test_runtime_state();
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
@@ -914,7 +934,6 @@ pub(super) fn runtime_test_session(
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

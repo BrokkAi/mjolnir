@@ -273,11 +273,9 @@ pub(crate) mod harness;
 #[cfg(unix)]
 mod harness_launch;
 #[cfg(unix)]
-pub use harness_launch::{PreparedHarnessLaunch, prepare_harness_launch};
-#[cfg(unix)]
-mod runtime_identity;
-#[cfg(unix)]
 pub use discovery::discover_profile_config;
+#[cfg(unix)]
+pub use harness_launch::{PreparedHarnessLaunch, prepare_harness_launch};
 #[cfg(not(unix))]
 pub async fn discover_profile_config(
     _spec: mj_core::worker_launch::ProfileProbeSpec,
@@ -390,6 +388,7 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 pub use unix::{
     SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
     lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
+    seed_container_github_token,
 };
 
 #[cfg(not(unix))]

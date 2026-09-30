@@ -488,7 +488,6 @@ pub struct SessionLaunchOptions {
     pub branch: Option<String>,
     /// Diff base; defaults to `at`.
     pub base: Option<String>,
-    pub expected_runtime_identity: Option<String>,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -760,7 +759,6 @@ impl Controller {
             at,
             branch,
             base,
-            expected_runtime_identity,
             subagents,
             initial_prompt,
             workspace_id,
@@ -769,9 +767,6 @@ impl Controller {
             project_directory,
             session_title_override,
         } = options;
-        if let Some(expected) = &expected_runtime_identity {
-            mj_core::harness_runtime::validate_expected_identity(expected)?;
-        }
         let launch_base = match base {
             Some(base) => {
                 let base = base.trim();
@@ -888,7 +883,6 @@ impl Controller {
             launch_base,
             launch_branch,
             checkout,
-            expected_runtime_identity,
             publication: None,
             subagents: Some(subagents.unwrap_or_else(|| {
                 if profile.kind.supports_delegation_tools() {

@@ -7,7 +7,6 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         subagent_mcp_socket: None,
-        runtime_constraint: None,
         clear_context_request: None,
         context_restore: None,
         goal_recovery: Default::default(),

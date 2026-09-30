@@ -34,8 +34,6 @@ pub struct ApiSession {
     pub assessment: Option<mj_core::assessment::Summary>,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<mj_core::harness_runtime::RuntimeReceipt>,
     /// Immutable starting selection, named as `StartSessionRequest` names
     /// it; session readiness verifies preparation.
     /// Commit the workspace started checked out at, when one was named.
@@ -47,8 +45,6 @@ pub struct ApiSession {
     /// Diff base the session was started with; `at` unless another was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_runtime_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_work: Option<ApiBackgroundWork>,
     pub id: String,
@@ -99,8 +95,6 @@ impl From<&ViewerSession> for ApiSession {
             at: session.at.clone(),
             branch: session.branch.clone(),
             base: session.base.clone(),
-            expected_runtime_identity: session.expected_runtime_identity.clone(),
-            runtime: None,
             id: session.id.clone(),
             workspace_id: session.workspace_id.clone(),
             title: session.title.clone(),
@@ -177,8 +171,6 @@ pub struct StartSessionRequest {
     /// revision for a raw managed worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_runtime_identity: Option<String>,
     /// Omitted reuses the last accepted top-level session choice.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,

@@ -682,7 +682,6 @@ pub(super) fn worker_launch_config(
             target_environment,
             seed_image_environment: backend.container_engine().is_some(),
             run_mode: Default::default(),
-            expected_runtime_identity: session.expected_runtime_identity.clone(),
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,

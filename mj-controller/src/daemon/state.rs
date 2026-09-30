@@ -217,7 +217,6 @@ impl RuntimeState {
                 at: None,
                 branch: None,
                 base: None,
-                expected_runtime_identity: None,
                 create_managed_worktree: None,
                 subagents: None,
                 initial_prompt: None,

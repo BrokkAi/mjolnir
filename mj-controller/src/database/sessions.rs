@@ -536,7 +536,7 @@ pub(super) fn save_resumed_session_to(
         "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
              container_memory = ?4, container_workspace = ?5,
              create_managed_worktree = ?6, launch_base = ?7, launch_branch = ?8,
-             checkout_json = ?9, expected_runtime_identity = ?10
+             checkout_json = ?9
          WHERE session_id = ?1",
         params![
             session.id,
@@ -555,7 +555,6 @@ pub(super) fn save_resumed_session_to(
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            session.expected_runtime_identity,
         ],
     )?;
     replace_mounts(&tx, &session.id, &session.additional_mounts)?;
