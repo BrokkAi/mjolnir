@@ -144,6 +144,60 @@ pub fn set_startup_delivery_phase(
     })
 }
 
+/// Marks a step as delivering, unless it was withdrawn since the drain read
+/// it. False means another owner took the step; the drain reads the queue
+/// again and settles it.
+pub fn claim_startup_delivery(command_id: &str) -> Result<bool> {
+    let command_id = command_id.to_owned();
+    submit_database_write("claim startup delivery", move |connection| {
+        Ok(connection.execute(
+            "UPDATE startup_steps SET phase='delivering',error=NULL WHERE command_id=?1 AND phase IN ('pending','delivering')",
+            [command_id],
+        )? == 1)
+    })
+}
+
+/// Withdraws the newest prompt queued for `session_id` with exactly this
+/// text, if delivery has not started. The step goes to `cancelling`, which
+/// the drain settles without submitting. Returns whether one was withdrawn.
+pub fn withdraw_startup_prompt(session_id: &str, text: &str) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let text = text.to_owned();
+    submit_database_write("withdraw startup prompt", move |connection| {
+        let tx = connection.transaction()?;
+        let candidates = {
+            let mut statement = tx.prepare(
+                "SELECT command_id,step_json FROM startup_steps WHERE session_id=?1 AND group_id IS NULL AND phase='pending' ORDER BY sequence DESC",
+            )?;
+            statement
+                .query_map([&session_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (command_id, step_json) in candidates {
+            let Ok(serde_json::Value::Object(step)) = serde_json::from_str(&step_json) else {
+                continue;
+            };
+            let matches = step
+                .get("Prompt")
+                .and_then(|prompt| prompt.get("text"))
+                .and_then(serde_json::Value::as_str)
+                == Some(text.as_str());
+            if matches
+                && tx.execute(
+                    "UPDATE startup_steps SET phase='cancelling',error=NULL WHERE command_id=?1 AND phase='pending'",
+                    [command_id],
+                )? == 1
+            {
+                tx.commit()?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 pub fn load_latest_startup_group(session_id: &str) -> Result<Vec<StartupDelivery>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(

@@ -735,6 +735,18 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Take a queued prompt back before delivery starts. The caller becomes
+    /// its only owner. Once the drain has claimed the step, the prompt is on
+    /// its way to the session and this returns false.
+    pub(crate) async fn withdraw_startup_prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<bool> {
+        let (id, prompt) = (session_id.to_owned(), text.to_owned());
+        blocking(move || crate::database::withdraw_startup_prompt(&id, &prompt)).await
+    }
+
     pub(crate) async fn restore_startup_deliveries(
         self: &Arc<Self>,
         cancellation: &CancellationToken,
@@ -950,14 +962,17 @@ impl RuntimeState {
             }
             if let Some(handle) = &handle {
                 let persisted_id = command_id.clone();
-                if let Err(error) = blocking(move || {
-                    crate::database::set_startup_delivery_phase(&persisted_id, "delivering", None)
-                })
-                .await
+                match blocking(move || crate::database::claim_startup_delivery(&persisted_id)).await
                 {
-                    self.fail_startup_queue(session_id, &format!("{error:#}"))
-                        .await;
-                    return;
+                    Ok(true) => {}
+                    // Withdrawn while this drain waited for the harness: the
+                    // next read sees the step cancelling and settles it.
+                    Ok(false) => continue,
+                    Err(error) => {
+                        self.fail_startup_queue(session_id, &format!("{error:#}"))
+                            .await;
+                        return;
+                    }
                 }
                 let outcome = tokio::select! {
                     () = cancel.cancelled() => Err(anyhow!("the daemon stopped before startup delivery settled")),

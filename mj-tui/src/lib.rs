@@ -235,6 +235,13 @@ pub enum DashboardAction {
         session_id: String,
         text: String,
     },
+    /// The person recalled a queued startup prompt into the standby composer
+    /// to edit it. The host asks the daemon to withdraw it, so the composer
+    /// is the prompt's only owner.
+    WithdrawStartupPrompt {
+        session_id: String,
+        text: String,
+    },
     CreateSession {
         create_managed_worktree: Option<bool>,
         subagents: Option<mj_core::subagent::SubagentPolicy>,

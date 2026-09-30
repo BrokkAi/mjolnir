@@ -456,6 +456,9 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::WithdrawStartupPrompt { session_id, text } => Ok(
+            DaemonReply::PromptWithdrawn(state.withdraw_startup_prompt(&session_id, &text).await?),
+        ),
         DaemonAction::ReviewerAction {
             session_id,
             role,
