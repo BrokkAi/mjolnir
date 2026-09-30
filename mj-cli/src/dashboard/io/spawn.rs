@@ -1415,7 +1415,6 @@ pub(crate) fn spawn_dashboard_create_session(
                         at: None,
                         branch: None,
                         base: None,
-                        expected_runtime_identity: None,
                         subagents,
                         create_managed_worktree,
                         initial_prompt: None,

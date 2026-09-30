@@ -29,7 +29,6 @@ pub(super) async fn get_session(
         ApiSession::from(require_session_record(&snapshot, &session_id)?)
     };
     if let Ok(backend) = backend(&state) {
-        session.runtime = backend.runtime_receipt(session_id.clone()).await?;
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
             session.last_turn_diagnostic = turn
                 .last_turn_outcome
@@ -44,14 +43,6 @@ pub(super) async fn get_session(
             {
                 session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
                 session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
-                if let Some(runtime) = &snapshot.operational.runtime
-                    && session
-                        .runtime
-                        .as_ref()
-                        .is_none_or(|persisted| persisted.event_ordinal < runtime.event_ordinal)
-                {
-                    session.runtime = Some(runtime.clone());
-                }
             }
         }
     }
@@ -123,7 +114,6 @@ pub(super) async fn start_session(
         at: request.at.clone(),
         branch: request.branch.clone(),
         base: request.base.clone(),
-        expected_runtime_identity: request.expected_runtime_identity.clone(),
         subagents: request.subagents,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,

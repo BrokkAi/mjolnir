@@ -494,7 +494,6 @@ impl SessionHandleBackend for FakeSession {
 
 #[derive(Default)]
 struct FakeBackend {
-    runtime: Option<mj_core::harness_runtime::RuntimeReceipt>,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
@@ -547,13 +546,6 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
-    fn runtime_receipt(
-        &self,
-        _session_id: String,
-    ) -> BoxFuture<'_, AnyResult<Option<mj_core::harness_runtime::RuntimeReceipt>>> {
-        Box::pin(async { Ok(self.runtime.clone()) })
-    }
-
     fn transcript_history(
         &self,
         _session_id: String,
@@ -1573,7 +1565,6 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             at: None,
             branch: None,
             base: None,
-            expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),
@@ -1616,70 +1607,6 @@ async fn start_forwards_the_base_to_the_controller() {
         panic!("expected a New action, got {:?}", request.action);
     };
     assert_eq!(base.as_deref(), Some("origin/main"));
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-}
-
-#[tokio::test]
-async fn runtime_identity_constraint_is_forwarded_and_receipt_is_public_without_a_prompt() {
-    use mj_core::harness_runtime::*;
-    let mut identity = RuntimeIdentity {
-        id: None,
-        harness: mj_core::config::HarnessKind::Codex,
-        platform: "target".into(),
-        provenance: RuntimeProvenance::ManagedInstallation,
-        components: vec![],
-        unavailable_reason: None,
-    };
-    identity.refresh_id().unwrap();
-    let expected = identity.id.clone().unwrap();
-    let receipt = RuntimeReceipt {
-        identity,
-        event_ordinal: 7,
-        observed_at_ms: 100,
-    };
-    let backend = Arc::new(FakeBackend {
-        runtime: Some(receipt.clone()),
-        ..Default::default()
-    });
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions/session-1"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        json_body(response).await["runtime"],
-        serde_json::to_value(receipt).unwrap()
-    );
-    assert!(backend.prompts.lock().unwrap().is_empty());
-    let extra = format!(
-        ",\"expected_runtime_identity\":{}",
-        serde_json::to_string(&expected).unwrap()
-    );
-    let response = tokio::spawn(app.oneshot(start_request(start_body(&extra))));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New {
-        expected_runtime_identity,
-        ..
-    } = &request.action
-    else {
-        panic!("expected New")
-    };
-    assert_eq!(expected_runtime_identity.as_ref(), Some(&expected));
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1966,7 +1893,6 @@ async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_b
             at: None,
             branch: None,
             base: None,
-            expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
             workspace_id: String::new(),

@@ -33,7 +33,6 @@ pub(crate) fn current_background_session(
     Ok(current.filter(|current| {
         current.state == mj_core::state::SessionState::Running
             && current.target == observed.target
-            && current.expected_runtime_identity == observed.expected_runtime_identity
             && current.native_session_id == observed.native_session_id
             && current.harness_kind == observed.harness_kind
             && current.last_profile == observed.last_profile

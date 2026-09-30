@@ -4236,7 +4236,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
-        expected_runtime_identity: None,
         session_id: session.into(),
         harness: HarnessKind::Codex,
         harness_home: PathBuf::new(),
@@ -4341,7 +4340,6 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
-        expected_runtime_identity: None,
         session_id: "session-local".into(),
         harness: HarnessKind::Codex,
         harness_home: PathBuf::new(),
@@ -4431,7 +4429,6 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
         target_environment: Default::default(),
         seed_image_environment: false,
         run_mode: Default::default(),
-        expected_runtime_identity: None,
         session_id: session.into(),
         harness: HarnessKind::Kimi,
         harness_home: PathBuf::new(),
@@ -5235,7 +5232,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
 #[cfg(unix)]
 mod container_runtime {
     use super::*;
-    use mj_core::harness_runtime::{CODEX_ACP_PACKAGE, RuntimeProvenance, npm_bridge};
+    use mj_core::harness_runtime::{CODEX_ACP_PACKAGE, npm_bridge};
     use mj_worker::worker_runtime::{
         AcpSupervisorSpec, PreparedHarnessLaunch, prepare_harness_launch,
     };
@@ -5340,45 +5337,14 @@ mod container_runtime {
     }
 
     #[tokio::test]
-    async fn container_runtime_identifies_the_controller_selected_bridge_and_provider() {
+    async fn container_runtime_selects_the_installed_bridge() {
         for harness in [HarnessKind::Codex, HarnessKind::Claude] {
             let temp = tempfile::tempdir().unwrap();
             let bridge = installed_bridge(temp.path(), harness);
             let launch = container_launch(temp.path(), harness);
             let prepared = prepare(&launch).await;
-            let identity = prepared.runtime_identity().await.unwrap();
-            assert!(identity.id.is_some(), "{harness:?}: {identity:?}");
-            assert_eq!(identity.provenance, RuntimeProvenance::TargetInstallation);
             assert_eq!(prepared.spec.command, bridge.canonicalize().unwrap());
             assert!(prepared.spec.args.is_empty());
-            assert!(identity.components.iter().any(|component| {
-                component.name == "acp_bridge"
-                    && component.version.as_deref() == Some(npm_bridge(harness).unwrap().version)
-            }));
-            assert!(
-                identity
-                    .components
-                    .iter()
-                    .any(|component| component.name == "provider_cli"
-                        || component.name == "provider_sdk")
-            );
-            identity.require(identity.id.as_deref().unwrap()).unwrap();
-            let provider = if harness == HarnessKind::Codex {
-                "@openai/codex"
-            } else {
-                "@anthropic-ai/claude-agent-sdk"
-            };
-            std::fs::write(
-                temp.path()
-                    .join("node_modules")
-                    .join(provider)
-                    .join("package.json"),
-                serde_json::json!({"name": provider, "version": "changed-provider"}).to_string(),
-            )
-            .unwrap();
-            let changed = prepare(&launch).await.runtime_identity().await.unwrap();
-            assert!(changed.id.is_some());
-            assert!(changed.require(identity.id.as_deref().unwrap()).is_err());
         }
     }
 
@@ -5394,10 +5360,6 @@ mod container_runtime {
             let legacy = prepare(&launch).await;
             assert_eq!(legacy.spec.command, current.spec.command);
             assert!(legacy.spec.args.is_empty());
-            assert_eq!(
-                legacy.runtime_identity().await.unwrap(),
-                current.runtime_identity().await.unwrap()
-            );
         }
     }
 
@@ -5406,8 +5368,7 @@ mod container_runtime {
         let temp = tempfile::tempdir().unwrap();
         installed_bridge(temp.path(), HarnessKind::Codex);
         let mut launch = container_launch(temp.path(), HarnessKind::Codex);
-        // An empty selector can be meaningful to a wrapper. It does not give
-        // Mjolnir enough provenance to accept an identity constraint.
+        // An empty selector can be meaningful to a wrapper.
         launch
             .environment
             .insert("CODEX_PATH".into(), String::new());
@@ -5426,10 +5387,6 @@ mod container_runtime {
             Path::new("/bin/sh").canonicalize().unwrap()
         );
         assert_eq!(prepared.spec.args, launch.bridge_args);
-        let identity = prepared.runtime_identity().await.unwrap();
-        assert!(identity.id.is_none());
-        assert!(identity.unavailable_reason.is_some());
-        assert!(identity.require("mj-runtime-v1:expected").is_err());
     }
 
     #[tokio::test]
@@ -5445,8 +5402,6 @@ mod container_runtime {
             "node_modules/@openai/codex/bin/codex.js".into(),
         );
         let prepared = prepare(&launch).await;
-        let identity = prepared.runtime_identity().await.unwrap();
-        assert!(identity.id.is_some(), "{identity:?}");
         assert_eq!(prepared.spec.command, bridge.canonicalize().unwrap());
         assert!(Path::new(&prepared.spec.environment["CODEX_PATH"]).is_absolute());
         let link = temp.path().join("node_modules/.bin/codex-acp");
@@ -5471,7 +5426,7 @@ mod container_runtime {
     }
 
     #[tokio::test]
-    async fn container_runtime_installs_missing_or_incompatible_bridges_before_inspection() {
+    async fn container_runtime_installs_missing_or_incompatible_bridges_before_startup() {
         for (harness, incompatible) in [
             (HarnessKind::Codex, false),
             (HarnessKind::Codex, true),
@@ -5510,9 +5465,6 @@ mod container_runtime {
                 .unwrap();
             assert_eq!(std::fs::read(&install_log).unwrap(), b"x");
             let prepared = prepare(&launch).await;
-            let identity = prepared.runtime_identity().await.unwrap();
-            assert!(identity.id.is_some(), "{identity:?}");
-            assert_eq!(identity.provenance, RuntimeProvenance::ManagedInstallation);
             assert!(
                 prepared
                     .spec
@@ -5529,7 +5481,7 @@ mod container_runtime {
                 Err(std::fs::TryLockError::WouldBlock)
             ));
             let again = prepare(&launch).await;
-            assert_eq!(again.runtime_identity().await.unwrap(), identity);
+            assert_eq!(again.spec.command, prepared.spec.command);
             assert_eq!(std::fs::read(install_log).unwrap(), b"x");
         }
     }

@@ -179,7 +179,6 @@ impl ViewerSnapshot {
                     at: start.at,
                     branch: start.branch,
                     base: start.base,
-                    expected_runtime_identity: session.expected_runtime_identity.clone(),
                     targeted_turn_control_supported: false,
                     native_subagents: Vec::new(),
                     steering: None,
@@ -380,8 +379,6 @@ pub(super) fn project_key(identity: &str) -> String {
 pub struct ViewerSession {
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_runtime_identity: Option<String>,
     /// Commit the workspace started checked out at, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
