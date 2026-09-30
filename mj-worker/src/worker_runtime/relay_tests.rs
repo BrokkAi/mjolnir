@@ -6562,6 +6562,80 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     let _ = daemon.await;
 }
 
+/// #1192: a socket that exists must be a worker that answers. The daemon reads
+/// a bound socket as "connect now", and a connection to a socket nobody accepts
+/// on waits in the kernel backlog, so a slow harness preparation looked like a
+/// worker that never replied. While the harness is still being prepared there
+/// must be no socket, so a connect fails at once instead of hanging.
+#[tokio::test]
+async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("worker");
+    std::fs::create_dir_all(&root).unwrap();
+    // The runtime identity probe runs this, so preparation takes about a second.
+    let slow_harness = temp.path().join("slow-harness");
+    std::fs::write(&slow_harness, "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
+    std::fs::set_permissions(&slow_harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut config = launch_config("profile-home");
+    config.bridge_command = slow_harness;
+    config.cwd = temp.path().to_owned();
+    config.review_capture = false;
+    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
+
+    let socket = root.join("control.sock");
+    let steps = || -> Vec<String> {
+        std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|record| record["steps"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|step| step["step"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let mut preparing_without_socket = false;
+    let recorded = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let recorded = steps();
+            let preparing = recorded.iter().any(|step| step == "harness-resolve")
+                && !recorded.iter().any(|step| step == "bridge-start");
+            match mj_core::local_sockets::connect_unix_stream(&socket) {
+                Ok(_stream) => {
+                    assert!(
+                        !preparing,
+                        "a connect succeeded while the harness was still being prepared"
+                    );
+                    break recorded;
+                }
+                Err(_) => preparing_without_socket |= preparing,
+            }
+            if daemon.is_finished() {
+                break recorded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the worker neither served nor stopped");
+    assert!(
+        preparing_without_socket,
+        "the test never observed the harness-preparation window"
+    );
+    // The socket, when it appears, comes after the steps that need a harness.
+    let all = steps();
+    let position = |name: &str| all.iter().position(|step| step == name);
+    if let Some(bound) = position("bind-socket") {
+        let started = position("bridge-start").expect("bind-socket without bridge-start");
+        assert!(started < bound, "steps: {all:?}");
+        assert!(position("serving").is_some_and(|serving| serving > bound));
+    }
+    drop(recorded);
+    daemon.abort();
+    let _ = daemon.await;
+}
+
 /// The same working tree, with review configured, still blocks before the
 /// socket. This is the half the capture redesign has to make cheap; it is
 /// asserted here so the gate above cannot be mistaken for the whole fix.

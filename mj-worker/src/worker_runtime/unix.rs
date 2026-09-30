@@ -207,6 +207,31 @@ impl Drop for SocketGuard {
     }
 }
 
+/// Bind `control.sock`, restrict it to the owner, and record the `bind-socket`
+/// and `serving` startup steps. The caller must accept on the listener
+/// promptly: the daemon reads the socket's existence as "this worker answers".
+fn publish_control_socket(
+    root: &std::path::Path,
+    socket: &std::path::Path,
+) -> Result<(UnixListener, SocketGuard)> {
+    super::record_startup_step(root, "bind-socket");
+    let listener = bind_unix_listener(socket)
+        .with_context(|| format!("bind worker socket {}", socket.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("register worker socket {}", socket.display()))?;
+    let guard = SocketGuard(socket.to_owned());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+    super::record_startup_step(root, "serving");
+    Ok((listener, guard))
+}
+
 use super::WORKER_PID_FILE;
 
 /// Record this daemon's PID where session teardown can find it. Teardown
@@ -364,21 +389,6 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         std::fs::remove_file(&exit_record)
             .with_context(|| format!("clear stale exit record {}", exit_record.display()))?;
     }
-    super::record_startup_step(&root, "bind-socket");
-    let listener = bind_unix_listener(&socket)
-        .with_context(|| format!("bind worker socket {}", socket.display()))?;
-    listener
-        .set_nonblocking(true)
-        .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
-    let listener = UnixListener::from_std(listener)
-        .with_context(|| format!("register worker socket {}", socket.display()))?;
-    let _socket_guard = SocketGuard(socket.clone());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-    }
-    super::record_startup_step(&root, "serving");
 
     if restarting
         && durable_relay.operational_state().execution
@@ -410,6 +420,8 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
         }
         let (dispatch_wake_tx, dispatch_wake_rx) = mpsc::channel(1);
         drop(dispatch_wake_rx);
+        // Nothing here waits on a harness, so the relay can answer at once.
+        let (listener, _socket_guard) = publish_control_socket(&root, &socket)?;
         return serve_terminal_relay(
             listener,
             relay,
@@ -603,6 +615,12 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             stall_policy: None,
         };
         super::record_startup_step(&root, "bridge-start");
+        // Publish the socket only now that the loop below will accept on it.
+        // A bound socket that nobody accepts on takes the daemon's connection
+        // into the kernel backlog, where its hello neither fails nor succeeds,
+        // so a socket that exists has to be a worker that answers (#1192).
+        // The guard lives in this block, which is the worker's serving life.
+        let (listener, _socket_guard) = publish_control_socket(&root, &socket)?;
         let acp_shutdown = tokio_util::sync::CancellationToken::new();
         let mut acp_task = tokio::spawn(acp::run_with_shutdown(acp_spec, acp_commands_rx, acp_events_tx, acp_shutdown.clone()));
 
