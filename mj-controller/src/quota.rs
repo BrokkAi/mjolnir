@@ -131,13 +131,38 @@ impl QuotaManager {
         &self.reports
     }
 
+    /// The latest report for one profile, if there is one.
+    pub fn report(&self, profile_id: &str) -> Option<&ProfileQuota> {
+        self.reports.get(profile_id)
+    }
+
+    /// Adopt a report read from the store, so the profile counts as probed at
+    /// the report's time.
+    pub fn seed(&mut self, report: ProfileQuota) {
+        self.reports.insert(report.profile_id.clone(), report);
+    }
+
+    /// Forget a profile's report, for a profile whose configuration changed.
+    pub fn forget(&mut self, profile_id: &str) {
+        self.reports.remove(profile_id);
+    }
+
+    /// Keep only the profiles in `keep`: drop the reports of the others and
+    /// stop their cached clients.
+    pub async fn retain_profiles(&mut self, keep: &BTreeSet<String>) {
+        self.reports
+            .retain(|profile_id, _| keep.contains(profile_id));
+        self.stop_clients_outside_batch(keep).await;
+    }
+
     /// Refresh each profile independently so one slow harness cannot delay the
     /// others. `on_report` runs per profile in completion order, so fast
     /// harnesses report without waiting for the slowest one in the batch.
+    /// The batch is the whole configured set: profiles outside it are dropped.
     pub async fn refresh_profiles<F, Fut>(
         &mut self,
         requests: Vec<QuotaRefreshRequest>,
-        mut on_report: F,
+        on_report: F,
     ) where
         F: FnMut(QuotaRefreshOutcome) -> Fut,
         Fut: Future<Output = ()> + Send,
@@ -148,6 +173,16 @@ impl QuotaManager {
             .collect::<BTreeSet<_>>();
         self.reports
             .retain(|profile_id, _| batch.contains(profile_id));
+        self.probe(requests, on_report).await;
+        self.stop_clients_outside_batch(&batch).await;
+    }
+
+    /// Probe exactly these profiles and leave every other report alone.
+    pub async fn probe<F, Fut>(&mut self, requests: Vec<QuotaRefreshRequest>, mut on_report: F)
+    where
+        F: FnMut(QuotaRefreshOutcome) -> Fut,
+        Fut: Future<Output = ()> + Send,
+    {
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {
             let client = self.codex_clients.remove(&request.profile_id);
@@ -174,7 +209,6 @@ impl QuotaManager {
                 .insert(outcome.report.profile_id.clone(), outcome.report.clone());
             on_report(outcome).await;
         }
-        self.stop_clients_outside_batch(&batch).await;
     }
 
     /// Stop the cached clients whose profiles are not in `keep`. Every batch

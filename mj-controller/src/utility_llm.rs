@@ -210,6 +210,30 @@ impl UtilityLlmRuntime {
                 .map(|(id, profile)| quota_request(id, profile))
                 .collect::<Vec<_>>()
         };
+        // The daemon's poller keeps the stored report of each profile current;
+        // read that before asking a provider a second time.
+        let mut still_stale = Vec::new();
+        for request in stale {
+            let identity = request.cache_identity();
+            let stored =
+                tokio::task::spawn_blocking(move || crate::database::load_quota_cache(&identity))
+                    .await
+                    .ok()
+                    .and_then(|stored| stored.ok().flatten())
+                    .filter(|report| {
+                        now.saturating_sub(report.refreshed_at_epoch_seconds) <= QUOTA_FRESH_SECONDS
+                    });
+            match stored {
+                Some(report) => {
+                    self.quota_cache
+                        .lock()
+                        .await
+                        .insert(request.profile_id.clone(), report);
+                }
+                None => still_stale.push(request),
+            }
+        }
+        let stale = still_stale;
         if !stale.is_empty() {
             let mut manager = QuotaManager::default();
             manager.refresh_profiles(stale, |_| async {}).await;

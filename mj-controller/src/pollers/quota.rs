@@ -9,7 +9,28 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
-pub fn spawn_quota_refresher() -> (
+/// Reads a profile's stored report, the rebuildable copy the daemon keeps in
+/// the store. Called on a blocking thread.
+pub type QuotaCacheLoader =
+    Arc<dyn Fn(&QuotaRefreshRequest) -> Option<crate::quota::ProfileQuota> + Send + Sync>;
+
+/// When a profile is next due for a probe, in epoch seconds: one interval
+/// after its last report. A profile with no report is due at once (zero).
+pub(super) fn next_probe_at(report: Option<&crate::quota::ProfileQuota>) -> u64 {
+    report.map_or(0, |report| {
+        report.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs()
+    })
+}
+
+/// The daemon's quota poller, the only process that asks a provider.
+///
+/// Each profile has its own schedule. A profile whose stored report is younger
+/// than [`QUOTA_REFRESH_INTERVAL`] is published as it is and probed when that
+/// report ages out; anything else is probed now. A batch with `refresh` set
+/// probes every profile.
+pub fn spawn_quota_refresher(
+    cache: QuotaCacheLoader,
+) -> (
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
@@ -18,41 +39,109 @@ pub fn spawn_quota_refresher() -> (
     tokio::spawn(async move {
         let mut quotas = QuotaManager::default();
         let mut batch = QuotaRefreshBatch::default();
-        let mut interval = tokio::time::interval(QUOTA_REFRESH_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
+        // The cache identity each profile was last adopted under. A changed
+        // identity is a changed profile, whose report no longer applies.
+        let mut identities: std::collections::BTreeMap<String, String> = Default::default();
         loop {
+            let now = epoch_seconds();
+            let wake = batch
+                .profiles
+                .iter()
+                .map(|request| next_probe_at(quotas.report(&request.profile_id)))
+                .min()
+                .map(|due| Duration::from_secs(due.saturating_sub(now).max(5)));
             tokio::select! {
-                _ = interval.tick(), if !batch.profiles.is_empty() => {
-                    if !refresh_profile_quotas(
-                        &mut quotas,
-                        batch.generation,
-                        &batch.profiles,
-                        &updates_tx,
-                    ).await {
-                        break;
-                    }
-                }
+                _ = tokio::time::sleep(wake.unwrap_or_default()), if wake.is_some() => {}
                 changed = profiles_rx.changed() => {
                     if changed.is_err() {
                         tracing::debug!("quota profile target feed closed; stopping quota refresher");
                         break;
                     }
                     batch = profiles_rx.borrow_and_update().clone();
-                    if !refresh_profile_quotas(
-                        &mut quotas,
-                        batch.generation,
-                        &batch.profiles,
-                        &updates_tx,
-                    ).await {
+                    if !adopt_profiles(&mut quotas, &mut identities, &batch, &cache, &updates_tx).await {
                         break;
                     }
                 }
+            }
+            let now = epoch_seconds();
+            let due = batch
+                .profiles
+                .iter()
+                .filter(|request| {
+                    batch.refresh || next_probe_at(quotas.report(&request.profile_id)) <= now
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            // A batch that only changed the profile set and finds nothing due
+            // is not a cycle. A requested refresh always is, so the person's
+            // notice can end.
+            if due.is_empty() && !batch.refresh {
+                continue;
+            }
+            let generation = batch.generation;
+            batch.refresh = false;
+            if !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await {
+                break;
             }
         }
         quotas.shutdown().await;
     });
     (profiles_tx, updates_rx)
+}
+
+/// Bring the manager in line with a new batch: drop profiles that left or
+/// changed, and adopt the stored report of each new one when it is still
+/// current. Reports whether the consumer is still listening.
+async fn adopt_profiles(
+    quotas: &mut QuotaManager,
+    identities: &mut std::collections::BTreeMap<String, String>,
+    batch: &QuotaRefreshBatch,
+    cache: &QuotaCacheLoader,
+    updates: &tokio::sync::mpsc::Sender<QuotaUpdate>,
+) -> bool {
+    let keep = batch
+        .profiles
+        .iter()
+        .map(|request| request.profile_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    identities.retain(|id, _| keep.contains(id));
+    quotas.retain_profiles(&keep).await;
+    for request in &batch.profiles {
+        let identity = request.cache_identity();
+        if identities.get(&request.profile_id) == Some(&identity) {
+            continue;
+        }
+        identities.insert(request.profile_id.clone(), identity);
+        quotas.forget(&request.profile_id);
+        let load = cache.clone();
+        let for_request = request.clone();
+        let stored = match tokio::task::spawn_blocking(move || load(&for_request)).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::warn!(%error, "stored quota read task failed");
+                None
+            }
+        };
+        let Some(stored) = stored.filter(|report| {
+            report.error.is_none() && next_probe_at(Some(report)) > epoch_seconds()
+        }) else {
+            continue;
+        };
+        tracing::debug!(
+            profile_id = %request.profile_id,
+            refreshed_at = stored.refreshed_at_epoch_seconds,
+            "using the stored quota report; the next probe waits for it to age"
+        );
+        quotas.seed(stored.clone());
+        let outcome = QuotaRefreshOutcome {
+            report: stored,
+            credentials_changed: false,
+        };
+        if updates.send(QuotaUpdate::Report(outcome)).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 pub(super) async fn refresh_profile_quotas(

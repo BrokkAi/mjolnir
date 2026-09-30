@@ -460,6 +460,164 @@ async fn quota_refresh_completion_keeps_its_generation() {
     quotas.shutdown().await;
 }
 
+/// A profile whose probe needs no network: a custom provider that publishes no
+/// quota endpoint reports usage pricing.
+fn probeless_request(id: &str) -> QuotaRefreshRequest {
+    QuotaRefreshRequest {
+        native_openai: false,
+        profile_id: id.into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        source_home: PathBuf::from("/nonexistent-quota-home"),
+        environment: Default::default(),
+        cwd: PathBuf::from("."),
+        provider: Some(crate::quota::ProviderCredential {
+            id: "other".into(),
+            host: "example.invalid".into(),
+            api_key: "key".into(),
+        }),
+    }
+}
+
+fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
+    crate::quota::ProfileQuota {
+        banked_resets: None,
+        profile_id: id.into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        windows: vec![crate::quota::QuotaWindow {
+            label: "Week".into(),
+            remaining_percent: Some(42),
+            used: None,
+            limit: None,
+            resets: None,
+            resets_at_epoch_seconds: None,
+        }],
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
+    }
+}
+
+fn poller_with_store(
+    stored: Vec<crate::quota::ProfileQuota>,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
+    spawn_quota_refresher(Arc::new(move |request: &QuotaRefreshRequest| {
+        stored
+            .iter()
+            .find(|report| report.profile_id == request.profile_id)
+            .cloned()
+    }))
+}
+
+fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
+    QuotaRefreshBatch {
+        generation,
+        refresh,
+        profiles: ids.iter().map(|id| probeless_request(id)).collect(),
+    }
+}
+
+async fn next_update(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> QuotaUpdate {
+    tokio::time::timeout(Duration::from_secs(20), updates.recv())
+        .await
+        .expect("an update arrives")
+        .expect("the poller runs")
+}
+
+async fn assert_quiet(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) {
+    if let Ok(update) = tokio::time::timeout(Duration::from_millis(300), updates.recv()).await {
+        panic!("expected no probe, got {update:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_report_younger_than_the_interval_is_published_and_not_probed() {
+    let stored = stored_report("a", 60);
+    let (profiles, mut updates) = poller_with_store(vec![stored.clone()]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the stored report is published first");
+    };
+    assert_eq!(outcome.report, stored);
+    assert_quiet(&mut updates).await;
+    // The next probe waits for the report to age out.
+    assert_eq!(
+        next_probe_at(Some(&stored)),
+        stored.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs()
+    );
+    assert_eq!(next_probe_at(None), 0);
+}
+
+#[tokio::test]
+async fn a_report_older_than_the_interval_is_probed_at_start() {
+    let stored = stored_report("a", QUOTA_REFRESH_INTERVAL.as_secs() + 60);
+    let (profiles, mut updates) = poller_with_store(vec![stored.clone()]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the probe reports");
+    };
+    assert!(outcome.report.refreshed_at_epoch_seconds > stored.refreshed_at_epoch_seconds);
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 1 }
+    ));
+}
+
+#[tokio::test]
+async fn a_reload_probes_only_the_profile_it_added() {
+    let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    assert_quiet(&mut updates).await;
+
+    profiles.send_replace(batch(2, false, &["a", "b"]));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["b"]
+    ));
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the new profile reports");
+    };
+    assert_eq!(outcome.report.profile_id, "b");
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+    assert_quiet(&mut updates).await;
+}
+
+#[tokio::test]
+async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
+    let (profiles, mut updates) = poller_with_store(vec![stored_report("a", 60)]);
+    profiles.send_replace(batch(1, false, &["a"]));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    profiles.send_replace(batch(2, true, &["a"]));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["a"]
+    ));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Report(_)
+    ));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+}
+
 #[test]
 fn a_manual_quota_refresh_completes_when_the_daemon_finishes_a_later_cycle() {
     // The surface remembers the daemon's cycle count when it asks.

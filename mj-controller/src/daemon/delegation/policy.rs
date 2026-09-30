@@ -64,7 +64,15 @@ impl Policy {
         let (refresh, refresh_rx) = mpsc::channel(1);
         // A surface's Refresh reaches this poller through the daemon.
         state.attach_quota_refresh(refresh.clone());
-        let (profiles_tx, quota_rx) = spawn_quota_refresher();
+        // The stored report is a rebuildable cache: a failed read only costs a probe.
+        let (profiles_tx, quota_rx) = spawn_quota_refresher(Arc::new(|request| {
+            crate::database::load_quota_cache(&request.cache_identity())
+                .inspect_err(
+                    |error| tracing::warn!(%error, "could not read the stored quota report"),
+                )
+                .ok()
+                .flatten()
+        }));
         let credentials = CredentialSyncCoordinator::spawn_guarded(state.worker_background_gate());
         let mut policy = Self {
             services: Services {
@@ -101,7 +109,10 @@ impl Policy {
             if force {
                 self.batch.generation = self.batch.generation.saturating_add(1);
                 self.batch.profiles = quota_refresh_profiles(&controller);
+                self.batch.refresh = true;
                 self.profiles_tx.send_replace(self.batch.clone());
+                // Only this request is a refresh; a later profile-set change is not.
+                self.batch.refresh = false;
             }
             crate::server_runtime::republish_quota_profiles(
                 &controller,

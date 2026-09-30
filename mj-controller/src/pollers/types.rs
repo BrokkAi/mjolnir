@@ -3,6 +3,10 @@ use super::*;
 #[derive(Debug, Clone, Default)]
 pub struct QuotaRefreshBatch {
     pub generation: u64,
+    /// The person asked for a refresh: probe every profile that is not on
+    /// hold, fresh or not. Without it, only profiles whose report is stale
+    /// (or missing) are probed.
+    pub refresh: bool,
     pub profiles: Vec<QuotaRefreshRequest>,
 }
 
