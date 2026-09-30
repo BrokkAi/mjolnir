@@ -917,11 +917,14 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
         )
         .purpose("skills archive format fixture");
 
-        let actions = reconcile_session(&target, None).await.unwrap();
+        let skills = Arc::new(CanonicalSkills::collect(&target));
+        let actions = reconcile_session(&SessionRelays::Direct, &target, &skills, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             actions,
-            [CredentialSyncAction::SkillsPushed],
+            Some(vec![CredentialSyncAction::SkillsPushed]),
             "protocol {protocol}"
         );
         let archive = std::fs::read(&received).unwrap();
@@ -1187,8 +1190,13 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         sync_github_token: false,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };
-    let result =
-        credential_sync::reconcile_profile_guarded(&[target], Some(SESSION_ID), Some(&gate)).await;
+    let result = credential_sync::reconcile_profile_guarded(
+        &SessionRelays::Direct,
+        &[target],
+        Some(SESSION_ID),
+        Some(&gate),
+    )
+    .await;
     assert!(
         result.is_empty(),
         "deferral must not report an unchanged or failed login"

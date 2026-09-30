@@ -3452,3 +3452,92 @@ fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
          capture future so the wrappers stay small"
     );
 }
+
+#[cfg(unix)]
+const RELAY_JOB_TEST_CHILD: &str = "MJ_TEST_RELAY_JOB_CHILD";
+
+/// Credential sync used to open a relay connection of its own to every live
+/// worker every minute. It now runs as a job on the session actor's own
+/// connection: no second connection reaches the worker, and while a
+/// lifecycle operation holds the connection the job is deferred rather than
+/// connecting around it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
+    if std::env::var_os(RELAY_JOB_TEST_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let test_name = format!(
+            "{}::a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        IsolatedTest::new(test_name)
+            .env(RELAY_JOB_TEST_CHILD, "1")
+            .env("MJ_DATA_DIR", directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    struct StatusJob(tokio::sync::oneshot::Sender<Result<()>>);
+    impl crate::session_manager::RelayConnectionJob for StatusJob {
+        fn run<'a>(
+            self: Box<Self>,
+            client: &'a mut crate::worker_client::RelayClient,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                let _ = self.0.send(client.status().await.map(|_| ()));
+            })
+        }
+        fn refuse(self: Box<Self>, error: anyhow::Error) {
+            let _ = self.0.send(Err(error));
+        }
+    }
+    async fn run_status(handle: &ManagedSessionHandle) -> Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        handle.run_on_connection(Box::new(StatusJob(reply))).await;
+        response.await.unwrap()
+    }
+
+    let relay_root = tempfile::tempdir().unwrap();
+    let start_log = tempfile::tempdir().unwrap();
+    let start_log = start_log.path().join("relay-starts");
+    crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            relay_root.path(),
+            Some(&start_log),
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    wait_until_the_actor_serves_again(&handle).await;
+    assert_eq!(relay_starts(&start_log), 1);
+
+    run_status(&handle).await.unwrap();
+    assert_eq!(
+        relay_starts(&start_log),
+        1,
+        "the job must use the actor's connection, not open another"
+    );
+
+    let lease = handle.lease_connection().await.unwrap();
+    let deferred = run_status(&handle).await.unwrap_err();
+    assert!(
+        crate::session_manager::RelayJobDeferred::marks(&deferred),
+        "{deferred:#}"
+    );
+    lease.release();
+    wait_until_the_actor_serves_again(&handle).await;
+    run_status(&handle).await.unwrap();
+    assert_eq!(relay_starts(&start_log), 1);
+    channels.shutdown.shutdown().await.unwrap();
+}

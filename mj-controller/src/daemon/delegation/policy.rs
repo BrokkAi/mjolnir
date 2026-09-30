@@ -73,7 +73,10 @@ impl Policy {
                 .ok()
                 .flatten()
         }));
-        let credentials = CredentialSyncCoordinator::spawn_guarded(state.worker_background_gate());
+        let credentials = CredentialSyncCoordinator::spawn_guarded(
+            manager.clone(),
+            state.worker_background_gate(),
+        );
         let mut policy = Self {
             services: Services {
                 backend,

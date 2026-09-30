@@ -1,4 +1,16 @@
 use super::*;
+use crate::session_manager::{RelayConnectionJob, RelayJobDeferred, SessionManagerControl};
+
+/// How a reconciliation reaches each session's worker.
+#[derive(Clone)]
+pub(super) enum SessionRelays {
+    /// The session actor's own connection. A sync never opens a connection
+    /// of its own to a live worker.
+    Actors(SessionManagerControl),
+    /// A connection of its own per session, for tests against fixture workers.
+    #[cfg(test)]
+    Direct,
+}
 
 pub struct CredentialSyncCoordinator {
     pub(super) handle: CredentialSyncHandle,
@@ -8,14 +20,20 @@ pub struct CredentialSyncCoordinator {
 impl CredentialSyncCoordinator {
     #[cfg(test)]
     pub fn spawn() -> Self {
-        Self::spawn_inner(None)
+        Self::spawn_inner(SessionRelays::Direct, None)
     }
 
-    pub fn spawn_guarded(gate: Arc<crate::recovery_gate::RecoveryGate>) -> Self {
-        Self::spawn_inner(Some(gate))
+    pub fn spawn_guarded(
+        manager: SessionManagerControl,
+        gate: Arc<crate::recovery_gate::RecoveryGate>,
+    ) -> Self {
+        Self::spawn_inner(SessionRelays::Actors(manager), Some(gate))
     }
 
-    fn spawn_inner(gate: Option<Arc<crate::recovery_gate::RecoveryGate>>) -> Self {
+    fn spawn_inner(
+        relays: SessionRelays,
+        gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+    ) -> Self {
         let (targets_tx, mut targets_rx) = watch::channel(Vec::new());
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
         let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
@@ -111,9 +129,11 @@ impl CredentialSyncCoordinator {
                     // is being shutdown".
                     let triggered_by = trigger.cause.as_ref().map(|cause| cause.session_id.clone());
                     let gate = gate.clone();
+                    let relays = relays.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
                             reconcile_profile_guarded(
+                                &relays,
                                 &targets,
                                 triggered_by.as_deref(),
                                 gate.as_ref(),
@@ -178,7 +198,7 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_guarded(targets, triggered_by, None).await
+    reconcile_profile_guarded(&SessionRelays::Direct, targets, triggered_by, None).await
 }
 
 /// Reconcile one profile with every live session that runs it.
@@ -193,10 +213,14 @@ pub(super) async fn reconcile_profile(
 /// reached and had nothing to change is what shows the profile's own login
 /// is the one the provider refused.
 pub(super) async fn reconcile_profile_guarded(
+    relays: &SessionRelays,
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
 ) -> Vec<CredentialSyncOutcome> {
+    let Some(first) = targets.first().cloned() else {
+        return Vec::new();
+    };
     // The token lookup may run `gh auth token`, a synchronous child process,
     // so it goes to the blocking pool rather than stalling a scheduler thread.
     let github_token = match targets.iter().any(|target| target.sync_github_token) {
@@ -208,6 +232,16 @@ pub(super) async fn reconcile_profile_guarded(
             }),
         false => None,
     };
+    // Every target here runs the same profile, so they share one canonical
+    // skills tree. Collection reads and compresses the whole tree, so it runs
+    // once, off the scheduler threads.
+    let skills = Arc::new(
+        tokio::task::spawn_blocking(move || CanonicalSkills::collect(&first))
+            .await
+            .unwrap_or_else(|error| {
+                CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
+            }),
+    );
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
@@ -234,15 +268,11 @@ pub(super) async fn reconcile_profile_guarded(
                         if !current {
                             return Ok(None);
                         }
-                        reconcile_session(target, github_token.as_deref())
-                            .await
-                            .map(Some)
+                        reconcile_session(relays, target, &skills, github_token.as_deref()).await
                     })
                     .await
                     .unwrap_or(Ok(None)),
-                None => reconcile_session(target, github_token.as_deref())
-                    .await
-                    .map(Some),
+                None => reconcile_session(relays, target, &skills, github_token.as_deref()).await,
             };
             match result {
                 // Deferral is not a successful credential check: in particular
@@ -306,50 +336,185 @@ pub(super) fn canonical_session_skills(
     )
 }
 
-/// Returns every action taken; an empty list means the copies already agree.
-pub(super) async fn reconcile_session(
-    target: &CredentialSyncTarget,
-    github_token: Option<&str>,
-) -> Result<Vec<CredentialSyncAction>> {
-    let canonical_path = harness_authentication_marker(target.harness, &target.profile_home);
-    let (canonical, canonical_bytes) = read_credential_file(target.harness, &canonical_path)?;
-    let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
-    // Which limits the canonical tree is collected with depends on the
-    // archive format the worker reads, known only once it has said hello.
-    // Collection reads and compresses the whole tree, so it runs off the
-    // scheduler threads. A tree that cannot be collected still fails the
-    // whole reconciliation, credentials included.
-    let skills_target = target.clone();
-    let format = client.skills_archive_format();
-    let canonical_skills =
-        tokio::task::spawn_blocking(move || canonical_session_skills(&skills_target, format))
-            .await
-            .unwrap_or_else(|error| Err(anyhow!("skills collection task stopped: {error}")));
-    let result = match canonical_skills {
-        Ok(canonical_skills) => {
-            reconcile_connected(
-                &mut client,
-                target,
-                &canonical_path,
-                &canonical,
-                &canonical_bytes,
-                &canonical_skills,
-                github_token,
-            )
-            .await
+/// A profile's canonical skills tree in each archive format a worker may read.
+/// Which one a session needs is known only from its worker's hello.
+pub(super) struct CanonicalSkills {
+    plain: std::result::Result<mj_core::skills::SkillsArchive, String>,
+    gzip: std::result::Result<mj_core::skills::SkillsArchive, String>,
+}
+
+impl CanonicalSkills {
+    pub(super) fn collect(target: &CredentialSyncTarget) -> Self {
+        let collect =
+            |format| canonical_session_skills(target, format).map_err(|error| format!("{error:#}"));
+        Self {
+            plain: collect(mj_core::skills::SkillsArchiveFormat::Plain),
+            gzip: collect(mj_core::skills::SkillsArchiveFormat::Gzip),
         }
-        Err(error) => Err(error),
-    };
-    // Detach even when the exchange failed; the worker and harness keep
-    // running either way. A failed detach only leaks a short-lived proxy, so it
-    // is reported rather than turned into a sync failure.
-    if let Err(error) = client.detach().await {
-        tracing::warn!(
-            session_id = %target.session_id,
-            "could not close the credential sync connection: {error:#}"
-        );
     }
-    result
+
+    fn failed(reason: &str) -> Self {
+        Self {
+            plain: Err(reason.to_owned()),
+            gzip: Err(reason.to_owned()),
+        }
+    }
+
+    /// A tree that cannot be collected fails the whole reconciliation,
+    /// credentials included.
+    fn for_format(
+        &self,
+        format: mj_core::skills::SkillsArchiveFormat,
+    ) -> Result<&mj_core::skills::SkillsArchive> {
+        let collected = match format {
+            mj_core::skills::SkillsArchiveFormat::Plain => &self.plain,
+            mj_core::skills::SkillsArchiveFormat::Gzip => &self.gzip,
+        };
+        collected.as_ref().map_err(|error| anyhow!("{error}"))
+    }
+}
+
+/// What one session is reconciled against, read on the controller before its
+/// worker is asked anything.
+pub(super) struct SessionCanonical {
+    pub(super) credential_path: std::path::PathBuf,
+    pub(super) credential: CredentialSnapshot,
+    pub(super) credential_bytes: Vec<u8>,
+    pub(super) skills: Arc<CanonicalSkills>,
+    pub(super) github_token: Option<String>,
+}
+
+impl SessionCanonical {
+    pub(super) fn read(
+        target: &CredentialSyncTarget,
+        skills: Arc<CanonicalSkills>,
+        github_token: Option<&str>,
+    ) -> Result<Self> {
+        let credential_path = harness_authentication_marker(target.harness, &target.profile_home);
+        let (credential, credential_bytes) =
+            read_credential_file(target.harness, &credential_path)?;
+        Ok(Self {
+            credential_path,
+            credential,
+            credential_bytes,
+            skills,
+            github_token: github_token.map(ToOwned::to_owned),
+        })
+    }
+}
+
+/// Reconcile one session. Returns every action taken, where an empty list
+/// means the copies already agree, or `None` when the session could not be
+/// reached this cycle because its actor had no connection to lend.
+pub(super) async fn reconcile_session(
+    relays: &SessionRelays,
+    target: &CredentialSyncTarget,
+    skills: &Arc<CanonicalSkills>,
+    github_token: Option<&str>,
+) -> Result<Option<Vec<CredentialSyncAction>>> {
+    let canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    match relays {
+        SessionRelays::Actors(manager) => {
+            let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
+                tracing::debug!(
+                    session_id = %target.session_id,
+                    "credential sync waits for the session's relay actor"
+                );
+                return Ok(None);
+            };
+            let (reply, response) = tokio::sync::oneshot::channel();
+            handle
+                .run_on_connection(Box::new(CredentialSyncJob {
+                    target: target.clone(),
+                    canonical,
+                    reply,
+                }))
+                .await;
+            match response
+                .await
+                .context("the session actor dropped the credential sync")?
+            {
+                Ok(actions) => Ok(Some(actions)),
+                Err(error) if RelayJobDeferred::marks(&error) => {
+                    tracing::debug!(
+                        session_id = %target.session_id,
+                        reason = %error,
+                        "credential sync deferred to the next cycle"
+                    );
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(test)]
+        SessionRelays::Direct => {
+            let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
+            let result = reconcile_on(&mut client, target, &canonical).await;
+            if let Err(error) = client.detach().await {
+                tracing::warn!(
+                    session_id = %target.session_id,
+                    "could not close the credential sync connection: {error:#}"
+                );
+            }
+            result.map(Some)
+        }
+    }
+}
+
+/// Reconcile one session over a connection to its worker.
+pub(super) async fn reconcile_on(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    canonical: &SessionCanonical,
+) -> Result<Vec<CredentialSyncAction>> {
+    let skills = canonical
+        .skills
+        .for_format(client.skills_archive_format())?;
+    reconcile_connected(
+        client,
+        target,
+        &canonical.credential_path,
+        &canonical.credential,
+        &canonical.credential_bytes,
+        skills,
+        canonical.github_token.as_deref(),
+    )
+    .await
+}
+
+/// One session's reconciliation, run by its actor on the actor's connection.
+struct CredentialSyncJob {
+    target: CredentialSyncTarget,
+    canonical: SessionCanonical,
+    reply: tokio::sync::oneshot::Sender<Result<Vec<CredentialSyncAction>>>,
+}
+
+impl RelayConnectionJob for CredentialSyncJob {
+    fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Self {
+                target,
+                canonical,
+                reply,
+            } = *self;
+            let result = reconcile_on(client, &target, &canonical).await;
+            if reply.send(result).is_err() {
+                tracing::debug!(
+                    session_id = %target.session_id,
+                    "credential sync result receiver was already closed"
+                );
+            }
+        })
+    }
+
+    fn refuse(self: Box<Self>, error: anyhow::Error) {
+        if self.reply.send(Err(error)).is_err() {
+            tracing::debug!(
+                session_id = %self.target.session_id,
+                "credential sync refusal receiver was already closed"
+            );
+        }
+    }
 }
 
 pub(super) async fn reconcile_connected(

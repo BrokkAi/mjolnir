@@ -308,6 +308,16 @@ impl ManagedSessionHandle {
         Ok(PendingRelaySync { response })
     }
 
+    /// Run `job` on this session actor's own relay connection. The job is
+    /// refused, never dropped, when the actor cannot run it.
+    pub async fn run_on_connection(&self, job: Box<dyn RelayConnectionJob>) {
+        if let Err(error) = self.commands.send(ActorCommand::RelayJob { job }).await
+            && let ActorCommand::RelayJob { job } = error.0
+        {
+            job.refuse(anyhow::anyhow!("session actor stopped"));
+        }
+    }
+
     pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
         self.lease_connection_for(None).await
     }
