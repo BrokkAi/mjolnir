@@ -748,6 +748,28 @@ pub(super) async fn run_session_actor(
                             );
                         }
                     }
+                    ActorCommand::RelayJob { job } => {
+                        // The actor alone decides when its connection is
+                        // free; a job never opens or reopens one.
+                        if lifecycle.is_leased() {
+                            job.refuse(
+                                RelayJobDeferred(
+                                    "a lifecycle operation holds the relay connection",
+                                )
+                                .into(),
+                            );
+                            continue;
+                        }
+                        let Some(connection) = connection.as_mut() else {
+                            job.refuse(
+                                RelayJobDeferred("the relay connection is reconnecting").into(),
+                            );
+                            continue;
+                        };
+                        // A job whose exchange broke the connection leaves it to
+                        // the next sync, which reconnects like any other failure.
+                        job.run(&mut connection.client).await;
+                    }
                     ActorCommand::StopBackgroundTask {
                         background_task_id,
                         reply,

@@ -1103,7 +1103,6 @@ impl DashboardContext {
                     self.dashboard.set_config(self.controller.config.clone());
                     self.dashboard.set_state(self.controller.state.clone());
                     self.refresh_chat_context();
-                    self.refresh_poll_targets();
                     // The daemon renamed the profile, saw the profile set
                     // change and probes the new id once; nothing to ask here.
                     self.dashboard.set_notice(format!("Renamed {what}."));
@@ -1328,7 +1327,6 @@ impl DashboardContext {
                 Ok(applied) => {
                     let session_id = applied.session.id.clone();
                     self.resolve_project_sources();
-                    self.refresh_poll_targets();
                     self.dashboard.set_notice(format!(
                         "Imported {} session {}.",
                         applied.harness, applied.native_session_id
@@ -1767,7 +1765,6 @@ impl DashboardContext {
                 }
             }
         }
-        self.refresh_poll_targets();
     }
 
     fn apply_worker_diagnosis(

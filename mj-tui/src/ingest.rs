@@ -14,9 +14,7 @@ use mj_core::state::{
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
 use mj_client::quota::ProfileQuota;
-use mj_core::targets::{
-    DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage, SessionResourceUsage,
-};
+use mj_core::targets::{DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage};
 use mj_transcript::transcript::{materialized_content_text, materialized_tool_diffstats};
 
 use crate::wizards::clamp_resources;
@@ -67,7 +65,6 @@ pub(crate) struct SessionDetail {
     pub(crate) unread_agent_messages: usize,
     pub(crate) interruption_event_ordinals: Vec<u64>,
     pub(crate) unread_interruptions: usize,
-    pub(crate) resource_usage: Option<SessionResourceUsage>,
     pub(crate) transcript: Option<TranscriptSnapshot>,
     pub(crate) transcript_hydration: TranscriptHydration,
     pub(crate) queued_prompts: Vec<mj_core::relay::QueuedPrompt>,
@@ -944,17 +941,6 @@ impl DashboardState {
         agents.sort();
         agents.dedup();
         self.installed_agents = Some(agents);
-    }
-
-    pub fn apply_resource_usage(&mut self, session_id: &str, usage: SessionResourceUsage) {
-        let detail = self
-            .session_details
-            .entry(session_id.to_string())
-            .or_default();
-        if detail.resource_usage.as_ref() == Some(&usage) {
-            return;
-        }
-        detail.resource_usage = Some(usage);
     }
 
     pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {

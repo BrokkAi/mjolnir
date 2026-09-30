@@ -2508,6 +2508,96 @@ async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_
     coordinator.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mode() {
+    let request = RelayRequest::Submit {
+        command_id: "restore-mode".into(),
+        command: RelayCommand::RestoreExecutionMode,
+    };
+    assert!(!request.supported_at(27));
+    assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
+
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit(&mut relay.lock().unwrap(), "prompt-1", prompt("running"));
+    wake_tx.try_send(()).unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-1", "running");
+    submit(
+        &mut relay.lock().unwrap(),
+        "restore-mode",
+        RelayCommand::RestoreExecutionMode,
+    );
+    wake_tx.try_send(()).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
+            .await
+            .is_err()
+    );
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-1".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), command_rx.recv()).await.unwrap().unwrap(),
+        CommandRequest::RestoreExecutionMode { request_id } if request_id == "restore-mode"
+    ));
+    event_tx
+        .send(RuntimeEvent::ConfigApplied {
+            request_id: "restore-mode".into(),
+            key: "mode".into(),
+            value: "auto".into(),
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| {
+        state.config.get("mode").map(String::as_str) == Some("auto")
+    })
+    .await;
+    let events = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(&event.observation,
+        RelayObservation::CommandCompleted { command_id, outcome: mj_core::relay::RelayCommandOutcome::Configured, .. }
+            if command_id == "restore-mode"
+    )));
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+    drop(relay);
+    let reopened = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(
+        reopened
+            .operational_state()
+            .config
+            .get("mode")
+            .map(String::as_str),
+        Some("auto")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let temp = tempfile::tempdir().unwrap();
@@ -6538,6 +6628,25 @@ async fn control_socket_appears(root: &Path, within: std::time::Duration) -> boo
     .is_ok()
 }
 
+/// Whether the worker's startup record already names `step`.
+///
+/// The record outlives the worker, which makes it the reliable witness for a
+/// step whose visible effect can vanish first: a worker whose harness exits at
+/// once removes `control.sock` again during teardown.
+fn startup_step_recorded(root: &Path, step: &str) -> bool {
+    let Some(record) = std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return false;
+    };
+    record["steps"].as_array().is_some_and(|steps| {
+        steps
+            .iter()
+            .any(|recorded| recorded["step"].as_str() == Some(step))
+    })
+}
+
 /// A session that no review can run for must do no working-tree capture at
 /// startup. This is the #1065 failure: the capture is proportional to the
 /// working tree, so a session in a large tree never reached its control
@@ -6557,7 +6666,23 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
-    let appeared = control_socket_appears(&root, std::time::Duration::from_secs(30)).await;
+    let appeared = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            // `control.sock` alone is a momentary witness: the fake harness
+            // exits at once, so the worker can bind, serve, and remove the
+            // socket between two polls. `serving` is recorded only after the
+            // bind succeeded, and that record survives the worker.
+            if root.join("control.sock").exists() || startup_step_recorded(&root, "serving") {
+                break true;
+            }
+            if daemon.is_finished() {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
     // The startup record names the step a slow start stalled in.
     let steps =
         std::fs::read_to_string(root.join(mj_core::relay::WORKER_STARTUP_FILE)).unwrap_or_default();

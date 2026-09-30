@@ -1900,6 +1900,9 @@ pub(super) fn drain_requests_from_the_previous_bridge(
             CommandRequest::SetSessionMode { request_id, .. } => {
                 ("SetSessionMode", Some(request_id))
             }
+            CommandRequest::RestoreExecutionMode { request_id } => {
+                ("RestoreExecutionMode", Some(request_id))
+            }
             CommandRequest::CancelTurnFor { request_id, .. } => ("CancelTurnFor", Some(request_id)),
             CommandRequest::Steer { request_id, .. } => ("Steer", Some(request_id)),
             CommandRequest::Cancel { request_id, .. } => ("Cancel", Some(request_id)),

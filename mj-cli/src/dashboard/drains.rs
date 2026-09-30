@@ -53,7 +53,6 @@ impl DashboardContext {
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
         self.drain_runtime_config();
-        self.drain_resource_updates();
         self.drain_capacity_updates();
         self.drain_aws_resource_options();
         self.drain_import_profiles();
@@ -73,7 +72,6 @@ impl DashboardContext {
             self.runtime_notices.take_delivered(),
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
-            self.resource.take_delivered(),
             self.capacity.take_delivered(),
             self.aws_options.take_delivered(),
             self.import_profiles.take_delivered(),
@@ -220,7 +218,6 @@ impl DashboardContext {
                 Some((&self.dashboard_io_tx, &self.critical_operations)),
             ) {
                 Ok(true) => {
-                    let _ = self.resource_triggers_tx.try_send(session_id.clone());
                     if let Some(materialized) = materialized {
                         let viewed_through_event_ordinal = self
                             .controller
@@ -430,7 +427,6 @@ impl DashboardContext {
         self.controller.config = config.clone();
         self.dashboard.set_config(config);
         self.refresh_chat_context();
-        self.refresh_poll_targets();
         // A profile added or changed here is probed once by the daemon, which
         // reloads the same configuration; this process asks no provider.
         // Config and session records have one owner: the runtime feed.
@@ -486,14 +482,6 @@ impl DashboardContext {
         self.reconcile_question_drafts();
         self.refresh_chat_context();
         self.controller_changed = true;
-        self.refresh_poll_targets();
-    }
-
-    pub(crate) fn drain_resource_updates(&mut self) {
-        while let Some(update) = self.resource.next_ready() {
-            self.dashboard
-                .apply_resource_usage(&update.session_id, update.usage);
-        }
     }
 
     pub(crate) fn drain_capacity_updates(&mut self) {

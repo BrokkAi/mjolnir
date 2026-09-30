@@ -1045,6 +1045,9 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
             request_id,
             mode_id: mode_id.clone(),
         }),
+        RelayCommand::RestoreExecutionMode => {
+            Some(CommandRequest::RestoreExecutionMode { request_id })
+        }
         RelayCommand::Steer {
             active_prompt_id, ..
         } => claimed

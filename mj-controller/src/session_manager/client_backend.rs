@@ -168,18 +168,25 @@ impl SessionManagerControl {
 
     pub async fn session(&self, session_id: impl Into<String>) -> Result<ManagedSessionHandle> {
         let session_id = session_id.into();
+        self.find_session(session_id.clone())
+            .await?
+            .with_context(|| format!("session {session_id} is not managed"))
+    }
+
+    /// The session's handle, or `None` while it has no actor.
+    pub async fn find_session(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<Option<ManagedSessionHandle>> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(ManagerCommand::Session {
-                session_id: session_id.clone(),
+                session_id: session_id.into(),
                 reply,
             })
             .await
             .context("session manager stopped")?;
-        response
-            .await
-            .context("session manager stopped")?
-            .with_context(|| format!("session {session_id} is not managed"))
+        response.await.context("session manager stopped")
     }
 
     pub async fn wait_for_session(

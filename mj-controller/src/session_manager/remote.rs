@@ -171,6 +171,12 @@ pub(super) async fn run_remote_session_actor(
                 )));
                 continue;
             }
+            ActorCommand::RelayJob { job } => {
+                job.refuse(anyhow::anyhow!(
+                    "relay connection jobs run only inside the controller daemon"
+                ));
+                continue;
+            }
         };
         if let Err(error) = requests.send(request).await {
             match error.0 {

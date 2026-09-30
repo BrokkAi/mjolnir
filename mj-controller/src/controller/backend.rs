@@ -270,17 +270,6 @@ impl Controller {
             .context("reconnect plan is empty")
     }
 
-    pub fn resource_probe(&self, session_id: &str) -> Result<targets::SessionResourceProbe> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let locator = session.target.as_ref().context("session has no target")?;
-        let backend = backend_locator(locator, session, &self.config)?;
-        targets::resource_probe(&backend, session_id)
-    }
-
     pub fn deployment_capacity_targets(&self) -> Vec<targets::DeploymentCapacityTarget> {
         use targets::{DeploymentCapacityKind, DeploymentCapacityTarget};
 

@@ -272,7 +272,12 @@ fn verdict(probe: &WorkerProbe) -> StartupVerdict {
     if let Some(exit) = &probe.exit {
         return StartupVerdict::Hopeless(probe.to_string(), exit.refusal.clone());
     }
-    if !probe.alive() {
+    // The launch clears the previous startup record, so a record is this
+    // launch's. With no record and no process, the worker may not have started
+    // yet: a detached launch returns before its shell reaches the worker's own
+    // command line, which a loaded machine can take seconds to do. That is not
+    // evidence of death, so only the clock ends this wait.
+    if !probe.alive() && probe.startup.is_some() {
         return StartupVerdict::Hopeless(probe.to_string(), None);
     }
     StartupVerdict::Working(probe.step().map(ToOwned::to_owned))
@@ -601,6 +606,9 @@ mod tests {
         /// Reports the step of the same number, counting from one, once that
         /// many attempts have run: a record that advances through its steps.
         steps: &'static [&'static str],
+        /// Shows no process and no record until this many attempts have run:
+        /// a detached launch whose worker has not started yet.
+        not_started_until: Option<usize>,
     }
     impl FakeStartingWorker {
         fn never_accepts() -> Self {
@@ -615,6 +623,7 @@ mod tests {
                 cancel_on_attempt: None,
                 hangs: false,
                 steps: &[],
+                not_started_until: None,
             }
         }
 
@@ -641,6 +650,16 @@ mod tests {
         }
 
         fn inspect(&self) -> Result<WorkerProbe> {
+            if self
+                .not_started_until
+                .is_some_and(|started| self.attempts < started)
+            {
+                return Ok(WorkerProbe {
+                    startup: None,
+                    exit: None,
+                    pids: vec![],
+                });
+            }
             let exited = self
                 .death_after_attempts
                 .is_some_and(|died_after| self.attempts >= died_after);
@@ -913,5 +932,51 @@ mod tests {
         assert!(reported.contains("harness-resolve"), "{reported}");
         assert!(!reported.contains("no startup step"), "{reported}");
         assert!(reported.contains("still pending"), "{reported}");
+    }
+
+    /// A detached launch returns before the worker's own process exists. On a
+    /// loaded machine the first probes can find no process and no record, which
+    /// is a worker that has not started yet, not one that died.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_waits_for_a_worker_that_has_not_started_yet() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            not_started_until: Some(4),
+            progressing: true,
+            ..FakeStartingWorker::accepting_after(6)
+        };
+
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
+
+        assert_eq!(relay, "relay");
+    }
+
+    /// A worker that never shows up at all is still reported, at the deadline,
+    /// as one that recorded nothing.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_reports_a_worker_that_never_started_at_the_deadline() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut worker = FakeStartingWorker {
+            not_started_until: Some(usize::MAX),
+            ..FakeStartingWorker::never_accepts()
+        };
+        let started = tokio::time::Instant::now();
+
+        let error =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap_err();
+
+        assert!(started.elapsed() >= WORKER_STARTUP_CONNECT_TIMEOUT);
+        let reported = format!("{error:#}");
+        assert!(
+            reported.contains("it recorded no startup step"),
+            "{reported}"
+        );
     }
 }

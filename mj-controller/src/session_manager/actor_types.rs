@@ -45,6 +45,37 @@ pub(super) enum ActorCommand {
         idle_harness: Option<mj_core::config::HarnessKind>,
         reply: oneshot::Sender<Result<(u64, StandaloneSession)>>,
     },
+    /// Periodic work on the actor's own connection. See [`RelayConnectionJob`].
+    RelayJob { job: Box<dyn RelayConnectionJob> },
+}
+
+/// Work run on a session actor's own relay connection, in turn with the
+/// actor's other relay traffic. A periodic exchange such as credential sync
+/// uses this instead of opening a connection of its own to every worker.
+pub trait RelayConnectionJob: Send + Sync + 'static {
+    fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()>;
+
+    /// The actor did not run the job; `error` says why.
+    fn refuse(self: Box<Self>, error: anyhow::Error);
+}
+
+/// The actor had no connection to lend: a lifecycle operation holds it, or
+/// the actor is reconnecting. The job belongs to the next cycle.
+#[derive(Debug)]
+pub struct RelayJobDeferred(pub &'static str);
+
+impl std::fmt::Display for RelayJobDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for RelayJobDeferred {}
+
+impl RelayJobDeferred {
+    pub fn marks(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some()
+    }
 }
 
 impl ActorCommand {
@@ -57,6 +88,7 @@ impl ActorCommand {
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::Reviewer { action, .. } => action.operation_name(),
             Self::Lease { .. } => "lease",
+            Self::RelayJob { .. } => "relay_job",
         }
     }
 
@@ -128,6 +160,7 @@ impl ActorCommand {
                     );
                 }
             }
+            Self::RelayJob { job } => job.refuse(anyhow::anyhow!(message.to_owned())),
         }
     }
 }

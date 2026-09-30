@@ -395,7 +395,10 @@ pub(super) fn project_observation(
             if *command == RelayCommandKind::ClearContext {
                 mutation.execution = Some(MaterializedExecutionState::Idle);
             }
-            if *command == RelayCommandKind::SetConfig {
+            if matches!(
+                command,
+                RelayCommandKind::SetConfig | RelayCommandKind::RestoreExecutionMode
+            ) {
                 mutation
                     .config_results
                     .push((command_id.clone(), Some(message.clone())));

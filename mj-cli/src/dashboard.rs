@@ -66,10 +66,9 @@ use crate::import::{
     PendingDashboardImport, spawn_dashboard_import,
 };
 use crate::pollers::{
-    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, ResourcePollTarget, ResourcePollUpdate,
-    RuntimeStateUpdate, WorkerDiagnosisTracker, apply_worker_poll_update,
-    complete_manual_quota_refresh, projected_queued_prompts, refresh_dashboard_poll_targets,
-    session_target_is_pollable, spawn_dashboard_capacity_poller, spawn_dashboard_resource_poller,
+    CapacityPollUpdate, DashboardLifecycleUpdate, Feed, RuntimeStateUpdate, WorkerDiagnosisTracker,
+    apply_worker_poll_update, complete_manual_quota_refresh, projected_queued_prompts,
+    session_target_is_pollable, spawn_dashboard_capacity_poller,
     spawn_remote_dashboard_worker_poller, spawn_worker_diagnosis,
 };
 use crate::session_presentation::{apply_lifecycle_display, apply_worker_activity, lifecycle_kind};
@@ -367,10 +366,6 @@ pub(crate) struct DashboardContext {
     pub(crate) lifecycle_updates_tx: UnboundedSender<DashboardLifecycleUpdate>,
     lifecycle: Feed<UnboundedReceiver<DashboardLifecycleUpdate>>,
     pub(crate) lifecycle_operations: BTreeMap<String, ActiveLifecycleOperation>,
-
-    resource_targets_tx: watch::Sender<Vec<ResourcePollTarget>>,
-    resource_triggers_tx: Sender<String>,
-    resource: Feed<Receiver<ResourcePollUpdate>>,
 
     capacity_targets_tx: watch::Sender<Vec<DeploymentCapacityTarget>>,
     capacity_triggers_tx: Sender<()>,
@@ -782,9 +777,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
                 context.runtime_state.accept(update);
-            }
-            update = context.resource.wait(), if context.resource.is_open() => {
-                context.resource.accept(update);
             }
             update = context.capacity.wait(), if context.capacity.is_open() => {
                 context.capacity.accept(update);
@@ -1567,17 +1559,10 @@ impl DashboardContext {
             tokio::sync::mpsc::unbounded_channel::<DashboardLifecycleUpdate>();
         let (critical_operations, critical_operations_changed) = CriticalOperationTracker::new();
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
-        let (resource_targets_tx, resource_triggers_tx, resource_updates_rx) =
-            spawn_dashboard_resource_poller();
         let (capacity_targets_tx, capacity_triggers_tx, capacity_updates_rx) =
             spawn_dashboard_capacity_poller();
         let (aws_resource_options_tx, aws_resource_options_rx) =
             tokio::sync::mpsc::unbounded_channel::<AwsResourceOptions>();
-        refresh_dashboard_poll_targets(
-            &controller,
-            &resource_targets_tx,
-            &lifecycle_operations.keys().cloned().collect(),
-        );
         let capacity_targets = controller.deployment_capacity_targets();
         capacity_targets_tx.send_replace(capacity_targets.clone());
         dashboard.set_deployment_capacity_targets(capacity_targets);
@@ -1659,9 +1644,6 @@ impl DashboardContext {
             lifecycle_updates_tx,
             lifecycle: Feed::new(lifecycle_updates_rx),
             lifecycle_operations,
-            resource_targets_tx,
-            resource_triggers_tx,
-            resource: Feed::new(resource_updates_rx),
             capacity_targets_tx,
             capacity_triggers_tx,
             capacity: Feed::new(capacity_updates_rx),

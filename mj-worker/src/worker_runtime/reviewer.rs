@@ -1086,6 +1086,7 @@ impl ReviewerRole {
             crate::acp::PlanControl::SetSessionMode { mode_id } => {
                 RelayCommand::SetSessionMode { mode_id }
             }
+            crate::acp::PlanControl::RestoreExecutionMode => RelayCommand::RestoreExecutionMode,
         };
         self.config_sequence += 1;
         let command_id = format!("reviewer-plan-mode-{}", self.config_sequence);

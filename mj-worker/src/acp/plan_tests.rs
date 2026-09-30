@@ -37,6 +37,113 @@ fn mode_config(current: &str) -> Value {
     }])
 }
 
+#[tokio::test]
+async fn leaving_claude_plan_mode_restores_the_workers_execution_policy() {
+    for config in [false, true] {
+        for (policy, expected) in [
+            (ExecutionPolicy::ConfiguredApprovals, "auto"),
+            (ExecutionPolicy::Unconstrained, "bypassPermissions"),
+        ] {
+            let mut probe = PlanProbe::with_config(policy, config).await;
+            // Use the same control the terminal and web Plan toggle send.
+            probe
+                .commands
+                .send(CommandRequest::SetSessionMode {
+                    request_id: "enter-plan".into(),
+                    mode_id: "plan".into(),
+                })
+                .await
+                .unwrap();
+            let entering = probe.message().await;
+            assert_eq!(entering["params"]["modeId"], "plan");
+            probe.result(&entering, json!({})).await;
+            loop {
+                if let RuntimeEvent::SessionModeApplied { request_id, .. } = probe.event().await {
+                    assert_eq!(request_id, "enter-plan");
+                    break;
+                }
+            }
+            probe
+                .commands
+                .send(CommandRequest::RestoreExecutionMode {
+                    request_id: "exit-plan".into(),
+                })
+                .await
+                .unwrap();
+            let restoring = probe.message().await;
+            if config {
+                assert_eq!(restoring["method"], "session/set_config_option");
+                assert_eq!(restoring["params"]["value"], expected);
+            } else {
+                assert_eq!(restoring["method"], "session/set_mode");
+                assert_eq!(restoring["params"]["modeId"], expected);
+            }
+            // It must not announce success before the harness acknowledges.
+            while let Ok(event) = probe.events.try_recv() {
+                assert!(!matches!(event, RuntimeEvent::ConfigApplied { .. }));
+            }
+            probe
+                .result(
+                    &restoring,
+                    if config {
+                        json!({"configOptions": mode_config(expected)})
+                    } else {
+                        json!({})
+                    },
+                )
+                .await;
+            loop {
+                if let RuntimeEvent::ConfigApplied {
+                    request_id,
+                    key,
+                    value,
+                    ..
+                } = probe.event().await
+                {
+                    assert_eq!(request_id, "exit-plan");
+                    assert_eq!(key, "mode");
+                    assert_eq!(value, expected);
+                    break;
+                }
+            }
+            probe.no_message().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_refused_claude_plan_exit_reports_failure_without_continuing() {
+    let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    let restoring = probe.message().await;
+    // An acknowledgement that still reports Plan is not a successful exit.
+    probe
+        .result(&restoring, json!({"configOptions": mode_config("plan")}))
+        .await;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::ConfigApplied { .. } => panic!("unconfirmed mode must not succeed"),
+            RuntimeEvent::CommandRejected {
+                request_id,
+                message,
+                ..
+            } => {
+                assert_eq!(request_id, "exit-plan");
+                assert!(message.contains("reports"), "{message}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    probe.no_message().await;
+}
+
 #[test]
 fn claude_plan_approval_selects_the_deployment_mode_without_clearing_context() {
     for ids in [

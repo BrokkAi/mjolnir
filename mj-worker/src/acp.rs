@@ -228,6 +228,9 @@ pub enum CommandRequest {
         request_id: String,
         mode_id: String,
     },
+    RestoreExecutionMode {
+        request_id: String,
+    },
     /// Connection-only answer to an in-flight ACP elicitation. The content is
     /// deliberately never put in the durable relay command ledger.
     ResolveElicitation {

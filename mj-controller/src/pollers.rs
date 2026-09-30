@@ -36,7 +36,7 @@ use crate::session_manager::{
 use crate::targets::{
     CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec,
     DeploymentCapacityKind, DeploymentCapacityTarget, DeploymentCapacityUsage, ImageHost,
-    ImageRefresh, RefreshWhen, SessionResourceProbe, SessionResourceUsage,
+    ImageRefresh, RefreshWhen,
 };
 use crate::worker_client::CredentialSyncCoordinator;
 
@@ -68,7 +68,6 @@ pub const IMAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// recovery work the daemon also schedules at startup, which competes with it
 /// for the SSH admission slots.
 const IMAGE_REFRESH_DELAY: Duration = Duration::from_secs(2);
-pub const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const RESOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 pub const CAPACITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 

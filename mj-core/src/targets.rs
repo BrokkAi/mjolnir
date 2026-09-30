@@ -281,22 +281,6 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionResourceUsage {
-    pub cpu_percent: Option<u8>,
-    pub memory_current_bytes: u64,
-    pub memory_limit_bytes: Option<u64>,
-    pub swap_current_bytes: Option<u64>,
-    pub swap_limit_bytes: Option<u64>,
-    pub writable_disk_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionResourceProbe {
-    pub memory: CommandSpec,
-    pub disk: Option<CommandSpec>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentCapacityKind {
     Host,
