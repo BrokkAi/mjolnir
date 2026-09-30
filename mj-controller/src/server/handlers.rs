@@ -408,12 +408,6 @@ pub(super) async fn mark_conversation_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct StopBackgroundTaskRequest {
-    pub(super) background_task_id: String,
-}
-
 /// Ask the live session actor to stop one task the current projection still
 /// shows. The snapshot check is intentionally repeated at admission time:
 /// a task may have completed, or lost its provider stop capability, between
@@ -421,7 +415,7 @@ pub(super) struct StopBackgroundTaskRequest {
 pub(super) async fn stop_background_task(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
-    Json(request): Json<StopBackgroundTaskRequest>,
+    Json(request): Json<api::StopBackgroundTaskRequest>,
 ) -> Result<StatusCode, ApiError> {
     validate_public_id(&session_id)?;
     // Task ids are opaque provider ids (the worker currently uses values such
@@ -506,7 +500,6 @@ pub(super) async fn preflight_new(
         at: None,
         branch: None,
         base: None,
-        expected_runtime_identity: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),

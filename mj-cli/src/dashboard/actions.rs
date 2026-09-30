@@ -442,16 +442,15 @@ pub(crate) async fn apply_dashboard_action(
             model,
             config,
         } => {
-            crate::dashboard::spawn_io(
+            super::io::spawn_background_async(
                 "discovering subagent models",
                 context.dashboard_io_tx.clone(),
-                move || {
+                // Each profile can need two probes, each with a 300s deadline.
+                std::time::Duration::from_secs(660),
+                async move {
                     let config = serde_json::from_str(&config)?;
-                    mj_core::runtime::block_on(
-                        mj_controller::controller::profile_config::subagent_options_for(
-                            config, profile, model,
-                        ),
-                    )?
+                    let mut client = daemon::connect_existing().await?;
+                    client.subagent_options(profile, model, Some(config)).await
                 },
                 move |result| DashboardIoUpdate::SubagentOptions { id, result },
             );

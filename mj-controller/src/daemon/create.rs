@@ -152,7 +152,6 @@ impl RuntimeState {
                     at: request.at,
                     branch: request.branch,
                     base: request.base,
-                    expected_runtime_identity: request.expected_runtime_identity,
                     subagents: request.subagents,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,

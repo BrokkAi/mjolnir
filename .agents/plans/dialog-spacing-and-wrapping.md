@@ -17,6 +17,8 @@ Create, Open/Sessions, and Move should have one blank terminal cell inside the t
 - [x] (2026-09-30) Move subagent policy into profile setup, with Native as the default and Single model as the only alternative.
 - [x] (2026-09-30) Skip single-profile selection and single usable raw-target selection; bypass Confirm when both selectors were skipped.
 - [x] (2026-09-30) Validate and commit the profile settings and navigation extension on hel3; full dev-profile Cargo tests, Clippy, formatting, and diff checks passed.
+- [x] (2026-09-30) Integrate upstream db8c9ce3 and validate daemon-owned discovery of unsaved profile drafts; full Cargo tests, Clippy, formatting, and diff checks passed.
+- [ ] Integrate upstream's subsequent project-catalog changes, validate the combined wizard behavior, and push the resulting merge to origin/master as requested.
 
 ## Surprises & Discoveries
 
@@ -80,3 +82,15 @@ Revision note: record the corrected profile configuration requirement and the ra
 Milestone outcome (2026-09-30): profile policy is persisted and used by CLI, TUI, and web creation and TUI/web Moves. The review controls and AllModels/None UI choices are removed; recorded legacy session policies remain readable. Settings model and effort selectors use supervised draft discovery, show loading/errors, reject retired replies, and provide retry. The navigation state has an explicit Launching step, retains the sizing page for containers/EC2, and submits completed Move preparation once. Failed resume checks expose an explicit Retry. Necessary large-transfer file selection remains. Initial validation exposed PTY expectations for the now-skipped Profile screen and a settings test fixture missing the second model-specific catalog reply; both fixtures were corrected. The final full dev-profile Cargo suite passed, including 2065 controller, 579 core, 900 TUI, 698 worker, 253 CLI, and 11 PTY tests. Clippy with warnings denied, formatting, and diff checks passed. This completes the profile settings and navigation checkpoint on hel3 without pushing.
 
 Revision note: record completed profile settings and navigation, validation-driven fixes for the PTY route, correct modal border measurement, asynchronous failure retries, and passing final validation.
+
+## Merge and publication extension (2026-09-30)
+
+The user requested merge and push. The current hel3 branch tracks origin/master. The separate local master worktree has active uncommitted work, so integration happens in this clean worktree and is pushed to origin/master. Do not change the other worktree or include its unpublished work.
+
+Upstream commit c502e9bd moved model discovery into the daemon because only the daemon owns cache writes. Preserve that ownership while sending the unsaved setup configuration with the authenticated discovery request. Add an optional boxed Config to DaemonAction::SubagentOptions and a client argument, retain supervised asynchronous execution and shutdown cancellation, and resolve the action conflict by using the daemon client. Advance the daemon protocol from 46 to 47 so normal startup replaces clients' old daemons before draft discovery. Extend wire, cancellation, management compatibility, and isolated cached-draft regressions. Run the full dev-profile Cargo suite, Clippy, formatting, and diff checks before committing the merge and pushing the current branch to its configured upstream master.
+
+Decision: the daemon discovers both saved and draft profiles, using the submitted snapshot for drafts. Rationale: keeping cache writes with their owner avoids the upstream cold-cache failure while letting setup discover models before saving its configuration.
+
+Revision note: record the authorized merge/push and the integration fix required by upstream daemon-owned model discovery.
+
+Merge checkpoint: integration with db8c9ce3 passed the full dev-profile suite, including 2069 controller, 583 core, 903 TUI, 693 worker, 254 CLI, and 11 PTY tests. Clippy, formatting, and diff checks passed. Upstream advanced to f9bced67 during validation, adding project identity and incremental discovery across the Create flow; integrate that committed work next before pushing, without changing the other worktrees.

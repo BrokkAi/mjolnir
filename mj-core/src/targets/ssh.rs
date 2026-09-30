@@ -1431,6 +1431,8 @@ fn master_open_command(ssh: &SshTarget, socket: &Path) -> CommandSpec {
     args.extend([
         "-o".to_owned(),
         "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "ConnectTimeout=10".to_owned(),
         "-f".to_owned(),
         "-N".to_owned(),
         "-o".to_owned(),
@@ -2873,6 +2875,8 @@ mod tests {
                 "jump",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
                 "-f",
                 "-N",
                 "-o",
@@ -2903,6 +2907,63 @@ mod tests {
             check.ssh_destination, None,
             "a check opens no connection and takes no admission permit"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_master_open_times_out_during_handshake_and_honors_the_users_shorter_budget() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let (finish, stopping) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((connection, _)) => {
+                        // Accept TCP but never send an SSH banner. ConnectTimeout
+                        // must cover the handshake, not just the TCP connect.
+                        let _ = stopping.recv_timeout(Duration::from_secs(5));
+                        drop(connection);
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stopping.try_recv().is_ok() || Instant::now() >= deadline {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept stalled SSH handshake: {error}"),
+                }
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let ssh = SshTarget {
+            destination: "127.0.0.1".into(),
+            ssh_args: vec![
+                "-F".into(),
+                "/dev/null".into(),
+                "-p".into(),
+                port.to_string(),
+                "-o".into(),
+                "ConnectTimeout=1".into(),
+            ],
+        };
+        let started = Instant::now();
+        // Exercise one open: the outer admission helper separately retries
+        // pre-authentication timeouts with backoff.
+        let result = CancellableProcessExecutor::with_timeout(Duration::from_secs(3))
+            .run_once(&master_open_command(&ssh, &directory.path().join("master")));
+        let _ = finish.send(());
+        server.join().unwrap();
+        let output = result.expect("SSH's handshake timeout must beat the executor deadline");
+        assert_eq!(output.status, 255);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("timed out"), "{stderr}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

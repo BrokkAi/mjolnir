@@ -497,8 +497,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              last_checkpoint_error, project_directory, managed_worktree,
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
-             target_runtime_json, launch_branch, publication_json, checkout_json, expected_runtime_identity
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
+             target_runtime_json, launch_branch, publication_json, checkout_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -529,8 +529,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              target_runtime_json = excluded.target_runtime_json,
              launch_branch = excluded.launch_branch,
              publication_json = excluded.publication_json,
-             checkout_json = excluded.checkout_json,
-             expected_runtime_identity = excluded.expected_runtime_identity",
+             checkout_json = excluded.checkout_json",
         params![
             session.id,
             session.title,
@@ -579,7 +578,6 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.launch_branch,
             session.publication.as_ref().map(serde_json::to_string).transpose()?,
             session.checkout.as_ref().map(serde_json::to_string).transpose()?,
-            session.expected_runtime_identity,
         ],
     )?;
     tx.execute(
@@ -627,7 +625,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         launch_base: _,
         launch_branch: _,
         checkout: _,
-        expected_runtime_identity: _,
         publication: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
@@ -1132,7 +1129,7 @@ const SESSION_QUERY: &str =
                 s.draft_input, s.container_cpus, s.container_memory, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
-                s.launch_branch, s.publication_json, s.checkout_json, s.expected_runtime_identity
+                s.launch_branch, s.publication_json, s.checkout_json
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1162,7 +1159,6 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         create_managed_worktree: row.get(23)?,
         launch_base: row.get(27)?,
         launch_branch: row.get(29)?,
-        expected_runtime_identity: row.get(32)?,
         checkout: row
             .get::<_, Option<String>>(31)?
             .map(|json| {

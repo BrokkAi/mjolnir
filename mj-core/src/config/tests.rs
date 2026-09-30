@@ -48,8 +48,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
         build_cache: Some(TargetBuildCache {
             enabled: Some(true),
             directory: None,
-            max_size: None,
-            target_max_size: None,
+            max_total_size: None,
         }),
     };
     let serialized = serde_json::to_value(&every_setting).unwrap();
@@ -1756,29 +1755,59 @@ fn build_cache_sizes_accept_the_spellings_mbx_accepts() {
 }
 
 #[test]
-fn machine_worktree_budget_round_trips_and_validates_independently() {
+fn shared_build_budget_round_trips_and_validates() {
     let cache: TargetBuildCache = serde_json::from_value(serde_json::json!({
-        "max_size": "500GiB", "target_max_size": "250GiB"
+        "max_total_size": "2TB"
     }))
     .unwrap();
     cache.validate("builder").unwrap();
     assert_eq!(
-        serde_json::to_value(&cache).unwrap()["target_max_size"],
-        "250GiB"
+        serde_json::to_value(&cache).unwrap()["max_total_size"],
+        "2TB"
     );
     let cleared: TargetBuildCache =
-        serde_json::from_value(serde_json::json!({"target_max_size": null})).unwrap();
+        serde_json::from_value(serde_json::json!({"max_total_size": null})).unwrap();
     assert!(cleared.is_default());
     let invalid = TargetBuildCache {
-        target_max_size: Some("lots".into()),
+        max_total_size: Some("lots".into()),
         ..Default::default()
     };
+    assert!(invalid.validate("builder").is_err());
+}
+
+#[test]
+fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
+    for legacy in [
+        serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
+        serde_json::json!({"max_size": [false], "target_max_size": {"invalid": true}}),
+    ] {
+        let mut settings = legacy;
+        settings["enabled"] = serde_json::json!(false);
+        settings["directory"] = serde_json::json!("/cache");
+        let cache: TargetBuildCache = serde_json::from_value(settings.clone()).unwrap();
+        cache.validate("builder").unwrap();
+        assert_eq!(cache.enabled, Some(false));
+        assert_eq!(cache.directory.as_deref(), Some(Path::new("/cache")));
+        assert_eq!(cache.max_total_size, None);
+        let source = toml::to_string(&serde_json::json!({
+            "version": CONFIG_VERSION,
+            "machines": {"builder": {
+                "kind": "ssh", "host": "builder.example.com", "build_cache": settings
+            }}
+        }))
+        .unwrap();
+        let config: Config = toml::from_str(&source).unwrap();
+        assert_eq!(config.machines["builder"].build_cache(), Some(&cache));
+        let serialized = serde_json::to_value(&cache).unwrap();
+        assert!(serialized.get("max_size").is_none());
+        assert!(serialized.get("target_max_size").is_none());
+        settings["max_total_size"] = serde_json::json!("2TB");
+        let reset: TargetBuildCache = serde_json::from_value(settings).unwrap();
+        assert_eq!(reset.max_total_size.as_deref(), Some("2TB"));
+    }
     assert!(
-        invalid
-            .validate("builder")
-            .unwrap_err()
-            .to_string()
-            .contains("worktree build budget")
+        serde_json::from_value::<TargetBuildCache>(serde_json::json!({"max_totl_size": "2TB"}))
+            .is_err()
     );
 }
 
@@ -2365,14 +2394,12 @@ fn every_kind_config() -> Config {
     let local_cache = TargetBuildCache {
         enabled: Some(true),
         directory: Some(PathBuf::from("/var/cache/mbx")),
-        max_size: Some("50GiB".into()),
-        target_max_size: None,
+        max_total_size: Some("50GiB".into()),
     };
     let builder_cache = TargetBuildCache {
         enabled: Some(false),
         directory: Some(PathBuf::from("/srv/cache/mbx")),
-        max_size: Some("20GB".into()),
-        target_max_size: None,
+        max_total_size: Some("20GB".into()),
     };
     let ssh = SshConnection {
         host: "builder.example.com".into(),
@@ -2523,7 +2550,7 @@ kind = "local-podman"
 image = "example.invalid/agent:latest"
 
 [targets.podman.build_cache]
-max_size = "50GiB"
+max_total_size = "50GiB"
 
 [targets.docker]
 kind = "local-docker"
@@ -2561,8 +2588,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     let cache = TargetBuildCache {
         enabled: None,
         directory: None,
-        max_size: Some("50GiB".into()),
-        target_max_size: None,
+        max_total_size: Some("50GiB".into()),
     };
     assert_eq!(
         config.machines["local"],
@@ -2602,7 +2628,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     for expected in [
         "[machines.local]",
         "[machines.local.build_cache]",
-        "max_size = \"50GiB\"",
+        "max_total_size = \"50GiB\"",
         "[machines.\"builder.example.com\"]",
         "kind = \"ssh\"",
         "host = \"builder.example.com\"",
@@ -2676,7 +2702,7 @@ fn settings_that_belong_to_a_machine_are_refused_on_a_runtime() {
             "bare harness only",
         ),
         (
-            "[targets.podman]\nkind = \"podman\"\nimage = \"a:1\"\n[targets.podman.build_cache]\nmax_size = \"1GiB\"\n",
+            "[targets.podman]\nkind = \"podman\"\nimage = \"a:1\"\n[targets.podman.build_cache]\nmax_total_size = \"1GiB\"\n",
             "belongs to [machines.local]",
         ),
         (
@@ -2786,7 +2812,7 @@ kind = "ssh"
 host = "builder.example.com" # Keep this host note.
 [machines.builder.build_cache]
 enabled = true
-max_size = "50GiB"
+max_total_size = "50GiB"
 target_max_size = "10GB"
 directory = "/cache"
 [machines.other]
@@ -2814,8 +2840,7 @@ machine = "builder"
             );
         }
         let cache = config.machines["builder"].build_cache().unwrap();
-        assert_eq!(cache.max_size.as_deref(), Some("50GiB"));
-        assert_eq!(cache.target_max_size.as_deref(), Some("10GB"));
+        assert_eq!(cache.max_total_size.as_deref(), Some("50GiB"));
         assert_eq!(cache.directory.as_deref(), Some(Path::new("/cache")));
         for target in config.targets.values() {
             let (TargetTemplate::LocalPodman { container }
@@ -2916,7 +2941,7 @@ fn legacy_global_cache_opt_out_is_applied_after_fused_target_conversion() {
         config.machines["local"]
             .build_cache()
             .unwrap()
-            .max_size
+            .max_total_size
             .as_deref(),
         Some("50GiB")
     );

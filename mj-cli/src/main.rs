@@ -153,6 +153,8 @@ enum Command {
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
+    /// Stop a session's background task, or all tasks the worker can stop.
+    StopTask(api_commands::StopTaskArgs),
     /// Print the API base URL and where its bearer token lives.
     ApiInfo(api_commands::ApiInfoArgs),
     /// Discover available models and efforts for a profile.
@@ -525,6 +527,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Resume(_)) => "resume",
         Some(Command::InterruptTurn(_)) => "interrupt-turn",
+        Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
@@ -693,6 +696,9 @@ async fn run_command(
                 .map(|()| DashboardExit::Normal)
         }
         Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::StopTask(args)) => api_commands::stop_task(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Models(args)) => api_commands::models(args)
@@ -2456,7 +2462,6 @@ mod tests {
                 launch_base: None,
                 launch_branch: None,
                 checkout: None,
-                expected_runtime_identity: None,
                 publication: None,
                 build_cache: None,
                 container_workspace: None,

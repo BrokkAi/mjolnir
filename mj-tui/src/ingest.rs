@@ -28,6 +28,8 @@ pub(crate) struct SessionOperationDisplay {
     /// uncancellable at its atomic commit boundary.
     pub(crate) cancellable: bool,
     pub(crate) started_at_epoch_seconds: u64,
+    /// The operation owns its preview until completion, even when a state
+    /// publication temporarily omits a newly registered session.
     pub(crate) placeholder: Option<SessionRecord>,
     /// Launch stages currently in flight and when each began. More than one
     /// entry means independent setup lanes are overlapping.
@@ -635,6 +637,7 @@ impl DashboardState {
         }
         state.sessions = rows;
         self.state = state;
+        self.apply_operation_projection();
         if self.navigation.retain_sessions(|id| {
             crate::dashboard_conversation::session_belongs_in_layout(
                 &self.state,
@@ -646,7 +649,6 @@ impl DashboardState {
             self.reconcile_pins();
             self.mark_layout_modified();
         }
-        self.apply_operation_projection();
         for (id, record) in changed {
             self.release_finished_conversation(&id);
             if let Some(record) = record {
@@ -791,6 +793,7 @@ impl DashboardState {
         operation_id: Option<String>,
         cancellable: bool,
     ) {
+        let placeholder = placeholder.or_else(|| self.state.sessions.get(&session_id).cloned());
         self.session_operations.insert(
             session_id,
             SessionOperationDisplay {
@@ -846,12 +849,16 @@ impl DashboardState {
     }
 
     pub fn finish_session_operation(&mut self, session_id: &str) {
-        self.session_operations.remove(session_id);
-        if self
-            .state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.id.starts_with("pending-"))
+        let preview_finished = self
+            .session_operations
+            .remove(session_id)
+            .is_some_and(|operation| operation.placeholder.is_some());
+        if (preview_finished && !self.durable_records.contains_key(session_id))
+            || self
+                .state
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| session.id.starts_with("pending-"))
         {
             self.state.sessions.remove(session_id);
         }

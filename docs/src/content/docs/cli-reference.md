@@ -216,6 +216,7 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>] [--workspace <name>]
           [--queue start|discard] [--json]
 mj interrupt-turn --session <id> [--json]
+mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
 mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
@@ -343,6 +344,16 @@ which blocks while the resume runs and reports the reason if it fails, and then
 `mj set-config` and `mj prompt` as for any live session. A session that is
 already running is refused: suspend it first. `mj move` is the command for a live
 session that should continue elsewhere.
+
+`mj sessions --json` and `mj sessions --session <id> --json` include
+`background_tasks`, with each task's opaque `id`, `command`, `started_at_ms`,
+and `can_stop`. Use `mj stop-task --session <id> <task-id>` to stop one task,
+or `--all` to request stops for every currently listed stoppable task.
+Unsupported tasks are skipped and reported. With `--json`, the result contains
+`session_id`, `accepted_task_ids`, `skipped_task_ids`, and a `failures` object
+mapping task IDs to errors. All selected stops are attempted; any failure makes
+the command exit nonzero. Acceptance does not establish that the task has exited:
+inspect the session again to confirm it disappeared.
 
 `mj suspend` saves a verified recovery copy and releases the environment. It
 reports acceptance; follow it with `mj wait --session <id>` to observe completion

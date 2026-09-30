@@ -2361,18 +2361,6 @@ impl SubagentBackend for ApiBackend {
         })
     }
 
-    fn runtime_receipt(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<Option<mj_core::harness_runtime::RuntimeReceipt>>> {
-        Box::pin(async move {
-            blocking("load runtime receipt", move || {
-                crate::database::load_runtime_receipt(&session_id)
-            })
-            .await
-        })
-    }
-
     fn turn_state(&self, session_id: String) -> BoxFuture<'_, Result<Option<TurnState>>> {
         Box::pin(async move {
             blocking("load turn outcome", move || {

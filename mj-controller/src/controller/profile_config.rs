@@ -508,6 +508,63 @@ mod tests {
         Refusal::of(error).map(|refusal| refusal.message().to_owned())
     }
 
+    #[tokio::test]
+    async fn unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings() {
+        const CHILD: &str = "MJ_TEST_UNSAVED_PROFILE_DISCOVERY";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "unsaved-profile-discovery-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        Config::default().save().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.path().into(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            subagents: SubagentPolicy::SingleModel {
+                model: "chosen".into(),
+                effort: Some("high".into()),
+            },
+        };
+        let key = fingerprint(&profile, profile.environment.resolved()).unwrap();
+        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let catalog = ProfileConfig {
+            model: Some("chosen".into()),
+            models: vec![choice("chosen")],
+            efforts: vec![choice("high")],
+            observed_at: 1,
+        };
+        store("unsaved", &key, &None, &catalog).unwrap();
+        store("unsaved", &key, &catalog.model, &catalog).unwrap();
+        let mut draft = Config::default();
+        draft.profiles.insert("unsaved".into(), profile);
+        let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
+            .await
+            .unwrap();
+        assert_eq!(options.models, catalog.models);
+        assert_eq!(options.efforts, catalog.efforts);
+        assert!(options.unavailable.is_empty());
+        assert!(!Config::load().unwrap().profiles.contains_key("unsaved"));
+    }
+
     #[test]
     fn a_policy_on_a_harness_without_delegation_is_refused_with_its_message() {
         let error =

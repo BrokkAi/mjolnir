@@ -1002,7 +1002,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

@@ -325,6 +325,27 @@ async fn client_presence_is_global_and_detach_and_prune_remove_it() {
 }
 
 #[tokio::test]
+async fn subagent_discovery_does_not_hold_handoff_and_stops_when_the_daemon_shuts_down() {
+    let action = DaemonAction::SubagentOptions {
+        profile: "codex".into(),
+        model: Some("gpt-6-luna".into()),
+        config: Some(Box::new(mj_core::config::Config::default())),
+    };
+    assert!(upgrade_request_activity(&action).unwrap().is_none());
+    let state = test_runtime_state();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = handle_action(action, &metadata, &state, &cancellation)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "subagent discovery cancelled by daemon shutdown"
+    );
+}
+
+#[tokio::test]
 async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one() {
     let state = test_runtime_state();
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
@@ -914,7 +935,6 @@ pub(super) fn runtime_test_session(
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,
@@ -1610,6 +1630,15 @@ fn released_protocol_transcripts() -> Vec<ProtocolTranscript> {
             responses: [
                 r#"{"protocol_version":16,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.4.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
                 r#"{"protocol_version":16,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
+            ],
+        },
+        ProtocolTranscript {
+            protocol_version: 47,
+            daemon_build: "2.24.0",
+            expected_requests: requests(47),
+            responses: [
+                r#"{"protocol_version":47,"request_id":1,"result":{"Ok":{"reply":"status","value":{"pid":4242,"started_at":"2026-09-01T07:48:14Z","build_version":"2.24.0","attached_clients":1,"phone_status":{"state":"disabled"}}}}}"#,
+                r#"{"protocol_version":47,"request_id":2,"result":{"Ok":{"reply":"done"}}}"#,
             ],
         },
     ]
@@ -4030,6 +4059,8 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
+    let log = crate::test_log::CapturedLog::default();
+    let _log = tracing::subscriber::set_default(log.clone());
     let workspace = crate::database::create_workspace("Suspend restart").unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut session = runtime_test_session("restart-suspend", &workspace.id, SessionState::Running);
@@ -4062,6 +4093,26 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
             .starts_with(mj_core::state::CLOSE_FAILURE_PREFIX)
     );
     assert!(!restarted.close_is_requested(&session.id));
+    let diagnostic = log.at(tracing::Level::WARN);
+    assert!(
+        diagnostic
+            .iter()
+            .any(|line| line.contains("suspension failure worker diagnostic")
+                && line.contains("worker_pids=[]")
+                && line.contains("recorded no startup step")),
+        "{diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .iter()
+            .any(|line| line.contains("phase=\"lease worker connection\"")
+                || line.contains("phase=\"wait for session actor\"")),
+        "{diagnostic:?}"
+    );
+    assert!(
+        !root.path().join(&session.id).exists(),
+        "diagnosis must not create worker state"
+    );
 }
 
 /// #1191: `mj destroy` is answered "accepted" before the destroy finishes,

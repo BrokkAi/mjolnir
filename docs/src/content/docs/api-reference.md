@@ -181,6 +181,20 @@ synchronized, and `null` when the worker does not report this capability. `tasks
 contains known task records (`id`, `started_at_ms`, `command`, `can_stop`). The
 whole field is omitted when no connected snapshot is available.
 
+All session responses also include `background_tasks` from the daemon's current
+projection. Each record has `id`, `command`, `started_at_ms`, and `can_stop`.
+Treat IDs as opaque when requesting a stop.
+
+```text
+POST /api/v1/sessions/{session_id}/background-tasks/stop
+```
+
+Send `{"background_task_id":"<opaque task id>"}`. The daemon validates that
+the task is still present and stoppable, then waits for the worker's
+acknowledgement and answers **202** with no body. A task that has ended or cannot
+be stopped returns **409**; an unavailable worker returns **503**; a provider
+stop failure returns **500**. Inspect the session again to confirm task exit.
+
 A finished prompt or idle chat phase does not prove background tasks have ended.
 For Kimi, a routine checkpoint requires `known: true` and an empty task list,
 in addition to the normal checkpoint prerequisites. A deferred bundle export
@@ -217,78 +231,6 @@ or `interrupted` with a `message`. This field retains the raw harness evidence:
 Use `mj wait` or the normalized `turn_ended` event outcome to determine success.
 The list route omits the field: it is built from the dashboard projection,
 which carries no turn identity.
-
-### Resolved harness runtime
-
-`GET /api/v1/sessions/{session_id}` also returns `runtime` after ACP
-initialization, even if no task prompt was submitted. The session list omits
-this field. The latest receipt remains readable after the worker stops. Each
-initialization also creates a durable `runtime_resolved` event in the public
-event feed; use those events to retain every run across restart, resume, and
-worker replacement. Earlier receipts are never rewritten. Before initialization
-there is no receipt; during recovery the latest receipt may describe the prior
-process, so receipt lookup alone is not permission to dispatch work.
-
-```json
-{
-  "runtime": {
-    "id": "mj-runtime-v1:<sha256>",
-    "harness": "codex",
-    "platform": "linux-x86_64",
-    "provenance": "target_installation",
-    "components": [
-      { "name": "acp_bridge", "version": "1.13.3", "sha256": "<sha256>" },
-      { "name": "provider_cli", "version": "0.156.1", "sha256": "<sha256>" }
-    ],
-    "unavailable_reason": null,
-    "event_ordinal": 7,
-    "observed_at_ms": 1788000000000
-  }
-}
-```
-
-The example abbreviates the components. Treat `id` as an opaque comparison ID.
-It covers the harness, target OS/architecture, provenance, inspected component
-versions/content digests, and the ACP-reported agent name/version. Managed bare
-workers report `managed_installation`: the leased installation manifest and
-contents participate. Container/ambient workers report `target_installation`
-when they use a preinstalled bridge and provider. If a container needs Mjolnir's
-pinned Codex/Claude installation, it reports `managed_installation` instead.
-Selection finishes before inspection and ACP startup, so the identity describes
-the bridge actually executed, including for launch configurations saved by older
-releases. Mjolnir inspects the packages on the target; version pins alone never
-establish identity. For npm runtimes, digests include the containing
-`node_modules` tree so hoisted provider binaries and dependencies participate;
-changing other packages in that tree can also change the identity. Codex requires
-an explicit `CODEX_PATH`; Claude includes its provider SDK. Muse includes its
-provider executable and target installation metadata. Unmanaged Kimi/Grok and
-custom wrappers without sufficient metadata report `id: null` and an explicit
-`unavailable_reason`. Individual unknown component versions/digests are `null`.
-
-This compares inspected runtime installations, not model/effort choices, system
-libraries, the OS image, credentials, or behavior of a remote provider service.
-It is not image or worker provenance, and it does not attest against outside
-processes modifying an installation behind Mjolnir's back. Runtime upgrades
-managed by Mjolnir replace workers only through the existing idle admission
-policy. Receipts publish no installation paths, harness homes, credentials, or
-private environment values.
-
-To require a saved identity, create a session with
-`"expected_runtime_identity": "mj-runtime-v1:<sha256>"`. Obtain the first identity
-by creating an unconstrained session **without `prompt`**, awaiting readiness,
-and fetching its receipt. Save its non-null `runtime.id`, then supply that value
-on later launches. Matching installations can accept prompts. A mismatch or
-unknown identity fails visibly before loading a native session or accepting a
-prompt, including after resume/replacement; the durable constraint is checked
-again under the worker's command admission lock. Discovery followed by an
-upgrade cannot silently authorize a different runtime. Busy accepted work is
-never cancelled to satisfy a new selection.
-
-A saved runtime that is no longer installed is refused; this option does not
-reinstall retired versions. Discover the current identity and explicitly select
-it for a new session. Omitting the constraint preserves normal upgrade behavior.
-The database migration refuses older daemons that cannot enforce the constraint
-or interpret retained runtime events; normal startup performs the upgrade.
 
 ### List launch options
 
@@ -816,9 +758,11 @@ Preconditions, all answering `409` with the reason:
 | `mj resume --session <id>` | `POST /sessions/{id}/resume` |
 | `mj destroy --session <id> [--delete-branch]` | `POST /sessions/{id}/destroy` |
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
+| `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 
-Every one of them takes `--json` and then prints the route's response unchanged,
-which is the quickest way to see a shape before you write a client for it.
+These commands accept `--json`. `mj stop-task` prints its aggregate report of
+accepted, skipped, and failed task IDs; the other commands print the route's
+response unchanged.
 
 ## A whole run
 

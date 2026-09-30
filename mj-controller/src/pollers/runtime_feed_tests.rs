@@ -26,7 +26,6 @@ fn session_record(id: &str) -> SessionRecord {
         launch_base: None,
         launch_branch: None,
         checkout: None,
-        expected_runtime_identity: None,
         publication: None,
         build_cache: None,
         container_workspace: None,

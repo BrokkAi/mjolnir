@@ -450,6 +450,110 @@ pub(crate) struct SessionArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct StopTaskArgs {
+    /// Session id, as `mj sessions` lists it.
+    #[arg(long)]
+    session: String,
+    /// Opaque task id from `mj sessions --session <id> --json`.
+    #[arg(
+        value_name = "TASK_ID",
+        required_unless_present = "all",
+        conflicts_with = "all"
+    )]
+    task_id: Option<String>,
+    /// Stop every currently listed task that the worker can stop.
+    #[arg(long)]
+    all: bool,
+    /// Print accepted task ids, skipped task ids and failures as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StopTaskReport {
+    session_id: String,
+    accepted_task_ids: Vec<String>,
+    skipped_task_ids: Vec<String>,
+    failures: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) async fn stop_task(args: StopTaskArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    let report = stop_tasks(&client, &args).await?;
+    if args.json {
+        print_json(&report)?;
+    } else {
+        for id in &report.accepted_task_ids {
+            println!(
+                "stop accepted for background task {id} in {}",
+                report.session_id
+            );
+        }
+        for id in &report.skipped_task_ids {
+            println!("background task {id} cannot be stopped by this worker; skipped");
+        }
+        for (id, error) in &report.failures {
+            eprintln!("background task {id}: {error}");
+        }
+        if report.accepted_task_ids.is_empty() && report.failures.is_empty() {
+            println!("no stoppable background tasks in {}", report.session_id);
+        }
+    }
+    if !report.failures.is_empty() {
+        bail!(
+            "could not stop {} background task(s)",
+            report.failures.len()
+        );
+    }
+    Ok(())
+}
+
+async fn stop_tasks(client: &ApiClient, args: &StopTaskArgs) -> Result<StopTaskReport> {
+    let mut report = StopTaskReport {
+        session_id: args.session.clone(),
+        accepted_task_ids: Vec::new(),
+        skipped_task_ids: Vec::new(),
+        failures: Default::default(),
+    };
+    let task_ids = if args.all {
+        let session = client
+            .session_if_known(&args.session)
+            .await?
+            .with_context(|| format!("unknown session {}", args.session))?;
+        let (stoppable, skipped): (Vec<_>, Vec<_>) = session
+            .background_tasks
+            .into_iter()
+            .partition(|task| task.can_stop);
+        report.skipped_task_ids = skipped.into_iter().map(|task| task.id).collect();
+        stoppable
+            .into_iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>()
+    } else {
+        vec![
+            args.task_id
+                .clone()
+                .context("name a task id or use --all")?,
+        ]
+    };
+    let outcomes = futures::future::join_all(
+        task_ids
+            .iter()
+            .map(|id| client.stop_background_task(&args.session, id)),
+    )
+    .await;
+    for (id, outcome) in task_ids.into_iter().zip(outcomes) {
+        match outcome {
+            Ok(()) => report.accepted_task_ids.push(id),
+            Err(error) => {
+                report.failures.insert(id, format!("{error:#}"));
+            }
+        }
+    }
+    Ok(report)
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct SuspendArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
@@ -638,7 +742,6 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         at: args.at.clone(),
         branch: args.branch.clone(),
         base: args.base.clone(),
-        expected_runtime_identity: None,
         workspace_id,
         profile_id: args.profile.clone(),
         target_id: args.target.clone(),
@@ -1548,6 +1651,142 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[test]
+    fn stop_task_requires_a_session_and_exactly_one_task_selection() {
+        for argv in [
+            vec!["mj", "stop-task", "--session", "s1"],
+            vec![
+                "mj",
+                "stop-task",
+                "--session",
+                "s1",
+                "terminal:one",
+                "--all",
+            ],
+            vec!["mj", "stop-task", "--all"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        for selection in ["terminal:one", "--all"] {
+            let cli =
+                Cli::try_parse_from(["mj", "stop-task", "--session", "s1", selection, "--json"])
+                    .unwrap();
+            let Some(Command::StopTask(args)) = cli.command else {
+                panic!("expected stop-task")
+            };
+            assert_eq!(args.session, "s1");
+            assert_eq!(args.all, selection == "--all");
+            assert!(args.json);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_task_sends_opaque_ids_and_all_reports_partial_failures() {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let mut session = wait_response("finished", serde_json::json!({})).session;
+        session.background_tasks = [
+            ("terminal:one / opaque", true),
+            ("terminal:failed", true),
+            ("native:observer", false),
+            ("terminal:two", true),
+        ]
+        .into_iter()
+        .map(
+            |(id, can_stop)| mj_controller::server::ViewerBackgroundTask {
+                id: id.into(),
+                command: "sleep 60".into(),
+                started_at_ms: 0,
+                can_stop,
+            },
+        )
+        .collect();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/sessions/s1",
+                get(move || {
+                    let session = session.clone();
+                    async move { Json(session) }
+                }),
+            )
+            .route(
+                "/api/v1/sessions/s1/background-tasks/stop",
+                post(
+                    move |headers: HeaderMap,
+                          Json(request): Json<
+                        mj_controller::server::api::StopBackgroundTaskRequest,
+                    >| {
+                        let requests = requests.clone();
+                        async move {
+                            assert_eq!(headers["authorization"], "Bearer test-token");
+                            let id = request.background_task_id;
+                            requests.lock().unwrap().push(id.clone());
+                            if id == "terminal:failed" {
+                                (
+                                    StatusCode::CONFLICT,
+                                    Json(serde_json::json!({"error":"task already ended"})),
+                                )
+                                    .into_response()
+                            } else {
+                                StatusCode::ACCEPTED.into_response()
+                            }
+                        }
+                    },
+                ),
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let mut response = next.run(request).await;
+                    response
+                        .headers_mut()
+                        .insert("mj-api-version", "1".parse().unwrap());
+                    response
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = ApiClient::new(format!("http://{address}"), "test-token".into()).unwrap();
+        let mut args = StopTaskArgs {
+            session: "s1".into(),
+            task_id: Some("terminal:one / opaque".into()),
+            all: false,
+            json: true,
+        };
+        let single = stop_tasks(&client, &args).await.unwrap();
+        assert_eq!(single.accepted_task_ids, ["terminal:one / opaque"]);
+        assert_eq!(*seen.lock().unwrap(), ["terminal:one / opaque"]);
+        seen.lock().unwrap().clear();
+        args.task_id = None;
+        args.all = true;
+        let all = stop_tasks(&client, &args).await.unwrap();
+        assert_eq!(
+            all.accepted_task_ids,
+            ["terminal:one / opaque", "terminal:two"]
+        );
+        assert_eq!(all.skipped_task_ids, ["native:observer"]);
+        assert!(all.failures["terminal:failed"].contains("task already ended"));
+        let mut requests = seen.lock().unwrap().clone();
+        requests.sort();
+        assert_eq!(
+            requests,
+            ["terminal:failed", "terminal:one / opaque", "terminal:two"]
+        );
+        let json = serde_json::to_value(&all).unwrap();
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["accepted_task_ids"].as_array().unwrap().len(), 2);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn export_json_with_out_reports_one_object_and_text_stays_a_sentence() {
