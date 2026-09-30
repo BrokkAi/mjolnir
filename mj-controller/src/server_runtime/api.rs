@@ -825,10 +825,20 @@ impl ApiBackend {
                 timeout_seconds,
                 return_when,
             } => {
-                for child_id in child_session_ids {
-                    self.require_owned_child(parent_session_id, child_id)
-                        .await?;
-                }
+                // Naming no children means every child of this parent that is
+                // not finished. This daemon owns the parent-to-children list,
+                // so it resolves the set once, when the wait starts.
+                let resolved;
+                let child_session_ids = if child_session_ids.is_empty() {
+                    resolved = self.unfinished_children(parent_session_id).await?;
+                    &resolved
+                } else {
+                    for child_id in child_session_ids {
+                        self.require_owned_child(parent_session_id, child_id)
+                            .await?;
+                    }
+                    child_session_ids
+                };
                 // The budget runs from when the caller made the request, not
                 // from when this daemon picked it up. A request that is
                 // executed again — after a daemon restart, or after a result
@@ -850,24 +860,8 @@ impl ApiBackend {
                 let deadline = started + remaining;
                 loop {
                     let inputs = self.subagent_input_progress(parent_session_id).await?;
-                    let ids = child_session_ids.clone();
-                    let summaries = tokio::task::spawn_blocking(move || {
-                        ids.into_iter()
-                            .map(|id| {
-                                let summary =
-                                    crate::database::load_materialized_session_summary(&id)?;
-                                let progress = load_child_progress(&id)?;
-                                Ok((id, summary, progress))
-                            })
-                            .collect::<Result<Vec<_>>>()
-                    })
-                    .await??;
-                    let mut starts = std::collections::BTreeMap::new();
-                    for (id, _, _) in &summaries {
-                        if let Some(status) = self.start_status(id.clone()).await? {
-                            starts.insert(id.clone(), status);
-                        }
-                    }
+                    let (summaries, starts) =
+                        self.child_snapshots(child_session_ids.clone()).await?;
                     let finished = summaries
                         .iter()
                         .map(|(id, summary, progress)| {
@@ -1162,6 +1156,70 @@ impl ApiBackend {
         }
     }
 
+    /// What the store and the start tracker say about each of `ids`.
+    async fn child_snapshots(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<(
+        Vec<(
+            String,
+            Option<mj_core::state::MaterializedSessionSummary>,
+            ChildProgress,
+        )>,
+        std::collections::BTreeMap<String, StartStatus>,
+    )> {
+        let summaries = tokio::task::spawn_blocking(move || {
+            ids.into_iter()
+                .map(|id| {
+                    let summary = crate::database::load_materialized_session_summary(&id)?;
+                    let progress = load_child_progress(&id)?;
+                    Ok((id, summary, progress))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await??;
+        let mut starts = std::collections::BTreeMap::new();
+        for (id, _, _) in &summaries {
+            if let Some(status) = self.start_status(id.clone()).await? {
+                starts.insert(id.clone(), status);
+            }
+        }
+        Ok((summaries, starts))
+    }
+
+    /// The children an id-less `wait` covers: those of `parent_id` that are not
+    /// finished. When none is, the finished ones that still exist, so the
+    /// caller learns their state from an immediate answer.
+    async fn unfinished_children(&self, parent_id: &str) -> Result<Vec<String>> {
+        let inputs = self.subagent_input_progress(parent_id).await?;
+        let ids = self
+            .list_subagents(parent_id.to_owned())
+            .await?
+            .into_iter()
+            .map(|child| child.child_session_id)
+            .collect::<Vec<_>>();
+        let (summaries, starts) = self.child_snapshots(ids).await?;
+        let children = summaries
+            .iter()
+            .map(|(id, summary, progress)| {
+                let record = self.exports.session_record(id);
+                let (state, _, finished) = inputs.status(
+                    id,
+                    subagent_status(
+                        record.as_ref(),
+                        summary.as_ref(),
+                        starts.get(id),
+                        None,
+                        self.exports.close_is_requested(id),
+                        progress,
+                    ),
+                );
+                (id.clone(), state, finished)
+            })
+            .collect::<Vec<_>>();
+        Ok(implicit_wait_set(&children))
+    }
+
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
         anyhow::ensure!(
             self.list_subagents(parent_id.to_owned())
@@ -1390,6 +1448,26 @@ fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
 /// that closed a child and spawned its replacement stacked the two process
 /// trees inside one container (#1087). This is the projection the daemon's own
 /// viewer applies, down to leaving a record that already says `Stopped` alone.
+/// The children an id-less `wait` covers, from each child's id, state and
+/// whether it finished: the unfinished ones (running, starting, stopping). With
+/// none unfinished, every child that has not been stopped, all finished, so the
+/// wait answers at once with their state.
+fn implicit_wait_set(children: &[(String, String, bool)]) -> Vec<String> {
+    let unfinished = children
+        .iter()
+        .filter(|(_, _, finished)| !finished)
+        .map(|(id, _, _)| id.clone())
+        .collect::<Vec<_>>();
+    if !unfinished.is_empty() {
+        return unfinished;
+    }
+    children
+        .iter()
+        .filter(|(_, state, _)| state != "stopped")
+        .map(|(id, _, _)| id.clone())
+        .collect()
+}
+
 fn subagent_status(
     record: Option<&mj_core::state::SessionRecord>,
     summary: Option<&mj_core::state::MaterializedSessionSummary>,

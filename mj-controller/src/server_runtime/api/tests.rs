@@ -3227,3 +3227,127 @@ async fn wait_returns_a_report_handed_back_in_a_reminder_turn() {
     let progress = load_child_progress("child-1").unwrap();
     assert!(progress.awaiting_prompt(None), "{progress:?}");
 }
+
+fn wait_child(id: &str, state: &str, finished: bool) -> (String, String, bool) {
+    (id.to_owned(), state.to_owned(), finished)
+}
+
+/// An id-less `wait` covers the children that are not finished, and leaves out
+/// parked, completed, failed and stopped ones.
+#[test]
+fn an_id_less_wait_covers_only_the_unfinished_children() {
+    let children = [
+        wait_child("running", "running", false),
+        wait_child("starting", "preparing", false),
+        wait_child("closing", "stopping", false),
+        wait_child("parked", "completed", true),
+        wait_child("failed", "failed", true),
+        wait_child("stopped", "stopped", true),
+    ];
+    assert_eq!(
+        implicit_wait_set(&children),
+        ["running", "starting", "closing"]
+    );
+}
+
+/// With nothing unfinished, the set is the finished children that still
+/// exist, so the answer is immediate and names them; a stopped child is gone.
+#[test]
+fn an_id_less_wait_with_nothing_running_lists_the_finished_children() {
+    let children = [
+        wait_child("parked", "completed", true),
+        wait_child("failed", "failed", true),
+        wait_child("stopped", "stopped", true),
+    ];
+    assert_eq!(implicit_wait_set(&children), ["parked", "failed"]);
+    assert!(implicit_wait_set(&[]).is_empty());
+}
+
+/// `return_when: any` over the resolved set answers once one of the running
+/// children finishes, and never because of a finished child left out of it.
+#[test]
+fn return_when_any_over_an_id_less_set_ignores_children_left_out() {
+    let children = [
+        wait_child("a", "running", false),
+        wait_child("b", "running", false),
+        wait_child("done", "completed", true),
+    ];
+    let set = implicit_wait_set(&children);
+    assert_eq!(set, ["a", "b"]);
+    let any = mj_core::subagent::ReturnWhen::Any;
+    assert!(!any.satisfied(&[false, false]));
+    assert!(any.satisfied(&[false, true]));
+}
+
+/// An id-less wait for a parent whose only child finished and parked answers
+/// at once with status complete and lists that child; a parent with no child
+/// gets the same immediate answer, not an error.
+#[tokio::test]
+async fn an_id_less_wait_answers_at_once_when_nothing_is_running() {
+    if !isolated_parked_test("an_id_less_wait_answers_at_once_when_nothing_is_running") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&parent_record("parent-1", "parent")).unwrap();
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, _delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+    let wait = |backend: Arc<ApiBackend>| async move {
+        let started = std::time::Instant::now();
+        let answer = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: "request".into(),
+                    created_at_ms: mj_core::clock::epoch_millis(),
+                    action: mj_core::subagent::SubagentToolAction::WaitAgents {
+                        child_session_ids: Vec::new(),
+                        timeout_seconds: Some(5),
+                        return_when: Default::default(),
+                    },
+                },
+            )
+            .await;
+        assert!(!answer.is_error, "{}", answer.message);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()
+    };
+
+    let none = wait(backend.clone()).await;
+    assert_eq!(
+        none["status"],
+        mj_core::subagent::WAIT_STATUS_COMPLETE,
+        "{none}"
+    );
+    assert_eq!(none["agents"], serde_json::json!([]), "{none}");
+
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 3;
+    conversation.applied_event_digest = format!("{:064x}", 3);
+    conversation.last_turn_outcome = Some(finished_turn("task-1"));
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(
+        crate::database::record_subagent_handback(
+            "child-1",
+            &mj_core::subagent::SubagentHandback {
+                command_id: "task-1".into(),
+                message: "Done.".into(),
+                recorded_at_ms: 1,
+            },
+        )
+        .unwrap()
+    );
+    let listed = wait(backend).await;
+    assert_eq!(
+        listed["status"],
+        mj_core::subagent::WAIT_STATUS_COMPLETE,
+        "{listed}"
+    );
+    assert_eq!(
+        listed["agents"][0]["child_session_id"], "child-1",
+        "{listed}"
+    );
+    assert_eq!(listed["agents"][0]["state"], "completed", "{listed}");
+    assert_eq!(listed["agents"][0]["output"], "Done.", "{listed}");
+}

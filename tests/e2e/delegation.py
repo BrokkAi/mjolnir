@@ -244,6 +244,11 @@ def main():
         assert parked["status"] == "complete", parked
         assert parked["agents"][0]["output"] == "first report without a dashboard", parked
         assert parked_seconds < 5, f"wait on a parked child took {parked_seconds}"
+        # A wait that names no children finds nothing running and answers at
+        # once, listing the finished child.
+        idless = tool(parent, "wait_agents", {"timeout_seconds": 30})
+        assert idless["status"] == "complete", idless
+        assert [agent["child_session_id"] for agent in idless["agents"]] == [child], idless
         # Submit the next wait while send_input is still starting the parked
         # child. It must not answer with the old report or return early, and
         # the daemon must not re-park the child under the input. Then replace

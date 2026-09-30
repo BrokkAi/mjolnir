@@ -379,6 +379,9 @@ pub enum SubagentToolAction {
         message: String,
     },
     WaitAgents {
+        /// Empty means every child of the parent that is not finished; the
+        /// daemon, which owns the parent's child list, resolves it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         child_session_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
@@ -1570,6 +1573,22 @@ mod tests {
             subagent_wait_timeout_for(Some(HarnessKind::Codex), None),
             Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
         );
+    }
+
+    #[test]
+    fn a_wait_naming_no_children_omits_the_list_on_the_wire() {
+        let none = SubagentToolAction::WaitAgents {
+            child_session_ids: Vec::new(),
+            timeout_seconds: Some(5),
+            return_when: ReturnWhen::All,
+        };
+        let encoded = serde_json::to_value(&none).unwrap();
+        assert!(
+            encoded["params"].get("child_session_ids").is_none(),
+            "{encoded}"
+        );
+        let decoded: SubagentToolAction = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, none);
     }
 
     #[test]

@@ -36,7 +36,8 @@ child sessions in the same target and filesystem:
 - `send_input` — durably queue follow-up input to one child, including while it
   starts. The queue receipt is not delivery confirmation; do not resend it.
   `wait` and `list_agents` show pending input and delivery failures.
-- `wait` — block until the named children finish their current turn. Status
+- `wait` — block until the named children finish their current turn. Omit
+  `child_session_ids` to wait for every child that is still running. Status
   `complete` means the reports are in `output`; `still_running` means the
   timeout came first. That is not a failure: call `wait` again with the same
   `child_session_ids`.

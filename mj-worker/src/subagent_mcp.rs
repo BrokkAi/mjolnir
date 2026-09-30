@@ -189,6 +189,12 @@ fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Opti
     else {
         return None;
     };
+    if child_session_ids.is_empty() {
+        return Some(format!(
+            "waiting for every child session that is still running; {}s elapsed",
+            elapsed.as_secs()
+        ));
+    }
     Some(format!(
         "waiting for {} child session(s) to finish their turn: {}; {}s elapsed",
         child_session_ids.len(),
@@ -287,6 +293,7 @@ struct HandbackArgs {
 
 #[derive(Deserialize)]
 struct WaitArgs {
+    #[serde(default)]
     child_session_ids: Vec<String>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
@@ -514,10 +521,10 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. Queued input keeps a child unfinished; pending_inputs lists undelivered request IDs, and input_deliveries records recent delivery outcomes. A delivery failure reports state failed and its cause instead of an old report. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again after repairing that login or making another eligible profile available. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
+                "Block until the named child sessions finish their current turn, or until the timeout, whichever comes first. Omit child_session_ids to wait for every child of yours that is still running; when none is, the answer comes at once with status complete and lists your finished children. Otherwise call wait once with every child you are waiting for and the largest timeout you can afford; every wait call costs you a request with your whole context, so do not poll with short timeouts. Use return_when any when the next step depends on whichever finishes first; it answers as soon as one named child finishes, and the others show finished false. Queued input keeps a child unfinished; pending_inputs lists undelivered request IDs, and input_deliveries records recent delivery outcomes. A delivery failure reports state failed and its cause instead of an old report. The answer's status field is complete when every named child finished, with its report in that child's output, or still_running when some child had not. output is the short report the child handed back, or its last message when it did not hand one back; report_source says which. The report names files in the child's report_dir for the details. An output longer than {max_output} characters is cut and marked truncated. A child Mjolnir has reminded to hand back its report still reads as running. still_running is not a failure and says nothing about whether the work is going well: call wait again with the children still running, or do other work first and call wait later. A child whose profile could not sign in reports state \"failed\" with failure kind login_invalid and its profile_id: that is not about the task. Its output names the `mj login` command the person must run; spawn the task again after repairing that login or making another eligible profile available. A finished child that Mjolnir has parked to free this target's processes also carries parked true; send_input starts it again. wait also follows a child you have closed: while the close runs that child reports state \"stopping\" and is not finished, and it reports state \"stopped\" once it is gone. timeout_seconds defaults to {default_wait}, the most this session allows; a child may run far longer than that, so expect to call wait more than once.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
-            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"required":["child_session_ids"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"description":"The children to wait for. Omit, or pass an empty list, to wait for every child of yours that is still running."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"additionalProperties":false}),
         ),
         tool(
             "interrupt",
@@ -1109,6 +1116,83 @@ mod tests {
                 "timeout_seconds": mj_core::subagent::MAX_CODEX_WAIT_SECONDS,
                 "return_when": "any"
             }})
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_without_child_ids_or_with_an_empty_list_names_no_children() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        for arguments in [
+            json!({"return_when": "any"}),
+            json!({"child_session_ids": []}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("subagents.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (sent, received) = std::sync::mpsc::channel::<Value>();
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                let request_id = request["request_id"].clone();
+                sent.send(request).unwrap();
+                let reply = json!({"accepted": true, "result": {
+                    "request_id": request_id, "completed_at_ms": 1, "is_error": false,
+                    "message": "{\"status\":\"complete\",\"agents\":[]}"
+                }});
+                let mut body = serde_json::to_vec(&reply).unwrap();
+                body.push(b'\n');
+                let mut stream = reader.into_inner();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+                let _ = stream.read(&mut [0u8; 1]);
+            });
+            let (value, is_error) = call_with_budget(
+                &socket,
+                Some(HarnessKind::Codex),
+                SubagentMcpRole::Parent,
+                Some(&json!({"name": "wait", "arguments": arguments})),
+                &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+                |_| Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(!is_error, "{value}");
+            let request = received.recv().unwrap();
+            assert_eq!(
+                request["action"]["params"].get("child_session_ids"),
+                None,
+                "{request}"
+            );
+            assert_eq!(request["action"]["action"], "wait_agents", "{request}");
+        }
+    }
+
+    #[test]
+    fn the_wait_schema_makes_child_session_ids_optional_and_says_so() {
+        let tools = tool_definitions(Some(HarnessKind::Codex));
+        let wait = tools
+            .iter()
+            .find(|tool| tool["name"] == "wait")
+            .expect("wait tool");
+        let schema = &wait["inputSchema"];
+        assert!(schema.get("required").is_none(), "{schema}");
+        assert!(
+            schema["properties"]["child_session_ids"]
+                .get("minItems")
+                .is_none(),
+            "{schema}"
+        );
+        let description = wait["description"].as_str().unwrap();
+        assert!(
+            description.contains(
+                "Omit child_session_ids to wait for every child of yours that is still running"
+            ),
+            "{description}"
         );
     }
 
