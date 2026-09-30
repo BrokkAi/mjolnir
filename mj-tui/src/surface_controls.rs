@@ -1,7 +1,7 @@
 //! Visible entry points for the same commands the keyboard dispatches.
 
 use crossterm::event::{Event, MouseEvent};
-use mj_chat::components::{ButtonRow, ControlKind, Interaction};
+use mj_chat::components::{ButtonRow, ControlKind, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -27,8 +27,6 @@ pub(crate) enum SurfaceControl {
     ClearSessionsFilter,
     /// The `Filter:` input on the Sessions action row; a click starts typing.
     SessionsFilterInput,
-    /// The `x` at the right end of that input, which drops the filter.
-    ClearSessionsFilterInput,
     PanePin(PaneId),
     PinHere(PaneId),
     SessionPin(usize),
@@ -169,7 +167,7 @@ impl DashboardState {
                     self.begin_support_pane_menu(pane);
                     DashboardAction::None
                 }
-                SurfaceControl::ClearSessionsFilter | SurfaceControl::ClearSessionsFilterInput => {
+                SurfaceControl::ClearSessionsFilter => {
                     self.clear_sessions_filter();
                     DashboardAction::None
                 }
@@ -340,8 +338,9 @@ fn filter_input_area(dashboard: &DashboardState, row: Rect, start: u16) -> Optio
 }
 
 /// Draws the `Filter: ____` input to the right of the buttons. It shows and
-/// edits the same text the `/` key does. While a filter is in force an `x` at
-/// its right end drops it, as the `×` on the pane title does.
+/// edits the same text the `/` key does, with the readline caret drawn as a
+/// reversed cell while it is being edited. The clear chip lives on the pane
+/// title, not here.
 fn render_sessions_filter_input(
     frame: &mut Frame,
     row: Rect,
@@ -354,63 +353,46 @@ fn render_sessions_filter_input(
     let mut form = dashboard.surface_form.borrow_mut();
     let filter = dashboard.sessions_filter.as_ref();
     let editing = filter.is_some_and(|filter| filter.editing);
-    let clear = Line::raw(theme::glyphs().close).width() as u16;
-    let clear_area = filter
-        .is_some()
-        .then(|| Rect::new(area.right() - clear, area.y, clear, 1));
     let label = FILTER_LABEL.len() as u16;
-    let field_end = clear_area.map_or(area.right(), |clear| clear.x);
-    let field = Rect::new(
-        area.x + label,
-        area.y,
-        field_end.saturating_sub(area.x + label),
-        1,
-    );
-    let input = Rect::new(area.x, area.y, field_end - area.x, 1);
+    let room = usize::from(area.width.saturating_sub(label));
     form.register(
         SurfaceControl::SessionsFilterInput,
         ControlKind::Button,
-        input,
+        area,
         true,
     );
-    // The label stays put; the field shows the end of the text, where the
-    // typing is, and pads with underscores so the box shows its extent.
-    let text: Vec<char> = filter
-        .map(|filter| filter.query.chars().collect())
-        .unwrap_or_default();
-    let room = usize::from(field.width);
-    let caret = usize::from(editing);
-    let shown: String = text
-        .iter()
-        .skip(text.len().saturating_sub(room.saturating_sub(caret)))
-        .collect();
-    let used = shown.chars().count();
+    // The label stays put; the field scrolls to keep the cursor in view and
+    // pads with underscores so the box shows its extent. Outside editing the
+    // caret is not drawn and the end of the text shows, as before.
+    let (value, cursor) = filter.map_or(("", 0), |filter| {
+        let value = filter.query.value();
+        (
+            value,
+            if editing {
+                filter.query.cursor()
+            } else {
+                value.len()
+            },
+        )
+    });
+    let (before, caret, after) =
+        TextField::caret_window(value, cursor, room + usize::from(!editing));
+    let caret = if editing { caret } else { String::new() };
+    let after = if editing { after } else { String::new() };
+    let used = Line::raw(format!("{before}{caret}{after}")).width();
     let mut spans = vec![
         Span::styled(FILTER_LABEL, theme::muted()),
-        Span::styled(shown, theme::actionable()),
+        Span::styled(before, theme::actionable()),
     ];
-    if editing && used < room {
-        spans.push(Span::styled(" ", theme::focus_control()));
+    if editing {
+        spans.push(Span::styled(caret, theme::focus_control()));
+        spans.push(Span::styled(after, theme::actionable()));
     }
-    let padding = room.saturating_sub(used + usize::from(editing && used < room));
-    spans.push(Span::styled("_".repeat(padding), theme::muted()));
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)),
-        Rect::new(area.x, area.y, field_end - area.x, 1),
-    );
-    if let Some(clear_area) = clear_area {
-        let control = SurfaceControl::ClearSessionsFilterInput;
-        form.register(control, ControlKind::Button, clear_area, true);
-        let style = if form.is_armed(control) {
-            theme::selection(true)
-        } else {
-            theme::actionable()
-        };
-        frame.render_widget(
-            Paragraph::new(theme::glyphs().close).style(style),
-            clear_area,
-        );
-    }
+    spans.push(Span::styled(
+        "_".repeat(room.saturating_sub(used)),
+        theme::muted(),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &DashboardState) {
@@ -577,7 +559,7 @@ mod tests {
         buffer_lines, chord, dashboard_with_session, key, mouse_at, point, running_session,
     };
     use crate::{Focus, Mode, PaneSize, SessionStateFilter, SupportPane};
-    use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use mj_chat::theme;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -923,7 +905,7 @@ mod tests {
             assert_eq!(
                 filter
                     .as_ref()
-                    .map(|filter| (filter.query.as_str(), filter.state)),
+                    .map(|filter| (filter.query.value(), filter.state)),
                 Some(("ses", Some(SessionStateFilter::Blocked)))
             );
 
@@ -1001,10 +983,11 @@ mod tests {
         assert!(dashboard.sessions_filter.is_some());
     }
 
-    /// Typing in the input edits the `/` search text, and the `x` at its end
-    /// clears it. The `x` shows only while a filter is in force.
+    /// Typing in the input edits the `/` search text and `Esc` clears it and
+    /// leaves. The input has no `x` of its own: the clear chip is on the
+    /// Sessions title.
     #[test]
-    fn typing_in_the_filter_input_filters_and_its_x_clears() {
+    fn typing_in_the_filter_input_filters_and_esc_clears() {
         let mut dashboard = dashboard_with_session(running_session());
         let lines = draw(&mut dashboard, (140, 40));
         let (x, y) = point(&lines, "Filter:");
@@ -1020,13 +1003,13 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Char(character)));
         }
         assert_eq!(
-            dashboard.sessions_filter.as_ref().map(|f| f.query.as_str()),
+            dashboard.sessions_filter.as_ref().map(|f| f.query.value()),
             Some("nomatch")
         );
         let lines = draw(&mut dashboard, (140, 40));
         let row = actions_row(&dashboard, &lines);
         assert!(row.contains("Filter: nomatch"), "{row:?}");
-        assert!(row.contains('×'), "{row:?}");
+        assert!(!row.contains('×') && !row.contains(" x "), "{row:?}");
         // The same text is the `/` search: the list is filtered by it.
         assert!(
             dashboard
@@ -1035,12 +1018,136 @@ mod tests {
                 .all(|session| Some(session.id.as_str()) == dashboard.selected_session_id())
         );
 
-        let pane = dashboard.pane_areas.expect("pane areas")[0];
-        let chip = row.chars().position(|c| c == '×').unwrap() as u16 + pane.x;
-        assert_eq!(click(&mut dashboard, (chip, y)), DashboardAction::None);
+        dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(dashboard.sessions_filter, None);
         let lines = draw(&mut dashboard, (140, 40));
-        assert!(!actions_row(&dashboard, &lines).contains('×'));
+        assert!(actions_row(&dashboard, &lines).contains("Filter: ____"));
+    }
+
+    fn mods(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn filter_state(dashboard: &DashboardState) -> (String, usize) {
+        let filter = dashboard.sessions_filter.as_ref().expect("filter");
+        (filter.query.value().to_owned(), filter.query.cursor())
+    }
+
+    /// User request 2026-09-29: the filter input takes the readline keys the
+    /// composer does.
+    #[test]
+    fn the_filter_input_takes_readline_keys() {
+        use KeyModifiers as M;
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "alpha beta gamma".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let steps: &[(KeyEvent, &str, usize)] = &[
+            (key(KeyCode::Left), "alpha beta gamma", 15),
+            (key(KeyCode::Right), "alpha beta gamma", 16),
+            (key(KeyCode::Home), "alpha beta gamma", 0),
+            (key(KeyCode::End), "alpha beta gamma", 16),
+            (mods(KeyCode::Char('a'), M::CONTROL), "alpha beta gamma", 0),
+            (mods(KeyCode::Char('e'), M::CONTROL), "alpha beta gamma", 16),
+            (mods(KeyCode::Char('b'), M::CONTROL), "alpha beta gamma", 15),
+            (mods(KeyCode::Char('f'), M::CONTROL), "alpha beta gamma", 16),
+            (mods(KeyCode::Char('b'), M::ALT), "alpha beta gamma", 11),
+            (mods(KeyCode::Char('b'), M::ALT), "alpha beta gamma", 6),
+            (mods(KeyCode::Char('f'), M::ALT), "alpha beta gamma", 10),
+            (key(KeyCode::Delete), "alpha betagamma", 10),
+            (key(KeyCode::Backspace), "alpha betgamma", 9),
+            (mods(KeyCode::Char('h'), M::CONTROL), "alpha begamma", 8),
+            (mods(KeyCode::Char('w'), M::CONTROL), "alpha gamma", 6),
+            (mods(KeyCode::Char('k'), M::CONTROL), "alpha ", 6),
+            (mods(KeyCode::Char('a'), M::CONTROL), "alpha ", 0),
+            (key(KeyCode::Char('x')), "xalpha ", 1),
+            (mods(KeyCode::Char('u'), M::CONTROL), "alpha ", 0),
+        ];
+        for (event, text, cursor) in steps {
+            assert!(
+                dashboard
+                    .handle_sessions_filter_key(*event, false)
+                    .is_some()
+            );
+            assert_eq!(
+                filter_state(&dashboard),
+                ((*text).to_owned(), *cursor),
+                "{event:?}"
+            );
+        }
+        // Up and Down are not text: the pane still gets them.
+        assert!(
+            dashboard
+                .handle_sessions_filter_key(key(KeyCode::Up), false)
+                .is_none()
+        );
+    }
+
+    fn filter_cells(dashboard: &mut DashboardState) -> (String, Vec<usize>) {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        let (x, y) = point(&lines, "Filter:");
+        let caret = theme::focus_control();
+        let reversed = (x..x + FILTER_LABEL.len() as u16 + FILTER_FIELD_MAX)
+            .filter(|&column| {
+                let cell = &buffer[(column, y)];
+                if theme::is_mono() {
+                    cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+                } else {
+                    Some(cell.bg) == caret.bg
+                }
+            })
+            .map(|column| usize::from(column - x))
+            .collect();
+        (lines[usize::from(y)].clone(), reversed)
+    }
+
+    /// The caret is a reversed cell at the cursor, and a field narrower than
+    /// its text scrolls to keep the cursor in view.
+    #[test]
+    fn the_filter_caret_follows_the_cursor_and_the_field_scrolls() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('/')));
+        for character in "abcdef".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let label = FILTER_LABEL.len();
+        // At the end the caret sits on the cell after the text.
+        let (row, reversed) = filter_cells(&mut dashboard);
+        assert!(row.contains("Filter: abcdef"), "{row:?}");
+        assert_eq!(reversed, vec![label + 6]);
+        // Moved left, it sits on the letter it would delete.
+        dashboard.handle_key(key(KeyCode::Left));
+        dashboard.handle_key(key(KeyCode::Left));
+        let (row, reversed) = filter_cells(&mut dashboard);
+        assert!(row.contains("Filter: abcdef"), "{row:?}");
+        assert_eq!(reversed, vec![label + 4]);
+
+        // Text wider than the field shows its tail with the caret on the last
+        // cell, then its head when the cursor goes home.
+        dashboard.handle_key(key(KeyCode::End));
+        for character in "ghijklmnopqrstuvwxyz0123456789".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let (row, reversed) = filter_cells(&mut dashboard);
+        assert!(row.contains("789 "), "{row:?}");
+        assert!(!row.contains("abc"), "{row:?}");
+        let [caret] = reversed[..] else {
+            panic!("one caret cell: {reversed:?} in {row:?}");
+        };
+        assert!(caret > label + 6, "{row:?}");
+        dashboard.handle_key(key(KeyCode::Home));
+        let (row, reversed) = filter_cells(&mut dashboard);
+        assert!(row.contains("Filter: abcdefghij"), "{row:?}");
+        assert!(!row.contains("789"), "{row:?}");
+        assert_eq!(reversed, vec![label]);
     }
 
     #[test]
@@ -1060,7 +1167,7 @@ mod tests {
             dashboard
                 .sessions_filter
                 .as_ref()
-                .is_some_and(|f| !f.editing && f.query == "q")
+                .is_some_and(|f| !f.editing && f.query.value() == "q")
         );
         dashboard.handle_key(key(KeyCode::Char('/')));
         dashboard.handle_key(key(KeyCode::Esc));
@@ -1080,7 +1187,7 @@ mod tests {
         let lines = draw(&mut dashboard, (140, 40));
         let row = actions_row(&dashboard, &lines);
         assert!(row.contains("Filter: q"), "{row:?}");
-        assert!(row.contains(" x "), "{row:?}");
+        assert!(!row.contains(" x "), "{row:?}");
         assert!(row.is_ascii(), "{row:?}");
     }
 

@@ -1,5 +1,6 @@
 use super::*;
 
+use mj_chat::text_input::EditOutcome;
 use ratatui::style::Style;
 
 use mj_client::daemon::SessionTextMatchKind;
@@ -287,7 +288,7 @@ impl DashboardState {
                     || self.session_matches_filter(session, filter)
             })
             .collect::<Vec<_>>();
-        let query = filter.query.trim().to_lowercase();
+        let query = filter.query.value().trim().to_lowercase();
         if !query.is_empty() {
             // A stable sort keeps the list's own order inside each group.
             kept.sort_by_key(|session| self.sessions_filter_rank(session, &query));
@@ -312,7 +313,7 @@ impl DashboardState {
         {
             return false;
         }
-        let query = filter.query.trim().to_lowercase();
+        let query = filter.query.value().trim().to_lowercase();
         if query.is_empty() {
             return true;
         }
@@ -363,7 +364,7 @@ impl DashboardState {
     pub(crate) fn sessions_ranked_by_match(&self) -> bool {
         self.sessions_filter
             .as_ref()
-            .is_some_and(|filter| !filter.query.trim().is_empty())
+            .is_some_and(|filter| !filter.query.value().trim().is_empty())
     }
 
     /// The search the daemon should run for the filter's text, with its
@@ -374,7 +375,7 @@ impl DashboardState {
         let query = self
             .sessions_filter
             .as_ref()
-            .map(|filter| filter.query.trim().to_owned())
+            .map(|filter| filter.query.value().trim().to_owned())
             .unwrap_or_default();
         let search = &mut self.sessions_text;
         if query == search.asked {
@@ -446,7 +447,7 @@ impl DashboardState {
         };
         let mut parts = Vec::new();
         if filter.editing || !filter.query.is_empty() {
-            parts.push(format!("/{}", filter.query));
+            parts.push(format!("/{}", filter.query.value()));
         }
         if let Some(state) = filter.state {
             parts.push(state.label().to_owned());
@@ -502,20 +503,14 @@ impl DashboardState {
                         self.sessions_filter = None;
                     }
                 }
-                KeyCode::Backspace => {
-                    filter.query.pop();
+                // Everything else is line editing: the shared single-line
+                // editor takes the readline keys, and leaves the arrows Up and
+                // Down (and anything it does not know) to the pane.
+                _ => {
+                    if matches!(filter.query.handle_key(key), EditOutcome::Unhandled) {
+                        return None;
+                    }
                 }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    filter.query.clear();
-                }
-                KeyCode::Char(character)
-                    if !key.modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                    ) =>
-                {
-                    filter.query.push(character);
-                }
-                _ => return None,
             }
             self.clamp_selections();
             return Some(());
@@ -541,7 +536,7 @@ impl DashboardState {
                     (Some(state), Some(filter)) => filter.state = Some(state),
                     (Some(state), None) => {
                         self.sessions_filter = Some(SessionsFilter {
-                            query: String::new(),
+                            query: mj_chat::text_input::TextInput::new(),
                             state: Some(state),
                             editing: false,
                         });

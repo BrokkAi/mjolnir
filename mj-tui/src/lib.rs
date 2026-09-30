@@ -110,7 +110,7 @@ pub(crate) enum SessionsRow {
 /// plain keys keep their meaning and the filter merely stays in force.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionsFilter {
-    pub query: String,
+    pub query: mj_chat::text_input::TextInput,
     pub state: Option<SessionStateFilter>,
     pub editing: bool,
 }

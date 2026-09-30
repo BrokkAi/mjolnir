@@ -575,6 +575,47 @@ impl TextField {
         }
     }
 
+    /// Cuts a single-line field down to `width` cells around `cursor` for a
+    /// host that draws its own caret. Returns the text before the caret, the
+    /// caret cell (the grapheme under the cursor, or a space at the end), and
+    /// the text after it. One cell is always kept for the caret, so the field
+    /// scrolls horizontally to keep the cursor in view.
+    #[must_use]
+    pub fn caret_window(value: &str, cursor: usize, width: usize) -> (String, String, String) {
+        let cursor = cursor.min(value.len());
+        let cursor_width = value[..cursor].width();
+        let scroll = cursor_width.saturating_sub(width.saturating_sub(1));
+        let mut start = 0;
+        let mut consumed = 0;
+        for grapheme in value[..cursor].graphemes(true) {
+            if consumed >= scroll {
+                break;
+            }
+            consumed += grapheme.width();
+            start += grapheme.len();
+        }
+        let before = value[start..cursor].to_owned();
+        let before_width = before.width();
+        let mut rest = value[cursor..].graphemes(true);
+        let under = rest.next();
+        let caret = match under {
+            Some(grapheme) if before_width + grapheme.width() <= width => grapheme.to_owned(),
+            _ => " ".to_owned(),
+        };
+        let mut after = String::new();
+        if under.is_some_and(|grapheme| grapheme == caret) {
+            let mut used = before_width + caret.width();
+            for grapheme in rest {
+                if used + grapheme.width() > width {
+                    break;
+                }
+                used += grapheme.width();
+                after.push_str(grapheme);
+            }
+        }
+        (before, caret, after)
+    }
+
     /// Applies an edit emitted by a form to a text input.
     pub fn apply(input: &mut TextInput, edit: super::FieldEdit) -> crate::text_input::EditOutcome {
         super::apply_field_edit(input, edit)
