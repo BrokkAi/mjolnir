@@ -1245,6 +1245,7 @@ pub(super) async fn serve_session(
                                 }
                             }
                             Some(CommandRequest::ClearContext { request_id }) |
+                            Some(CommandRequest::RestoreExecutionMode { request_id }) |
                             Some(CommandRequest::SetConfig { request_id, .. }) => {
                                 emit_runtime_event(
                                     events,
@@ -1407,6 +1408,55 @@ pub(super) async fn serve_session(
                                 reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
                                 request_id,
                                 message: format!("{error:#}"),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+            }
+            CommandRequest::RestoreExecutionMode { request_id } => {
+                let applied = async {
+                    let desired = enforcement
+                        .and_then(ExecutionEnforcement::acp_mode)
+                        .context("this harness has no execution mode to restore")?;
+                    enforce_execution_mode(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        desired,
+                        &mut config_options,
+                        &mut modes,
+                    )
+                    .await
+                }
+                .await;
+                match applied {
+                    Ok(value) => {
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::SessionModesConfigured {
+                                modes: modes.clone(),
+                            },
+                        )
+                        .await?;
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::ConfigApplied {
+                                request_id,
+                                key: "mode".into(),
+                                value,
+                                config_options: config_options.clone(),
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::CommandRejected {
+                                reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                                request_id,
+                                message: format!("restore execution mode: {error:#}"),
                             },
                         )
                         .await?;

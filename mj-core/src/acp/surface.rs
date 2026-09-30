@@ -21,8 +21,15 @@ const FAST_MODE_OFF: &str = "off";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanControl {
-    SetConfig { key: String, value: String },
-    SetSessionMode { mode_id: String },
+    SetConfig {
+        key: String,
+        value: String,
+    },
+    SetSessionMode {
+        mode_id: String,
+    },
+    /// The worker restores the execution policy saved in its launch spec.
+    RestoreExecutionMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +182,9 @@ impl AcpSessionSurface {
     pub fn finish_plan_mode_change(&mut self, active: bool) {
         self.plan_mode_change_pending = false;
         self.current_mode = Some(if active { "plan" } else { "default" }.into());
+        if self.harness_kind == Some(HarnessKind::Claude) && !active {
+            self.sync_plan_mode();
+        }
     }
 
     pub fn supports_plan_mode(&self) -> bool {
@@ -186,6 +196,12 @@ impl AcpSessionSurface {
     }
 
     pub fn plan_control(&self, active: bool) -> Result<PlanControl, PlanControlError> {
+        if self.harness_kind == Some(HarnessKind::Claude) && !active {
+            return self
+                .supports_plan_mode()
+                .then_some(PlanControl::RestoreExecutionMode)
+                .ok_or(PlanControlError::Incompatible);
+        }
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
             // Muse has no plan mode over ACP; see `forwards_plan_command`.
@@ -342,6 +358,24 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
         surface.finish_plan_mode_change(true);
         assert_eq!(surface.current_mode(), Some("plan"));
+    }
+
+    #[test]
+    fn claude_plan_exit_restores_worker_policy_and_keeps_the_confirmed_mode() {
+        for restored in ["auto", "bypassPermissions"] {
+            let mut surface = AcpSessionSurface::default();
+            surface.set_harness_kind(HarnessKind::Claude);
+            surface.set_config_options(&[mode_option("mode", "plan")]);
+            assert_eq!(
+                surface.plan_control(false),
+                Ok(PlanControl::RestoreExecutionMode)
+            );
+            surface.begin_plan_mode_change(false);
+            surface.set_config_options(&[mode_option("mode", restored)]);
+            surface.finish_plan_mode_change(false);
+            assert_eq!(surface.current_mode(), Some(restored));
+            assert!(!surface.plan_mode_active());
+        }
     }
 
     #[test]

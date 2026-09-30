@@ -480,7 +480,7 @@ pub(super) async fn enforce_execution_mode(
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
     legacy_modes: &mut Option<agent_client_protocol::schema::v1::SessionModeState>,
-) -> Result<()> {
+) -> Result<String> {
     if let Some(option) = config_options.iter().find(|option| {
         option.category == Some(SessionConfigOptionCategory::Mode)
             && select_contains(&option.kind, desired)
@@ -508,9 +508,9 @@ pub(super) async fn enforce_execution_mode(
             ),
         };
         if let Some(modes) = legacy_modes.as_mut() {
-            modes.current_mode_id = applied.into();
+            modes.current_mode_id = applied.clone().into();
         }
-        return Ok(());
+        return Ok(applied);
     }
     if legacy_modes.as_ref().is_some_and(|modes| {
         modes
@@ -533,7 +533,7 @@ pub(super) async fn enforce_execution_mode(
         if let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = desired.to_owned().into();
         }
-        return Ok(());
+        return Ok(desired.to_owned());
     }
     bail!("ACP bridge does not expose required execution mode {desired}")
 }

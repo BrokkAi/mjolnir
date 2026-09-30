@@ -895,6 +895,71 @@ async fn an_effort_the_live_session_offers_is_accepted_while_the_snapshot_still_
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn advertised_permission_mode_is_listed_and_can_be_restored_through_the_api() {
+    let mut view = live_view("flash", &["high"]);
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .config_options
+        .push(
+            serde_json::from_value(serde_json::json!({
+                "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                "currentValue": "default", "options": [
+                    {"value": "default", "name": "Manual"},
+                    {"value": "plan", "name": "Plan"},
+                    {"value": "auto", "name": "Auto"}
+                ]
+            }))
+            .unwrap(),
+        );
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(view),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.set_config = true;
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"mode","value":"auto"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let mode = body["config_options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["key"] == "mode")
+        .expect("the API lists the permission selector");
+    assert!(
+        mode["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|choice| choice["value"] == "auto")
+    );
+    // The fake does not mutate its reported current value.
+    assert_eq!(mode["current"], "default");
+    let response = app
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"mode","value":"unadvertised"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 fn api_app(
     backend: Arc<FakeBackend>,
     adjust: impl FnOnce(&mut ViewerSnapshot),

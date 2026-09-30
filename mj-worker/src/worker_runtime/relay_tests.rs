@@ -2508,6 +2508,96 @@ async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_
     coordinator.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mode() {
+    let request = RelayRequest::Submit {
+        command_id: "restore-mode".into(),
+        command: RelayCommand::RestoreExecutionMode,
+    };
+    assert!(!request.supported_at(27));
+    assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
+
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(unix::run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit(&mut relay.lock().unwrap(), "prompt-1", prompt("running"));
+    wake_tx.try_send(()).unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-1", "running");
+    submit(
+        &mut relay.lock().unwrap(),
+        "restore-mode",
+        RelayCommand::RestoreExecutionMode,
+    );
+    wake_tx.try_send(()).unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), command_rx.recv())
+            .await
+            .is_err()
+    );
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-1".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), command_rx.recv()).await.unwrap().unwrap(),
+        CommandRequest::RestoreExecutionMode { request_id } if request_id == "restore-mode"
+    ));
+    event_tx
+        .send(RuntimeEvent::ConfigApplied {
+            request_id: "restore-mode".into(),
+            key: "mode".into(),
+            value: "auto".into(),
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| {
+        state.config.get("mode").map(String::as_str) == Some("auto")
+    })
+    .await;
+    let events = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(&event.observation,
+        RelayObservation::CommandCompleted { command_id, outcome: mj_core::relay::RelayCommandOutcome::Configured, .. }
+            if command_id == "restore-mode"
+    )));
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+    drop(relay);
+    let reopened = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    assert_eq!(
+        reopened
+            .operational_state()
+            .config
+            .get("mode")
+            .map(String::as_str),
+        Some("auto")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let temp = tempfile::tempdir().unwrap();

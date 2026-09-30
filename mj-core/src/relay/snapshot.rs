@@ -93,6 +93,8 @@ pub enum RelayCommand {
         key: String,
         value: String,
     },
+    /// Restore the worker's saved execution policy after planning.
+    RestoreExecutionMode,
     /// Native goal control delivered independently of the prompt queue.
     GoalControl {
         action: crate::goal::GoalControlAction,
@@ -168,6 +170,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::RestoreExecutionMode => 28,
             Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
             Self::SetQuotaRecovery { .. } | Self::ResumeAfterQuota { .. } => 20,
@@ -227,6 +230,7 @@ impl RelayCommand {
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
+                | Self::RestoreExecutionMode
                 | Self::GoalControl { .. }
                 | Self::SetSessionMode { .. }
                 | Self::CancelTurn
@@ -256,6 +260,7 @@ impl RelayCommand {
             Self::RemoveQueuedPrompt { .. } => RelayCommandKind::RemoveQueuedPrompt,
             Self::ClearQueuedPrompts => RelayCommandKind::ClearQueuedPrompts,
             Self::SetConfig { .. } => RelayCommandKind::SetConfig,
+            Self::RestoreExecutionMode => RelayCommandKind::RestoreExecutionMode,
             Self::GoalControl { .. } => RelayCommandKind::GoalControl,
             Self::SetSessionMode { .. } => RelayCommandKind::SetSessionMode,
             Self::CancelTurn => RelayCommandKind::CancelTurn,
@@ -288,6 +293,7 @@ pub enum RelayCommandKind {
     RemoveQueuedPrompt,
     ClearQueuedPrompts,
     SetConfig,
+    RestoreExecutionMode,
     GoalControl,
     SetSessionMode,
     CancelTurn,
@@ -312,6 +318,7 @@ impl RelayCommandKind {
             Self::RemoveQueuedPrompt => "remove_queued_prompt",
             Self::ClearQueuedPrompts => "clear_queued_prompts",
             Self::SetConfig => "set_config",
+            Self::RestoreExecutionMode => "restore_execution_mode",
             Self::GoalControl => "goal_control",
             Self::SetSessionMode => "set_session_mode",
             Self::CancelTurn => "cancel_turn",

@@ -1175,7 +1175,9 @@ impl DurableRelay {
             dispatch.state == RelayDispatchState::InFlight
                 && matches!(
                     dispatch.command,
-                    RelayCommand::SetConfig { .. } | RelayCommand::SetSessionMode { .. }
+                    RelayCommand::SetConfig { .. }
+                        | RelayCommand::SetSessionMode { .. }
+                        | RelayCommand::RestoreExecutionMode
                 )
         })
     }
