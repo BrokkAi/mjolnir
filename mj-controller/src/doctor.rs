@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::controller::{WorkerBinaryAvailability, worker_binary_prerequisite_for_arch};
+use crate::controller::{
+    WorkerBinaryAvailability, ssh_worker_binary_prerequisite, worker_binary_prerequisite_for_arch,
+};
 use crate::setup::{
     DiscoveredHome, discover_harness_homes_with_executor, harness_is_authenticated_with_executor,
 };
@@ -216,6 +218,7 @@ pub fn run_with_config_path(
     checks.extend(build_cache_checks(offered, executor));
     checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(offered));
+    checks.extend(ssh_bare_worker_checks(config, executor));
     checks.push(daemon_build_check());
     checks.extend(worker_freshness_checks(offered));
     checks.extend(review_residue_checks(config));
@@ -2473,6 +2476,37 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         .collect()
 }
 
+/// One worker check per bare SSH target: the worker the host's own platform
+/// needs, which the daemon refuses a launch without (RVE-2). A macOS host
+/// needs a Darwin worker, not the Linux one a container check looks for.
+fn ssh_bare_worker_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter(|(_, target)| matches!(target, TargetTemplate::SshBare { .. }))
+        .map(|(id, target)| {
+            let check_id = format!("worker.{id}");
+            let title = format!("Worker binary for SSH target {id}");
+            match ssh_worker_binary_prerequisite(target, executor) {
+                None => DoctorCheck::unsupported(
+                    check_id,
+                    title,
+                    format!(
+                        "The platform of this host could not be read over SSH, so its worker binary is not checked; see `runtime.ssh-bare.{id}`."
+                    ),
+                ),
+                Some((triple, result)) => worker_source_check(check_id, title, &triple, result),
+            }
+        })
+        .collect()
+}
+
 fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
     let title = format!("Container worker binary for target {id}");
     let arch = match container_architecture(container.platform.as_deref()) {
@@ -2482,9 +2516,23 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
         }
     };
     let triple = format!("{arch}-unknown-linux-musl");
-    match worker_binary_prerequisite_for_arch(arch) {
+    worker_source_check(
+        format!("worker.{id}"),
+        title,
+        &triple,
+        worker_binary_prerequisite_for_arch(arch),
+    )
+}
+
+fn worker_source_check(
+    check_id: String,
+    title: String,
+    triple: &str,
+    source: anyhow::Result<WorkerBinaryAvailability>,
+) -> DoctorCheck {
+    match source {
         Ok(WorkerBinaryAvailability::Local { path, source }) => DoctorCheck::ready(
-            format!("worker.{id}"),
+            check_id,
             title,
             format!(
                 "{triple} worker is available from {source}: {}",
@@ -2492,12 +2540,12 @@ fn worker_binary_check(id: &str, container: &ContainerTemplate) -> DoctorCheck {
             ),
         ),
         Ok(WorkerBinaryAvailability::Remote { url, .. }) => DoctorCheck::ready(
-            format!("worker.{id}"),
+            check_id,
             title,
             format!("{triple} worker will be verified and downloaded from {url} when needed."),
         ),
         Err(error) => DoctorCheck::fixable(
-            format!("worker.{id}"),
+            check_id,
             title,
             format!("No usable {triple} worker source: {error:#}"),
             format!(

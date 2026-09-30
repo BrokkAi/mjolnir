@@ -133,7 +133,7 @@ pub(super) async fn start_session(
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),
     };
-    validate_action(&action, &state.snapshot_rx.borrow())?;
+    crate::server::validate_action_live(&state, &action).await?;
     super::super::identify_raw_project(&mut action);
 
     let (reply, outcome) = tokio::sync::oneshot::channel();

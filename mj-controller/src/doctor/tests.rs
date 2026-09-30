@@ -2577,3 +2577,71 @@ fn doctor_warns_when_bifrost_cannot_run_or_names_no_version() {
         assert!(check.remediation.is_some());
     }
 }
+
+/// A bare SSH target gets a worker check for the platform the host runs: a
+/// macOS host without a Darwin worker is fixable with the triple to build, a
+/// host with its worker is ready, and a host that does not answer is skipped
+/// (RVE-2).
+#[test]
+fn a_bare_ssh_target_gets_a_worker_check_for_the_platform_it_runs() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    const CHILD: &str = "MJ_DOCTOR_SSH_WORKER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut worker = b"linux x86_64".to_vec();
+        worker.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
+        std::fs::write(
+            directory.path().join("mj-worker-x86_64-unknown-linux-musl"),
+            worker,
+        )
+        .unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "a_bare_ssh_target_gets_a_worker_check_for_the_platform_it_runs",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "doctor-ssh-worker")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_DIR", directory.path())
+        .run();
+        return;
+    }
+    let config = ssh_bare_config();
+    let checks = ssh_bare_worker_checks(
+        Ok(&config),
+        &FakeExecutor::new([Ok(output("Darwin arm64\n"))]),
+    );
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].id, "worker.builder");
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    assert!(
+        checks[0].detail.contains("aarch64-apple-darwin"),
+        "{:?}",
+        checks[0]
+    );
+    assert!(
+        checks[0]
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("cargo build --release --target aarch64-apple-darwin"),
+        "{:?}",
+        checks[0]
+    );
+
+    let ready = ssh_bare_worker_checks(
+        Ok(&config),
+        &FakeExecutor::new([Ok(output("Linux x86_64\n"))]),
+    );
+    assert_eq!(ready[0].status, CheckStatus::Ready, "{:?}", ready[0]);
+
+    let skipped =
+        ssh_bare_worker_checks(Ok(&config), &FakeExecutor::new([Ok(failed("timed out"))]));
+    assert_eq!(
+        skipped[0].status,
+        CheckStatus::Unsupported,
+        "{:?}",
+        skipped[0]
+    );
+    assert!(ssh_bare_worker_checks(Err(ConfigGap::Unreadable), &AlwaysFailingExecutor).is_empty());
+}

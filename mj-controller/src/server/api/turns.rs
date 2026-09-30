@@ -517,7 +517,7 @@ pub(super) async fn send_action(
     state: &ServerState,
     action: ControllerAction,
 ) -> Result<StatusCode, ApiFailure> {
-    validate_action(&action, &state.snapshot_rx.borrow())?;
+    crate::server::validate_action_live(state, &action).await?;
     let (reply, outcome) = tokio::sync::oneshot::channel();
     state
         .action_tx

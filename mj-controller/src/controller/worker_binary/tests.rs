@@ -5804,3 +5804,56 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         }
     }
 }
+
+/// The admission check names the worker a bare SSH host lacks, and only that
+/// one: a host that runs a platform the daemon can serve, or that does not
+/// answer, is not a worker-source problem (RVE-2).
+#[test]
+fn worker_source_problem_names_the_platform_a_bare_ssh_host_lacks() {
+    const CHILD: &str = "MJ_WORKER_SOURCE_PROBLEM_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("mj-worker-x86_64-unknown-linux-musl"),
+            stamped_worker(b"linux x86_64"),
+        )
+        .unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "worker_source_problem_names_the_platform_a_bare_ssh_host_lacks",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "worker-source-problem")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_DIR", directory.path())
+        .run();
+        return;
+    }
+    struct Platform(Option<&'static str>);
+    impl CommandExecutor for Platform {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.purpose, "detect target platform");
+            match self.0 {
+                Some(uname) => Ok(CommandOutput {
+                    status: 0,
+                    stdout: uname.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                }),
+                None => bail!("connection timed out"),
+            }
+        }
+    }
+    let template = mj_core::config::TargetTemplate::SshBare {
+        ssh: ssh_connection(),
+        permissions: mj_core::config::PermissionMode::Yolo,
+        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
+    };
+    assert_eq!(
+        worker_source_problem(&template, &Platform(Some("Linux x86_64"))),
+        None
+    );
+    let problem = worker_source_problem(&template, &Platform(Some("Darwin arm64")))
+        .expect("no Darwin worker is installed");
+    assert!(problem.contains("aarch64-apple-darwin"), "{problem}");
+    assert_eq!(worker_source_problem(&template, &Platform(None)), None);
+}

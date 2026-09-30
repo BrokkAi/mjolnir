@@ -103,6 +103,66 @@ pub(in crate::controller) fn preflight_worker_binary(
     }
 }
 
+/// Why no worker binary could serve a session on this target, or `None` when
+/// one can (or when that cannot be told without a host that does not answer).
+///
+/// This is the resolution `preflight_worker_binary` performs, without the
+/// download or the build check, so the daemon can refuse a launch up front
+/// instead of admitting it and failing the session seconds later. An
+/// existing SSH host is asked its platform; a host that does not answer, or
+/// answers with a platform Mjolnir does not support, is not a worker-source
+/// problem and is left to the launch to report.
+pub(crate) fn worker_source_problem(
+    template: &mj_core::config::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Option<String> {
+    if let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template {
+        let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
+            .purpose("detect target platform");
+        let platform = probe_platform(executor, command).ok()?;
+        return worker_binary_for_arch(
+            platform.architecture,
+            WorkerBinaryRequirement::for_os(platform.os),
+        )
+        .err()
+        .map(|error| format!("{error:#}"));
+    }
+    let requirement = if matches!(template, mj_core::config::TargetTemplate::LocalBare) {
+        WorkerBinaryRequirement::LocalHost
+    } else {
+        WorkerBinaryRequirement::PortableLinux
+    };
+    let mut failure = None;
+    for arch in preflight_architectures(template) {
+        match worker_binary_for_arch(arch, requirement) {
+            Ok(_) => return None,
+            Err(error) => failure = Some(format!("{error:#}")),
+        }
+    }
+    failure
+}
+
+/// The worker an existing SSH host needs, with the target triple it is
+/// named by, read from the host's own platform. `None` for a template that
+/// is not a bare SSH host and for a host that does not say what it runs; the
+/// SSH reachability check reports the latter.
+pub fn ssh_worker_binary_prerequisite(
+    template: &mj_core::config::TargetTemplate,
+    executor: &impl CommandExecutor,
+) -> Option<(String, Result<WorkerBinaryAvailability>)> {
+    let mj_core::config::TargetTemplate::SshBare { ssh, .. } = template else {
+        return None;
+    };
+    let command = targets::ssh_command(&SshTarget::from(ssh), ["uname", "-sm"])
+        .purpose("detect target platform");
+    let platform = probe_platform(executor, command).ok()?;
+    let requirement = WorkerBinaryRequirement::for_os(platform.os);
+    Some((
+        requirement.triple(platform.architecture),
+        worker_binary_for_arch(platform.architecture, requirement),
+    ))
+}
+
 pub(in crate::controller) fn worker_binary_for(
     locator: &targets::TargetLocator,
     executor: &impl CommandExecutor,

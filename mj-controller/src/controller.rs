@@ -80,7 +80,7 @@ pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
-pub(crate) use worker_binary::refresh_target_worker_binary_if_stale;
+pub(crate) use worker_binary::{refresh_target_worker_binary_if_stale, worker_source_problem};
 pub(crate) use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
@@ -100,7 +100,7 @@ pub use reviewer::reviewer_stager;
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
-    worker_binary_prerequisite_for_arch,
+    ssh_worker_binary_prerequisite, worker_binary_prerequisite_for_arch,
 };
 pub use worker_restart::WorkerUpgradeOutcome;
 pub use worktree::{ResumePlan, local_project_repository, resume_compatibility};

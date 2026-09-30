@@ -166,7 +166,7 @@ impl WorkerBinaryRequirement {
         }
     }
 
-    fn triple(self, arch: &str) -> String {
+    pub(super) fn triple(self, arch: &str) -> String {
         match self {
             Self::Darwin => format!("{arch}-apple-darwin"),
             Self::LocalHost if cfg!(target_os = "macos") => format!("{arch}-apple-darwin"),

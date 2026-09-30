@@ -203,7 +203,13 @@ pub struct ServerOptions {
     /// options route. Tests replace it so the answer does not depend on the
     /// engines the test host has.
     engine_checks: Arc<api::LocalEngineChecks>,
+    worker_source_check: Option<WorkerSourceCheck>,
 }
+
+/// Answers, for a target id, why no worker binary could serve a session there.
+/// It blocks (a bare SSH host is asked its platform), so callers run it off
+/// the async runtime.
+pub type WorkerSourceCheck = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Typed request channels served by the authenticated HTTP surface.
 pub struct ServerRequests {
@@ -250,6 +256,7 @@ impl ServerOptions {
             subagent: None,
             preferences_path: mj_core::go::GoPreferences::path(),
             engine_checks: Arc::new(api::LocalEngineChecks::on_this_host()),
+            worker_source_check: None,
         })
     }
 
@@ -312,6 +319,12 @@ impl ServerOptions {
     /// through. Without it those routes answer 503.
     pub fn set_subagent_backend(&mut self, backend: Arc<dyn api::SubagentBackend>) {
         self.subagent = Some(backend);
+    }
+
+    /// Refuse launches, resumes and moves onto a target the check reports as
+    /// having no worker binary. Without it every target is admitted.
+    pub fn set_worker_source_check(&mut self, check: WorkerSourceCheck) {
+        self.worker_source_check = Some(check);
     }
 
     /// Read the remembered default from a specific preferences file instead

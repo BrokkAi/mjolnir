@@ -956,6 +956,21 @@ fn api_app_with_engines(
     watch::Sender<ViewerSnapshot>,
     mpsc::Receiver<super::super::BundleRequest>,
 ) {
+    api_app_with_worker_check(backend, adjust, preferences_path, engine_probe, None)
+}
+
+fn api_app_with_worker_check(
+    backend: Arc<FakeBackend>,
+    adjust: impl FnOnce(&mut ViewerSnapshot),
+    preferences_path: PathBuf,
+    engine_probe: super::EngineProbe,
+    worker_check: Option<crate::server::WorkerSourceCheck>,
+) -> (
+    axum::Router,
+    mpsc::Receiver<ControllerRequest>,
+    watch::Sender<ViewerSnapshot>,
+    mpsc::Receiver<super::super::BundleRequest>,
+) {
     let (config, state) = sample_config_state();
     // The sample record carries a recorded error. It is left in place: a
     // session-scoped error must not answer a wait about one turn, so every
@@ -993,6 +1008,9 @@ fn api_app_with_engines(
     options.set_subagent_backend(backend);
     options.set_preferences_path(preferences_path);
     options.set_engine_probe(engine_probe);
+    if let Some(check) = worker_check {
+        options.set_worker_source_check(check);
+    }
     (router(options), action_rx, snapshot_tx, bundle_rx)
 }
 
@@ -4220,6 +4238,39 @@ async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
         body.contains("Docker is not installed on this host"),
         "{body}"
     );
+    assert!(actions.try_recv().is_err(), "nothing was launched");
+}
+
+/// A target the daemon has no worker binary for is refused at admission with
+/// the reason, before anything is launched (RVE-2); a target it does have one
+/// for is admitted.
+#[tokio::test]
+async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
+    let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
+        (target == "podman").then(|| {
+            "worker source for aarch64 (Darwin) was unavailable when the daemon started: not built"
+                .to_owned()
+        })
+    });
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app_with_worker_check(
+        Arc::new(FakeBackend::default()),
+        |_| {},
+        absent_preferences_path(),
+        Arc::new(|_| Some(crate::controller::LocalEngineReadiness::Ready)),
+        Some(check),
+    );
+    let response = app
+        .oneshot(start_request(
+            r#"{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(body.contains("podman"), "{body}");
+    assert!(body.contains("aarch64 (Darwin)"), "{body}");
+    assert!(body.contains("MJ_WORKER_DIR"), "{body}");
     assert!(actions.try_recv().is_err(), "nothing was launched");
 }
 

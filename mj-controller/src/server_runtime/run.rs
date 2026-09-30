@@ -124,6 +124,13 @@ pub(crate) async fn run_server(
         &crate::server::api_token_path(),
     )?);
     options.set_subagent_backend(api_backend.clone());
+    // A launch onto a target the daemon has no worker binary for is refused at
+    // admission, from the configuration as it is on disk right now.
+    options.set_worker_source_check(std::sync::Arc::new(|target_id| {
+        let controller = Controller::load().ok()?;
+        let template = controller.config.targets.get(target_id)?;
+        crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
+    }));
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
     // Publish a pin only for a certificate the operator configured. A

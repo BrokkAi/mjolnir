@@ -342,7 +342,49 @@ pub(super) async fn validate_action_live(
         }
         _ => None,
     };
-    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())
+    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())?;
+    require_worker_source(state, action).await
+}
+
+/// The target a launch, resume or move would put a session on.
+fn launch_target(action: &ControllerAction) -> Option<&str> {
+    match action {
+        ControllerAction::New { target_id, .. } | ControllerAction::Resume { target_id, .. } => {
+            Some(target_id)
+        }
+        ControllerAction::Move { request } => {
+            request.preparation.selection.target_template_id.as_deref()
+        }
+        _ => None,
+    }
+}
+
+/// Refuse a New, Resume or Move whose target has no worker binary the daemon
+/// can install, the way a missing runtime is refused: at admission, with the
+/// reason, instead of admitting the session and failing it seconds later.
+///
+/// Which worker a bare SSH host needs depends on its operating system, which
+/// only the host can say, so the check may contact it; it runs off the async
+/// runtime. A server built without a check (tests, the viewer alone) admits.
+async fn require_worker_source(
+    state: &ServerState,
+    action: &ControllerAction,
+) -> Result<(), ApiError> {
+    let (Some(check), Some(target_id)) = (state.worker_source_check.clone(), launch_target(action))
+    else {
+        return Ok(());
+    };
+    let target_id = target_id.to_owned();
+    let checked = target_id.clone();
+    let problem = tokio::task::spawn_blocking(move || check(&checked))
+        .await
+        .map_err(|_| ApiError::controller_unavailable())?;
+    match problem {
+        Some(problem) => Err(ApiError::bad_request(format!(
+            "target \"{target_id}\" cannot run sessions: {problem}. Build the worker for that platform, install it beside `mj`, or set MJ_WORKER_BINARY, MJ_WORKER_DIR, or MJ_WORKER_URL with MJ_WORKER_SHA256."
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn validate_action_against(

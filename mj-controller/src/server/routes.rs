@@ -29,6 +29,8 @@ pub(super) struct ServerState {
     pub(super) preferences_path: PathBuf,
     /// Local container engine checks for the launch options route.
     pub(super) engine_checks: Arc<api::LocalEngineChecks>,
+    /// Why a target has no installable worker binary, if it has none.
+    pub(super) worker_source_check: Option<WorkerSourceCheck>,
     /// Prompts held until their starting session can take them.
     pub(super) held_prompts: Arc<api::HeldPrompts>,
 }
@@ -110,6 +112,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         subagent: options.subagent,
         preferences_path: options.preferences_path,
         engine_checks: options.engine_checks,
+        worker_source_check: options.worker_source_check,
         held_prompts: Arc::new(api::HeldPrompts::default()),
     };
     let protected = Router::new()
