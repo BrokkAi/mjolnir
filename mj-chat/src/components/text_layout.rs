@@ -5,8 +5,27 @@ use std::collections::VecDeque;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Display text uses the same wrapping for measurement and rendering.
+pub fn wrap_lines<'a>(lines: impl IntoIterator<Item = Line<'a>>, width: u16) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .flat_map(|line| {
+            let owned = Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| {
+                        Span::styled(span.content.into_owned(), line.style.patch(span.style))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            crate::chat::wrap_styled_line(owned, usize::from(width), 0)
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InputGrapheme {

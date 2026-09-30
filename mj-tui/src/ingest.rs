@@ -8,8 +8,7 @@ use mj_core::config::Config;
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::state::{
     MaterializedExecutionState, MaterializedSession, MaterializedSessionSummary, MoveOperation,
-    SessionRecord, SessionResourceAllocation, State, TranscriptBody, TranscriptItem,
-    normalize_session_title,
+    SessionRecord, State, TranscriptBody, TranscriptItem, normalize_session_title,
 };
 
 use mj_chat::chat::{Notices, TranscriptSnapshot};
@@ -17,8 +16,7 @@ use mj_client::quota::ProfileQuota;
 use mj_core::targets::{DeploymentCapacityTarget, DeploymentCapacityUsage, ProvisionStage};
 use mj_transcript::transcript::{materialized_content_text, materialized_tool_diffstats};
 
-use crate::wizards::clamp_resources;
-use crate::{DashboardState, Mode, SessionOperationKind, nth_key};
+use crate::{DashboardState, SessionOperationKind};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionOperationDisplay {
@@ -980,7 +978,7 @@ impl DashboardState {
         result: std::result::Result<Option<DeploymentCapacityUsage>, String>,
         sampled_at_epoch_seconds: u64,
     ) {
-        let (affected_targets, limits) = {
+        let affected_targets = {
             let Some(detail) = self.capacity_details.get_mut(target_id) else {
                 return;
             };
@@ -994,44 +992,9 @@ impl DashboardState {
                 }
                 Err(error) => detail.probe_error = Some(error),
             }
-            let affected_targets = detail.target.target_ids.clone();
-            let limits = detail
-                .usage
-                .as_ref()
-                .map(|usage| (usage.logical_cores, usage.memory_total_bytes));
-            (affected_targets, limits)
+            detail.target.target_ids.clone()
         };
-        if let Some(limits) = limits {
-            match &mut self.mode {
-                Mode::New(wizard) => {
-                    let selected = nth_key(&self.config.targets, wizard.target);
-                    if affected_targets.contains(&selected)
-                        && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-                            &wizard.resource_allocation
-                    {
-                        let (cpus, memory_bytes) =
-                            clamp_resources(*cpus, *memory_bytes, Some(limits));
-                        wizard.resource_allocation =
-                            Some(SessionResourceAllocation::Container { cpus, memory_bytes });
-                        wizard.sizing_error = None;
-                    }
-                }
-                Mode::Resume(wizard) => {
-                    let selected = nth_key(&self.config.targets, wizard.target);
-                    if affected_targets.contains(&selected)
-                        && let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-                            &wizard.resource_allocation
-                    {
-                        let (cpus, memory_bytes) =
-                            clamp_resources(*cpus, *memory_bytes, Some(limits));
-                        wizard.resource_allocation =
-                            Some(SessionResourceAllocation::Container { cpus, memory_bytes });
-                        wizard.sizing_error = None;
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.refresh_wizard_resource_limits(&affected_targets);
     }
 
     pub fn begin_capacity_refresh(&mut self) {

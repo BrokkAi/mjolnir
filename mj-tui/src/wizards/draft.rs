@@ -56,6 +56,10 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
     fn form(&self) -> &RefCell<Dialog<WizardControl>>;
     fn form_mut(&mut self) -> &mut Dialog<WizardControl>;
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation>;
+    fn sizing_error(&self) -> Option<&str>;
+    fn resource_editor(&self) -> &ResourceEditor;
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor;
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>>;
     /// The three sizing fields at once, so a caller can read the cached AWS
     /// sizes while writing the chosen allocation and the sizing error.
     fn sizing_mut(
@@ -156,7 +160,7 @@ pub(crate) trait WizardDraft: Sized + CompletesPaths {
 }
 
 /// Whether the target step's Next is enabled: the draft must be able to use
-/// the selected target, and an EC2 target must already have a size.
+/// the selected target, and a sized target must have a valid allocation.
 pub(crate) fn target_advance_enabled<W: WizardDraft>(
     dashboard: &DashboardState,
     wizard: &W,
@@ -166,7 +170,7 @@ pub(crate) fn target_advance_enabled<W: WizardDraft>(
         && (wizard.resource_allocation().is_some()
             || !matches!(
                 dashboard.config.targets.get(&target_id),
-                Some(TargetTemplate::AwsEc2 { .. })
+                Some(target) if target_is_sized(target)
             ))
 }
 
@@ -223,6 +227,20 @@ impl WizardDraft for NewWizard {
         self.resource_allocation.as_ref()
     }
 
+    fn sizing_error(&self) -> Option<&str> {
+        self.sizing_error.as_deref()
+    }
+
+    fn resource_editor(&self) -> &ResourceEditor {
+        &self.resource_editor
+    }
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
+        &mut self.resource_editor
+    }
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
+        &self.aws_options
+    }
+
     fn sizing_mut(
         &mut self,
     ) -> (
@@ -267,13 +285,14 @@ impl WizardDraft for NewWizard {
     }
 
     /// Anything that changes what would be created invalidates the remote
-    /// creation preflight. Removing an attachment, adjusting sizes, opening a
-    /// fresh attachment editor and editing a field do not, because none of
+    /// creation preflight. Removing an attachment, opening a fresh
+    /// attachment editor and editing an unrelated field do not, because none of
     /// them changes the sources the preflight resolved.
     fn note_draft_change(&mut self, dashboard: &mut DashboardState, change: DraftChange) {
         if matches!(
             change,
             DraftChange::BundleSelected
+                | DraftChange::ResourcesAdjusted
                 | DraftChange::TargetSelected
                 | DraftChange::AttachmentOpened
                 | DraftChange::ReviewLeft
@@ -663,6 +682,20 @@ impl WizardDraft for ResumeWizard {
 
     fn resource_allocation(&self) -> Option<&SessionResourceAllocation> {
         self.resource_allocation.as_ref()
+    }
+
+    fn sizing_error(&self) -> Option<&str> {
+        self.sizing_error.as_deref()
+    }
+
+    fn resource_editor(&self) -> &ResourceEditor {
+        &self.resource_editor
+    }
+    fn resource_editor_mut(&mut self) -> &mut ResourceEditor {
+        &mut self.resource_editor
+    }
+    fn aws_options(&self) -> &BTreeMap<String, Vec<SessionResourceAllocation>> {
+        &self.aws_options
     }
 
     fn sizing_mut(

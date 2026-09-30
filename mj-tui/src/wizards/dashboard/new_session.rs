@@ -36,11 +36,7 @@ impl DashboardState {
                     return self.advance_new_wizard(wizard);
                 }
                 wizard.form.get_mut().focus(step_initial(wizard.step));
-                let action = if wizard.resource_allocation.is_some() {
-                    DashboardAction::None
-                } else {
-                    self.prepare_wizard_target(&mut wizard)
-                };
+                let action = self.initialize_wizard_resources(&mut wizard);
                 self.mode = Mode::New(wizard);
                 action
             }
@@ -62,14 +58,12 @@ impl DashboardState {
                     .targets
                     .get(&target_template_id)
                     .expect("selected target index is present in config");
-                if matches!(target, TargetTemplate::AwsEc2 { .. })
-                    && wizard.resource_allocation.is_none()
-                {
+                if target_is_sized(target) && wizard.resource_allocation.is_none() {
                     self.notices.set(
                         wizard
                             .sizing_error
                             .clone()
-                            .unwrap_or_else(|| "EC2 sizes are still loading.".into()),
+                            .unwrap_or_else(|| "Resource sizing is not ready.".into()),
                     );
                     self.mode = Mode::New(wizard);
                     return DashboardAction::None;

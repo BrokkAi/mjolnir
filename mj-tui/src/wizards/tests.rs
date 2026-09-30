@@ -1359,7 +1359,7 @@ fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() 
             }),
         );
         let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
-        for label in ["/work/visible", "Filter (Enter)", "Use project"] {
+        for label in ["/work/visible", "Filter:", "Use project"] {
             assert!(
                 text.contains(label),
                 "missing {label:?} at {width}x{height}:\n{text}"
@@ -1460,9 +1460,29 @@ fn project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions() {
             ["owner/visible"]
         );
         assert!(project_wizard(&dashboard).new_bundle_source.is_empty());
+        // The spaced form can exceed a short terminal. Tab must reveal the
+        // repository actions rather than leave their controls off screen.
+        for _ in 0..20 {
+            if project_wizard(&dashboard).form.borrow().focused()
+                == Some(WizardControl::NewBundleRemove)
+            {
+                break;
+            }
+            ready_key(&mut dashboard, key(KeyCode::Tab));
+            draw_project_picker(&mut dashboard, &mut terminal);
+        }
+        assert_eq!(
+            project_wizard(&dashboard).form.borrow().focused(),
+            Some(WizardControl::NewBundleRemove)
+        );
         let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
         assert!(text.contains("Main  owner/visible"), "{text}");
         assert!(text.contains("Remove"), "{text}");
+        assert_dialog_spacing(
+            &buffer_lines(terminal.backend().buffer()),
+            "Choose a project",
+            "Use 1 repository",
+        );
     }
 }
 
@@ -2403,10 +2423,10 @@ fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
 
-    // Target step: Tab reaches Cancel, then Back. Activating Back returns to
-    // Profile while keeping the wizard open with its draft state.
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
+    // Target step: Tab passes CPU and MEM, then Cancel and Back.
+    for _ in 0..4 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+    }
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
@@ -2431,8 +2451,9 @@ fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
     open_resume_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
 
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
+    for _ in 0..4 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+    }
     assert_eq!(
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
@@ -3845,121 +3866,6 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
 }
 
 #[test]
-fn resume_target_step_minus_halves_container_size_through_the_key_path() {
-    let mut config = config();
-    // Mirror the real config: an EC2 target that sorts before podman.
-    config.targets.insert(
-        "aws-runson".into(),
-        TargetTemplate::AwsEc2 {
-            aws_profile: None,
-            region: "us-east-1".into(),
-            launch_template: "lt-123".into(),
-            launch_template_version: None,
-            ssh_user: "ubuntu".into(),
-            address_source: Default::default(),
-            identity_file: None,
-            ssh_args: Vec::new(),
-        },
-    );
-    let mut dashboard = DashboardState::new(
-        config,
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [("session-1".into(), stopped_session())]
-                .into_iter()
-                .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
-        },
-        BTreeMap::new(),
-    );
-
-    dashboard.begin_resume_for("session-1");
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume wizard, got {:?}", dashboard.mode);
-    };
-    assert_eq!(wizard.step, WizardStep::Profile);
-
-    // 1/3 -> 2/3 target step; podman is the session's target.
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume wizard on target step");
-    };
-    assert_eq!(wizard.step, WizardStep::Target);
-    assert_eq!(
-        nth_key(&dashboard.config.targets, wizard.target),
-        "podman".to_string()
-    );
-    let gib = 1024 * 1024 * 1024;
-    assert_eq!(
-        wizard.resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 32 * gib,
-        })
-    );
-
-    ready_key(&mut dashboard, key(KeyCode::Char('-')));
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume wizard after '-'");
-    };
-    assert_eq!(
-        wizard.resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 4,
-            memory_bytes: 16 * gib,
-        })
-    );
-}
-
-#[test]
-fn new_target_step_minus_halves_container_size_when_focus_is_off_content() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new wizard, got {:?}", dashboard.mode);
-    };
-    assert_eq!(wizard.step, WizardStep::Profile);
-
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new wizard on target step");
-    };
-    assert_eq!(wizard.step, WizardStep::Target);
-    let gib = 1024 * 1024 * 1024;
-    assert_eq!(
-        wizard.resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 32 * gib,
-        })
-    );
-
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new wizard after tab");
-    };
-    assert_ne!(
-        wizard.form.borrow().focused(),
-        Some(WizardControl::TargetList)
-    );
-
-    ready_key(&mut dashboard, key(KeyCode::Char('-')));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new wizard after '-'");
-    };
-    assert_eq!(
-        wizard.resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 4,
-            memory_bytes: 16 * gib,
-        })
-    );
-}
-
-#[test]
 fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() {
     let gib = 1024 * 1024 * 1024;
     let mut state = State::default();
@@ -4037,207 +3943,6 @@ fn resume_keeps_the_sessions_size_instead_of_the_hosts_latest_size() {
             memory_bytes: 16 * gib,
         })
     );
-}
-
-#[test]
-fn container_size_controls_clamp_independently_halves_current_ratio_and_reset() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 8,
-        memory_bytes: 32 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('+'));
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('+'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 32,
-            memory_bytes: 64 * gib,
-        })
-    );
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 16,
-            memory_bytes: 32 * gib,
-        })
-    );
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('r'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 32 * gib,
-        })
-    );
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('c'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 16,
-            memory_bytes: 32 * gib,
-        })
-    );
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('m'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 16,
-            memory_bytes: 48 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_minus_clamps_cpu_at_floor_and_keeps_halving_memory() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 2,
-        memory_bytes: 32 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 2,
-            memory_bytes: 16 * gib,
-        })
-    );
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 2,
-            memory_bytes: 8 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_minus_clamps_memory_at_floor_and_keeps_halving_cpu() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 16,
-        memory_bytes: 8 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 8 * gib,
-        })
-    );
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 4,
-            memory_bytes: 8 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_minus_is_a_no_op_once_both_are_at_their_floors() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 2,
-        memory_bytes: 8 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 2,
-            memory_bytes: 8 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_minus_leaves_values_already_below_floor_unchanged() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 1,
-        memory_bytes: 4 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('-'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 1,
-            memory_bytes: 4 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_c_clamps_at_cpu_ceiling() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 60,
-        memory_bytes: 32 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('c'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 64,
-            memory_bytes: 32 * gib,
-        })
-    );
-}
-
-#[test]
-fn container_m_clamps_at_memory_ceiling() {
-    let gib = 1024 * 1024 * 1024;
-    let mut allocation = Some(SessionResourceAllocation::Container {
-        cpus: 8,
-        memory_bytes: 60 * gib,
-    });
-    let limits = Some((64, 64 * gib));
-
-    adjust_resources(&mut allocation, None, limits, KeyCode::Char('m'));
-    assert_eq!(
-        allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 64 * gib,
-        })
-    );
-}
-
-#[test]
-fn ec2_size_controls_use_exact_doubling_steps() {
-    let options = [8_u64, 16, 32]
-        .into_iter()
-        .map(|vcpus| SessionResourceAllocation::AwsEc2 {
-            instance_type: format!("family.{vcpus}"),
-            vcpus,
-            memory_bytes: vcpus * 4 * 1024 * 1024 * 1024,
-        })
-        .collect::<Vec<_>>();
-    let mut allocation = Some(options[0].clone());
-    adjust_resources(&mut allocation, Some(&options), None, KeyCode::Char('+'));
-    assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 16);
-    adjust_resources(&mut allocation, Some(&options), None, KeyCode::Char('r'));
-    assert_eq!(allocation_cpus(allocation.as_ref().unwrap()), 8);
 }
 
 #[test]
@@ -4380,7 +4085,9 @@ fn revisiting_or_reselecting_a_target_preserves_edited_resources() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.begin_new();
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Char('-')));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    replace_resource_text(&mut dashboard, "4");
+    ready_key(&mut dashboard, key(KeyCode::BackTab));
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("new wizard")
     };
@@ -4804,7 +4511,7 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
         "{lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line.contains("daemon running?")),
+        lines.iter().any(|line| line.contains("running?")),
         "{lines:#?}"
     );
     assert!(
@@ -5765,7 +5472,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 2/3 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 4;
     assert!(
         lines[field].contains("/work/remembered"),
         "the field draws its value: {:?}",
@@ -5777,7 +5484,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
 /// directories and the key hints are the last rows it writes, so a dialog that
 /// is not sized for its own field and buttons loses exactly those.
 #[test]
-fn the_project_step_draws_its_recent_list_and_hints_above_the_buttons() {
+fn the_project_step_draws_its_recent_list_and_error_above_the_buttons() {
     let mut dashboard = dashboard_at_local_project_step(&["/work/newer", "/work/older"]);
     for character in "/work/newer".chars() {
         ready_key(&mut dashboard, key(KeyCode::Char(character)));
@@ -5793,17 +5500,47 @@ fn the_project_step_draws_its_recent_list_and_hints_above_the_buttons() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
+    assert_dialog_spacing(&lines, "New session", "Cancel");
     let buttons = row_of(&lines, "Cancel");
     for label in [
         "Error: project directory does not exist",
         "Recent on this host",
         "/work/older",
-        "Enter validates",
     ] {
         assert!(
             row_of(&lines, label) < buttons,
             "{label:?} is drawn above the button row: {lines:#?}"
         );
+    }
+}
+
+#[test]
+fn create_and_move_steps_keep_padding_and_separate_information() {
+    for (width, height) in [(140, 40), (80, 24)] {
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+        ready_open_new_wizard(&mut dashboard);
+        let lines = drawn(&mut dashboard, width, height);
+        assert_dialog_spacing(&lines, "New session", "Cancel");
+        assert!(!lines.join("\n").contains("Tab moves focus"));
+
+        let mut dashboard = dashboard_at_local_project_step(&["/work/older"]);
+        let lines = drawn(&mut dashboard, width, height);
+        assert_dialog_spacing(&lines, "New session", "Cancel");
+        assert!(
+            row_of(&lines, "Recent on this host") + 1
+                < lines
+                    .iter()
+                    .rposition(|line| line.contains("/work/older"))
+                    .unwrap()
+        );
+
+        let mut dashboard = dashboard_with_session(running_session());
+        let id = open_move_review(&mut dashboard);
+        assert!(dashboard.apply_move_preparation(id, move_preparation()));
+        let lines = drawn(&mut dashboard, width, height);
+        assert_dialog_spacing(&lines, "Move", "Cancel");
+        assert_eq!(row_of(&lines, "Profile:") + 2, row_of(&lines, "Project:"));
+        assert_eq!(row_of(&lines, "Target:") + 2, row_of(&lines, "Compute:"));
     }
 }
 
@@ -5879,7 +5616,7 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     );
 
     let lines = drawn(&mut dashboard, 140, 40);
-    let field = row_of(&lines, "New session · 2/3 local project") + 3;
+    let field = row_of(&lines, "New session · 2/3 local project") + 4;
     let buttons = row_of(&lines, "Cancel");
     assert!(
         lines[field].contains("/srv/pro"),
@@ -6271,6 +6008,11 @@ fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+    assert_dialog_spacing(
+        &buffer_lines(terminal.backend().buffer()),
+        "Move · choose files",
+        "Continue",
+    );
     assert!(rendered.contains("Choose files to transfer"), "{rendered}");
     assert!(rendered.contains("1.00 GB"), "{rendered}");
     assert!(
@@ -6360,5 +6102,396 @@ fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
     assert!(!raw.contains("fixed/default resources"), "{raw}");
 
     let sized = draw(&mut dashboard, podman);
-    assert!(sized.contains("+ double"), "{sized}");
+    assert!(!sized.contains("+ double"), "{sized}");
+    assert!(
+        sized.contains("CPU") && sized.contains("MEM (GiB)"),
+        "{sized}"
+    );
+}
+
+fn replace_resource_text(dashboard: &mut DashboardState, text: &str) {
+    ready_key(dashboard, key(KeyCode::End));
+    ready_key(
+        dashboard,
+        crossterm::event::KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+    );
+    for character in text.chars() {
+        ready_key(dashboard, key(KeyCode::Char(character)));
+    }
+}
+
+#[test]
+fn container_cpu_and_memory_edit_through_tab_in_create_open_and_move() {
+    let gib = 1 << 30;
+    for kind in 0..3 {
+        let session = if kind == 2 {
+            running_session()
+        } else {
+            stopped_session()
+        };
+        let mut dashboard = dashboard_with_session(session);
+        match kind {
+            0 => {
+                ready_open_new_wizard(&mut dashboard);
+            }
+            1 => {
+                dashboard.begin_resume_for("session-1");
+            }
+            _ => {
+                dashboard.focus_sessions();
+                dashboard.begin_move();
+            }
+        }
+        ready_key(&mut dashboard, key(KeyCode::Enter));
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+        let focused = match &dashboard.mode {
+            Mode::New(wizard) => wizard.form.borrow().focused(),
+            Mode::Resume(wizard) => wizard.form.borrow().focused(),
+            _ => panic!("expected target step"),
+        };
+        assert_eq!(focused, Some(WizardControl::ResourceCpu), "kind {kind}");
+        assert!(dashboard.text_input_focused());
+        replace_resource_text(&mut dashboard, "3");
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+        ready_key(&mut dashboard, key(KeyCode::End));
+        ready_key(
+            &mut dashboard,
+            crossterm::event::KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        dashboard.handle_paste("1.5");
+        let allocation = match &dashboard.mode {
+            Mode::New(wizard) => wizard.resource_allocation.clone(),
+            Mode::Resume(wizard) => wizard.resource_allocation.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 3,
+                memory_bytes: gib + gib / 2
+            }),
+            "kind {kind}"
+        );
+        let lines = drawn(&mut dashboard, 80, 24);
+        assert!(
+            lines.iter().any(|line| line.contains("MEM (GiB)")),
+            "{lines:#?}"
+        );
+        assert!(!lines.join("\n").contains("+ double"));
+        let next = ready_key(&mut dashboard, key(KeyCode::Enter));
+        if kind == 2 {
+            assert!(matches!(next, DashboardAction::MoveSession {
+                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }),
+                preparation_request_id: Some(_), ..
+            } if memory_bytes == gib + gib / 2));
+        }
+        let step = match &dashboard.mode {
+            Mode::New(wizard) => wizard.step,
+            Mode::Resume(wizard) => wizard.step,
+            _ => panic!("expected next step"),
+        };
+        assert_ne!(step, WizardStep::Target);
+        if kind == 0 {
+            ready_key(&mut dashboard, key(KeyCode::Enter));
+            let Some(DashboardAction::PreflightCreateSession { launch }) =
+                dashboard.take_prerequisite_check()
+            else {
+                panic!("create preflight");
+            };
+            assert!(matches!(*launch, DashboardAction::CreateSession {
+                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }), ..
+            } if memory_bytes == gib + gib / 2));
+        } else if kind == 1 {
+            let DashboardAction::PreflightResumeRepositories { launch } =
+                ready_key(&mut dashboard, key(KeyCode::Enter))
+            else {
+                panic!("resume preflight");
+            };
+            assert!(matches!(*launch, DashboardAction::ResumeSession {
+                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }), ..
+            } if memory_bytes == gib + gib / 2));
+        }
+        // Returning from later steps keeps the edited allocation and fields.
+        if kind == 0 {
+            for _ in 0..2 {
+                if let Mode::New(wizard) = &mut dashboard.mode {
+                    wizard.form.get_mut().focus(WizardControl::Back);
+                }
+                ready_key(&mut dashboard, key(KeyCode::Enter));
+            }
+            assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+            assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "3");
+            assert_eq!(new_wizard(&dashboard).resource_editor.memory.value(), "1.5");
+            assert!(!new_wizard(&dashboard).remote_preflight_in_flight);
+        }
+    }
+}
+
+#[test]
+fn invalid_cpu_keeps_text_disables_next_and_recovers_without_resetting_memory() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    replace_resource_text(&mut dashboard, "0");
+    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "0");
+    assert!(new_wizard(&dashboard).resource_allocation.is_none());
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    let lines = drawn(&mut dashboard, 80, 24).join("\n");
+    assert!(lines.contains("positive whole number"), "{lines}");
+    replace_resource_text(&mut dashboard, "5");
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 5,
+            memory_bytes: 32 << 30
+        })
+    );
+    // Unfocused legacy shortcuts no longer change resources.
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    for character in ['+', '-', 'c', 'm', 'r'] {
+        ready_key(&mut dashboard, key(KeyCode::Char(character)));
+    }
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 5,
+            memory_bytes: 32 << 30
+        })
+    );
+}
+
+#[test]
+fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+        ready_open_new_wizard(&mut dashboard);
+        ready_key(&mut dashboard, key(KeyCode::Enter));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        let y = row_of(&lines, "MEM (GiB)") as u16 + 1;
+        let (cpu_x, _) = point(&lines, "CPU");
+        let (memory_x, _) = point(&lines, "MEM (GiB)");
+        for (x, expected) in [
+            (cpu_x, WizardControl::ResourceCpu),
+            (memory_x, WizardControl::ResourceMemory),
+        ] {
+            assert!(
+                buffer[(x, y)].modifier.contains(Modifier::UNDERLINED),
+                "{width}x{height}: {lines:#?}"
+            );
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), (x, y)));
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (x, y)));
+            assert_eq!(
+                new_wizard(&dashboard).form.borrow().focused(),
+                Some(expected)
+            );
+            assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+        }
+        replace_resource_text(&mut dashboard, "12.5");
+        assert_eq!(
+            new_wizard(&dashboard).resource_allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 8,
+                memory_bytes: (12 << 30) + (1 << 29)
+            })
+        );
+        assert_dialog_spacing(&lines, "target", "Next");
+    }
+}
+
+#[test]
+fn ec2_dropdown_selects_instances_preserves_refresh_and_rejects_removed_selection() {
+    let aws = TargetTemplate::AwsEc2 {
+        aws_profile: None,
+        region: "us-east-1".into(),
+        launch_template: "hel".into(),
+        launch_template_version: None,
+        ssh_user: "ubuntu".into(),
+        address_source: mj_core::config::AwsAddressSource::PublicIp,
+        identity_file: None,
+        ssh_args: Vec::new(),
+    };
+    let mut configuration = config();
+    configuration.targets = BTreeMap::from([("aws".into(), aws)]);
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert!(new_wizard(&dashboard).resource_allocation.is_none());
+    let loading = drawn(&mut dashboard, 80, 24).join("\n");
+    assert!(loading.contains("Loading instance types"), "{loading}");
+    let options = [8, 16]
+        .into_iter()
+        .map(|vcpus| SessionResourceAllocation::AwsEc2 {
+            instance_type: format!("family.{vcpus}"),
+            vcpus,
+            memory_bytes: vcpus * (4 << 30),
+        })
+        .collect::<Vec<_>>();
+    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    assert_eq!(
+        new_wizard(&dashboard).form.borrow().focused(),
+        Some(WizardControl::ResourceInstance)
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    let popup = drawn(&mut dashboard, 80, 24).join("\n");
+    assert!(popup.contains("Instance types"), "{popup}");
+    ready_key(&mut dashboard, key(KeyCode::Down));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(options[1].clone())
+    );
+    assert!(
+        !new_wizard(&dashboard)
+            .resource_editor
+            .instances
+            .is_open(WizardControl::ResourceInstance)
+    );
+    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(options[1].clone())
+    );
+    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
+    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
+    assert!(new_wizard(&dashboard).resource_allocation.is_none());
+    assert!(
+        new_wizard(&dashboard)
+            .sizing_error
+            .as_ref()
+            .unwrap()
+            .contains("unavailable")
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(options[0].clone())
+    );
+}
+
+#[test]
+fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limits() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 4 << 30,
+            logical_cores: 2,
+            disk_total_bytes: None,
+        })),
+        0,
+    );
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    replace_resource_text(&mut dashboard, "3");
+    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "3");
+    assert!(
+        new_wizard(&dashboard)
+            .sizing_error
+            .as_ref()
+            .unwrap()
+            .contains("CPU exceeds")
+    );
+    replace_resource_text(&mut dashboard, "2");
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    for text in ["", "0", "NaN", "-1", "5", "18446744073709551615"] {
+        replace_resource_text(&mut dashboard, text);
+        assert_eq!(new_wizard(&dashboard).resource_editor.memory.value(), text);
+        assert!(new_wizard(&dashboard).resource_allocation.is_none());
+        ready_key(&mut dashboard, key(KeyCode::Enter));
+        assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    }
+    replace_resource_text(&mut dashboard, "3.25");
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 2,
+            memory_bytes: (3 << 30) + (1 << 28),
+        })
+    );
+}
+
+#[test]
+fn invalid_resource_text_survives_back_to_profile_and_reentering_target() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    replace_resource_text(&mut dashboard, "invalid");
+    for _ in 0..3 {
+        ready_key(&mut dashboard, key(KeyCode::Tab));
+    }
+    assert_eq!(
+        new_wizard(&dashboard).form.borrow().focused(),
+        Some(WizardControl::Back)
+    );
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    assert_eq!(
+        new_wizard(&dashboard).resource_editor.cpu.value(),
+        "invalid"
+    );
+    assert!(new_wizard(&dashboard).resource_allocation.is_none());
+}
+
+#[test]
+fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    ready_open_new_wizard(&mut dashboard);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Tab));
+    replace_resource_text(&mut dashboard, "6");
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
+    let _ = dashboard.take_prerequisite_check();
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    let sample = |cpus| {
+        Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            cpu_percent: None,
+            memory_used_bytes: 0,
+            memory_total_bytes: 64 << 30,
+            logical_cores: cpus,
+            disk_total_bytes: None,
+        }))
+    };
+    dashboard.apply_deployment_capacity("local", sample(4), 0);
+    let wizard = new_wizard(&dashboard);
+    assert_eq!(wizard.step, WizardStep::Target);
+    assert_eq!(wizard.resource_editor.cpu.value(), "6");
+    assert!(wizard.resource_allocation.is_none());
+    assert!(
+        wizard
+            .sizing_error
+            .as_ref()
+            .unwrap()
+            .contains("CPU exceeds")
+    );
+    assert!(!wizard.remote_preflight_in_flight);
+    ready_key(&mut dashboard, key(KeyCode::Enter));
+    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
+    dashboard.apply_deployment_capacity("local", sample(8), 1);
+    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "6");
+    assert_eq!(
+        new_wizard(&dashboard).resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 32 << 30,
+        })
+    );
 }

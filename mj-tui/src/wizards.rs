@@ -4,6 +4,10 @@ mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
+mod resources;
+use resources::{
+    ResourceEditor, ResourcePicker, declare_resource_controls, memory_gib_text, target_resources,
+};
 mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
@@ -34,14 +38,15 @@ use mj_core::state::{
 
 use mj_chat::components::PathField;
 use mj_chat::components::{
-    Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, EditOutcome, FieldEdit,
-    Form, FormViewport, Interaction, PopupSide,
+    Checkbox, ChoiceList, ComboBox, ComboBoxState, ControlKind, Dialog, DialogShell, EditOutcome,
+    FieldEdit, Form, FormViewport, Interaction, PopupSide, TextField, wrap_lines,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination};
 
 use crate::widgets::{
-    Truncate, centered_modal, dismissible_modal_title, format_resource_bytes, truncate_to_cells,
+    Truncate, centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes,
+    truncate_to_cells,
 };
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
@@ -50,8 +55,6 @@ use crate::{
 
 const BASELINE_CPUS: u64 = 8;
 const BASELINE_MEMORY_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-const FLOOR_CPUS: u64 = 2;
-const FLOOR_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WizardStep {
@@ -71,6 +74,9 @@ pub(crate) enum WizardControl {
     ProfileList,
     BundleList,
     TargetList,
+    ResourceCpu,
+    ResourceMemory,
+    ResourceInstance,
     ProjectDirectory,
     RecentProject(usize),
     NewBundleRepositories,
@@ -190,6 +196,7 @@ pub(crate) struct NewWizard {
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
+    pub(crate) resource_editor: ResourceEditor,
     /// Network clone destinations returned by the asynchronous creation
     /// preflight. A nonempty value is concrete evidence the review is ready.
     pub(crate) remote_repositories: Option<Vec<RemoteRepositoryPreview>>,
@@ -225,6 +232,7 @@ impl PartialEq for NewWizard {
             && self.resource_allocation == other.resource_allocation
             && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
+            && self.resource_editor == other.resource_editor
             && self.remote_repositories == other.remote_repositories
             && self.remote_preflight_in_flight == other.remote_preflight_in_flight
             && self.remote_preflight_error == other.remote_preflight_error
@@ -458,6 +466,7 @@ pub(crate) struct ResumeWizard {
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
+    pub(crate) resource_editor: ResourceEditor,
     pub(crate) discard_queue: bool,
     /// Move's delegation choice for its destination. A plain resume keeps the
     /// session's own policy and never shows it.
@@ -486,6 +495,7 @@ impl PartialEq for ResumeWizard {
             && self.resource_allocation == other.resource_allocation
             && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
+            && self.resource_editor == other.resource_editor
             && self.discard_queue == other.discard_queue
     }
 }
@@ -602,7 +612,10 @@ fn preferred_aws_option<'a>(
     {
         return Some(option);
     }
-    options.iter().find(|option| allocation_cpus(option) == 8)
+    options
+        .iter()
+        .find(|option| allocation_cpus(option) == 8)
+        .or_else(|| options.first())
 }
 
 fn apply_aws_options(
@@ -612,103 +625,25 @@ fn apply_aws_options(
     allocation: &mut Option<SessionResourceAllocation>,
     sizing_error: &mut Option<String>,
     previous: Option<&SessionResourceAllocation>,
+    selected_type: Option<&str>,
 ) {
     match result {
         Ok(options) => {
-            *allocation = preferred_aws_option(&options, previous).cloned();
+            *allocation = if let Some(instance_type) = selected_type {
+                options.iter().find(|option| matches!(option,
+                    SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type
+                )).cloned()
+            } else {
+                preferred_aws_option(&options, previous).cloned()
+            };
+            *sizing_error = allocation.is_none().then(|| {
+                "The selected instance type is unavailable; choose an available type.".into()
+            });
             options_by_target.insert(target_id.to_owned(), options);
-            *sizing_error = None;
         }
         Err(error) => {
             *allocation = None;
             *sizing_error = Some(error);
-        }
-    }
-}
-
-fn adjust_resources(
-    allocation: &mut Option<SessionResourceAllocation>,
-    aws_options: Option<&Vec<SessionResourceAllocation>>,
-    limits: Option<(u64, u64)>,
-    code: KeyCode,
-) {
-    let Some(current) = allocation.clone() else {
-        return;
-    };
-    match current {
-        SessionResourceAllocation::Container { cpus, memory_bytes } => {
-            let next = match code {
-                KeyCode::Char('r') => clamp_resources(BASELINE_CPUS, BASELINE_MEMORY_BYTES, limits),
-                KeyCode::Char('+') => {
-                    let Some((max_cpus, max_memory)) = limits else {
-                        return;
-                    };
-                    (
-                        cpus.saturating_mul(2).min(max_cpus.max(1)),
-                        memory_bytes.saturating_mul(2).min(max_memory.max(1)),
-                    )
-                }
-                KeyCode::Char('c') => {
-                    let Some((max_cpus, _)) = limits else {
-                        return;
-                    };
-                    (cpus.saturating_add(8).min(max_cpus.max(1)), memory_bytes)
-                }
-                KeyCode::Char('m') => {
-                    let Some((_, max_memory)) = limits else {
-                        return;
-                    };
-                    (
-                        cpus,
-                        memory_bytes
-                            .saturating_add(memory_bytes / 2)
-                            .min(max_memory.max(1)),
-                    )
-                }
-                KeyCode::Char('-') => {
-                    let next_cpus = if cpus > FLOOR_CPUS {
-                        (cpus / 2).max(FLOOR_CPUS)
-                    } else {
-                        cpus
-                    };
-                    let next_memory = if memory_bytes > FLOOR_MEMORY_BYTES {
-                        (memory_bytes / 2).max(FLOOR_MEMORY_BYTES)
-                    } else {
-                        memory_bytes
-                    };
-                    (next_cpus, next_memory)
-                }
-                _ => return,
-            };
-            *allocation = Some(SessionResourceAllocation::Container {
-                cpus: next.0,
-                memory_bytes: next.1,
-            });
-        }
-        SessionResourceAllocation::AwsEc2 {
-            vcpus,
-            memory_bytes,
-            ..
-        } => {
-            let Some(options) = aws_options else {
-                return;
-            };
-            let desired = match code {
-                KeyCode::Char('+') => (Some(vcpus.saturating_mul(2)), None),
-                KeyCode::Char('-') if vcpus > 1 => (Some(vcpus / 2), None),
-                KeyCode::Char('r') => (Some(BASELINE_CPUS), None),
-                KeyCode::Char('c') => (Some(vcpus.saturating_mul(2)), Some(memory_bytes)),
-                KeyCode::Char('m') => (Some(vcpus), Some(memory_bytes.saturating_mul(2))),
-                _ => return,
-            };
-            if let Some(next) = options.iter().find(|option| {
-                desired.0.is_none_or(|cpus| allocation_cpus(option) == cpus)
-                    && desired
-                        .1
-                        .is_none_or(|memory| allocation_memory(option) == memory)
-            }) {
-                *allocation = Some(next.clone());
-            }
         }
     }
 }

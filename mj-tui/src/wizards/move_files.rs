@@ -94,13 +94,19 @@ pub(super) fn render(
         return;
     };
     let popup = centered_modal(frame, surfaces, 100, 26, area);
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let inner = DialogShell::padded_inner(popup);
+    let layout = DialogShell::layout(inner, 1);
     let mut form = wizard.form.borrow_mut();
     begin_form_frame(&mut form, WizardControl::Next);
     declare(wizard, &mut form);
+    let title = dismissible_modal_title(
+        &mut form,
+        popup,
+        "Move · choose files",
+        theme::title(true),
+        true,
+    );
+    frame.render_widget(theme::modal().title(title), popup);
     let problems = assessment
         .selection_problem(&wizard.files.selection)
         .into_iter()
@@ -109,43 +115,44 @@ pub(super) fn render(
     let all = WorkspaceSelection::default().included_bytes(assessment);
     let summary = vec![
         Line::raw("Choose files to transfer"),
+        Line::raw(""),
         Line::raw(format!(
             "Transfer: {}   Leave behind: {}",
             format_bytes(selected),
             format_bytes(all.saturating_sub(selected))
         )),
+        Line::raw(""),
         Line::raw(format!(
             "Tracked history and edits: {} (always included)",
             format_bytes(assessment.required_bytes)
         )),
+        Line::raw(""),
         Line::raw(format!(
             "Not transferred: {} ignored files ({}) and {} credential files",
             assessment.ignored_files,
             format_bytes(assessment.ignored_bytes),
             assessment.credential_files
         )),
+        Line::raw(""),
         Line::raw(if wizard.files.selection.exclusions.is_empty() {
             "All eligible files are included. Continue accepts this transfer."
         } else {
             "Excluded files stay in the stopped source until explicit cleanup."
         }),
-        Line::raw("Space toggles a checkbox · Tab changes focus · Expand opens a directory"),
+        Line::raw(""),
     ];
+    let summary = wrap_lines(summary, inner.width);
     let rows = wizard.files.rows(assessment);
     let focus_row = match form.focused() {
         Some(WizardControl::MoveFile(index) | WizardControl::ExpandMoveFile(index)) => {
             Some((summary.len() + index) as u16)
         }
-        Some(WizardControl::MoveOtherFiles) => Some((summary.len() + rows.len()) as u16),
+        Some(WizardControl::MoveOtherFiles) => Some((summary.len() + rows.len() + 1) as u16),
         _ => None,
     };
-    let body = Rect {
-        height: inner.height.saturating_sub(2),
-        ..inner
-    };
     let viewport = FormViewport::new(
-        body,
-        (summary.len() + rows.len() + 1 + problems.len()) as u16,
+        layout.body,
+        (summary.len() + rows.len() + 3 + problems.len()) as u16,
         0,
         focus_row,
     );
@@ -213,23 +220,19 @@ pub(super) fn render(
     );
     Dialog::render_actions(
         frame,
-        viewport.row((summary_rows + rows.len()) as u16, 1),
+        viewport.row((summary_rows + rows.len() + 1) as u16, 1),
         &[(WizardControl::MoveOtherFiles, other.as_str(), true)],
         &mut form,
     );
     for (index, blocker) in problems.iter().enumerate() {
         frame.render_widget(
             Paragraph::new(blocker.as_str()).style(theme::muted()),
-            viewport.row((summary_rows + 1 + rows.len() + index) as u16, 1),
+            viewport.row((summary_rows + 3 + rows.len() + index) as u16, 1),
         );
     }
     Dialog::render_actions(
         frame,
-        Rect {
-            y: inner.y + inner.height.saturating_sub(1),
-            height: 1,
-            ..inner
-        },
+        layout.actions,
         &[
             (WizardControl::Back, "Back", true),
             (

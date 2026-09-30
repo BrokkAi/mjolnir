@@ -47,6 +47,7 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                     )
                     .collect(),
             );
+            declare_resource_controls(&mut form, target_resources(dashboard, wizard));
             declare_wizard_buttons(&mut form, true, enabled);
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
@@ -205,6 +206,7 @@ impl DashboardState {
             Err(interaction) => interaction,
         };
         let action = wizard.route_extra_interaction(action);
+        let action = wizard.resource_editor_mut().instances.route(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
@@ -235,10 +237,41 @@ impl DashboardState {
             }
             Interaction::Activate(id) => self.activate_wizard_control(wizard, id),
             Interaction::Edit(id, edit) => {
-                wizard.note_draft_change(self, DraftChange::FieldEdit);
+                let change = if matches!(
+                    id,
+                    WizardControl::ResourceCpu | WizardControl::ResourceMemory
+                ) {
+                    DraftChange::ResourcesAdjusted
+                } else {
+                    DraftChange::FieldEdit
+                };
+                wizard.note_draft_change(self, change);
                 self.apply_wizard_field_edit(&mut wizard, id, edit);
                 self.keep(wizard)
             }
+            Interaction::ComboBoxCommit(WizardControl::ResourceInstance, index) => {
+                let id = nth_key(&self.config.targets, wizard.target());
+                let chosen = wizard
+                    .aws_options()
+                    .get(&id)
+                    .and_then(|options| options.get(index))
+                    .cloned();
+                if let Some(chosen) = chosen {
+                    let before = wizard.resource_editor().draft_values();
+                    wizard.form_mut().track_draft_part("resources", before);
+                    wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
+                    let (_, allocation, error) = wizard.sizing_mut();
+                    *allocation = Some(chosen.clone());
+                    *error = None;
+                    if let SessionResourceAllocation::AwsEc2 { instance_type, .. } = chosen {
+                        wizard.resource_editor_mut().instance_type = Some(instance_type);
+                    }
+                    let after = wizard.resource_editor().draft_values();
+                    wizard.form_mut().track_draft_part("resources", after);
+                }
+                self.keep(wizard)
+            }
+            Interaction::ComboBoxDismiss(WizardControl::ResourceInstance) => self.keep(wizard),
             Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
                 wizard.note_draft_change(self, DraftChange::ReadOnlyToggled);
                 commit_mount_access(wizard.mounts_mut(), index);
@@ -295,6 +328,26 @@ impl DashboardState {
         id: WizardControl,
         edit: FieldEdit,
     ) {
+        if matches!(
+            id,
+            WizardControl::ResourceCpu | WizardControl::ResourceMemory
+        ) {
+            let before = wizard.resource_editor().draft_values();
+            wizard.form_mut().track_draft_part("resources", before);
+            let editor = wizard.resource_editor_mut();
+            let input = if id == WizardControl::ResourceCpu {
+                &mut editor.cpu
+            } else {
+                &mut editor.memory
+            };
+            if TextField::apply(input, edit) == EditOutcome::Changed {
+                self.validate_wizard_resources(wizard);
+                self.record_event_handled();
+            }
+            let after = wizard.resource_editor().draft_values();
+            wizard.form_mut().track_draft_part("resources", after);
+            return;
+        }
         let Err(edit) = wizard.apply_extra_field_edit(self, id, edit) else {
             return;
         };
@@ -339,6 +392,15 @@ impl DashboardState {
         if id == WizardControl::Cancel {
             self.cancel_modal();
             return DashboardAction::None;
+        }
+        if id == WizardControl::ResourceInstance && wizard.step() == WizardStep::Target {
+            let selected = match target_resources(self, &wizard) {
+                Some(ResourcePicker::Ec2 { selected, .. }) => selected,
+                _ => return self.keep(wizard),
+            };
+            let mut wizard = wizard;
+            wizard.resource_editor_mut().instances.open(id, selected);
+            return self.keep(wizard);
         }
         if wizard.step() == WizardStep::Mounts {
             return self.activate_wizard_mount(id, wizard);
@@ -505,18 +567,6 @@ impl DashboardState {
             // arm of this function can apply to it.
             return wizard.reenter_review(self);
         }
-        if wizard.step() == WizardStep::Target
-            && matches!(key.code, KeyCode::Char('+' | '-' | 'r' | 'c' | 'm'))
-        {
-            wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
-            let before = format!("{:?}", wizard.resource_allocation());
-            wizard
-                .form_mut()
-                .track_draft_part("resources", vec![before]);
-            self.adjust_wizard_resources(&mut wizard, key.code);
-            let after = format!("{:?}", wizard.resource_allocation());
-            wizard.form_mut().track_draft_part("resources", vec![after]);
-        }
         wizard.handle_extra_shortcut(self, key);
         self.keep(wizard)
     }
@@ -654,6 +704,15 @@ impl DashboardState {
             return;
         }
         let previous = wizard.previous_allocation(self);
+        let selected_type =
+            wizard.resource_editor().instance_type.clone().or_else(|| {
+                match wizard.resource_allocation() {
+                    Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
+                        Some(instance_type.clone())
+                    }
+                    _ => None,
+                }
+            });
         let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
         apply_aws_options(
             target_id,
@@ -662,7 +721,15 @@ impl DashboardState {
             allocation,
             sizing_error,
             previous,
+            selected_type.as_deref(),
         );
+        if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) =
+            wizard.resource_allocation()
+        {
+            let instance_type = instance_type.clone();
+            wizard.resource_editor_mut().instance_type = Some(instance_type);
+        }
+        wizard.resource_editor_mut().instances = ComboBoxState::default();
         self.mode = wizard.into_mode();
     }
 }

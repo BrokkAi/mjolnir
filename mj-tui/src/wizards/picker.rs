@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PickerNavigation<'a> {
+    pub(crate) resources: Option<ResourcePicker<'a>>,
     pub(crate) has_back: bool,
     /// Row the keyboard is on, highlighted while the content has focus.
     pub(crate) selected: usize,
@@ -120,14 +121,16 @@ impl PickerChoice {
                 spans.push(Span::styled(text, cell.style));
                 break;
             }
+            let text = truncate_to_cells(&cell.text, widths[index], Truncate::PLAIN);
+            let cell_width = Line::raw(text.as_str()).width();
             let padding = widths[index]
                 .saturating_add(COLUMN_GAP)
-                .saturating_sub(cell.width());
-            spans.push(Span::styled(cell.text.clone(), cell.style));
+                .saturating_sub(cell_width);
+            spans.push(Span::styled(text, cell.style));
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
             }
-            used = used.saturating_add(cell.width()).saturating_add(padding);
+            used = used.saturating_add(cell_width).saturating_add(padding);
         }
         Line::from(spans)
     }
@@ -174,7 +177,8 @@ pub(crate) fn target_table(rows: Vec<PickerChoice>) -> Vec<PickerChoice> {
         PickerCell::blank(),
         PickerCell::styled("TARGET", style),
         PickerCell::styled("KIND", style),
-        PickerCell::styled("SIZE", style),
+        PickerCell::styled("CPU", style),
+        PickerCell::styled("MEM (GiB)", style),
         PickerCell::styled("STATUS", style),
     ]));
     table.extend(rows);
@@ -239,62 +243,66 @@ pub(crate) fn render_picker(
     form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
-    let width_percent = if area.width < 64 { 100 } else { 68 };
-    // Help lines wrap rather than run off the dialog's edge. The height is
-    // sized from the width the dialog will roughly have; the lines are
-    // wrapped again to the exact width once it is placed.
-    let wrap_help = |width: usize| {
-        help.iter()
-            .flat_map(|line| mj_chat::chat::wrap_styled_line(line.clone(), width.max(1), 2))
-            .collect::<Vec<_>>()
+    let width_percent = if navigation.control == WizardControl::TargetList {
+        if area.width < 100 { 100 } else { 85 }
+    } else if area.width < 64 {
+        100
+    } else {
+        68
+    };
+    let instance_rows = if matches!(navigation.resources, Some(ResourcePicker::Ec2 { .. })) {
+        3
+    } else {
+        0
     };
     let side_width = if navigation.side_actions.is_empty() {
         0
     } else {
-        usize::from(
-            mj_chat::components::ButtonColumn::width(navigation.side_actions)
-                + mj_chat::components::ButtonColumn::BODY_GAP,
-        )
+        mj_chat::components::ButtonColumn::width(navigation.side_actions)
+            + mj_chat::components::ButtonColumn::BODY_GAP
     };
-    let estimated_width = usize::from(area.width) * usize::from(width_percent) / 100;
-    let help_rows = wrap_help(estimated_width.saturating_sub(4 + side_width)).len();
+    let estimated = mj_chat::components::dialog_rect(area, width_percent, 1);
+    let help = wrap_lines(help, estimated.width.saturating_sub(4 + side_width));
     let popup = centered_modal(
         frame,
         surfaces,
         width_percent,
-        (choices.len() as u16 + help_rows as u16 + 6).clamp(9, 24),
+        (choices.len().max(1) as u16
+            + help.len() as u16
+            + u16::from(!help.is_empty())
+            + instance_rows
+            + 5)
+        .clamp(6, 28),
         area,
     );
-    let content = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let button_area = mj_chat::components::DialogShell::layout(content, 0).actions;
-    // The side column shares the rows above the navigation buttons with the
-    // list and help, which keep the width to its left.
-    let columns = form.split_actions(
-        Rect::new(
-            content.x,
-            content.y,
-            content.width,
-            button_area.y.saturating_sub(content.y),
-        ),
-        navigation.side_actions,
-    );
-    let body = if navigation.side_actions.is_empty() {
-        content
-    } else {
-        Rect::new(content.x, content.y, columns.body.width, content.height)
-    };
-    let help = wrap_help(usize::from(body.width));
+    let content = DialogShell::padded_inner(popup);
+    let layout = DialogShell::layout(content, 1);
+    let button_area = layout.actions;
+    let columns = form.split_actions(layout.body, navigation.side_actions);
+    let body = columns.body;
     let list_height = u16::try_from(choices.len())
         .unwrap_or(u16::MAX)
         .max(u16::from(
             choices.is_empty() && navigation.empty_hint.is_some(),
         ))
-        .min(content.height.saturating_sub(help.len() as u16 + 2));
+        .min(
+            body.height
+                .saturating_sub(help.len() as u16 + u16::from(!help.is_empty()) + instance_rows)
+                .max(1)
+                .min(body.height),
+        );
     let list_area = Rect::new(body.x, body.y, body.width, list_height);
-    let widths = picker_columns(&choices);
+    let mut widths = picker_columns(&choices);
+    if navigation.control == WizardControl::TargetList && widths.len() == 6 {
+        widths[0] = 0;
+        widths[3] = 6;
+        widths[4] = 12;
+        widths[5] = widths[5].clamp(6, 11);
+        let remaining =
+            usize::from(list_area.width).saturating_sub(6 + 12 + widths[5] + 5 * COLUMN_GAP);
+        widths[1] = widths[1].min(remaining / 2);
+        widths[2] = widths[2].min(remaining.saturating_sub(widths[1]));
+    }
     let rows = choices
         .iter()
         .map(|choice| choice.line(&widths, usize::from(list_area.width)))
@@ -313,8 +321,11 @@ pub(crate) fn render_picker(
         .iter()
         .map(|choice| !choice.disabled)
         .collect::<Vec<_>>();
-    let help_y = list_area.y.saturating_add(list_area.height);
-    let help_height = (help.len() as u16).min(content.bottom().saturating_sub(help_y + 1));
+    let help_y = list_area
+        .bottom()
+        .saturating_add(instance_rows)
+        .saturating_add(u16::from(!help.is_empty()));
+    let help_height = (help.len() as u16).min(body.bottom().saturating_sub(help_y));
     let help_area = Rect::new(body.x, help_y, body.width, help_height);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
@@ -338,6 +349,81 @@ pub(crate) fn render_picker(
             )),
             list_area,
         );
+    }
+    declare_resource_controls(form, navigation.resources);
+    match navigation.resources {
+        Some(ResourcePicker::Container(editor)) => {
+            let selected_display_row = row_map
+                .iter()
+                .position(|row| *row == Some(navigation.selected));
+            let offset = form.list_offset(navigation.control);
+            if let Some(row) = selected_display_row
+                .filter(|row| *row >= offset && *row - offset < usize::from(list_area.height))
+            {
+                let y = list_area.y + (row - offset) as u16;
+                let mut x = list_area.x;
+                for (column, width) in widths.iter().enumerate() {
+                    if let Some((input, id)) = match column {
+                        3 => Some((&editor.cpu, WizardControl::ResourceCpu)),
+                        4 => Some((&editor.memory, WizardControl::ResourceMemory)),
+                        _ => None,
+                    } {
+                        let field = Rect::new(
+                            x,
+                            y,
+                            (*width as u16).min(list_area.right().saturating_sub(x)),
+                            1,
+                        );
+                        TextField::render_underlined(frame, field, input, form, id);
+                    }
+                    x = x.saturating_add((*width + COLUMN_GAP) as u16);
+                }
+            }
+        }
+        Some(ResourcePicker::Ec2 {
+            editor,
+            options,
+            selected,
+            has_selection,
+            loading,
+        }) => {
+            let label_y = list_area.bottom().saturating_add(1);
+            let label = Rect::new(body.x, label_y, body.width, 1).intersection(body);
+            let field =
+                Rect::new(body.x, label_y.saturating_add(1), body.width, 1).intersection(body);
+            frame.render_widget(Paragraph::new("Instance type:"), label);
+            let selected = editor
+                .instances
+                .selection(WizardControl::ResourceInstance, selected);
+            let lines = options
+                .iter()
+                .map(|option| Line::raw(resource_allocation_description(Some(option))))
+                .collect::<Vec<_>>();
+            let value = if loading {
+                "Loading instance types…".into()
+            } else if options.is_empty() {
+                "No instance types available".into()
+            } else if has_selection || editor.instances.is_open(WizardControl::ResourceInstance) {
+                resource_allocation_description(options.get(selected))
+            } else {
+                "Choose an instance type".into()
+            };
+            ComboBox::render(
+                frame,
+                popup,
+                field,
+                &ComboBox::display_value(&value),
+                &lines,
+                selected,
+                editor.instances.is_open(WizardControl::ResourceInstance),
+                !options.is_empty(),
+                " Instance types ",
+                PopupSide::Above,
+                form,
+                WizardControl::ResourceInstance,
+            );
+        }
+        None => {}
     }
     frame.render_widget(Paragraph::new(help), help_area);
     let mut buttons = vec![(WizardControl::Cancel, "Cancel", true)];

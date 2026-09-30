@@ -75,6 +75,7 @@ impl DashboardState {
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             remote_repositories: None,
             remote_preflight_in_flight: false,
             remote_preflight_error: None,
@@ -139,6 +140,7 @@ impl DashboardState {
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: false,
             subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
@@ -203,6 +205,7 @@ impl DashboardState {
             resource_allocation: None,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: false,
             subagents: Box::new(subagents::SubagentDraft::new(Default::default())),
             form: std::cell::RefCell::new(mj_chat::components::Dialog::default()),
@@ -265,6 +268,7 @@ impl DashboardState {
             resource_allocation: session.resource_allocation,
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             // Move's safe default is to leave pending work idle. The review
             // checkbox can explicitly opt into starting it after readiness.
             discard_queue: true,
@@ -350,6 +354,7 @@ impl DashboardState {
                 .or(session.resource_allocation),
             aws_options: BTreeMap::new(),
             sizing_error: None,
+            resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
             subagents: Box::new(subagents::SubagentDraft::new(
                 operation

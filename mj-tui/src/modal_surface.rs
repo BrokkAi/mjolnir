@@ -270,6 +270,10 @@ impl DialogModal for NewWizard {
     fn text_input_focused(&self) -> bool {
         if let Some(id) = self.form.borrow().focused() {
             return match self.step {
+                WizardStep::Target => matches!(
+                    id,
+                    WizardControl::ResourceCpu | WizardControl::ResourceMemory
+                ),
                 WizardStep::ProjectDirectory => id == WizardControl::ProjectDirectory,
                 WizardStep::NewBundle => {
                     id == WizardControl::NewBundleSource && !self.bundle_creation_in_flight
@@ -303,11 +307,17 @@ impl DialogModal for ResumeWizard {
 
     fn text_input_focused(&self) -> bool {
         if let Some(id) = self.form.borrow().focused() {
-            return self.step == WizardStep::Mounts
-                && matches!(
+            return match self.step {
+                WizardStep::Target => matches!(
+                    id,
+                    WizardControl::ResourceCpu | WizardControl::ResourceMemory
+                ),
+                WizardStep::Mounts => matches!(
                     id,
                     WizardControl::MountSource | WizardControl::MountDestination
-                );
+                ),
+                _ => false,
+            };
         }
         // See the note on the new-session wizard above.
         self.step == WizardStep::Mounts

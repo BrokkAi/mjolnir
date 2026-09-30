@@ -1,18 +1,8 @@
 use super::*;
 
-/// The Target step's resource keys, with the live refresh binding for the
-/// recheck rather than a key that may not exist any more.
-fn resource_help(dashboard: &DashboardState) -> String {
-    let base = "+ double · - halve · c +8 CPU · m +50% memory · r reset";
-    match dashboard.first_key_label(crate::CommandId::Refresh) {
-        Some(key) => format!("{base} · {key} recheck"),
-        None => base.to_owned(),
-    }
-}
-
 /// Whether the target step sets a size for `target`: containers get CPU and
 /// memory, EC2 an instance type. Other targets run with what the host has.
-fn target_is_sized(target: &TargetTemplate) -> bool {
+pub(crate) fn target_is_sized(target: &TargetTemplate) -> bool {
     mj_core::config::is_container_target(target) || matches!(target, TargetTemplate::AwsEc2 { .. })
 }
 
@@ -27,7 +17,6 @@ fn target_step_choices<W: WizardDraft>(
 ) -> (Vec<PickerChoice>, Vec<Line<'static>>, usize) {
     let warning = Style::default().fg(theme::palette().warning);
     let mut help = Vec::new();
-    let mut selected_sized = false;
     // A target whose runtime is not on this host is not listed at all; one
     // whose host did not answer is, with its status.
     let offered = dashboard.offered_target_indices();
@@ -44,11 +33,12 @@ fn target_step_choices<W: WizardDraft>(
             let checking = rejection
                 .as_deref()
                 .is_some_and(|reason| reason.starts_with("checking"));
-            let size = match wizard.resource_allocation() {
-                Some(allocation) if selected && target_is_sized(target) => {
-                    resource_allocation_description(Some(allocation))
-                }
-                _ => String::new(),
+            let (cpu, memory) = match wizard.resource_allocation() {
+                Some(allocation) if selected && target_is_sized(target) => (
+                    allocation_cpus(allocation).to_string(),
+                    memory_gib_text(allocation_memory(allocation)),
+                ),
+                _ => ("—".into(), "—".into()),
             };
             let status = match &rejection {
                 None if selected && sizing_error.is_some() => {
@@ -65,7 +55,14 @@ fn target_step_choices<W: WizardDraft>(
                 help.push(Line::styled(format!("{id}: {reason}"), warning));
             }
             if selected {
-                selected_sized = target_is_sized(target);
+                if mj_core::config::is_container_target(target)
+                    && dashboard.host_limits(id).is_none()
+                {
+                    help.push(Line::styled(
+                        "Host totals unavailable; resource limits cannot be checked.",
+                        warning,
+                    ));
+                }
                 if let Some(error) = sizing_error.filter(|_| rejection.is_none()) {
                     help.push(Line::styled(format!("Sizing: {error}"), warning));
                 }
@@ -74,7 +71,8 @@ fn target_step_choices<W: WizardDraft>(
                 PickerCell::blank(),
                 PickerCell::text(id.as_str()),
                 PickerCell::text(target_label(target)),
-                PickerCell::text(size),
+                PickerCell::text(cpu),
+                PickerCell::text(memory),
                 status,
             ]);
             if rejection.is_some() {
@@ -84,14 +82,9 @@ fn target_step_choices<W: WizardDraft>(
             }
         })
         .collect();
-    help.push(picker_help(&if selected_sized {
-        resource_help(dashboard)
-    } else {
-        match dashboard.first_key_label(crate::CommandId::Refresh) {
-            Some(key) => format!("↑/↓ select · {key} recheck availability"),
-            None => "↑/↓ select · Tab moves focus · Enter activates".to_owned(),
-        }
-    }));
+    if let Some(key) = dashboard.first_key_label(crate::CommandId::Refresh) {
+        help.push(picker_help(&format!("{key} recheck availability")));
+    }
     (target_table(rows), help, selected_row)
 }
 
@@ -247,41 +240,45 @@ pub(crate) fn render_new_wizard(
             dashboard.config.targets[&target_id],
             TargetTemplate::LocalBare
         );
-        let mut lines = vec![
-            Line::raw(if local {
+        let width = centered_rect(76, 1, area).width.saturating_sub(4);
+        let intro = wrap_lines(
+            [Line::raw(if local {
                 "Absolute project directory on this machine:"
             } else {
                 "Absolute project directory on the remote machine:"
-            }),
-            Line::raw(""),
-        ];
+            })],
+            width,
+        );
+        let field_row = intro.len() as u16 + 1;
+        let mut details = vec![Line::raw("")];
         if let Some(error) = &wizard.project_directory_error {
-            lines.push(Line::styled(
-                format!("Error: {error}"),
-                Style::default().fg(theme::palette().error),
+            details.extend(wrap_lines(
+                [Line::styled(
+                    format!("Error: {error}"),
+                    Style::default().fg(theme::palette().error),
+                )],
+                width,
             ));
-            lines.push(Line::raw(""));
+            details.push(Line::raw(""));
         }
-        // Launch finding R1-1: the field starts as the repository `mj` was
-        // started in, so say so. A plain Enter then reads as choosing that
-        // repository rather than accepting a default nobody saw.
         if local && launch_directory_chosen(dashboard, wizard) {
-            lines.push(Line::styled(
-                "Filled in with the repository mj was started in; Enter uses it.",
-                Style::default().fg(theme::palette().warning),
+            details.extend(wrap_lines(
+                [Line::styled(
+                    "Filled in with the repository mj was started in.",
+                    Style::default().fg(theme::palette().warning),
+                )],
+                width,
             ));
+            details.push(Line::raw(""));
         }
-        let mut history_start = None;
+        let mut recent_rows = Vec::new();
         if !wizard.project_history.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "Recent on this host (click or ↑/↓ selects):",
-                Style::default().fg(theme::palette().muted),
-            ));
-            history_start = Some(lines.len());
-            lines.extend(wizard.project_history.iter().take(5).enumerate().map(
-                |(index, directory)| {
-                    Line::styled(
+            details.push(Line::styled("Recent on this host:", theme::muted()));
+            details.push(Line::raw(""));
+            for (index, directory) in wizard.project_history.iter().take(5).enumerate() {
+                let start = field_row + 1 + details.len() as u16;
+                let rows = wrap_lines(
+                    [Line::styled(
                         format!(
                             "{} {}",
                             if index == wizard.project_history_index {
@@ -296,37 +293,33 @@ pub(crate) fn render_new_wizard(
                         } else if index == wizard.project_history_index {
                             Style::default().fg(theme::palette().text)
                         } else {
-                            Style::default().fg(theme::palette().muted)
+                            theme::muted()
                         },
-                    )
-                },
-            ));
+                    )],
+                    width,
+                );
+                recent_rows.push((index, start, rows.len() as u16));
+                details.extend(rows);
+            }
         }
-        lines.push(Line::styled(
-            "Enter validates · Tab moves · Back returns · Esc cancels",
-            Style::default().fg(theme::palette().muted),
-        ));
-        // The dialog holds two intro rows, the field, the detail rows and the
-        // button row, so it is sized for all of them: a shorter frame lets the
-        // buttons overwrite the last detail rows, which is where the remembered
-        // directories and the key hints live. A completion popup gets its own
-        // rows between the field and the buttons for the same reason.
-        let detail_rows = u16::try_from(lines.len().saturating_sub(2)).unwrap_or(u16::MAX);
-        let content_rows = detail_rows
-            .max(PathField::popup_rows(&wizard.project_directory))
-            .saturating_add(4);
-        let popup = centered_modal(
-            frame,
-            surfaces,
-            76,
-            content_rows.saturating_add(2).max(9),
-            area,
-        );
-        let content = popup.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        let title_line = dismissible_modal_title(
+        while details.last().is_some_and(|line| line.width() == 0) {
+            details.pop();
+        }
+        let height = field_row
+            + 1
+            + (details.len() as u16).max(PathField::popup_rows(&wizard.project_directory));
+        let popup = centered_modal(frame, surfaces, 76, (height + 5).max(9), area);
+        let inner = DialogShell::padded_inner(popup);
+        let layout = DialogShell::layout(inner, 1);
+        let focused_row = match focused_before_frame {
+            Some(WizardControl::RecentProject(index)) => recent_rows
+                .iter()
+                .find(|(i, _, _)| *i == index)
+                .map(|(_, row, _)| *row),
+            _ => Some(field_row),
+        };
+        let viewport = FormViewport::new(layout.body, height, 0, focused_row);
+        let title = dismissible_modal_title(
             &mut form,
             popup,
             format!(
@@ -337,53 +330,35 @@ pub(crate) fn render_new_wizard(
             theme::title(true),
             true,
         );
-        frame.render_widget(theme::modal().title(title_line), popup);
-        let intro = lines.iter().take(2).cloned().collect::<Vec<_>>();
-        let details = lines.iter().skip(2).cloned().collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(intro),
-            Rect::new(content.x, content.y, content.width, 2.min(content.height)),
-        );
-        let field_y = content.y.saturating_add(2);
-        let button_y = content.bottom().saturating_sub(1);
-        frame.render_widget(
-            Paragraph::new(details),
-            Rect::new(
-                content.x,
-                field_y.saturating_add(1),
-                content.width,
-                button_y.saturating_sub(field_y.saturating_add(1)),
-            ),
-        );
-        if let Some(start) = history_start {
-            for index in 0..wizard.project_history.len().min(5) {
-                let row = content.y.saturating_add((start + index + 1) as u16);
-                if row < button_y {
-                    form.register(
-                        WizardControl::RecentProject(index),
-                        ControlKind::Button,
-                        Rect::new(content.x, row, content.width, 1),
-                        true,
-                    );
-                }
-            }
+        frame.render_widget(theme::modal().title(title), popup);
+        for (index, line) in intro.into_iter().enumerate() {
+            frame.render_widget(Paragraph::new(line), viewport.row(index as u16, 1));
+        }
+        for (index, line) in details.into_iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(line),
+                viewport.row(field_row + 1 + index as u16, 1),
+            );
+        }
+        for (index, start, height) in recent_rows {
+            form.register(
+                WizardControl::RecentProject(index),
+                ControlKind::Button,
+                viewport.row(start, height),
+                true,
+            );
         }
         PathField::render_within(
             frame,
-            Rect::new(
-                content.x,
-                content.y,
-                content.width,
-                button_y.saturating_sub(content.y),
-            ),
-            Rect::new(content.x, field_y, content.width, 1.min(content.height)),
+            layout.body,
+            viewport.row(field_row, 1),
             &wizard.project_directory,
             &mut form,
             WizardControl::ProjectDirectory,
         );
         Dialog::render_actions(
             frame,
-            mj_chat::components::DialogShell::layout(content, 0).actions,
+            layout.actions,
             &[
                 (WizardControl::Cancel, "Cancel", true),
                 (WizardControl::Back, "Back", true),
@@ -481,9 +456,7 @@ pub(crate) fn render_new_wizard(
     let mut help = if matches!(wizard.step, WizardStep::Target | WizardStep::Bundle) {
         step_help
     } else {
-        vec![picker_help(
-            "↑/↓ select · Tab moves focus · Enter activates",
-        )]
+        Vec::new()
     };
     if wizard.step == WizardStep::Profile
         && dashboard
@@ -508,6 +481,7 @@ pub(crate) fn render_new_wizard(
         choices,
         help,
         PickerNavigation {
+            resources: target_resources(dashboard, wizard),
             has_back: wizard.step != WizardStep::Profile,
             selected,
             control: match wizard.step {
@@ -517,22 +491,7 @@ pub(crate) fn render_new_wizard(
                 _ => unreachable!("picker step has a list control"),
             },
             next_enabled: match wizard.step {
-                WizardStep::Target => {
-                    dashboard
-                        .target_readiness_rejection(&nth_key(
-                            &dashboard.config.targets,
-                            wizard.target,
-                        ))
-                        .is_none()
-                        && (wizard.resource_allocation.is_some()
-                            || !matches!(
-                                dashboard
-                                    .config
-                                    .targets
-                                    .get(&nth_key(&dashboard.config.targets, wizard.target)),
-                                Some(TargetTemplate::AwsEc2 { .. })
-                            ))
-                }
+                WizardStep::Target => target_advance_enabled(dashboard, wizard),
                 // Without a bundle there is nothing to review; the pinned
                 // action is the only way forward.
                 WizardStep::Bundle => !dashboard.config.bundles.is_empty(),
@@ -600,18 +559,16 @@ fn compact_path(source: &str) -> String {
 /// The selected project's full sources, drawn under the project list so a
 /// long path or a second repository is never cut off.
 fn bundle_details(id: &str, bundle: &mj_core::config::ProjectBundle) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::raw(""),
-        Line::styled(
-            format!(
-                "{id} · {}",
-                crate::widgets::counted(bundle.repositories.len(), "repository", "repositories")
-            ),
-            theme::muted(),
+    let mut lines = vec![Line::styled(
+        format!(
+            "{id} · {}",
+            crate::widgets::counted(bundle.repositories.len(), "repository", "repositories")
         ),
-    ];
+        theme::muted(),
+    )];
     let multiple = bundle.repositories.len() > 1;
     for repository in &bundle.repositories {
+        lines.push(Line::raw(""));
         let primary = multiple && repository.id == bundle.primary_repo;
         lines.push(Line::raw(format!(
             "  {}{}",
@@ -710,6 +667,7 @@ pub(crate) fn render_review_wizard(
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
+        Line::raw(""),
         Line::from(vec![
             Span::styled(format!("{project_label}: "), theme::muted()),
             Span::styled(
@@ -720,29 +678,34 @@ pub(crate) fn render_review_wizard(
             ),
             Span::styled(project_note, theme::muted()),
         ]),
+        Line::raw(""),
         Line::from(vec![
             Span::styled("Target: ", theme::muted()),
             Span::styled(target_id, Style::default().fg(theme::palette().accent)),
             Span::styled(format!(" ({})", target_label(target)), theme::muted()),
         ]),
+        Line::raw(""),
         Line::from(vec![
             Span::styled("Compute: ", theme::muted()),
             Span::raw(resource_allocation_description(allocation)),
         ]),
     ];
     if moving && source_unavailable {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Source is unavailable; Move will recover its saved data without starting its old harness.",
             Style::default().fg(theme::palette().warning),
         ));
     }
     if moving && in_place_move {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Only the harness and profile are replaced; the environment and workspace are kept.",
             theme::muted(),
         ));
     }
     if moving && stopped_subagents > 0 {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!(
                 "{} will be stopped; the session is told which when it resumes.",
@@ -756,6 +719,7 @@ pub(crate) fn render_review_wizard(
         ));
     }
     if moving && active_interruption {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             if in_place_move {
                 "Active work will be interrupted; the session keeps its environment."
@@ -765,6 +729,7 @@ pub(crate) fn render_review_wizard(
             Style::default().fg(theme::palette().warning),
         ));
         if clear_resource_allocation {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Fixed/default destination resources will replace the source sizing.",
                 Style::default().fg(theme::palette().warning),
@@ -772,8 +737,10 @@ pub(crate) fn render_review_wizard(
         }
     }
     if let Some(conversion) = conversion.filter(|_| moving) {
+        lines.push(Line::raw(""));
         lines.push(Line::raw(conversion.summary_line()));
         for warning in conversion.warning_lines() {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
                 warning,
                 Style::default().fg(theme::palette().warning),
@@ -782,15 +749,18 @@ pub(crate) fn render_review_wizard(
     }
     if moving {
         if preparing {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Checking move destination…",
                 Style::default().fg(theme::palette().muted),
             ));
         } else if let Some(error) = preparation_error {
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
                 format!("Move preparation failed: {error}"),
                 Style::default().fg(theme::palette().error),
             ));
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "Press Retry to check the destination again.",
                 Style::default().fg(theme::palette().muted),
@@ -798,16 +768,19 @@ pub(crate) fn render_review_wizard(
         }
     }
     if remote_preflight_in_flight {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Checking prerequisites…",
             Style::default().fg(theme::palette().muted),
         ));
     } else if let Some(error) = remote_preflight_error {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!("Prerequisite check failed: {error}"),
             Style::default().fg(theme::palette().error),
         ));
     } else if let Some(repositories) = remote_repositories {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             if local_changes_excluded {
                 "Network clone plan (local commits and dirty files excluded):"
@@ -829,7 +802,9 @@ pub(crate) fn render_review_wizard(
         }
     }
     let worktree_row = worktree.map(|(checked, available)| {
+        lines.push(Line::raw(""));
         let row = lines.len() as u16;
+        lines.push(Line::raw(""));
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             if checked && available {
@@ -845,30 +820,31 @@ pub(crate) fn render_review_wizard(
     let mut subagent_effort_row = None;
     let mut subagent_retry_row = None;
     let subagent_row = subagents.map(|wizard| {
+        lines.push(Line::raw(""));
         let row = lines.len() as u16;
         lines.push(Line::raw(""));
         if matches!(
             wizard.policy,
             mj_core::subagent::SubagentPolicy::SingleModel { .. }
         ) {
+            lines.push(Line::raw(""));
             let height = 1;
             subagent_model_row = Some((lines.len() as u16, height));
             for _ in 0..height {
                 lines.push(Line::raw(""));
             }
+            lines.push(Line::raw(""));
             let height = 1;
             subagent_effort_row = Some((lines.len() as u16, height));
             for _ in 0..height {
                 lines.push(Line::raw(""));
             }
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "Configure profiles in Settings → Profiles; additional eligible",
+                "Configure profiles in Settings → Profiles; additional eligible profiles in Settings → Sub-agents. Your own profile is always eligible.",
                 theme::muted(),
             ));
-            lines.push(Line::styled(
-                "profiles in Settings → Sub-agents. Your own profile is always eligible.",
-                theme::muted(),
-            ));
+
             if let Some(error) = wizard.error() {
                 lines.push(Line::raw(error));
             }
@@ -877,6 +853,7 @@ pub(crate) fn render_review_wizard(
                     lines.push(Line::raw(error.clone()));
                 }
             }
+            lines.push(Line::raw(""));
             subagent_retry_row = Some(lines.len() as u16);
             lines.push(Line::raw(""));
         }
@@ -884,6 +861,7 @@ pub(crate) fn render_review_wizard(
     });
     let queue_label = queue.map(|(count, _)| format!("Queued prompts: {count}"));
     if let Some(label) = &queue_label {
+        lines.push(Line::raw(""));
         lines.push(Line::raw(label.clone()));
     }
     // Guardian targets rely on the harness's own approval mode rather than
@@ -897,6 +875,7 @@ pub(crate) fn render_review_wizard(
             .map(|profile| profile.kind)
         && let Some(warning) = kind.unsandboxed_guardian_warning()
     {
+        lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!("⚠ {warning}"),
             Style::default()
@@ -910,15 +889,39 @@ pub(crate) fn render_review_wizard(
             Span::styled("Attached directories: ", theme::muted()),
             Span::styled(mounts.mounts.len().to_string(), theme::title(false)),
         ]));
+        lines.push(Line::raw(""));
     }
-    lines.push(Line::styled(
-        if can_attach {
-            "Tab moves focus · Enter edits selected directory · Delete removes it"
-        } else {
-            "Tab moves focus · Enter activates"
-        },
-        Style::default().fg(theme::palette().muted),
-    ));
+
+    let last_control_row = [
+        worktree_row,
+        subagent_row,
+        subagent_model_row.map(|(row, _)| row),
+        subagent_effort_row.map(|(row, _)| row),
+        subagent_retry_row,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .map_or(0, |row| usize::from(row) + 1);
+    if mounts.mounts.is_empty() || !can_attach {
+        while lines.len() > last_control_row && lines.last().is_some_and(|line| line.width() == 0) {
+            lines.pop();
+        }
+    }
+    let width = centered_rect(84, 1, area).width.saturating_sub(4);
+    let mut wrapped = Vec::new();
+    let mut offsets = Vec::new();
+    for line in lines {
+        offsets.push(wrapped.len() as u16);
+        wrapped.extend(wrap_lines([line], width));
+    }
+    let lines = wrapped;
+    let map_row = |row: u16| offsets[usize::from(row)];
+    let worktree_row = worktree_row.map(map_row);
+    let subagent_row = subagent_row.map(map_row);
+    let subagent_model_row = subagent_model_row.map(|(row, height)| (map_row(row), height));
+    let subagent_effort_row = subagent_effort_row.map(|(row, height)| (map_row(row), height));
+    let subagent_retry_row = subagent_retry_row.map(map_row);
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -936,25 +939,11 @@ pub(crate) fn render_review_wizard(
     let total_height = summary_height
         .saturating_add(list_height)
         .saturating_add(queue_height);
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        84,
-        (total_height.min(16) + 3).clamp(13, 26),
-        area,
-    );
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let popup = centered_modal(frame, surfaces, 84, (total_height + 5).clamp(13, 36), area);
+    let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
-    let body = Rect::new(
-        inner.x,
-        inner.y,
-        inner.width,
-        inner.height.saturating_sub(1),
-    );
+    let body = DialogShell::layout(inner, 1).body;
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
         Some(WizardControl::Subagents) => subagent_row,
@@ -1047,7 +1036,7 @@ pub(crate) fn render_review_wizard(
                 selected,
                 false,
                 enabled,
-                " values · ↑/↓ select · Tab/Enter accept ",
+                " Values ",
                 PopupSide::Below,
                 form,
                 id,
@@ -1197,12 +1186,7 @@ pub(crate) fn render_review_wizard(
                 || remote_preflight_error.is_some())
             && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
     ));
-    Dialog::render_actions(
-        frame,
-        mj_chat::components::DialogShell::layout(inner, 0).actions,
-        &buttons,
-        form,
-    );
+    Dialog::render_actions(frame, DialogShell::layout(inner, 1).actions, &buttons, form);
     // Paint the active popup last so it overlays the remaining review fields.
     if let Some((id, field, value, options, selected, enabled)) = expanded_subagent_combo {
         ComboBox::render(
@@ -1214,7 +1198,7 @@ pub(crate) fn render_review_wizard(
             selected,
             true,
             enabled,
-            " values · ↑/↓ select · Tab/Enter accept ",
+            " Values ",
             PopupSide::Below,
             form,
             id,
@@ -1296,7 +1280,7 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
         selected,
         expanded,
         true,
-        " access · ↑/↓ select · Enter accept ",
+        " Access ",
         PopupSide::Below,
         form,
         id,
@@ -1340,6 +1324,7 @@ pub(crate) fn render_mount_wizard(
     };
     let mut lines = vec![
         Line::raw(format!("Target: {target_id} ({})", target_label(target))),
+        Line::raw(""),
         Line::styled(protection, Style::default().fg(theme::palette().warning)),
     ];
     if !mounts.mounts.is_empty() {
@@ -1360,7 +1345,7 @@ pub(crate) fn render_mount_wizard(
     {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Recent sources (↑/↓ when Source is empty):",
+            "Recent sources:",
             Style::default().fg(theme::palette().muted),
         ));
         lines.extend(
@@ -1386,35 +1371,20 @@ pub(crate) fn render_mount_wizard(
             Style::default().fg(theme::palette().error),
         ));
     }
-    lines.push(Line::styled(
-        "Ctrl-Space completes · Tab moves focus · Space toggles read-only · Enter continues/adds",
-        Style::default().fg(theme::palette().muted),
-    ));
+
+    lines.push(Line::raw(""));
+    let lines = wrap_lines(lines, centered_rect(84, 1, area).width.saturating_sub(4));
     let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let total_height = info_height.saturating_add(3);
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        84,
-        (total_height.min(16) + 3).clamp(13, 25),
-        area,
-    );
-    let inner = popup.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    let total_height = info_height.saturating_add(5);
+    let popup = centered_modal(frame, surfaces, 84, (total_height + 5).clamp(13, 32), area);
+    let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
-    let body = Rect::new(
-        inner.x,
-        inner.y,
-        inner.width,
-        inner.height.saturating_sub(1),
-    );
+    let body = DialogShell::layout(inner, 1).body;
     let focused_row = match form.focused() {
         Some(WizardControl::MountSource) => Some(info_height),
-        Some(WizardControl::MountDestination) => Some(info_height.saturating_add(1)),
-        Some(WizardControl::MountAccess) => Some(info_height.saturating_add(2)),
+        Some(WizardControl::MountDestination) => Some(info_height.saturating_add(2)),
+        Some(WizardControl::MountAccess) => Some(info_height.saturating_add(4)),
         _ => None,
     };
     let viewport = FormViewport::new(body, total_height, 0, focused_row);
@@ -1450,7 +1420,7 @@ pub(crate) fn render_mount_wizard(
         form,
         WizardControl::MountSource,
     );
-    let destination_row = viewport.row(info_height.saturating_add(1), 1);
+    let destination_row = viewport.row(info_height.saturating_add(2), 1);
     frame.render_widget(
         Paragraph::new("Destination:"),
         Rect::new(
@@ -1473,7 +1443,7 @@ pub(crate) fn render_mount_wizard(
         form,
         WizardControl::MountDestination,
     );
-    let access_row = viewport.row(info_height.saturating_add(2), 1);
+    let access_row = viewport.row(info_height.saturating_add(4), 1);
     frame.render_widget(
         Paragraph::new("Access:"),
         Rect::new(
@@ -1503,7 +1473,7 @@ pub(crate) fn render_mount_wizard(
     );
     Dialog::render_actions(
         frame,
-        mj_chat::components::DialogShell::layout(inner, 0).actions,
+        DialogShell::layout(inner, 1).actions,
         &[
             (WizardControl::Cancel, "Cancel", true),
             (WizardControl::Back, "Back", true),
@@ -1751,9 +1721,7 @@ pub(crate) fn render_resume_wizard(
             let selected_is_lossy = profiles.get(wizard.profile).is_some_and(|(_, harness)| {
                 session_harness.is_some_and(|current| current != *harness)
             });
-            let mut help = vec![picker_help(
-                "↑/↓ select · Tab moves focus · Enter activates",
-            )];
+            let mut help = Vec::new();
             if selected_is_lossy {
                 help.push(picker_help(
                     "Lossy: text only; tool calls + reasoning dropped.",
@@ -1810,6 +1778,7 @@ pub(crate) fn render_resume_wizard(
         choices,
         help,
         PickerNavigation {
+            resources: target_resources(dashboard, wizard),
             has_back: wizard.step != WizardStep::Profile,
             selected,
             control: match wizard.step {

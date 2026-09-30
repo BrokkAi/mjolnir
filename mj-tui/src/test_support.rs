@@ -39,6 +39,40 @@ pub(crate) fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str) {
+    let cells: Vec<Vec<char>> = lines.iter().map(|line| line.chars().collect()).collect();
+    let top = lines
+        .iter()
+        .position(|line| line.contains(title))
+        .expect("dialog title");
+    let left = cells[top]
+        .iter()
+        .position(|c| matches!(c, '╭' | '┌'))
+        .expect("left border");
+    let right = cells[top]
+        .iter()
+        .rposition(|c| matches!(c, '╮' | '┐'))
+        .expect("right border");
+    let bottom = (top + 1..cells.len())
+        .find(|&row| matches!(cells[row][left], '╰' | '└'))
+        .expect("bottom border");
+    let text = lines.join("\n");
+    for row in [top + 1, bottom - 2] {
+        assert!(
+            cells[row][left + 1..right].iter().all(|c| *c == ' '),
+            "row {row}:\n{text}"
+        );
+    }
+    assert!(
+        lines[bottom - 1].contains(action),
+        "buttons touch bottom border:\n{text}"
+    );
+    for row in &cells[top + 1..bottom] {
+        assert_eq!(row[left + 1], ' ', "left padding:\n{text}");
+        assert_eq!(row[right - 1], ' ', "right padding:\n{text}");
+    }
+}
+
 /// The whole dashboard surface drawn into a terminal of the given size, as one
 /// string per row.
 pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
