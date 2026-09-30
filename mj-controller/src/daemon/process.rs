@@ -501,6 +501,11 @@ pub(super) async fn run_daemon_runtime(
                             // news, not a fault.
                             if result.deferred {
                                 tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
+                            } else if result.cancelled {
+                                // The daemon asked for this cancel (a suspend
+                                // or close superseded the copy), so it is not
+                                // a failure of the checkpoint.
+                                tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
                             } else {
                                 tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
                             }

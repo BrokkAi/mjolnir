@@ -816,9 +816,12 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
         }
         let session_id = self.session_id;
         if self.executor.cancellation_requested() {
-            tracing::warn!(
+            // A cancel is something the daemon or the user asked for, not a
+            // failure of the checkpoint.
+            tracing::info!(
                 session_id,
                 paths = ?self.paths,
+                reason = "superseded by suspend",
                 "cancelled checkpoint left its files on the target; daemon start removes them from a local worker root"
             );
             return;
@@ -843,5 +846,48 @@ impl<E: CommandExecutor> Drop for TargetCheckpointFiles<'_, E> {
                 "could not remove an unused checkpoint's files from the target"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod cancel_log_tests {
+    use super::*;
+
+    struct CancelledExecutor;
+
+    impl CommandExecutor for CancelledExecutor {
+        fn cancellation_requested(&self) -> bool {
+            true
+        }
+
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            unreachable!("a cancelled checkpoint removes nothing")
+        }
+    }
+
+    /// A checkpoint the daemon cancelled is not a failure: it logs at info
+    /// with the reason, never at warn (RVD-1).
+    #[test]
+    fn a_cancelled_checkpoint_leaves_an_info_line_not_a_warning() {
+        let log = crate::test_log::CapturedLog::default();
+        let _guard = tracing::subscriber::set_default(log.clone());
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: "/tmp/worker".into(),
+        };
+        drop(TargetCheckpointFiles::new(
+            &CancelledExecutor,
+            &backend,
+            "session-1",
+            "/tmp/stage",
+            "/tmp/archive",
+        ));
+        assert!(
+            log.at_or_above(tracing::Level::WARN).is_empty(),
+            "{:?}",
+            log.events()
+        );
+        let info = log.at(tracing::Level::INFO);
+        assert_eq!(info.len(), 1, "{info:?}");
+        assert!(info[0].contains("superseded by suspend"), "{info:?}");
     }
 }
