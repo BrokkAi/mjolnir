@@ -20,7 +20,7 @@ Private paths and credentials must not enter the public error for a live session
 - [x] (2026-09-30) Focused tests passed: two outcome tests, one ACP/relay cancellation test, and both controller Close regressions.
 - [x] (2026-09-30) Commit the fix separately as 4cd9c35e; integrate upstream in e9022119.
 - [x] (2026-09-30) Complete full dev tests and all-targets Clippy before publication; formatting, docs, and all 70 browser unit tests also pass.
-- [ ] Validate the subsequent integration of upstream 91929a04 (profile defaults and wizards) before publication.
+- [x] (2026-09-30) Validate the subsequent integration of upstream 91929a04 (profile defaults and wizards) before publication; full Cargo tests, Clippy, docs, formatting, and all 70 browser unit tests pass.
 
 ## Surprises & Discoveries
 
@@ -66,10 +66,14 @@ the configured upstream `origin/master`; #1137 can be closed after that push.
 The last plan-recording commit changes only this document and reuses validation
 of the identical Rust source tree.
 
-Before publication, upstream advanced again to 91929a04. The next integration
-also changes Rust, Cargo dependencies, docs, and the browser, so repeat the full
-checks for that combined tree. This repetition is required by new source changes,
-not by the plan-only validation record. The fix itself remains 4cd9c35e.
+Before publication, upstream advanced again to 91929a04. That integration
+changed Rust, Cargo dependencies, docs, and the browser, so the full checks were
+repeated for the combined tree. This repetition was required by new source
+changes, not by the plan-only validation record. Final validation on d60df008
+passes: controller 2,078, core 589, TUI 904, and worker 694 tests, with zero
+failures; CLI unit/integration checks also pass. All-targets Clippy completed in
+the dev profile with warnings denied. The fix itself remains 4cd9c35e; d60df008
+separately corrects the stale browser payload regression from upstream.
 
 ## Context and Orientation
 
@@ -165,6 +169,11 @@ Local evidence is retained in `/tmp/mj-1137-worker-focused.log`,
 in `/tmp/mj-1137-web-tests.log`; run these outside the sandbox because the
 sandboxed Playwright subprocess returned an empty listing.
 
+Final integration evidence uses `/tmp/mj-1137-integrated-full-tests.log`,
+`/tmp/mj-1137-integrated-clippy.log`, `/tmp/mj-1137-integrated-docs-check.log`,
+and `/tmp/mj-1137-integrated-web-tests.log`. All pass. The upstream remained
+91929a04 at the final pre-publication read.
+
 ## Interfaces and Dependencies
 
 Use existing rusqlite transactions and the shared database writer; add no crate
@@ -192,3 +201,6 @@ per-session sub-agent chooser but left its browser payload test unchanged.
 Update that behavioral regression to exercise the selected profile's Native or
 SingleModel policy, including a legacy profile without the field, and prove a
 stale draft cannot override it. Commit this integration-test correction separately.
+
+Revision note (2026-09-30): final combined validation passes on d60df008.
+This final evidence update changes only the plan and requires no Cargo rerun.
