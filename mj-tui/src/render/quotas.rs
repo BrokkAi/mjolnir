@@ -102,6 +102,17 @@ pub(crate) fn minimized_quota_line(
                     color: None,
                 });
             }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if quota.is_some_and(|quota| quota.rate_limit_label(now).is_some()) {
+                return Some(SummaryReading {
+                    name: id.to_owned(),
+                    value: "rate limited".into(),
+                    color: None,
+                });
+            }
             let quota = quota.filter(|quota| quota.error.is_none());
             let Some(weekly) = quota
                 .and_then(ProfileQuota::weekly_window)
@@ -393,6 +404,17 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                     )
                 } else {
                     match dashboard.quotas.get(id) {
+                        // The provider said to wait. The daemon keeps the last
+                        // good reading and its age; the row says when the
+                        // next probe is allowed.
+                        Some(quota) if quota.rate_limit_label(now).is_some() => (
+                            Line::raw(quota.rate_limit_label(now).unwrap_or_default()),
+                            String::new(),
+                            Line::default(),
+                            String::new(),
+                            false,
+                            false,
+                        ),
                         Some(quota) if quota.error.is_none() => {
                             let (weekly_reset, five_hour_reset) = quota_reset_cells(quota, now);
                             let weekly = quota_bar(quota.weekly_window());

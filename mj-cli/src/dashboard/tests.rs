@@ -428,6 +428,7 @@ fn a_feed_update_redraws_without_a_dirty_mark() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
+        rate_limited_until_epoch_seconds: None,
     });
     terminal
         .draw(|frame| {

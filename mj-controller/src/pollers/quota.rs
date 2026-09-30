@@ -15,11 +15,20 @@ pub type QuotaCacheLoader =
     Arc<dyn Fn(&QuotaRefreshRequest) -> Option<crate::quota::ProfileQuota> + Send + Sync>;
 
 /// When a profile is next due for a probe, in epoch seconds: one interval
-/// after its last report. A profile with no report is due at once (zero).
+/// after its last report, or the end of a rate-limit hold when that is later.
+/// A profile with no report is due at once (zero).
 pub(super) fn next_probe_at(report: Option<&crate::quota::ProfileQuota>) -> u64 {
     report.map_or(0, |report| {
-        report.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs()
+        (report.refreshed_at_epoch_seconds + QUOTA_REFRESH_INTERVAL.as_secs())
+            .max(report.rate_limited_until_epoch_seconds.unwrap_or(0))
     })
+}
+
+/// Whether a provider told this profile to wait, and the wait is not over.
+fn on_hold(report: Option<&crate::quota::ProfileQuota>, now: u64) -> bool {
+    report
+        .and_then(|report| report.rate_limited_until_epoch_seconds)
+        .is_some_and(|until| until > now)
 }
 
 /// The daemon's quota poller, the only process that asks a provider.
@@ -68,7 +77,10 @@ pub fn spawn_quota_refresher(
                 .profiles
                 .iter()
                 .filter(|request| {
-                    batch.refresh || next_probe_at(quotas.report(&request.profile_id)) <= now
+                    let report = quotas.report(&request.profile_id);
+                    // A hold outranks even an explicit refresh: probing an
+                    // endpoint that just said 429 only extends the limit.
+                    !on_hold(report, now) && (batch.refresh || next_probe_at(report) <= now)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -166,7 +178,7 @@ pub(super) async fn refresh_profile_quotas(
     // manager for a clean shutdown; just stop sending.
     let delivered = AtomicBool::new(true);
     quotas
-        .refresh_profiles(profiles.to_vec(), |quota| {
+        .probe(profiles.to_vec(), |quota| {
             let delivered = &delivered;
             async move {
                 if delivered.load(Ordering::Acquire)

@@ -137,6 +137,7 @@ fn compact_includes_reset_and_error_states() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     assert!(report.compact().contains("70% left"));
     assert!(report.compact().contains("resets 10:00 Jun 17"));
@@ -152,6 +153,7 @@ fn compact_shows_login_expired_without_unavailable_prefix() {
         extra: None,
         error: Some(claude_usage::LOGIN_EXPIRED.into()),
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     assert_eq!(report.compact(), claude_usage::LOGIN_EXPIRED);
     assert_eq!(
@@ -170,6 +172,7 @@ fn compact_shows_other_errors_as_unavailable() {
         extra: None,
         error: Some("query Claude usage: HTTP 429".into()),
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     assert_eq!(report.compact(), "unavailable");
     assert_eq!(report.error_label().as_deref(), Some("unavailable"));
@@ -202,6 +205,7 @@ fn compact_displays_a_shared_reset_once() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     assert_eq!(
         report.compact(),
@@ -236,6 +240,7 @@ fn compact_hides_claude_short_window_when_week_is_exhausted() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
 
     assert_eq!(report.compact(), "Week 0% left, resets 03:59 Aug 14");
@@ -776,6 +781,88 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
 /// credentials file, so the expiry this asserts is not a state it can reach.
 /// Running it there would also spawn the real `claude` binary.
 #[cfg(not(target_os = "macos"))]
+#[test]
+fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
+    let now = chrono::Utc
+        .with_ymd_and_hms(2015, 10, 21, 7, 26, 0)
+        .unwrap();
+    assert_eq!(
+        parse_retry_after("120", now),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(
+        parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(
+        parse_retry_after("Wed, 21 Oct 2015 07:20:00 GMT", now),
+        None
+    );
+    assert_eq!(parse_retry_after("soon", now), None);
+
+    assert_eq!(rate_limit_hold(None), DEFAULT_RATE_LIMIT_HOLD);
+    assert_eq!(DEFAULT_RATE_LIMIT_HOLD, Duration::from_secs(15 * 60));
+    assert_eq!(
+        rate_limit_hold(Some(Duration::from_secs(0))),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        rate_limit_hold(Some(Duration::from_secs(300))),
+        Duration::from_secs(300)
+    );
+    assert_eq!(
+        rate_limit_hold(Some(Duration::from_secs(86_400))),
+        Duration::from_secs(6 * 3600)
+    );
+}
+
+fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
+    ProfileQuota {
+        banked_resets: None,
+        profile_id: "claude".into(),
+        harness: HarnessKind::Claude,
+        windows: remaining
+            .map(|remaining| QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(remaining),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: None,
+            })
+            .into_iter()
+            .collect(),
+        extra: None,
+        error: remaining.is_none().then(|| "unavailable".to_owned()),
+        refreshed_at_epoch_seconds: refreshed_at,
+        rate_limited_until_epoch_seconds: None,
+    }
+}
+
+#[test]
+fn a_rate_limit_keeps_the_last_good_report_and_its_age() {
+    let mut limited = quota_report(500, None);
+    limited.error = Some("rate limited".into());
+    limited.rate_limited_until_epoch_seconds = Some(1400);
+
+    // Nothing good to keep: the rate-limit report itself is published.
+    assert_eq!(hold_report(None, limited.clone()), limited);
+    assert_eq!(
+        hold_report(Some(&quota_report(400, None)), limited.clone()),
+        limited
+    );
+
+    let good = quota_report(100, Some(42));
+    let held = hold_report(Some(&good), limited);
+    assert_eq!(held.windows, good.windows);
+    assert_eq!(
+        held.refreshed_at_epoch_seconds, 100,
+        "the age is the good reading's"
+    );
+    assert_eq!(held.error, None);
+    assert_eq!(held.rate_limited_until_epoch_seconds, Some(1400));
+}
+
 #[tokio::test]
 async fn expired_claude_credentials_report_login_expired() {
     let directory = tempfile::tempdir().unwrap();
@@ -829,6 +916,7 @@ fn a_monthly_window_shares_the_long_window_column_with_a_weekly_one() {
             extra: None,
             error: None,
             refreshed_at_epoch_seconds: 0,
+            rate_limited_until_epoch_seconds: None,
         };
 
         assert!(report.weekly_window().is_some(), "{label}");
@@ -863,6 +951,7 @@ fn kimi_uses_percent_left_and_hides_a_short_window_on_sustainable_pace() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 3_600,
+        rate_limited_until_epoch_seconds: None,
     };
 
     assert_eq!(report.compact(), "Week 94% left, resets 12:22 Aug 18");

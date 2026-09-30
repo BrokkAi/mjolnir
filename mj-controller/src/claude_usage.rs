@@ -46,6 +46,9 @@ pub enum ClaudeUsageError {
     Refresh(String),
     Query(String),
     Parse,
+    /// The endpoint answered 429. The delay is what `Retry-After` asked for,
+    /// when it said.
+    RateLimited(Option<Duration>),
 }
 
 impl fmt::Display for ClaudeUsageError {
@@ -57,6 +60,7 @@ impl fmt::Display for ClaudeUsageError {
             Self::Refresh(error) => write!(f, "refresh Claude login: {error}"),
             Self::Query(error) => write!(f, "query Claude usage: {error}"),
             Self::Parse => write!(f, "could not parse claude /usage output"),
+            Self::RateLimited(_) => write!(f, "rate limited"),
         }
     }
 }
@@ -178,6 +182,11 @@ async fn query_api(
         })?;
     if matches!(response.status().as_u16(), 401 | 403) {
         return Err(ClaudeUsageError::LoginExpired);
+    }
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(ClaudeUsageError::RateLimited(
+            crate::quota::retry_after_header(response.headers()),
+        ));
     }
     if !response.status().is_success() {
         return Err(ClaudeUsageError::Query(format!(
@@ -714,6 +723,67 @@ Last 7d · 5966 requests · 78 sessions
             oauth["refreshToken"] = Value::String(refresh.to_owned());
         }
         serde_json::json!({"claudeAiOauth": oauth})
+    }
+
+    async fn usage_status_only(
+        status: StatusCode,
+        retry_after: Option<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/usage",
+            get(move || async move {
+                let mut headers = HeaderMap::new();
+                if let Some(value) = retry_after {
+                    headers.insert("retry-after", value.parse().unwrap());
+                }
+                (status, headers)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/usage"), server)
+    }
+
+    #[tokio::test]
+    async fn a_429_is_a_rate_limit_that_carries_the_servers_retry_after() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".credentials.json"),
+            serde_json::to_vec(&credentials(
+                "token",
+                None,
+                mj_core::clock::epoch_millis() + 3_600_000,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        for (header, expected) in [
+            (Some("120"), Some(Duration::from_secs(120))),
+            (None, None),
+            (Some("not a delay"), None),
+        ] {
+            let (url, server) = usage_status_only(StatusCode::TOO_MANY_REQUESTS, header).await;
+            let executor = RefreshExecutor {
+                home: home.path().to_path_buf(),
+                replacement: None,
+                status: 0,
+                commands: Arc::new(Mutex::new(Vec::new())),
+            };
+            let error = query_with(
+                home.path().to_path_buf(),
+                HashMap::new(),
+                &url,
+                Arc::new(executor),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, ClaudeUsageError::RateLimited(expected), "{header:?}");
+            assert_eq!(error.to_string(), "rate limited");
+            server.abort();
+        }
     }
 
     #[tokio::test]

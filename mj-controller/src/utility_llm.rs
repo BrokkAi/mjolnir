@@ -1002,6 +1002,7 @@ mod tests {
             extra: Some(crate::quota::API_LABEL.into()),
             error: None,
             refreshed_at_epoch_seconds: 0,
+            rate_limited_until_epoch_seconds: None,
         };
         assert_eq!(
             classify_quota(&report),

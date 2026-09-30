@@ -494,6 +494,7 @@ fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: epoch_seconds() - age_seconds,
+        rate_limited_until_epoch_seconds: None,
     }
 }
 
@@ -612,6 +613,49 @@ async fn an_explicit_refresh_probes_every_profile_even_when_fresh() {
         next_update(&mut updates).await,
         QuotaUpdate::Report(_)
     ));
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { generation: 2 }
+    ));
+}
+
+#[tokio::test]
+async fn a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh() {
+    // Its last good reading is old, so only the hold keeps it from a probe.
+    let mut held = stored_report("a", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
+    held.rate_limited_until_epoch_seconds = Some(epoch_seconds() + 300);
+    assert!(next_probe_at(Some(&held)) > epoch_seconds());
+
+    let (profiles, mut updates) = poller_with_store(vec![held.clone()]);
+    profiles.send_replace(batch(1, false, &["a", "b"]));
+    // The held profile is published with its hold and its old reading.
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the held report is published");
+    };
+    assert_eq!(outcome.report, held);
+    // Only the profile that is not held is probed.
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Refreshing { profile_ids } if profile_ids == ["b"]
+    ));
+    assert!(
+        matches!(next_update(&mut updates).await, QuotaUpdate::Report(o) if o.report.profile_id == "b")
+    );
+    assert!(matches!(
+        next_update(&mut updates).await,
+        QuotaUpdate::Finished { .. }
+    ));
+
+    // An explicit refresh asks the profile that is not held, and not the held one.
+    profiles.send_replace(batch(2, true, &["a", "b"]));
+    let update = next_update(&mut updates).await;
+    assert!(
+        matches!(&update, QuotaUpdate::Refreshing { profile_ids } if profile_ids == &["b"]),
+        "{update:?}"
+    );
+    assert!(
+        matches!(next_update(&mut updates).await, QuotaUpdate::Report(o) if o.report.profile_id == "b")
+    );
     assert!(matches!(
         next_update(&mut updates).await,
         QuotaUpdate::Finished { generation: 2 }

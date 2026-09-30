@@ -114,6 +114,63 @@ fn provider_credential_from(
     })
 }
 
+/// How long a profile's probes are held when the provider answers 429 without
+/// saying how long.
+pub const DEFAULT_RATE_LIMIT_HOLD: Duration = Duration::from_secs(15 * 60);
+
+/// A provider answered 429 (too many requests). Carried as the error of a
+/// failed probe so the refresh can turn it into a hold.
+#[derive(Debug)]
+pub(crate) struct RateLimited {
+    pub retry_after: Option<Duration>,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("rate limited")
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+/// A `Retry-After` value: a number of seconds, or an HTTP date. A date that
+/// has passed, or anything else, says nothing.
+pub(crate) fn parse_retry_after(value: &str, now: DateTime<chrono::Utc>) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = DateTime::parse_from_rfc2822(value).ok()?;
+    (date.with_timezone(&chrono::Utc) - now).to_std().ok()
+}
+
+pub(crate) fn retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(value, chrono::Utc::now())
+}
+
+/// The hold for a 429: what the provider asked for, kept between one minute
+/// and six hours so a bad header can neither spin the poller nor park a
+/// profile for days.
+pub(crate) fn rate_limit_hold(retry_after: Option<Duration>) -> Duration {
+    retry_after
+        .unwrap_or(DEFAULT_RATE_LIMIT_HOLD)
+        .clamp(Duration::from_secs(60), Duration::from_secs(6 * 3600))
+}
+
+/// What to publish after a probe was rate limited: the last good reading with
+/// the hold attached, so its numbers and age stay visible. With no good
+/// reading to keep, the rate-limit report itself.
+pub(crate) fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota) -> ProfileQuota {
+    match previous.filter(|previous| previous.error.is_none()) {
+        Some(good) => ProfileQuota {
+            rate_limited_until_epoch_seconds: limited.rate_limited_until_epoch_seconds,
+            ..good.clone()
+        },
+        None => limited,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaRefreshOutcome {
     pub report: ProfileQuota,
@@ -201,10 +258,16 @@ impl QuotaManager {
                 self.codex_clients
                     .insert(outcome.report.profile_id.clone(), client);
             }
-            log_quota_change(
-                self.reports.get(&outcome.report.profile_id),
-                &outcome.report,
-            );
+            let previous = self.reports.get(&outcome.report.profile_id);
+            let outcome = if outcome.report.rate_limited_until_epoch_seconds.is_some() {
+                QuotaRefreshOutcome {
+                    report: hold_report(previous, outcome.report),
+                    ..outcome
+                }
+            } else {
+                outcome
+            };
+            log_quota_change(previous, &outcome.report);
             self.reports
                 .insert(outcome.report.profile_id.clone(), outcome.report.clone());
             on_report(outcome).await;
@@ -246,6 +309,19 @@ impl QuotaManager {
 /// without this line the reason was recorded nowhere (R12-2). A profile that
 /// keeps failing the same way is logged once, not on every refresh.
 fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
+    if let Some(until) = report.rate_limited_until_epoch_seconds {
+        // A hold is logged once, when it starts: the profile is not probed
+        // again until it ends.
+        if previous.and_then(|previous| previous.rate_limited_until_epoch_seconds) != Some(until) {
+            tracing::info!(
+                profile_id = %report.profile_id,
+                harness = report.harness.display_name(),
+                retry_in_seconds = until.saturating_sub(mj_core::clock::epoch_seconds()),
+                "the provider rate limited the quota probe; holding this profile's probes"
+            );
+        }
+        return;
+    }
     let previous_error = previous.and_then(|previous| previous.error.as_deref());
     match report.error.as_deref() {
         Some(error) if previous_error != Some(error) => tracing::info!(
@@ -313,6 +389,7 @@ async fn refresh_profile(
                         extra: None,
                         error: None,
                         refreshed_at_epoch_seconds,
+                        rate_limited_until_epoch_seconds: None,
                     })
             } else {
                 // A provider that publishes no quota endpoint bills by usage,
@@ -328,6 +405,7 @@ async fn refresh_profile(
                     extra: Some(API_LABEL.to_owned()),
                     error: None,
                     refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
                 })
             }
         }
@@ -372,6 +450,7 @@ async fn refresh_profile(
                     extra: None,
                     error: None,
                     refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
                 }),
                 CodexUsageStatus::Unavailable(error) => Err(anyhow::anyhow!(error)),
             }
@@ -406,8 +485,14 @@ async fn refresh_profile(
                 extra: None,
                 error: None,
                 refreshed_at_epoch_seconds,
+                rate_limited_until_epoch_seconds: None,
             })
-            .map_err(|error| anyhow::anyhow!(error.to_string())),
+            .map_err(|error| match error {
+                claude_usage::ClaudeUsageError::RateLimited(retry_after) => {
+                    anyhow::Error::new(RateLimited { retry_after })
+                }
+                error => anyhow::anyhow!(error.to_string()),
+            }),
         HarnessKind::Kimi => {
             query_kimi(&source_home, &environment)
                 .await
@@ -419,6 +504,7 @@ async fn refresh_profile(
                     extra,
                     error: None,
                     refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
                 })
         }
         // Grok Build publishes no HTTP quota endpoint. Its own usage view polls
@@ -443,6 +529,7 @@ async fn refresh_profile(
                     extra: None,
                     error: None,
                     refreshed_at_epoch_seconds,
+                    rate_limited_until_epoch_seconds: None,
                 })
                 .map_err(|error| anyhow::anyhow!(error.to_string()))
         }
@@ -467,6 +554,7 @@ async fn refresh_profile(
                 extra: report.note,
                 error: None,
                 refreshed_at_epoch_seconds,
+                rate_limited_until_epoch_seconds: None,
             }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
@@ -477,6 +565,9 @@ async fn refresh_profile(
         extra: None,
         error: Some(error.to_string()),
         refreshed_at_epoch_seconds,
+        rate_limited_until_epoch_seconds: error.downcast_ref::<RateLimited>().map(|limited| {
+            refreshed_at_epoch_seconds + rate_limit_hold(limited.retry_after).as_secs()
+        }),
     });
     // The daemon reads the reset-time cache when a session runs out of quota,
     // and the daemon's own refreshes keep it: the web server's quota poller,
@@ -607,6 +698,12 @@ async fn query_kimi(
         )
     })
     .await?;
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(RateLimited {
+            retry_after: retry_after_header(response.headers()),
+        }
+        .into());
+    }
     if !response.status().is_success() {
         bail!("Kimi Code quota returned HTTP {}", response.status());
     }

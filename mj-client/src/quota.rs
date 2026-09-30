@@ -47,9 +47,26 @@ pub struct ProfileQuota {
     pub extra: Option<String>,
     pub error: Option<String>,
     pub refreshed_at_epoch_seconds: u64,
+    /// The provider answered 429 (too many requests): the daemon will not
+    /// probe this profile again before this time. The windows, when there are
+    /// any, are the last good reading, and `refreshed_at_epoch_seconds` is
+    /// when it was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limited_until_epoch_seconds: Option<u64>,
 }
 
 impl ProfileQuota {
+    /// `rate limited · retry in N min` while the provider's hold lasts.
+    pub fn rate_limit_label(&self, now: u64) -> Option<String> {
+        let until = self
+            .rate_limited_until_epoch_seconds
+            .filter(|until| *until > now)?;
+        Some(format!(
+            "rate limited · retry in {} min",
+            (until - now).div_ceil(60)
+        ))
+    }
+
     pub fn weekly_window(&self) -> Option<&QuotaWindow> {
         self.windows
             .iter()
@@ -339,6 +356,7 @@ mod tests {
                     extra: None,
                     error: None,
                     refreshed_at_epoch_seconds: 7,
+                    rate_limited_until_epoch_seconds: None,
                 },
             )]),
             probing: BTreeSet::from(["claude".to_owned()]),
@@ -348,6 +366,32 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<QuotaSnapshot>(&json).unwrap(),
             snapshot
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold() {
+        let mut quota: ProfileQuota = serde_json::from_value(serde_json::json!({
+            "profile_id": "claude", "harness": "claude", "windows": [],
+            "extra": null, "error": null, "refreshed_at_epoch_seconds": 0,
+            "rate_limited_until_epoch_seconds": 1000 + 15 * 60
+        }))
+        .unwrap();
+        assert_eq!(
+            quota.rate_limit_label(1000).as_deref(),
+            Some("rate limited · retry in 15 min")
+        );
+        assert_eq!(
+            quota.rate_limit_label(1000 + 15 * 60 - 1).as_deref(),
+            Some("rate limited · retry in 1 min")
+        );
+        assert_eq!(quota.rate_limit_label(1000 + 15 * 60), None);
+        quota.rate_limited_until_epoch_seconds = None;
+        assert!(
+            serde_json::to_value(&quota)
+                .unwrap()
+                .get("rate_limited_until_epoch_seconds")
+                .is_none()
         );
     }
 

@@ -23,6 +23,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn usage_priced(profile_id: &str) -> ProfileQuota {
         extra: Some(crate::quota::API_LABEL.to_owned()),
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     }
 }
 

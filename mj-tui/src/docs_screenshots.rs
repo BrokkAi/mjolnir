@@ -201,6 +201,7 @@ fn documentation_dashboard() -> DashboardState {
                 extra: Some("API".into()),
                 error: None,
                 refreshed_at_epoch_seconds: refreshed,
+                rate_limited_until_epoch_seconds: None,
             },
         ),
     ]);
@@ -376,6 +377,7 @@ fn profile_quota(
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: refreshed,
+        rate_limited_until_epoch_seconds: None,
     }
 }
 

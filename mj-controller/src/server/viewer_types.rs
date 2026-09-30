@@ -854,6 +854,10 @@ pub struct ViewerQuota {
     /// told from a current one without its age, so this is not optional.
     #[serde(default)]
     pub refreshed_at_epoch_seconds: u64,
+    /// The provider said to wait: no probe before this time. The windows are
+    /// the last good reading, taken at `refreshed_at_epoch_seconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limited_until_epoch_seconds: Option<u64>,
     /// Error state only. Raw vendor errors may contain paths or account data
     /// and remain on the controller.
     pub has_error: bool,

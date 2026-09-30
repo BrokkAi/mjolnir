@@ -3840,6 +3840,14 @@ function quotaResetText(now, window) {
     ? `resets ${display}` : display;
 }
 
+// The provider said to wait before the next probe. The reading beside it is
+// the last good one, so this text is a note on the row, not a replacement.
+function quotaHoldText(now, quota) {
+  const until = quota?.rate_limited_until_epoch_seconds;
+  if (!Number.isSafeInteger(until) || until <= now) return '';
+  return `rate limited · retry in ${Math.ceil((until - now) / 60)} min`;
+}
+
 function updateQuotaClocks() {
   const now = Math.floor(serverClockMs() / 1000);
   for (const node of quotaPanel.querySelectorAll('.quota-reset')) {
@@ -3884,10 +3892,12 @@ function renderQuota() {
       const summary = el('summary', 'quota-overview-row');
       const quota = profile.quota;
       const name = el('span', 'quota-profile-name', profile.id);
-      if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
+      const hold = quotaHoldText(Math.floor(serverClockMs() / 1000), quota);
+      if (hold) name.append(el('small', 'reading-mid', hold));
+      else if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
       else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
       summary.append(name);
-      const spoken = [profile.id, quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : ''];
+      const spoken = [profile.id, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
       if (quota?.windows?.length) {
         for (const label of labels) {
           const window = quota.windows.find(window => window.label === label);
@@ -3902,7 +3912,7 @@ function renderQuota() {
           spoken.push(description);
         }
       } else {
-        const state = el('span', 'quota-no-windows dim', quota?.has_error ? 'Unavailable' : quota?.summary || 'No reading yet');
+        const state = el('span', 'quota-no-windows dim', hold || (quota?.has_error ? 'Unavailable' : quota?.summary) || 'No reading yet');
         summary.append(state);
         spoken.push(state.textContent);
       }

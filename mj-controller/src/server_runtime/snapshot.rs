@@ -501,6 +501,7 @@ pub(super) fn viewer_snapshot_selected(
             stale: now.saturating_sub(quota.refreshed_at_epoch_seconds)
                 > QUOTA_STALE_AFTER.as_secs(),
             refreshed_at_epoch_seconds: quota.refreshed_at_epoch_seconds,
+            rate_limited_until_epoch_seconds: quota.rate_limited_until_epoch_seconds,
             has_error: quota.error.is_some(),
         });
     }

@@ -20,8 +20,8 @@ A 429 is respected. When a provider answers 429 (or sends a `Retry-After` header
 - [x] (2026-09-29) Wrote this plan.
 - [x] (2026-09-29) Commit (a): one prober in the daemon. Tests: `a_quota_change_travels_as_a_metadata_delta`, `metadata_from_a_daemon_that_published_no_quota_decodes_with_an_empty_snapshot` (mj-client); `a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one`, `published_quota_reaches_an_attached_client_through_the_runtime_feed` (daemon); `the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older` (mj-tui); `a_manual_quota_refresh_completes_when_the_daemon_finishes_a_later_cycle` (pollers). The dashboard's `quota_batch_asks_about` and its test were removed; the profile-set-changed probe is the daemon's (covered again in commit b).
 - [x] (2026-09-29) Commit (b): probe only when stale. Tests in `mj-controller/src/pollers/tests.rs`: `a_report_younger_than_the_interval_is_published_and_not_probed`, `a_report_older_than_the_interval_is_probed_at_start`, `a_reload_probes_only_the_profile_it_added`, `an_explicit_refresh_probes_every_profile_even_when_fresh`. `QuotaManager` gained `seed`, `forget`, `report`, `retain_profiles` and `probe` (probe only the given profiles; `refresh_profiles` keeps its whole-batch meaning for one-shot callers). `QuotaRefreshBatch.refresh` marks an explicit refresh. The utility ranking reads the stored report first.
-- [ ] Commit (c): honour 429. Failing tests first: a 429 (with and without `Retry-After`) produces a hold; a held profile is not probed by the schedule or by Refresh; the last good report survives with the hold; TUI and web render `rate limited · retry in N min`.
-- [ ] Final validation: `cargo test -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui -p brokk-mj-client`, web unit tests, clippy, fmt.
+- [x] (2026-09-29) Commit (c): honour 429. Tests: `a_429_is_a_rate_limit_that_carries_the_servers_retry_after` (claude_usage, fake server), `retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded`, `a_rate_limit_keeps_the_last_good_report_and_its_age` (quota), `a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh` (pollers), `a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold` (mj-client), `a_rate_limited_profile_reads_the_retry_time_not_unavailable` (mj-tui), `a rate limited profile reads the retry time in minutes...` (web unit), and the hold assertion in the server_runtime viewer quota test. Decision on display below.
+- [x] (2026-09-29) Final validation: `cargo test -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui -p brokk-mj-client` pass; clippy and fmt clean; web `node --test *.unit.test.mjs`: all quota tests pass (the one failure, `projects.unit.test.mjs` "every browser spec belongs to exactly one project", needs Playwright, which is not installed here, and is unrelated).
 
 ## Surprises & Discoveries
 
@@ -31,6 +31,9 @@ A 429 is respected. When a provider answers 429 (or sends a `Retry-After` header
   Evidence: `save()` in `mj-controller/src/database/quota_cache.rs`.
 - Observation: a report with an error is never written to that row, so the row is always the last good report.
   Evidence: `if report.error.is_some() { return Ok(()); }` in `save()`.
+
+- Observation: `QuotaManager::refresh_profiles` prunes reports and stops Codex clients for every profile not in the batch it is given. Once the poller passes only the due profiles, that dropped the reports of the others.
+  Evidence: `a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh` failed with `Refreshing { profile_ids: ["a", "b"] }` until the poller used the new `QuotaManager::probe` (probe exactly these, prune nothing) and `retain_profiles` (prune to the configured set).
 
 ## Decision Log
 
@@ -50,9 +53,16 @@ A 429 is respected. When a provider answers 429 (or sends a `Retry-After` header
   Rationale: the instructions say to touch these only to make them read the same reports. The auto-resume already reads the stored row; the utility ranking now does the same and probes only when there is no report younger than its own freshness limit.
   Date/Author: 2026-09-29, fix agent Q1.
 
+- Decision: A held profile's TUI row (full pane) reads `rate limited · retry in N min` in place of its bars, the minimized row reads `claude rate limited`, and the web row keeps the last good numbers and adds the same text beside the profile name. The report keeps its windows and `refreshed_at`, so the age stays available (web page "Last refreshed", pane title "refreshed N ago").
+  Rationale: the instructions say the row reads that text; the numbers stay published in the report and on the web page, where a row has room for both. The TUI table row has one cell for status text, as for other error states.
+  Date/Author: 2026-09-29, fix agent Q1.
+- Decision: Hold length is `Retry-After` clamped to 1 minute to 6 hours, else 15 minutes (`DEFAULT_RATE_LIMIT_HOLD`). Only the Claude usage endpoint and Kimi's usage endpoint are read for 429; other harnesses do not call an HTTP endpoint the poller can see a status from.
+  Rationale: a zero or absurd header must not spin the poller or park a profile for days.
+  Date/Author: 2026-09-29, fix agent Q1.
+
 ## Outcomes & Retrospective
 
-(To be written when the three commits have landed.)
+Three commits landed: (a) one prober in the daemon, (b) probe only when stale, (c) honour 429. Left open: a daemon restart forgets a hold (one probe per profile per restart); the quota auto-resume's own probe (`daemon/continuation/quota.rs`) and the utility ranking's fallback probe do not check holds (they read the stored report first, or probe when there is none); Codex, Grok and Muse probes do not report 429 as a hold.
 
 ## Context and Orientation
 

@@ -1502,6 +1502,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
                 extra: None,
                 error: None,
                 refreshed_at_epoch_seconds: now - age.as_secs(),
+                rate_limited_until_epoch_seconds: Some(now + 600),
             },
         )]);
         let projected = viewer_snapshot(
@@ -1531,6 +1532,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             .as_ref()
             .expect("the profile carries its quota")
             .clone();
+        assert_eq!(projected.rate_limited_until_epoch_seconds, Some(now + 600));
         assert_eq!(projected.windows[0].banked_resets, Some(1));
         assert_eq!(projected.windows[1].banked_resets, None);
         assert_eq!(

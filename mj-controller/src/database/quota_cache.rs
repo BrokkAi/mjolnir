@@ -68,6 +68,7 @@ mod tests {
             extra: None,
             error: None,
             refreshed_at_epoch_seconds: 1,
+            rate_limited_until_epoch_seconds: None,
         };
         save(&mut connection, "account-a", &report).unwrap();
         for banked in [Some(2), Some(0), Some(1), None] {

@@ -2231,6 +2231,7 @@ fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: now_seconds(),
+        rate_limited_until_epoch_seconds: None,
     }
 }
 
@@ -2260,6 +2261,7 @@ fn api_quota(profile_id: &str) -> ProfileQuota {
         extra: Some(API_LABEL.into()),
         error: None,
         refreshed_at_epoch_seconds: now_seconds(),
+        rate_limited_until_epoch_seconds: None,
     }
 }
 
@@ -2841,6 +2843,43 @@ fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older(
     let row = profiles_row(&mut dashboard);
     assert!(!row.contains("63%"), "{row:?}");
     assert!(row.contains("codex-1 12%"), "{row:?}");
+}
+
+#[test]
+fn a_rate_limited_profile_reads_the_retry_time_not_unavailable() {
+    let mut held = weekly_quota("claude-1", 63);
+    held.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
+    // No good reading behind the hold: the report itself is the rate limit.
+    let mut only_limited = weekly_quota("codex-1", 0);
+    only_limited.windows.clear();
+    only_limited.error = Some("rate limited".into());
+    only_limited.rate_limited_until_epoch_seconds = Some(now_seconds() + 5 * 60);
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_quota_snapshot(mj_client::quota::QuotaSnapshot {
+        reports: BTreeMap::from([
+            ("claude-1".to_owned(), held),
+            ("codex-1".to_owned(), only_limited),
+        ]),
+        ..Default::default()
+    });
+    let lines = drawn(&mut dashboard, 120, 44);
+    for id in ["claude-1", "codex-1"] {
+        let row = lines
+            .iter()
+            .find(|line| line.contains(id) && line.contains("rate limited"))
+            .unwrap_or_else(|| panic!("a rate limited row for {id}: {lines:#?}"));
+        assert!(row.contains("rate limited · retry in"), "{row:?}");
+        assert!(!row.contains("unavailable"), "{row:?}");
+    }
+
+    minimize_all_panes(&mut dashboard);
+    let row = drawn(&mut dashboard, 120, 44)
+        .into_iter()
+        .find(|line| line.contains("─ Profiles ──"))
+        .expect("the minimized Profiles row");
+    assert!(row.contains("claude-1 rate limited"), "{row:?}");
+    assert!(row.contains("codex-1 rate limited"), "{row:?}");
 }
 
 #[test]
@@ -4261,6 +4300,7 @@ fn quota_render_includes_errors_and_refresh_age_in_title() {
                 extra: None,
                 error: Some("offline".into()),
                 refreshed_at_epoch_seconds: 1,
+                rate_limited_until_epoch_seconds: None,
             },
         )]),
     );
@@ -4299,6 +4339,7 @@ fn quota_render_shows_login_expired_without_unavailable_prefix() {
                 extra: None,
                 error: Some("login expired".into()),
                 refreshed_at_epoch_seconds: 1,
+                rate_limited_until_epoch_seconds: None,
             },
         )]),
     );
@@ -4414,6 +4455,7 @@ fn quota_render_hides_five_hour_bar_and_reset_when_weekly_quota_is_exhausted() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     let mut dashboard = DashboardState::new(
         config(),
@@ -4505,6 +4547,7 @@ fn weekly_and_five_hour_resets_are_independent() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
 
     assert_eq!(
@@ -4584,6 +4627,7 @@ fn quota_render_uses_weekly_five_hour_and_reset_columns() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     let mut dashboard = DashboardState::new(
         config(),
@@ -4692,6 +4736,7 @@ fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
         extra: None,
         error: None,
         refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
     let mut dashboard = DashboardState::new(
         config(),
