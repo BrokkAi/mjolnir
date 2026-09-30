@@ -270,6 +270,36 @@ impl DashboardState {
         standby.set_draft(restored);
     }
 
+    /// The daemon had already started delivering a prompt that was recalled
+    /// for editing: it was sent. The composer's copy is dropped when the
+    /// person has not changed it, so Enter does not send it a second time.
+    /// Returns whether the composer's text was dropped.
+    pub fn standby_prompt_was_sent(&mut self, session_id: &str, text: &str) -> bool {
+        // A standby that is gone was adopted by the live chat, which holds
+        // the text now; nothing here to drop.
+        let Some(standby) = self.standby_prompts.get_mut(session_id) else {
+            return false;
+        };
+        if standby.draft() != text {
+            return false;
+        }
+        standby.clear_draft();
+        true
+    }
+
+    /// The daemon could not confirm that a recalled prompt was withdrawn, so
+    /// it may still be delivered. The composer shows it as queued again and
+    /// drops its own unchanged copy, so the prompt has one owner in view.
+    pub fn standby_prompt_withdrawal_unconfirmed(&mut self, session_id: &str, text: &str) {
+        let Some(standby) = self.standby_prompts.get_mut(session_id) else {
+            return;
+        };
+        if standby.draft() == text {
+            standby.clear_draft();
+        }
+        standby.restore_queued_prompt_text(text);
+    }
+
     /// Removes a session's standby composer and returns its draft, for the
     /// chat open that adopts it as the composer's starting input.
     pub fn take_standby_prompt_draft(&mut self, session_id: &str) -> Option<String> {
@@ -329,6 +359,18 @@ impl DashboardState {
                     return Some(DashboardAction::None);
                 };
                 return Some(DashboardAction::QueueStartupPrompt { session_id, text });
+            }
+            ChatAction::RemoveQueuedPrompt { text, .. } => {
+                // Up recalled the newest queued prompt into the composer. The
+                // preview is gone here already; the daemon must drop its copy
+                // too, or it would send the original when the session is ready.
+                self.record_event_handled();
+                let Some(session_id) = session_id else {
+                    // A launch standby's previews were never handed to the
+                    // daemon, so recalling one changes nothing there.
+                    return Some(DashboardAction::None);
+                };
+                return Some(DashboardAction::WithdrawStartupPrompt { session_id, text });
             }
             ChatAction::PasteFromClipboard => {
                 // Clipboard reads and image attachments belong to the attached

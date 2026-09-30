@@ -780,6 +780,61 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     );
 }
 
+/// Missing Docker with only the default candidate: one line that does not
+/// fail the run.
+#[test]
+fn missing_docker_with_no_docker_target_configured_is_info_and_passes() {
+    let checks = docker_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, CheckStatus::Unsupported);
+    assert!(
+        checks[0].detail.contains("no configured target uses it"),
+        "{}",
+        checks[0].detail
+    );
+    assert!(all_ready(&checks));
+}
+
+/// Missing Docker that a configured target needs stays a fault with the
+/// install hint, and fails the run.
+#[test]
+fn missing_docker_needed_by_a_configured_target_stays_fixable_and_fails() {
+    let configured = config_with([(
+        "sandbox",
+        TargetTemplate::LocalDocker {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]);
+    let checks = docker_checks(Ok(&configured), &AlwaysFailingExecutor, false);
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    assert!(checks[0].remediation.is_some());
+    assert!(!all_ready(&checks));
+}
+
+/// A configured target whose engine answers is ready, as before.
+#[test]
+fn present_docker_for_a_configured_target_is_ready() {
+    let executor = FakeExecutor::new([
+        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(b"image metadata\n")),
+        Ok(output(b"image metadata\n")),
+    ]);
+    let configured = config_with([(
+        "sandbox",
+        TargetTemplate::LocalDocker {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]);
+    let checks = docker_checks(Ok(&configured), &executor, false);
+    assert!(
+        checks
+            .iter()
+            .all(|check| check.status == CheckStatus::Ready),
+        "{checks:?}"
+    );
+    assert!(all_ready(&checks));
+}
+
 /// Launch finding R3-3: a Setup save once wrote the built-in `[targets.docker]`
 /// and `[targets.podman]` blocks into config.toml, and doctor then reported a
 /// missing engine as a fault to fix. A block identical to the built-in target

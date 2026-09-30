@@ -192,6 +192,7 @@ fn launch_target(
         availability: status.availability,
         unavailable_reason: status.unavailable_reason,
         runtime_missing: status.runtime_missing,
+        default_candidate: target.default_candidate,
         host: host.map(|host| host.label.clone()),
     }
 }

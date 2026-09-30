@@ -764,6 +764,12 @@ pub struct LaunchTarget {
     /// request that names it is refused with `unavailable_reason`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_missing: bool,
+    /// Whether the target is a default candidate Mjolnir supplies, not one
+    /// the user wrote in `config.toml`. With `runtime_missing` it means the
+    /// user has no such runtime and never asked for the target, so a client
+    /// should not list it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_candidate: bool,
     /// How a person names the host, when a reading covers this target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,

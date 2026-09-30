@@ -951,30 +951,35 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
-    let brand = format!(" {} MJOLNIR", theme::glyphs().spark);
     let branded_title = Line::from(vec![
-        Span::styled(brand, theme::title(true)),
-        Span::styled(" / ", theme::muted()),
+        Span::styled(format!(" {} ", theme::glyphs().spark), theme::title(true)),
         Span::styled("Workspaces ", theme::title(focused)),
     ]);
-    let version = format!(" {} ", dashboard.version_label);
-    let title = if branded_title.width() + Line::raw(&version).width() + BORDER_CORNER_CELLS
-        <= usize::from(area.width)
-    {
-        branded_title
-    } else {
-        Line::raw(WORKSPACES_TITLE)
-    };
+    // The product name sits beside the build number on the right; the version
+    // keeps its muted, non-bold stamp style.
+    let stamp = Line::from(vec![
+        Span::styled(" MJOLNIR", theme::title(true)),
+        Span::styled(
+            format!(" {} ", dashboard.version_label),
+            theme::muted().remove_modifier(Modifier::BOLD),
+        ),
+    ])
+    .right_aligned();
+    let stamp_width = stamp.width();
+    let title =
+        if branded_title.width() + stamp_width + BORDER_CORNER_CELLS <= usize::from(area.width) {
+            branded_title
+        } else {
+            Line::raw(WORKSPACES_TITLE)
+        };
     let title_width = title.width();
     let mut block = theme::panel(focused).title(title);
     // The pane sits at the top of every dashboard, so its border is where the
-    // build number costs nothing and is always in view. A sidebar too narrow
-    // to hold both drops it rather than overlap the pane's own title.
-    if usize::from(area.width) >= title_width + Line::raw(&version).width() + BORDER_CORNER_CELLS {
-        // The pane's own title style is bold; a build number is a stamp, not a
-        // heading, so it drops back out of bold here.
-        let style = theme::muted().remove_modifier(Modifier::BOLD);
-        block = block.title(Line::styled(version, style).right_aligned());
+    // product name and build number cost nothing and are always in view. A
+    // sidebar too narrow to hold both drops them as a whole rather than
+    // overlap the pane's own title.
+    if usize::from(area.width) >= title_width + stamp_width + BORDER_CORNER_CELLS {
+        block = block.title(stamp);
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);

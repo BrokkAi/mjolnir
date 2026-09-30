@@ -1045,6 +1045,91 @@ fn enter_during_a_starting_transition_queues_the_prompt_for_delivery() {
     );
 }
 
+/// Recalling a queued prompt with Up takes it back from the daemon: the
+/// preview goes, the composer holds the text, and Enter queues the edit once.
+#[test]
+fn recalling_a_queued_startup_prompt_withdraws_it_and_enter_requeues_the_edit() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    for character in "first".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::QueueStartupPrompt {
+            session_id: "session-1".into(),
+            text: "first".into(),
+        }
+    );
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Up)),
+        DashboardAction::WithdrawStartupPrompt {
+            session_id: "session-1".into(),
+            text: "first".into(),
+        }
+    );
+    let standby = dashboard.standby_prompts.get("session-1").expect("standby");
+    assert!(standby.queued_prompt_texts().is_empty());
+    assert_eq!(standby.draft(), "first");
+
+    dashboard.handle_key(key(KeyCode::Char('!')));
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::QueueStartupPrompt {
+            session_id: "session-1".into(),
+            text: "first!".into(),
+        }
+    );
+    let standby = dashboard.standby_prompts.get("session-1").expect("standby");
+    assert_eq!(standby.queued_prompt_texts(), vec!["first!".to_owned()]);
+}
+
+/// The daemon says the prompt had already gone out: the composer drops its
+/// unchanged copy so Enter cannot send it twice, and keeps an edited one.
+#[test]
+fn a_recalled_prompt_that_was_already_sent_is_not_kept_as_an_unchanged_draft() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    dashboard.handle_paste("sent");
+
+    assert!(dashboard.standby_prompt_was_sent("session-1", "sent"));
+    assert_eq!(dashboard.standby_prompts["session-1"].draft(), "");
+
+    dashboard.handle_paste("sent and edited");
+    assert!(!dashboard.standby_prompt_was_sent("session-1", "sent"));
+    assert_eq!(
+        dashboard.standby_prompts["session-1"].draft(),
+        "sent and edited"
+    );
+}
+
+/// If the daemon cannot be asked, the prompt may still go out, so it shows as
+/// queued again rather than leaving the person to think the queue is empty.
+#[test]
+fn an_unconfirmed_withdrawal_shows_the_prompt_as_queued_again() {
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+    dashboard.focus_prompt();
+    dashboard.handle_paste("maybe");
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Up));
+
+    dashboard.standby_prompt_withdrawal_unconfirmed("session-1", "maybe");
+
+    let standby = dashboard.standby_prompts.get("session-1").expect("standby");
+    assert_eq!(standby.queued_prompt_texts(), vec!["maybe".to_owned()]);
+    assert_eq!(standby.draft(), "");
+}
+
 /// A prompt the daemon refused comes back as the draft, ahead of anything
 /// typed since, and its preview goes away.
 #[test]

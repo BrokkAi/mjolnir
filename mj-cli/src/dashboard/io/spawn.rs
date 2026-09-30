@@ -970,6 +970,33 @@ pub(crate) fn spawn_startup_prompt(
     );
 }
 
+pub(crate) fn spawn_withdraw_startup_prompt(
+    session_id: String,
+    text: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    let withdrawn_session_id = session_id.clone();
+    let withdrawn_text = text.clone();
+    spawn_critical_async(
+        tracker,
+        format!("withdrawing a prompt for session {}", short_id(&session_id)),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .withdraw_startup_prompt(withdrawn_session_id, withdrawn_text)
+                .await
+        },
+        move |result| DashboardIoUpdate::StartupPromptWithdrawn {
+            session_id,
+            text,
+            result,
+        },
+    );
+}
+
 pub(crate) struct ConfigRenameRequest {
     pub(crate) what: String,
     pub(crate) old_id: String,

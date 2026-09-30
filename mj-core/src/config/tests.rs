@@ -342,6 +342,26 @@ fn local_targets_need_no_setup_and_preserve_explicit_overrides() {
     assert_eq!(resolved.clone().with_local_targets(), resolved);
 }
 
+/// The origin is decided where `with_local_targets` inserts: an id the file
+/// names is configured, even when its template repeats the default, and an id
+/// it supplies is a default candidate.
+#[test]
+fn with_local_targets_records_which_targets_it_supplied() {
+    let mut docker = Config::default().with_local_targets().targets["docker"].clone();
+    if let TargetTemplate::LocalDocker { container } = &mut docker {
+        container.image = "example.test/own:latest".into();
+    }
+    let mut written = Config::default();
+    written.targets.insert("docker".into(), docker);
+    let resolved = written.with_local_targets();
+    assert!(!resolved.is_default_target("docker"));
+    assert!(resolved.is_default_target("podman"));
+    // Resolving again keeps the origin.
+    let again = resolved.clone().with_local_targets();
+    assert!(!again.is_default_target("docker"));
+    assert!(again.is_default_target("podman"));
+}
+
 /// Saving edits the user's file in place: comments, blank lines, and the
 /// order of sections and keys survive a save that changes one value.
 /// Launch campaign finding C-21.
@@ -655,6 +675,7 @@ fn sample_config() -> Config {
         subagents: SubagentConfig::default(),
         jev: Default::default(),
         legacy_startup: (),
+        default_targets: Default::default(),
         machines: BTreeMap::new(),
         profiles: BTreeMap::from([(
             "codex-1".into(),

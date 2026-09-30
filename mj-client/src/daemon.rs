@@ -632,6 +632,15 @@ pub enum DaemonAction {
         #[serde(default)]
         inherited_draft: Option<String>,
     },
+    /// Take back a prompt queued with `QueueStartupPrompt` that the daemon has
+    /// not started delivering, so the person can edit it. The daemon cancels
+    /// the newest queued prompt with this exact text and replies
+    /// `PromptWithdrawn(true)`, or `PromptWithdrawn(false)` when none is
+    /// waiting because delivery already started.
+    WithdrawStartupPrompt {
+        session_id: String,
+        text: String,
+    },
     SyncSession {
         session_id: String,
     },
@@ -782,6 +791,8 @@ pub enum DaemonReply {
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
+    /// Whether a queued startup prompt was withdrawn before delivery.
+    PromptWithdrawn(bool),
     Done,
 }
 
@@ -1818,6 +1829,24 @@ impl DaemonClient {
         }
     }
 
+    /// Take a prompt back from the daemon's startup queue before delivery.
+    /// `Ok(true)` means it is withdrawn and will not be sent; `Ok(false)`
+    /// means delivery had already started, so it was sent. An error means the
+    /// daemon could not be asked, and the prompt may still be queued.
+    pub async fn withdraw_startup_prompt(
+        &mut self,
+        session_id: String,
+        text: String,
+    ) -> Result<bool> {
+        match self
+            .request(DaemonAction::WithdrawStartupPrompt { session_id, text })
+            .await?
+        {
+            DaemonReply::PromptWithdrawn(withdrawn) => Ok(withdrawn),
+            reply => bail!("unexpected startup prompt withdrawal reply {reply:?}"),
+        }
+    }
+
     /// Ask the daemon to review the turn this session just finished.
     ///
     /// The refusal is a sentence for a person -- "prompts are queued", "set
@@ -2145,7 +2174,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
     )
 }
 // Session creation names its starting selection `at`, `branch` and `base`.
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
