@@ -72,7 +72,7 @@ impl AbsentEngines {
 /// error cannot say so, because the target check rewrites the cause into
 /// the sentence the session wizard shows.
 pub(crate) fn engine_absent(template: &TargetTemplate, path: Option<&OsStr>) -> bool {
-    local_engine_command(template).is_some_and(|engine| !program_on_path(engine, path))
+    mj_controller::targets::runtime_missing_on_host(template, path)
 }
 
 #[cfg(test)]

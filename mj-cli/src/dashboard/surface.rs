@@ -448,7 +448,6 @@ impl DashboardContext {
             .controller(&self.controller);
         refresh_dashboard_poll_targets(
             &controller,
-            &self.worker_targets_tx,
             &self.resource_targets_tx,
             &self.lifecycle_operations.keys().cloned().collect(),
         );

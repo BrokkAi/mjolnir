@@ -1113,6 +1113,7 @@ mod tests {
     fn running_view() -> RuntimeReviewView {
         RuntimeReviewView {
             session_id: "1234567890".to_owned(),
+            questions: Vec::new(),
             tier: ReviewTier::Quick,
             phase: TurnReviewPhase::Running {
                 roles: vec![RoleStatus {

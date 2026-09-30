@@ -915,6 +915,33 @@ pub(crate) fn spawn_dashboard_rename(
     );
 }
 
+pub(crate) fn spawn_dashboard_change_workspace(
+    session_id: String,
+    workspace_id: String,
+    workspace_name: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    let moved_session_id = session_id.clone();
+    spawn_critical_async(
+        tracker,
+        format!("moving session {} to a workspace", short_id(&session_id)),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .set_session_workspace(moved_session_id, workspace_id)
+                .await
+        },
+        move |result| DashboardIoUpdate::ChangeWorkspace {
+            session_id,
+            workspace_name,
+            result,
+        },
+    );
+}
+
 pub(crate) fn spawn_startup_prompt(
     session_id: String,
     text: String,
@@ -1170,6 +1197,24 @@ pub(crate) fn spawn_create_bundle(
     );
 }
 
+pub(crate) fn spawn_remove_bundle(
+    bundle_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    let removed = bundle_id.clone();
+    spawn_critical_io(
+        tracker,
+        "removing project",
+        updates,
+        move || mj_controller::controller::remove_bundle(&bundle_id).map(|_| ()),
+        move |result| DashboardIoUpdate::RemovedBundle {
+            bundle_id: removed,
+            result,
+        },
+    );
+}
+
 pub(crate) fn spawn_imported_session_apply(
     mut imported: DashboardImportSuccess,
     pending: PendingDashboardImport,
@@ -1327,9 +1372,9 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
-                        launch_base: None,
-                        launch_branch: None,
-                        checkout: None,
+                        at: None,
+                        branch: None,
+                        base: None,
                         expected_runtime_identity: None,
                         subagents,
                         create_managed_worktree,
@@ -1436,6 +1481,41 @@ pub(crate) fn spawn_wiki_search(
             "searching the session archive",
             &updates,
             DashboardIoUpdate::WikiRows { request_id, result },
+        );
+    });
+}
+
+/// Search the conversations of the live sessions for the Sessions filter's
+/// text, after the typing pause.
+///
+/// The wait and the daemon call are in a task, so the render loop never waits
+/// on the index. A task whose request id is no longer the newest when it wakes
+/// stops without asking the daemon, and the dashboard drops an answer that
+/// names an older request.
+pub(crate) fn spawn_sessions_text_search(
+    request_id: u64,
+    query: String,
+    newest_request: Arc<AtomicU64>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    newest_request.store(request_id, Ordering::Release);
+    tokio::spawn(async move {
+        tokio::time::sleep(WIKI_SEARCH_DEBOUNCE).await;
+        if newest_request.load(Ordering::Acquire) != request_id {
+            return;
+        }
+        let result = async {
+            daemon::connect_or_start()
+                .await?
+                .session_text_search(query)
+                .await
+        }
+        .await
+        .map_err(|error| format!("{error:#}"));
+        report(
+            "searching session conversations",
+            &updates,
+            DashboardIoUpdate::SessionTextMatches { request_id, result },
         );
     });
 }

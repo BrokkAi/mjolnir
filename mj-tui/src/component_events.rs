@@ -109,6 +109,7 @@ impl DashboardState {
             Mode::EditContainer(editor) => self.handle_container_edit_event(event, editor),
             Mode::Setup(dialog) => self.handle_setup_event(event, dialog),
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
+            Mode::ChangeWorkspace(dialog) => self.handle_change_workspace_event(event, dialog),
             Mode::ChangedFiles(dialog) => self.handle_changed_files_event(event, dialog),
             Mode::NoticeLog(dialog) => self.handle_notice_log_event(event, dialog),
             Mode::ConfigId(dialog) => self.handle_config_id_event(event, dialog),

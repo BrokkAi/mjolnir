@@ -3,6 +3,11 @@
 pub(crate) mod render;
 pub(crate) use render::*;
 
+mod change_workspace;
+pub(crate) use change_workspace::{
+    WorkspacePicker, WorkspacePickerControl, render_workspace_picker,
+};
+
 mod container;
 pub(crate) use container::{ContainerEditFocus, ContainerEditor, render_container_editor};
 
@@ -321,6 +326,19 @@ pub(crate) enum Confirmation {
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
     InterruptWork { session_id: String, restart: bool },
+    /// The last step of Change Workspace: the session moves only on Move.
+    ChangeWorkspace {
+        session_id: String,
+        workspace_id: String,
+        workspace_name: String,
+    },
+    /// Interrupt all, with what was running when it opened. The targets are
+    /// found again on confirm, since turns end while the dialog is open.
+    InterruptAll {
+        session_id: String,
+        parent_running: bool,
+        subagents_running: usize,
+    },
     ForceDestroy {
         session_id: String,
         delete_branch_available: bool,
@@ -520,6 +538,8 @@ impl Confirmation {
             | Self::SuspendSession { session_id, .. }
             | Self::DiscardSinceCheckpoint { session_id, .. }
             | Self::InterruptWork { session_id, .. }
+            | Self::InterruptAll { session_id, .. }
+            | Self::ChangeWorkspace { session_id, .. }
             | Self::ForceDestroy { session_id, .. }
             | Self::DestroyStopped { session_id, .. }
             | Self::RecoverFailed { session_id, .. } => Some(session_id),
@@ -1675,6 +1695,42 @@ impl DashboardState {
                         acknowledge_unpublished_work: true,
                     }
                 }
+            }
+            (
+                Confirmation::ChangeWorkspace {
+                    session_id,
+                    workspace_id,
+                    workspace_name,
+                },
+                1,
+            ) => {
+                self.cancel_modal();
+                if !self.state.sessions.contains_key(&session_id) {
+                    self.set_notice("This session is no longer available.");
+                    return DashboardAction::None;
+                }
+                DashboardAction::ChangeWorkspace {
+                    session_id,
+                    workspace_id,
+                    workspace_name,
+                }
+            }
+            (Confirmation::InterruptAll { session_id, .. }, 1) => {
+                self.cancel_modal();
+                let targets = self.interrupt_all_targets(&session_id);
+                if targets.is_empty() {
+                    self.set_notice("Nothing is running any more.");
+                    return DashboardAction::None;
+                }
+                for (owner, child) in &targets.native {
+                    if let Some(pane) = self
+                        .native_agents
+                        .get_mut(&mj_core::native_agent::view_id(owner, child))
+                    {
+                        pane.stopping = true;
+                    }
+                }
+                DashboardAction::InterruptAll { targets }
             }
             (Confirmation::RecoverFailed { session_id, .. }, 1) => {
                 self.cancel_modal();

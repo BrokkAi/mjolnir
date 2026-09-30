@@ -116,6 +116,7 @@ pub(super) async fn wait(
                     }),
                     turn_number: None,
                     elapsed_ms: None,
+                    tool_calls: None,
                     capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
                     server_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
                     retry_assessment_pending: observation.retry_assessment_pending,
@@ -337,6 +338,7 @@ pub(super) async fn finish_wait(
         elapsed_ms: summary
             .as_ref()
             .map(|summary| summary.last_changed_at_ms - summary.turn_started_at_ms),
+        tool_calls: summary.as_ref().map(|summary| summary.tool_calls),
         quota_recovery: observation.quota_recovery.clone(),
         capacity_retry: observation
             .capacity_retry

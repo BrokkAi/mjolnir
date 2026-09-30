@@ -2490,6 +2490,47 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
         .collect()
 }
 
+/// F18: a turn the harness started on its own that the provider refuses for
+/// quota ends like any other cycle: the marker is gone, no tool is left in
+/// flight and a prompt could start. (Session e33442fe's recovery was lost to a
+/// checkpoint, not to a leftover fact; this pins that the facts are clean.)
+#[test]
+fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk(
+            "You've hit your session limit \u{b7} resets 1:10pm",
+        ))
+        .unwrap();
+    assert!(
+        relay
+            .operational_state()
+            .facts()
+            .harness_turn_started_at_ms
+            .is_some()
+    );
+    let refusal = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": true, "num_turns": 0,
+        "stop_reason": "stop_sequence", "result": "You've hit your session limit",
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "origin": {"kind": "task-notification"},
+    }))
+    .unwrap()
+    .unwrap();
+    relay.claude_turn_result(&refusal).unwrap();
+    let facts = relay.operational_state().facts();
+    assert_eq!(facts.harness_turn_started_at_ms, None);
+    assert!(facts.tools_in_flight.is_empty());
+    assert_eq!(facts.execution, RelayExecutionState::Idle);
+    // The bare test relay has no ACP connection, the one fact that may differ.
+    let ready = mj_core::activity::ActivityFacts {
+        acp_ready: Some(true),
+        ..facts
+    };
+    assert!(mj_core::activity::can_submit(&ready), "{ready:?}");
+}
+
 #[test]
 fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
     let temp = tempfile::tempdir().unwrap();
@@ -4492,6 +4533,9 @@ fn close_requires_exact_checkpoint_cut_and_survives_controller_disconnect() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
     let stale_cut = ready_checkpoint(&mut relay, "stale-close-barrier");
+    // Output that changes no work waits behind the cut; drift comes from
+    // something that ended that hold, such as the agent starting work.
+    relay.end_checkpoint_hold().unwrap();
     relay
         .record_observation(RelayObservation::Warning {
             message: "post-cut drift".into(),

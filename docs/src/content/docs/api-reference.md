@@ -374,8 +374,8 @@ POST /api/v1/sessions
   "target_id": "localhost",
   "bundle_id": "bundle-1",
   "project_directory": "/home/you/project",
-  "launch_branch": "main",
-  "launch_base": "origin/main",
+  "branch": "main",
+  "base": "origin/main",
   "title": "add a README line",
   "model": "<model-id-from-profile-config>",
   "effort": "high",
@@ -386,12 +386,22 @@ POST /api/v1/sessions
 `profile_id` and `target_id` may be omitted; each then follows the saved
 default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bundle_id`, or
 `project_directory`, or both: a directory with no bundle is bundled the way the
-viewer's own form does it. `launch_branch` selects the branch checked out in an
-isolated clone; otherwise the remote default is used. `launch_base` records a
-separate Git revision for the session's diff base. A bundle session resolves
-it in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`.
-For an exact starting revision on a bundle-backed session, supply a separate
-`checkout` object instead of `launch_base` or `launch_branch`:
+viewer's own form does it.
+
+Three fields choose where the session starts:
+
+- `at`: a full commit object ID to start the workspace at. Before the first
+  prompt, the bundle's primary repository is checked out at that commit. HEAD
+  is detached unless `branch` is given. Requires `bundle_id`.
+- `branch`: with `at`, the name of a new local branch created at that commit.
+  Without `at`, the existing branch checked out in an isolated clone; otherwise
+  the remote default is used.
+- `base`: the Git revision `mj diff` compares against, when it is not `at`. It
+  defaults to `at`. It does not move the checkout. A bundle session resolves it
+  in the fresh clone, so name a commit SHA, a tag, or `origin/<branch>`. For a
+  raw project's managed worktree without `at`, the worktree also starts here.
+
+To start a bundle session at an exact commit on a new private branch:
 
 ```json
 {
@@ -399,32 +409,45 @@ For an exact starting revision on a bundle-backed session, supply a separate
   "profile_id": "codex",
   "target_id": "builder",
   "bundle_id": "product",
-  "checkout": {
-    "repository_id": "project",
-    "commit": "0123456789abcdef0123456789abcdef01234567",
-    "branch": "town/run-123"
-  }
+  "at": "0123456789abcdef0123456789abcdef01234567",
+  "branch": "town/run-123"
 }
 ```
 
-`repository_id` must name a repository in the configured bundle, even for a
-single-repository bundle. Only that repository uses the selection; others start
-at their remote defaults. `commit` must be a full commit object ID, not a branch,
-tag, abbreviated SHA, or revision expression. Mjolnir fetches the exact object
-from origin if needed and refuses an unavailable commit. A moving remote branch
-cannot change the selected revision.
+`at` always applies to the bundle's primary repository (its configured
+`primary_repo`). Other repositories in the bundle start at their remote
+defaults. `at` must be a full commit object ID, not a branch, tag, abbreviated
+SHA, or revision expression. Mjolnir fetches the exact object from origin if
+needed and refuses an unavailable commit. A moving remote branch cannot change
+the selected revision.
 
-`branch` is optional: omitted leaves HEAD detached; supplied creates a new local
-branch without an upstream. Preparation never pushes or modifies the source
-checkout. Existing branches, dirty workspaces, invalid selections, and conflicting
-legacy selectors fail visibly. Exact checkout requires a bundle-backed session;
-it cannot be combined with `project_directory` or `create_managed_worktree: false`.
+With `at`, `branch` creates a new local branch without an upstream. Preparation
+never pushes or modifies the source checkout. Existing branches, dirty
+workspaces, and invalid selections fail visibly. `at` cannot be combined with
+`project_directory` alone or with `create_managed_worktree: false`.
+
+`subagents` sets the session's delegation policy:
+
+```json
+{"subagents": {"mode": "single_model", "model": "<model-id>", "effort": "low"}}
+```
+
+`mode` is `native` (the harness's own sub-agents), `all_models`, `single_model`,
+or `none`. `single_model` requires `model`, which must be one the parent's
+profiles offer, and takes an optional `effort`. The other modes take no other
+fields. The API spells the modes with underscores; `mj new --subagents` spells
+them with hyphens (`all-models`, `single-model`). Only Claude and Codex
+sessions accept a mode other than `native`. When `subagents` is omitted, the
+session reuses the last accepted choice. An unsupported mode or an unavailable
+model answers `422` with the reason in the body.
 
 Session creation still returns its ID before preparation finishes. Wait for
 readiness or inspect the session's failure before prompting. Readiness guarantees
 that preparation verified the selected commit, branch, and clean working tree.
-Session receipts retain the immutable `checkout` selection alongside the session
-and bundle IDs; while provisioning, this records intent, not completed work.
+Session receipts report the immutable starting selection as `at`, `branch` and
+`base`, the same names the request uses, alongside the session and bundle IDs.
+`base` reads as `at` when no other base was named. While provisioning, these
+record intent, not completed work.
 After prompting or resuming a checkpoint, the current checkout can differ: use
 the diff endpoint's repository metadata to inspect it. Resume preserves saved
 work instead of resetting to the original selection.
@@ -499,6 +522,7 @@ asked about; the wait keeps waiting until that turn actually ends.
   "turn_id": 57,
   "turn_number": 3,
   "elapsed_ms": 42318,
+  "tool_calls": 6,
   "relay": { "state": "connected" },
   "session": { "id": "session-1" }
 }
@@ -534,7 +558,8 @@ response = json.loads(result.stdout)
 
 - `turn_number` is the one-based position of this turn in the conversation, and
   `elapsed_ms` is how long it took from its first item to its last change. Both
-  are absent when the wait ended without a finished turn.
+  are absent when the wait ended without a finished turn. `tool_calls` is how
+  many tool calls the turn made, absent in the same case.
 - `final_message` is the agent's last message of the turn, flattened to text.
 - `diagnostic`, when available, preserves the provider failure's `message`,
   optional `code`, `http_status`, and provider-supplied `reset_at`. The same

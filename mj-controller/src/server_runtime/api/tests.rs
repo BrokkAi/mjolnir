@@ -2494,6 +2494,70 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
     }
 }
 
+/// I1-2: once a child's refused startup has also recorded it as failed, the
+/// parent still reads the startup's cause from `wait` and `list_agents`, and
+/// `send_input` is refused with it.
+#[tokio::test]
+async fn a_child_recorded_failed_after_a_refused_startup_reports_its_cause() {
+    if !isolated_parked_test("a_child_recorded_failed_after_a_refused_startup_reports_its_cause") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let cause = "this agent does not offer high as a effort";
+    let exports = ParkingExports::new(SessionState::Error, None);
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-1")
+        .unwrap()
+        .last_error = Some(cause.into());
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let startup_id = hold_child_start(&backend);
+    crate::database::fail_startup_group("child-1", &startup_id, cause).unwrap();
+
+    let answer = send_input(&backend, "must not run").await;
+    assert!(answer.is_error, "{}", answer.message);
+    let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(
+        value["error"],
+        format!("child startup failed: {cause}"),
+        "{value}"
+    );
+    assert!(delivered.try_recv().is_err());
+    assert_eq!(exports.unparks(), 0);
+
+    let call = |action| {
+        let backend = backend.clone();
+        async move {
+            let answer = backend
+                .execute_subagent_tool(
+                    "parent-1".into(),
+                    mj_core::subagent::SubagentToolRequest {
+                        originating_command_id: None,
+                        request_id: "request".into(),
+                        created_at_ms: mj_core::clock::epoch_millis(),
+                        action,
+                    },
+                )
+                .await;
+            assert!(!answer.is_error, "{}", answer.message);
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()
+        }
+    };
+    let waited = call(mj_core::subagent::SubagentToolAction::WaitAgents {
+        child_session_ids: vec!["child-1".into()],
+        timeout_seconds: Some(1),
+        return_when: Default::default(),
+    })
+    .await;
+    assert_eq!(waited["agents"][0]["state"], "error", "{waited}");
+    assert_eq!(waited["agents"][0]["output"], cause, "{waited}");
+    let listed = call(mj_core::subagent::SubagentToolAction::ListAgents).await;
+    assert_eq!(listed["agents"][0]["state"], "error", "{listed}");
+}
+
 #[tokio::test]
 async fn replayed_child_input_reuses_durable_acceptance_without_a_second_prompt() {
     if !isolated_parked_test(
@@ -3080,4 +3144,84 @@ async fn wait_and_list_agents_report_a_parked_child_with_its_report() {
     let listed = call(mj_core::subagent::SubagentToolAction::ListAgents).await;
     assert_eq!(listed["agents"][0]["parked"], true, "{listed}");
     assert_eq!(listed["agents"][0]["state"], "completed", "{listed}");
+}
+
+/// I1-3 and I1-4: a child that ends the parent's task without handing back
+/// is reminded, and hands back during the reminder turn. The reminder turn is
+/// Mjolnir's, not a prompt, so the store gives it no acceptance ordinal of its
+/// own. It still answers the prompt it reminded about: a `wait` on the parked
+/// child returns that report at once instead of running to its deadline.
+/// This is the state the tf-i1 store kept for both hung waits.
+#[tokio::test]
+async fn wait_returns_a_report_handed_back_in_a_reminder_turn() {
+    if !isolated_parked_test("wait_returns_a_report_handed_back_in_a_reminder_turn") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    // The parent's `send_input` was accepted at 84; that turn ended at 103
+    // with no report, so Mjolnir reminded the child.
+    crate::database::record_subagent_prompt("child-1", 84).unwrap();
+    let reminder = mj_core::subagent::handback_reminder_command_id(103);
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 120;
+    conversation.applied_event_digest = format!("{:064x}", 120);
+    conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        accepted_ordinal: None,
+        turn_start_position: None,
+        completed_ordinal: 118,
+        ..finished_turn(&reminder)
+    });
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(
+        crate::database::record_subagent_handback(
+            "child-1",
+            &mj_core::subagent::SubagentHandback {
+                command_id: reminder.clone(),
+                message: "README.md contains 10 words and 6 lines.".into(),
+                recorded_at_ms: 1,
+            },
+        )
+        .unwrap()
+    );
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, _delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+
+    let started = std::time::Instant::now();
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "request".into(),
+                created_at_ms: mj_core::clock::epoch_millis(),
+                action: mj_core::subagent::SubagentToolAction::WaitAgents {
+                    child_session_ids: vec!["child-1".into()],
+                    timeout_seconds: Some(3),
+                    return_when: Default::default(),
+                },
+            },
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let waited = serde_json::from_str::<serde_json::Value>(&answer.message).unwrap();
+    assert_eq!(
+        waited["status"],
+        mj_core::subagent::WAIT_STATUS_COMPLETE,
+        "{waited}"
+    );
+    assert_eq!(waited["agents"][0]["state"], "completed", "{waited}");
+    assert_eq!(
+        waited["agents"][0]["output"], "README.md contains 10 words and 6 lines.",
+        "{waited}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the wait ran to its deadline"
+    );
+
+    // A prompt the parent gave after the reminded turn ended is still owed.
+    crate::database::record_subagent_prompt("child-1", 110).unwrap();
+    let progress = load_child_progress("child-1").unwrap();
+    assert!(progress.awaiting_prompt(None), "{progress:?}");
 }

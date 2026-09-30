@@ -17,6 +17,9 @@
 
 pub use mj_core::relay::*;
 mod background;
+mod checkpoint_hold;
+#[cfg(test)]
+mod checkpoint_hold_tests;
 mod commands;
 mod journal;
 mod native_history;
@@ -212,6 +215,11 @@ pub struct DurableRelay {
     /// call id. Kimi runs a detached shell in one of our terminals, so this is
     /// what ties its native task record to the terminal doing the work.
     agent_terminal_tool_calls: BTreeMap<String, String>,
+    /// The worker's own writes waiting for the ready checkpoint barrier to
+    /// end, in arrival order. See `checkpoint_hold`.
+    held_writes: VecDeque<checkpoint_hold::HeldWrite>,
+    /// The barrier whose hold something that could not wait already ended.
+    hold_ended_for: Option<String>,
     /// Benchmark aid: stage and persist a snapshot on every append, the way
     /// the relay did before transcript appends were amortized, so both
     /// policies can be timed in one process.
@@ -474,6 +482,8 @@ impl DurableRelay {
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
             agent_terminal_tool_calls: BTreeMap::new(),
+            held_writes: VecDeque::new(),
+            hold_ended_for: None,
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
@@ -974,7 +984,13 @@ impl DurableRelay {
         self.journal_generation
     }
 
+    /// Journal an observation. While a checkpoint barrier holds its cut, one
+    /// that can wait is held until the barrier ends and the current frontier
+    /// is returned (see `checkpoint_hold`).
     pub fn record_observation(&mut self, observation: RelayObservation) -> Result<u64> {
+        let Some(observation) = self.hold_observation(observation)? else {
+            return Ok(self.snapshot.latest_ordinal);
+        };
         let acp_ready = match &observation {
             RelayObservation::SessionConfigured { .. } => Some(true),
             RelayObservation::AgentInitialized { .. }
@@ -1028,6 +1044,11 @@ impl DurableRelay {
             }
             _ => {}
         }
+        // A notification that changes no agent work waits for a ready
+        // checkpoint barrier to end; see `checkpoint_hold`.
+        let Some(update) = self.hold_session_update(update)? else {
+            return Ok(self.snapshot.latest_ordinal);
+        };
         let native_before = self.snapshot.goal.running();
         let mut native_after = self.snapshot.goal.clone();
         native_after.apply(&update)?;

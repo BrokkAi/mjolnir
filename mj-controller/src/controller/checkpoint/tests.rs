@@ -1057,6 +1057,20 @@ pub(crate) const LATCH_RELAY_ANSWER_PROMPTS: &str = "MJ_TEST_LATCH_ANSWER_PROMPT
 #[cfg(unix)]
 pub(crate) const LATCH_RELAY_ANSWER: &str = "answered by the stand-in harness";
 const LATCH_RELAY_STARTUP_DELAY_MS: &str = "MJ_TEST_LATCH_STARTUP_DELAY_MS";
+/// Have the worker write something of its own just before it reads a Close,
+/// and complete the Close once the barrier it seals has ended, the way a live
+/// worker does. The value names the write: [`LATE_HARNESS_NOTIFICATION`] or
+/// [`LATE_HARNESS_QUESTION`].
+#[cfg(unix)]
+const LATCH_RELAY_JOURNALS_BEFORE_CLOSE: &str = "MJ_TEST_LATCH_JOURNALS_BEFORE_CLOSE";
+/// A harness notification that changes no work, which waits behind the cut.
+#[cfg(unix)]
+const LATE_HARNESS_NOTIFICATION: &str = "notification";
+/// A question for a person, which cannot wait and spoils the cut.
+#[cfg(unix)]
+const LATE_HARNESS_QUESTION: &str = "question";
+#[cfg(unix)]
+const CLOSE_CUT_TEST_CHILD: &str = "MJ_TEST_CLOSE_CUT_CHILD";
 pub(crate) const LATCH_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-0123456789ab";
 /// Whether the scripted relay understands the early checkpoint release.
 #[cfg(unix)]
@@ -1154,6 +1168,10 @@ fn latch_relay_child_serves_stdio() {
         );
     let reject_release = std::env::var_os(LATCH_RELAY_REJECT_RELEASE).is_some();
     #[cfg(unix)]
+    let late_write = std::env::var(LATCH_RELAY_JOURNALS_BEFORE_CLOSE).ok();
+    #[cfg(unix)]
+    let journals_before_close = late_write.is_some();
+    #[cfg(unix)]
     let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
     #[cfg(unix)]
     let answer_prompts = std::env::var_os(LATCH_RELAY_ANSWER_PROMPTS).is_some();
@@ -1207,6 +1225,48 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
+        // The harness keeps talking while a checkpoint barrier holds: this
+        // lands one write of its own after the daemon's last look and before
+        // its Close, through the same relay calls the worker runtime uses.
+        #[cfg(unix)]
+        if matches!(
+            &request.request,
+            mj_core::relay::RelayRequest::Submit {
+                command: RelayCommand::Close { .. },
+                ..
+            }
+        ) {
+            match late_write.as_deref() {
+                Some(LATE_HARNESS_NOTIFICATION) => {
+                    relay
+                        .record_session_update(
+                            serde_json::from_value(serde_json::json!({
+                                "sessionUpdate": "session_info_update",
+                                "title": "A title the harness chose after the turn"
+                            }))
+                            .unwrap(),
+                        )
+                        .expect("record a harness notification");
+                }
+                Some(LATE_HARNESS_QUESTION) => {
+                    relay
+                        .record_observation(
+                            mj_core::relay::RelayObservation::ElicitationRequested {
+                                request: mj_core::elicitation::ElicitationRequest {
+                                    id: "late-question".into(),
+                                    message: "May I continue?".into(),
+                                    title: None,
+                                    description: None,
+                                    fields: Vec::new(),
+                                },
+                            },
+                        )
+                        .expect("record a harness question");
+                }
+                Some(other) => panic!("unknown late write {other:?}"),
+                None => {}
+            }
+        }
         let response = if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
         } else {
@@ -1247,6 +1307,12 @@ fn latch_relay_child_serves_stdio() {
                             },
                         )
                         .expect("complete the answered prompt");
+                }
+                #[cfg(unix)]
+                RelayCommand::Close { .. } if journals_before_close => {
+                    relay
+                        .record_command_completed(&claimed.command_id, RelayCommandOutcome::Closed)
+                        .expect("close the relay");
                 }
                 #[cfg(unix)]
                 RelayCommand::CancelTurn => {
@@ -3064,5 +3130,315 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     assert!(
         !purposes.iter().any(|purpose| purpose.contains("podman")),
         "no container command ran at all: {purposes:?}"
+    );
+}
+
+/// Run `test_name` in its own process with its own store, behind a scripted
+/// worker that makes `late_write` just before it reads the Close. Returns
+/// true in that child, where the caller runs its body.
+#[cfg(unix)]
+fn in_close_cut_child(test_name: &str, late_write: &str) -> bool {
+    if std::env::var_os(CLOSE_CUT_TEST_CHILD).is_some() {
+        return true;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let test_name = format!(
+        "{}::{test_name}",
+        module_path!()
+            .strip_prefix("mj_controller::")
+            .unwrap_or(module_path!())
+    );
+    IsolatedTest::new(test_name)
+        .env(CLOSE_CUT_TEST_CHILD, "1")
+        .env(LATCH_RELAY_JOURNALS_BEFORE_CLOSE, late_write)
+        .env("MJ_DATA_DIR", directory.path())
+        .run();
+    false
+}
+
+/// Every target command succeeds. A close behind [`close_cut_controller`]
+/// reuses the installed archive, so the only commands are the local target's
+/// teardown.
+#[cfg(unix)]
+struct SucceedingExecutor;
+
+#[cfg(unix)]
+impl CommandExecutor for SucceedingExecutor {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        _input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        anyhow::bail!("unexpected streamed command {:?}", command.purpose)
+    }
+}
+
+/// A live session behind the scripted relay, in `state`, whose installed
+/// archive holds exactly what that relay journals at startup, so a close
+/// reuses the archive and nothing but the scripted write moves the cut.
+#[cfg(unix)]
+async fn close_cut_controller(
+    state: SessionState,
+) -> (
+    Controller,
+    crate::session_manager::SessionManagerChannels,
+    ManagedSessionHandle,
+) {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("the suspend never finished");
+        std::process::exit(101);
+    });
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let profile_home = data_directory.join("profile");
+    let archive_directory = data_directory.join("archives");
+    for directory in [&relay_root, &profile_home, &archive_directory] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
+    input.canonical_session.session.configuration.goal = Some(Box::new(
+        serde_json::from_value(serde_json::json!({
+            "known": true,
+            "execution": {"version": 1, "status": "idle"}
+        }))
+        .unwrap(),
+    ));
+    let checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        &archive_directory,
+        LATCH_RELAY_SESSION,
+        &input,
+    );
+
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.state = state;
+    session.target_template_id = "removed-local".into();
+    session.target_runtime = Some((&TargetTemplate::LocalBare).into());
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
+    });
+    session.checkpoint = Some(checkpoint);
+    crate::database::save_session(&session).unwrap();
+
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: profile_home,
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+        },
+    );
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "project".into(),
+            repositories: vec![ProjectRepository {
+                id: "project".into(),
+                github: Some("example/project".into()),
+                local: None,
+                destination: "project".into(),
+                git_ref: None,
+            }],
+        },
+    );
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(LATCH_RELAY_SESSION.into(), session)]
+                .into_iter()
+                .collect(),
+            ..State::default()
+        },
+    };
+
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels
+        .targets
+        .send(vec![latch_relay_target(
+            &relay_root,
+            None,
+            ReleaseSupport::Supported,
+            false,
+        )])
+        .unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    (controller, channels, handle)
+}
+
+/// I2-3 (test-and-fix campaign 2026-09-29): a suspend issued right after a
+/// turn ended failed with "close does not match the current checkpoint cut".
+///
+/// The daemon took the cut from the barrier's ready cursor, but the worker
+/// kept journaling its own output under that barrier (the completed-turn
+/// classifier's answer, the harness's notifications), and its Close requires
+/// the frontier to equal the cut exactly. One such write between the daemon's
+/// last look and its Close made the worker refuse.
+///
+/// The worker now owns the cut: while a barrier is ready, output that changes
+/// no work waits, and a relay sealed at the cut drops it. The stand-in worker
+/// here makes that write through the real relay just before it reads the
+/// Close, the window the real session hit about half a second after its first
+/// turn ended, and the suspend seals and stops the session.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
+    if !in_close_cut_child(
+        "a_suspend_seals_when_the_worker_journals_after_the_close_cut",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, _handle) = close_cut_controller(SessionState::Running).await;
+    let suspended = controller
+        .suspend_session_managed_controlled(
+            LATCH_RELAY_SESSION,
+            &SucceedingExecutor,
+            &channels.control,
+            true,
+            None,
+        )
+        .await;
+    channels.shutdown.shutdown().await.unwrap();
+
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    if let Err(error) = suspended {
+        panic!(
+            "the suspend failed: {error:#}; the session was left {:?} with error {:?}",
+            record.state, record.last_error
+        );
+    }
+    assert_eq!(record.state, SessionState::Stopped);
+    assert_eq!(record.last_error, None);
+}
+
+/// A worker that answers a Close with a refusal did not seal its relay: the
+/// session is still live, and nothing about the refused close can be resumed.
+/// The suspend therefore releases its barrier and returns the session to
+/// `Running` with the refusal as its visible error, the way a close that stops
+/// before sealing does. Recording an interrupted close instead left I2-3's
+/// session `suspending` with an error until someone suspended it again.
+///
+/// The refusal comes from a question the harness asks between the cut and the
+/// Close: a question cannot wait behind the cut, so it spoils it. This goes
+/// through the daemon's route: its suspend marks the record `Closing` first
+/// and then recovers that close.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier() {
+    if !in_close_cut_child(
+        "a_refused_close_returns_the_session_to_running_and_releases_its_barrier",
+        LATE_HARNESS_QUESTION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, handle) = close_cut_controller(SessionState::Closing).await;
+    let suspended = controller
+        .recover_interrupted_close_managed(
+            LATCH_RELAY_SESSION,
+            &SucceedingExecutor,
+            &channels.control,
+            true,
+            None,
+        )
+        .await;
+
+    let error = suspended.expect_err("the scripted worker refuses the Close");
+    assert!(
+        format!("{error:#}").contains("close does not match the current checkpoint cut"),
+        "{error:#}"
+    );
+    let record = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(
+        record.state,
+        SessionState::Running,
+        "{:?}",
+        record.last_error
+    );
+    assert!(
+        record
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("close does not match the current checkpoint cut")),
+        "{:?}",
+        record.last_error
+    );
+    let persisted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(persisted.state, SessionState::Running);
+
+    // The barrier is gone and the relay was never sealed, so the session can
+    // take work again.
+    wait_until_the_actor_serves_again(&handle).await;
+    let mut lease = handle.lease_connection().await.unwrap();
+    let snapshot = lease.connection_mut().sync().await.unwrap();
+    lease.release();
+    assert_eq!(snapshot.operational.checkpoint_barrier, None);
+    assert!(
+        !matches!(
+            snapshot.operational.execution,
+            RelayExecutionState::Closing | RelayExecutionState::Closed
+        ),
+        "{:?}",
+        snapshot.operational.execution
+    );
+    channels.shutdown.shutdown().await.unwrap();
+}
+/// A direct `mj checkpoint` runs the controller's checkpoint futures inside
+/// the daemon's connection task, on a 2 MiB Tokio worker stack. In a debug
+/// build the capture protocol's own future is very large, and every wrapper
+/// that embeds it inline carries a full copy on that stack, so the daemon
+/// overflowed it (`mj checkpoint --session` aborted the daemon). The capture
+/// future must stay boxed below the wrappers, so the ones above it stay small.
+#[test]
+fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
+    // Measured in a debug build: 50000 and 39360 bytes unboxed, 24040 and 72
+    // boxed.
+    const ENTRY_LIMIT_BYTES: usize = 32 * 1024;
+    const WRAPPER_LIMIT_BYTES: usize = 4 * 1024;
+    let mut controller = Controller {
+        config: Default::default(),
+        state: State::default(),
+    };
+    let entry = controller.checkpoint_session("session-1");
+    let entry_size = std::mem::size_of_val(&entry);
+    drop(entry);
+    let executor = RefusingExecutor("not used");
+    let latched = controller.checkpoint_session_latched_with_recovery_stage(
+        "session-1",
+        &executor,
+        None,
+        LatchExclusivity::ReleaseAfterLatch,
+        CheckpointExportPolicy::Always,
+        false,
+        None,
+    );
+    let latched_size = std::mem::size_of_val(&latched);
+    drop(latched);
+    assert!(
+        entry_size < ENTRY_LIMIT_BYTES && latched_size < WRAPPER_LIMIT_BYTES,
+        "checkpoint_session future is {entry_size} bytes (limit {ENTRY_LIMIT_BYTES}) and the \
+         latched wrapper future is {latched_size} bytes (limit {WRAPPER_LIMIT_BYTES}); box the \
+         capture future so the wrappers stay small"
     );
 }

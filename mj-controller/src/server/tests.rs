@@ -3360,9 +3360,9 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
     assert_eq!(
         action.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
@@ -3387,9 +3387,9 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let (config, state) = sample_config_state();
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,
@@ -3527,6 +3527,7 @@ fn a_running_review_projects_to_the_phone() {
 
     let review = RuntimeReviewView {
         session_id: "session-1".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Extended,
         phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
             synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),
@@ -3728,7 +3729,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     assert_eq!(
         validate_action(
             &ControllerAction::Move {
-                request: request(Some(ResumeQueueDisposition::Discard), false),
+                request: Box::new(request(Some(ResumeQueueDisposition::Discard), false)),
             },
             &snapshot,
         )
@@ -3739,7 +3740,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     assert_eq!(
         validate_action(
             &ControllerAction::Move {
-                request: request(None, true),
+                request: Box::new(request(None, true)),
             },
             &snapshot,
         )
@@ -3749,7 +3750,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
     );
     validate_action(
         &ControllerAction::Move {
-            request: request(Some(ResumeQueueDisposition::Discard), true),
+            request: Box::new(request(Some(ResumeQueueDisposition::Discard), true)),
         },
         &snapshot,
     )
@@ -5013,8 +5014,12 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 #[test]
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         viewer_source("function subagentChoiceApplies(", "const SUBAGENT_MODES"),
+        viewer_source(
+            "function workingChildCount(",
+            "function sessionInWorkspace("
+        ),
         viewer_source(
             "function moveSubagentChange(",
             "function moveQueueItemText("
@@ -5025,8 +5030,8 @@ let newDraft = null;
 const snapshot = { profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }] };
 const sessions = {
   parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
-  parked: { id: "parked", lifecycle: "live" },
-  running: { id: "running", lifecycle: "live" },
+  parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
+  running: { id: "running", lifecycle: "live", chat_phase: "running" },
   gone: { id: "gone", lifecycle: "suspended" },
 };
 function sessionById(id) { return sessions[id]; }
@@ -5039,7 +5044,7 @@ draft.subagents = { mode: "all_models" };
 assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"all_models"}', "a changed policy must be sent");
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a harness without delegation tools sends no policy");
-assert(moveStoppedChildren(sessions.parent) === 2, "live and parked children are stopped");
+assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
 "#;
     run_viewer_script(
         "viewer-move-subagents",

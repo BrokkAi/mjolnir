@@ -167,7 +167,11 @@ admission: recovery copies, worker upgrade preparation, and sub-agent waits. The
 handoff cancels it. Only the worker swap itself, from the idle reservation to
 the reconnect, holds admission. While a handoff waits, the gate drains:
 deferrable work (`activity_unless_draining`) is refused so the wait can only
-shrink. Give each admission site its own label. New daemon-owned background
+shrink. An accepted `ForceDestroy` (and its child destroys) holds admission as
+"session destroy" and is not durable: the handoff, `mj daemon restart` and the
+graceful `mj daemon stop` wait for it, but only up to 60 seconds, then proceed
+and log at WARN the sessions they abandoned. A crash mid-destroy leaves the
+session, and the owner runs `mj destroy` again. Give each admission site its own label. New daemon-owned background
 operations must participate in this ownership. Close admission and verify no
 outstanding work in one decision, and name the blocking work in the wait notice
 so the user can see what the upgrade is waiting for. Worker replacement is

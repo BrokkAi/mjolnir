@@ -1063,6 +1063,31 @@ fn a_refused_setup_change_names_the_session_and_setting_by_display_name() {
     assert!(!error.contains("podman"), "{error}");
 }
 
+/// A project stays while any session would read it again on resume, and
+/// only sessions that no longer need it let it go.
+#[test]
+fn bundle_removal_is_refused_while_a_session_still_resumes_from_it() {
+    let mut state = sample_state();
+    let session = state.sessions.first_value_mut().unwrap();
+    session.state = SessionState::Stopped;
+    session.session_title_override = Some("Fix the login page".into());
+    let refusal = state.bundle_removal_refusal("hel").unwrap();
+    assert!(
+        refusal.contains("\"hel\" is used by a session: \"Fix the login page\""),
+        "{refusal}"
+    );
+    assert_eq!(state.bundle_removal_refusal("other"), None);
+
+    for release in [
+        |session: &mut SessionRecord| session.project_directory = Some("/work/hel".into()),
+        |session: &mut SessionRecord| session.state = SessionState::DestroyedWithDataLoss,
+    ] {
+        let mut released = state.clone();
+        release(released.sessions.first_value_mut().unwrap());
+        assert_eq!(released.bundle_removal_refusal("hel"), None);
+    }
+}
+
 #[test]
 fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults() {
     let state = sample_state();

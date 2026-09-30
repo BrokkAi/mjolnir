@@ -226,14 +226,7 @@ pub(crate) fn drawn_session_rows_with_options(
                     now_epoch_seconds,
                     attention,
                 };
-                let primary_busy = !unreachable
-                    && session.state == SessionState::Running
-                    && detail.is_some_and(|detail| {
-                        detail.activity.is_working(
-                            detail.current_turn_started_at,
-                            !detail.pending_elicitations.is_empty(),
-                        )
-                    });
+                let primary_busy = dashboard.session_is_working(&session.id);
                 // Review work is independent of the session's primary
                 // lifecycle. A review can keep animating while the session
                 // is stopped or unreachable, so do not gate it on either.
@@ -901,6 +894,11 @@ pub(crate) fn session_display_clock(
 /// The user prompt is a fallback for the compact summary, never an agent
 /// excerpt with a misleading prefix.
 pub(crate) fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
+    // A question waiting for an answer is what the session is doing now; the
+    // tool call that raised it only carries the harness's internal tool name.
+    if let Some(question) = detail.pending_elicitations.first() {
+        return Some(&question.message);
+    }
     if detail.last_agent_message_follows_last_user {
         detail
             .last_agent_message
@@ -1049,7 +1047,7 @@ pub(crate) fn sessions_title(
 /// Reserve a title suffix for the sessions that want a person. At narrow
 /// widths a compact form keeps that count visible while preserving the
 /// Sessions label; the narrowest form is the most urgent level's own glyph.
-/// The compact forms leave out the filter label, and its clear chip with it.
+/// The compact forms give up the filter label before they give up its clear chip.
 pub(crate) fn sessions_title_with_attention(
     workspace_name: &str,
     width: u16,
@@ -1075,18 +1073,47 @@ pub(crate) fn sessions_title_with_attention(
             clear_chip: base.clear_chip,
         };
     }
-    let compact = Line::styled(format!(" Sessions [{glyph}{count}]"), style);
-    if compact.width() <= budget {
+    // The compact forms lead with the count. A filter still says it is on: the
+    // label follows in whatever room is left, and the clear chip always ends
+    // the title, so the label is what gives way first.
+    let compact_forms = [
+        format!(" Sessions [{glyph}{count}]"),
+        format!(" {glyph}{count}"),
+    ];
+    for form in compact_forms {
+        let lead = Span::styled(form, style);
+        if !clear {
+            if lead.width() <= budget {
+                return SessionsTitle {
+                    line: Line::from(lead),
+                    clear_chip: None,
+                };
+            }
+            continue;
+        }
+        let end = title_end(true);
+        let end_width = Span::raw(end).width();
+        if lead.width() + end_width > budget {
+            continue;
+        }
+        let room = budget - lead.width() - end_width;
+        // A separating space, then at least one cell of label.
+        let label = (room >= 2 && !workspace_name.is_empty()).then(|| {
+            Span::styled(
+                format!(
+                    " {}",
+                    truncate_to_cells(workspace_name, room - 1, Truncate::SUMMARY)
+                ),
+                Style::default().fg(theme::palette().muted),
+            )
+        });
+        let chip_start = lead.width() + label.as_ref().map_or(0, Span::width);
+        let mut spans = vec![lead];
+        spans.extend(label);
+        spans.push(Span::styled(end, theme::muted()));
         return SessionsTitle {
-            line: compact,
-            clear_chip: None,
-        };
-    }
-    let tiny = Line::styled(format!(" {glyph}{count}"), style);
-    if tiny.width() <= budget {
-        return SessionsTitle {
-            line: tiny,
-            clear_chip: None,
+            line: Line::from(spans),
+            clear_chip: u16::try_from(chip_start).ok(),
         };
     }
     base
@@ -1197,7 +1224,12 @@ pub(crate) fn render_sessions(
     let filter_label = match dashboard.sessions_hidden_count() {
         0 => filter_label,
         hidden => {
-            let counted = format!("{filter_label} · {hidden} hidden");
+            // The count leads, so the label's tail is what a narrow title cuts.
+            let counted = if filter_label.is_empty() {
+                format!("{hidden} hidden")
+            } else {
+                format!("{hidden} hidden · {filter_label}")
+            };
             if label_keeps_full_prefix(&counted, area.width, maximize_enabled, clear) {
                 counted
             } else {
@@ -1262,7 +1294,9 @@ pub(crate) fn render_sessions(
         .with_selected(selected);
     frame.render_stateful_widget(table, rows_area, &mut state);
     if drawn.is_empty() && rows_area.height > 0 {
-        let lines = if dashboard.sessions_filter.is_some() {
+        let lines = if dashboard.sessions_text.is_pending() {
+            vec![Line::raw("Searching conversations…")]
+        } else if dashboard.sessions_filter.is_some() {
             vec![Line::raw("No sessions match · Esc clears the filter")]
         } else {
             vec![

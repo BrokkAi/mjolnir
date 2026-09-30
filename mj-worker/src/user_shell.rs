@@ -19,6 +19,12 @@ const OUTPUT_HEAD_BYTES: usize = 16 * 1024;
 const OUTPUT_TAIL_BYTES: usize = 16 * 1024;
 const LIVE_OUTPUT_BYTES: usize = 16 * 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
+/// How long output may keep arriving after the shell exits. A backgrounded
+/// descendant such as `(sleep 300 &)` inherits the pipes and keeps them open;
+/// without a bound the entry would read "running" for the descendant's whole
+/// life although the command finished. The same bound as Codex's
+/// `IO_DRAIN_TIMEOUT_MS`.
+const USER_SHELL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct UserShellSpec {
@@ -181,53 +187,84 @@ fn spawn_user_shell(
         let started = Instant::now();
         let stdout_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
         let stderr_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
-        let stdout_task = drain_pipe(
-            stdout,
-            request_id.clone(),
-            spec.command.clone(),
-            stdout_buffer.clone(),
-            stderr_buffer.clone(),
-            true,
-            events.clone(),
-        );
-        let stderr_task = drain_pipe(
-            stderr,
-            request_id.clone(),
-            spec.command.clone(),
-            stdout_buffer.clone(),
-            stderr_buffer.clone(),
-            false,
-            events.clone(),
-        );
+        // The readers are tasks of their own so a descendant that keeps a pipe
+        // open cannot hold this supervisor: aborting a reader drops, and so
+        // closes, our end of its pipe. The set also aborts them if this task
+        // is dropped.
+        let mut readers = JoinSet::new();
+        let pipes: [(
+            &'static str,
+            bool,
+            Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        ); 2] = [
+            ("stdout", true, Box::new(stdout)),
+            ("stderr", false, Box::new(stderr)),
+        ];
+        for (name, pipe_is_stdout, pipe) in pipes {
+            let read = drain_pipe(
+                pipe,
+                request_id.clone(),
+                spec.command.clone(),
+                stdout_buffer.clone(),
+                stderr_buffer.clone(),
+                pipe_is_stdout,
+                events.clone(),
+            );
+            readers.spawn(async move { (name, read.await) });
+        }
 
         let mut cancelled = cancelled;
         let mut timed_out = false;
         let mut was_cancelled = false;
-        // Leader exit does not end the command: descendants may retain pipes.
-        // Keep one cancellation owner until both streams and the child settle.
-        let completed = async { tokio::join!(child.wait(), stdout_task, stderr_task) };
-        tokio::pin!(completed);
-        let (waited, stdout_read, stderr_read) = tokio::select! {
-            result = &mut completed => result,
+        // The command completes when the shell (the leader) exits, not when
+        // every descendant closes the pipes it inherited.
+        let waited = tokio::select! {
+            result = child.wait() => result,
             _ = &mut cancelled => {
                 was_cancelled = true;
                 group.kill();
-                completed.await
+                child.wait().await
             }
             _ = tokio::time::sleep(USER_SHELL_TIMEOUT) => {
                 timed_out = true;
                 group.kill();
-                completed.await
+                child.wait().await
             }
         };
-        drop(group);
+        // The entry's duration is the leader's, not that of a descendant.
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
+        // Collect what is still readable, for at most USER_SHELL_DRAIN_TIMEOUT.
+        // Cancellation stays live: it ends the drain by killing the group.
         let mut read_errors = Vec::new();
-        for (name, read) in [("stdout", stdout_read), ("stderr", stderr_read)] {
-            if let Err(error) = read {
-                read_errors.push(format!("read {name}: {error:#}"));
+        let drain_deadline = tokio::time::sleep(USER_SHELL_DRAIN_TIMEOUT);
+        tokio::pin!(drain_deadline);
+        loop {
+            tokio::select! {
+                joined = readers.join_next() => match joined {
+                    None => break,
+                    Some(Ok((name, Err(error)))) => {
+                        read_errors.push(format!("read {name}: {error:#}"));
+                    }
+                    Some(Ok((_, Ok(())))) => {}
+                    Some(Err(error)) => {
+                        read_errors.push(format!("user shell reader stopped: {error}"));
+                    }
+                },
+                _ = &mut drain_deadline => break,
+                _ = &mut cancelled, if !was_cancelled && !timed_out => {
+                    was_cancelled = true;
+                    group.kill();
+                }
             }
         }
+        // A descendant that outlives the drain keeps its pipes; stop reading
+        // them. The buffers already hold everything read so far.
+        readers.abort_all();
+        while readers.join_next().await.is_some() {}
+        // Terminate whatever the shell left behind in its process group.
+        drop(group);
+
         let (stdout, stdout_truncated) = stdout_buffer
             .lock()
             .expect("user shell stdout lock poisoned")
@@ -263,7 +300,7 @@ fn spawn_user_shell(
             stderr_truncated,
             exit_code,
             signal,
-            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms,
             status,
             error: (!read_errors.is_empty()).then(|| read_errors.join("; ")),
         };
@@ -622,6 +659,74 @@ mod tests {
         let result = finished(&mut received).await;
         assert_eq!(result.status, UserShellStatus::Cancelled);
         assert!(result.stdout_truncated);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_is_gone(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .is_none_or(|state| {
+                state
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z'))
+            })
+    }
+
+    /// B-2: a backgrounded descendant holds stdout and stderr open.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn user_shell_completes_at_leader_exit_and_stops_a_descendant_holding_the_pipes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (events, mut received) = mpsc::channel(64);
+        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
+        shells
+            .start(
+                "held-pipes".into(),
+                "sleep 300 & echo $! > descendant; echo hi; exit 3".into(),
+            )
+            .unwrap();
+        let result = finished(&mut received).await;
+        assert_eq!(result.status, UserShellStatus::Exited, "{result:?}");
+        assert_eq!(result.exit_code, Some(3));
+        assert_eq!(result.stdout, "hi\n");
+        // The duration is the leader's, not the drain's.
+        assert!(result.duration_ms < 1_500, "{result:?}");
+        let pid: i32 = std::fs::read_to_string(cwd.path().join("descendant"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !process_is_gone(pid) {
+            if Instant::now() >= deadline {
+                // SAFETY: cleans up this test's own fixture.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("descendant {pid} survived the completed command");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(shells.available_slots(), MAX_CONCURRENT_USER_SHELLS - 1);
+        shells.completed("held-pipes");
+        assert_eq!(shells.available_slots(), MAX_CONCURRENT_USER_SHELLS);
+    }
+
+    /// Output the descendant writes during the drain is kept; output that
+    /// arrives after the drain is not waited for.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn user_shell_keeps_output_written_during_the_drain() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (events, mut received) = mpsc::channel(64);
+        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
+        shells
+            .start(
+                "drain-output".into(),
+                "(sleep 0.5; echo during-drain; sleep 30; echo too-late) & echo first".into(),
+            )
+            .unwrap();
+        let result = finished(&mut received).await;
+        assert_eq!(result.status, UserShellStatus::Exited, "{result:?}");
+        assert_eq!(result.stdout, "first\nduring-drain\n");
     }
 
     #[cfg(unix)]

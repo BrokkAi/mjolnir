@@ -24,15 +24,20 @@ fn target_step_choices<W: WizardDraft>(
     dashboard: &DashboardState,
     wizard: &W,
     sizing_error: Option<&str>,
-) -> (Vec<PickerChoice>, Vec<Line<'static>>) {
+) -> (Vec<PickerChoice>, Vec<Line<'static>>, usize) {
     let warning = Style::default().fg(theme::palette().warning);
     let mut help = Vec::new();
     let mut selected_sized = false;
+    // A target whose runtime is not on this host is not listed at all; one
+    // whose host did not answer is, with its status.
+    let offered = dashboard.offered_target_indices();
+    let selected_row = dashboard.target_row(wizard.target());
     let rows = dashboard
         .config
         .targets
         .iter()
         .enumerate()
+        .filter(|(index, _)| offered.contains(index))
         .map(|(index, (id, target))| {
             let selected = index == wizard.target();
             let rejection = wizard.target_rejection(dashboard, id);
@@ -87,7 +92,7 @@ fn target_step_choices<W: WizardDraft>(
             None => "↑/↓ select · Tab moves focus · Enter activates".to_owned(),
         }
     }));
-    (target_table(rows), help)
+    (target_table(rows), help, selected_row)
 }
 
 pub(crate) fn step_initial(step: WizardStep) -> WizardControl {
@@ -408,7 +413,7 @@ pub(crate) fn render_new_wizard(
         form.end_frame(initial);
         return;
     }
-    let mut target_help = Vec::new();
+    let mut step_help = Vec::new();
     let (title, choices, selected): (_, Vec<PickerChoice>, _) = match wizard.step {
         WizardStep::Profile => (
             format!(
@@ -429,47 +434,42 @@ pub(crate) fn render_new_wizard(
                 " New session · {} choose a project ",
                 step_counter(3, 4, target_hidden)
             ),
-            bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
-                .into_iter()
-                .map(|id| {
-                    let bundle = &dashboard.config.bundles[id];
-                    let sources = bundle
-                        .repositories
-                        .iter()
-                        .map(|repository| {
-                            repository.github.clone().unwrap_or_else(|| {
-                                repository
-                                    .local
-                                    .as_ref()
-                                    .map(|path| path.display().to_string())
-                                    .unwrap_or_else(|| repository.id.clone())
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    PickerChoice::text(format!(
-                        "{id}  {} · {sources}",
-                        crate::widgets::counted(
-                            bundle.repositories.len(),
-                            "repository",
-                            "repositories"
-                        )
-                    ))
-                })
-                .collect(),
+            {
+                let ids = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state);
+                if let Some(id) = ids.get(wizard.bundle) {
+                    step_help = bundle_details(id, &dashboard.config.bundles[*id]);
+                }
+                ids.into_iter()
+                    .map(|id| {
+                        let bundle = &dashboard.config.bundles[id];
+                        let mut summary = bundle
+                            .repositories
+                            .first()
+                            .map(|repository| compact_path(&repository_source(repository)))
+                            .unwrap_or_default();
+                        if bundle.repositories.len() > 1 {
+                            summary.push_str(&format!("  +{} more", bundle.repositories.len() - 1));
+                        }
+                        PickerChoice::table(vec![
+                            PickerCell::text(id),
+                            PickerCell::styled(summary, theme::muted()),
+                        ])
+                    })
+                    .collect()
+            },
             wizard.bundle,
         ),
         WizardStep::Target => {
-            let (rows, lines) =
+            let (rows, lines, selected_row) =
                 target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
-            target_help = lines;
+            step_help = lines;
             (
                 format!(
                     " New session · {} target ",
                     step_counter(2, 4, target_hidden)
                 ),
                 rows,
-                wizard.target,
+                selected_row,
             )
         }
         WizardStep::MoveFiles => unreachable!("file selection belongs to Move"),
@@ -478,14 +478,12 @@ pub(crate) fn render_new_wizard(
         WizardStep::NewBundle => unreachable!("bundle input was rendered above"),
         WizardStep::ProjectDirectory => unreachable!("project directory input was rendered above"),
     };
-    let mut help = if wizard.step == WizardStep::Target {
-        target_help
+    let mut help = if matches!(wizard.step, WizardStep::Target | WizardStep::Bundle) {
+        step_help
     } else {
-        vec![picker_help(if wizard.step == WizardStep::Bundle {
-            "Choose saved project files, or browse GitHub and folders for another."
-        } else {
-            "↑/↓ select · Tab moves focus · Enter activates"
-        })]
+        vec![picker_help(
+            "↑/↓ select · Tab moves focus · Enter activates",
+        )]
     };
     if wizard.step == WizardStep::Profile
         && dashboard
@@ -495,6 +493,14 @@ pub(crate) fn render_new_wizard(
     {
         help.push(guardian_footnote());
     }
+    let bundle_actions = [
+        (WizardControl::Add, "Add…", true),
+        (
+            WizardControl::RemoveBundle,
+            "Remove",
+            !dashboard.config.bundles.is_empty(),
+        ),
+    ];
     render_picker(
         frame,
         area,
@@ -532,11 +538,11 @@ pub(crate) fn render_new_wizard(
                 WizardStep::Bundle => !dashboard.config.bundles.is_empty(),
                 _ => true,
             },
-            pinned_action: (wizard.step == WizardStep::Bundle).then_some((
-                WizardControl::Add,
-                "Add project…",
-                true,
-            )),
+            side_actions: if wizard.step == WizardStep::Bundle {
+                &bundle_actions
+            } else {
+                &[]
+            },
             empty_hint: (wizard.step == WizardStep::Bundle && dashboard.config.bundles.is_empty())
                 .then_some("Choose a project to get started."),
         },
@@ -549,6 +555,71 @@ pub(crate) fn render_new_wizard(
         WizardStep::Target => WizardControl::TargetList,
         _ => unreachable!("picker step has a list control"),
     });
+}
+
+/// Where a project repository comes from, as the user gave it: the GitHub
+/// name, else the local path with the home directory written as `~`.
+fn repository_source(repository: &mj_core::config::ProjectRepository) -> String {
+    if let Some(github) = &repository.github {
+        return github.clone();
+    }
+    let Some(path) = &repository.local else {
+        return repository.id.clone();
+    };
+    if let Some(home) = std::env::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return if rest.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", rest.display())
+        };
+    }
+    path.display().to_string()
+}
+
+/// Longest source a project row shows before it cuts the middle out.
+const PROJECT_SOURCE_CHARS: usize = 40;
+
+/// Shortens a long source by cutting its middle: the start says where it
+/// lives and the end says which one it is. The details under the list show
+/// it whole.
+fn compact_path(source: &str) -> String {
+    let chars = source.chars().collect::<Vec<_>>();
+    if chars.len() <= PROJECT_SOURCE_CHARS {
+        return source.to_owned();
+    }
+    let head = PROJECT_SOURCE_CHARS / 3;
+    let tail = PROJECT_SOURCE_CHARS - head - 1;
+    let mut short = chars[..head].iter().collect::<String>();
+    short.push('…');
+    short.extend(&chars[chars.len() - tail..]);
+    short
+}
+
+/// The selected project's full sources, drawn under the project list so a
+/// long path or a second repository is never cut off.
+fn bundle_details(id: &str, bundle: &mj_core::config::ProjectBundle) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw(""),
+        Line::styled(
+            format!(
+                "{id} · {}",
+                crate::widgets::counted(bundle.repositories.len(), "repository", "repositories")
+            ),
+            theme::muted(),
+        ),
+    ];
+    let multiple = bundle.repositories.len() > 1;
+    for repository in &bundle.repositories {
+        let primary = multiple && repository.id == bundle.primary_repo;
+        lines.push(Line::raw(format!(
+            "  {}{}",
+            repository_source(repository),
+            if primary { "  (primary)" } else { "" }
+        )));
+    }
+    lines
 }
 
 pub(crate) struct ReviewWizardView<'a> {
@@ -573,7 +644,8 @@ pub(crate) struct ReviewWizardView<'a> {
     /// harness and profile, so the review must not promise a fresh environment.
     in_place_move: bool,
     source_unavailable: bool,
-    /// Sub-agents the Move stops, as a suspend would.
+    /// Sub-agents the Move stops that had not handed back; idle ones are
+    /// stopped without a word, as a suspend stops them.
     stopped_subagents: usize,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
@@ -674,7 +746,11 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::styled(
             format!(
                 "{} will be stopped; the session is told which when it resumes.",
-                crate::widgets::counted(stopped_subagents, "sub-agent", "sub-agents")
+                crate::widgets::counted(
+                    stopped_subagents,
+                    "working sub-agent",
+                    "working sub-agents"
+                )
             ),
             Style::default().fg(theme::palette().warning),
         ));
@@ -1563,7 +1639,9 @@ pub(crate) fn render_resume_wizard(
                     .as_ref()
                     .is_some_and(|p| p.source_unavailable),
                 stopped_subagents: if wizard.moving {
-                    dashboard.managed_active_child_ids(&wizard.session_id).len()
+                    dashboard
+                        .subagents_not_handed_back(&wizard.session_id)
+                        .len()
                 } else {
                     0
                 },
@@ -1703,13 +1781,13 @@ pub(crate) fn render_resume_wizard(
             )
         }
         WizardStep::Target => {
-            let (rows, help) =
+            let (rows, help, selected_row) =
                 target_step_choices(dashboard, wizard, wizard.sizing_error.as_deref());
             let step = format!("{} new target", step_counter(2, 3, target_hidden));
             (
                 resume_wizard_title(wizard, &step, &step),
                 rows,
-                wizard.target,
+                selected_row,
                 help,
             )
         }
@@ -1741,7 +1819,7 @@ pub(crate) fn render_resume_wizard(
             },
             next_enabled: wizard.step != WizardStep::Target
                 || target_advance_enabled(dashboard, wizard),
-            pinned_action: None,
+            side_actions: &[],
             empty_hint: None,
         },
         &mut form,

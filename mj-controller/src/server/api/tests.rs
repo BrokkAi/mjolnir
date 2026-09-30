@@ -1457,9 +1457,9 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
@@ -1493,17 +1493,16 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
 }
 
 #[tokio::test]
-async fn start_forwards_the_launch_base_to_the_controller() {
+async fn start_forwards_the_base_to_the_controller() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
 
-    let response =
-        tokio::spawn(app.oneshot(start_request(start_body(r#","launch_base":"origin/main""#))));
+    let response = tokio::spawn(app.oneshot(start_request(start_body(r#","base":"origin/main""#))));
     let request = actions.recv().await.unwrap();
-    let ControllerAction::New { launch_base, .. } = &request.action else {
+    let ControllerAction::New { base, .. } = &request.action else {
         panic!("expected a New action, got {:?}", request.action);
     };
-    assert_eq!(launch_base.as_deref(), Some("origin/main"));
+    assert_eq!(base.as_deref(), Some("origin/main"));
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1581,42 +1580,38 @@ async fn runtime_identity_constraint_is_forwarded_and_receipt_is_public_without_
 }
 
 #[test]
-fn session_receipt_retains_exact_checkout_identity() {
+fn session_receipt_names_the_start_selection_as_the_request_does() {
     let (config, mut state) = sample_config_state();
-    let checkout = mj_core::remote_git::ExactCheckout {
-        repository_id: "project".into(),
-        commit: "a".repeat(40),
-        branch: Some("town/run-123".into()),
-    };
-    state.sessions.get_mut("session-1").unwrap().checkout = Some(checkout.clone());
+    state.sessions.get_mut("session-1").unwrap().checkout =
+        Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: "a".repeat(40),
+            branch: Some("town/run-123".into()),
+        });
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let receipt = ApiSession::from(&snapshot.sessions[0]);
-    assert_eq!(receipt.checkout, Some(checkout));
+    assert_eq!(receipt.at, Some("a".repeat(40)));
+    assert_eq!(receipt.branch.as_deref(), Some("town/run-123"));
+    assert_eq!(receipt.base, Some("a".repeat(40)), "base defaults to at");
     assert_eq!(receipt.id, "session-1");
 }
 
 #[tokio::test]
-async fn start_forwards_exact_checkout() {
+async fn start_forwards_at_and_branch() {
     let backend = Arc::new(FakeBackend::default());
     let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-    let checkout = mj_core::remote_git::ExactCheckout {
-        repository_id: "project".into(),
-        commit: "a".repeat(40),
-        branch: Some("town/run-123".into()),
-    };
-    let extra = format!(
-        ",\"checkout\":{}",
-        serde_json::to_string(&checkout).unwrap()
-    );
+    let extra = format!(r#","at":"{}","branch":"town/run-123""#, "a".repeat(40));
     let response = tokio::spawn(app.oneshot(start_request(start_body(&extra))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New {
-        checkout: received, ..
+        at, branch, base, ..
     } = &request.action
     else {
         panic!("expected New")
     };
-    assert_eq!(received.as_ref(), Some(&checkout));
+    assert_eq!(at.as_deref(), Some("a".repeat(40).as_str()));
+    assert_eq!(branch.as_deref(), Some("town/run-123"));
+    assert_eq!(base, &None);
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1626,6 +1621,23 @@ async fn start_forwards_exact_checkout() {
     assert_eq!(
         response.await.unwrap().unwrap().status(),
         StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_refuses_at_without_a_bundle() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let body = format!(
+        r#"{{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","at":"{}"}}"#,
+        "a".repeat(40)
+    );
+    let response = app.oneshot(start_request(body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("`at` requires bundle_id"),
+        "{body}"
     );
 }
 
@@ -1838,9 +1850,9 @@ async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_b
     assert_eq!(
         request.action,
         ControllerAction::New {
-            launch_base: None,
-            launch_branch: None,
-            checkout: None,
+            at: None,
+            branch: None,
+            base: None,
             expected_runtime_identity: None,
             subagents: None,
             create_managed_worktree: None,
@@ -2246,6 +2258,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 900,
             final_message: Some("added the line".into()),
+            tool_calls: 4,
         }),
         ..FakeBackend::default()
     });
@@ -2266,6 +2279,7 @@ async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
     assert_eq!(body["turn_id"], 5);
     assert_eq!(body["turn_number"], 3);
     assert_eq!(body["elapsed_ms"], 800);
+    assert_eq!(body["tool_calls"], 4);
     assert_eq!(body["final_message"], "added the line");
     assert_eq!(body["stop_reason"], "end_turn");
     assert_eq!(body["usage"]["scope"], "last_request");
@@ -2293,6 +2307,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 500,
             final_message: None,
+            tool_calls: 0,
         }),
         ..FakeBackend::default()
     });
@@ -4076,6 +4091,9 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 id: "docker".into(),
                 kind: "local-docker".into(),
                 requires_project_directory: false,
+                runtime_missing: false,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
                 recent_project_directories: Vec::new(),
             });
             snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
@@ -4121,6 +4139,88 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
     );
     assert_eq!(target("podman")["availability"], "ready");
     assert_eq!(target("raw")["availability"], "ready");
+}
+
+/// A runtime missing on the daemon's host is permanent, so the options say so
+/// with `runtime_missing`; a host that did not answer is unavailable but not
+/// missing, so callers keep it listed.
+#[tokio::test]
+async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
+    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        snapshot.targets.push(crate::server::ViewerTarget {
+            id: "docker".into(),
+            kind: "local-docker".into(),
+            requires_project_directory: false,
+            runtime_missing: true,
+            availability: crate::server::api::LaunchAvailability::Unknown,
+            unavailable_reason: None,
+            recent_project_directories: Vec::new(),
+        });
+        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
+            id: "builder".into(),
+            label: "builder".into(),
+            target_ids: vec!["podman".into()],
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            logical_cores: None,
+            disk_total_bytes: None,
+            virtual_machines: None,
+            sampled_at_epoch_seconds: None,
+            refreshing: false,
+            stale: false,
+            has_error: true,
+        }];
+    });
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/options"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    let targets = body["targets"].as_array().unwrap();
+    let target = |id: &str| targets.iter().find(|target| target["id"] == id).unwrap();
+
+    assert_eq!(target("docker")["availability"], "unavailable");
+    assert_eq!(target("docker")["runtime_missing"], true);
+    assert_eq!(target("podman")["availability"], "unavailable");
+    assert!(target("podman").get("runtime_missing").is_none());
+}
+
+/// Naming a target whose runtime is not installed is refused by name, with the
+/// reason, for New, Resume and Move alike, since they share one validator.
+#[tokio::test]
+async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.targets.push(crate::server::ViewerTarget {
+                id: "docker".into(),
+                kind: "local-docker".into(),
+                requires_project_directory: false,
+                runtime_missing: true,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
+                recent_project_directories: Vec::new(),
+            });
+        });
+    let response = app
+        .oneshot(start_request(
+            r#"{"profile_id":"codex-1","target_id":"docker","bundle_id":"hel"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(body.contains("docker"), "{body}");
+    assert!(
+        body.contains("Docker is not installed on this host"),
+        "{body}"
+    );
+    assert!(actions.try_recv().is_err(), "nothing was launched");
 }
 
 #[tokio::test]
@@ -4496,6 +4596,7 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
             turn_started_at_ms: 100,
             last_changed_at_ms: 900,
             final_message: Some("Report delivered.".into()),
+            tool_calls: 0,
         }),
         ..FakeBackend::default()
     });

@@ -50,8 +50,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::pollers::{
-    dashboard_worker_targets, interrupted_suspend_session_ids, reserve_recovery_or_cancel,
-    spawn_image_refresher, unowned_interrupted_lifecycles,
+    dashboard_worker_targets, interrupted_destroy_session_ids, interrupted_suspend_session_ids,
+    reserve_recovery_or_cancel, spawn_image_refresher, unowned_interrupted_lifecycles,
 };
 
 // Move preparation now reports whether source state must be recovered without its harness.
@@ -235,6 +235,18 @@ enum LifecycleKind {
 }
 
 impl LifecycleKind {
+    /// Whether this operation is a destroy's teardown of the session, which a
+    /// second destroy of the same session waits for instead of cancelling.
+    fn is_teardown(self) -> bool {
+        matches!(
+            self,
+            LifecycleKind::ForceDestroy
+                | LifecycleKind::DestroyStopped
+                | LifecycleKind::ArchiveStopped
+                | LifecycleKind::StopSubagent
+        )
+    }
+
     /// What a refusal calls this operation, so a person told that a session is
     /// busy learns which operation is holding it (#1010).
     fn label(self) -> &'static str {
@@ -316,7 +328,9 @@ enum CloseRoute {
 /// A record mid-close with a live target cannot be closed again from the start:
 /// its worker socket is gone, so a fresh checkpoint attempt only fails on
 /// connect. Recovery finishes it from the checkpoint the first close verified.
-fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
+/// `subagent` says the session is a Mjolnir sub-agent; see
+/// [`crate::controller::has_nothing_to_checkpoint`].
+fn close_route(session: Option<&SessionRecord>, subagent: bool) -> CloseRoute {
     let Some(session) = session else {
         return CloseRoute::Graceful;
     };
@@ -328,7 +342,7 @@ fn close_route(session: Option<&SessionRecord>) -> CloseRoute {
         } else {
             CloseRoute::Done
         }
-    } else if crate::controller::has_nothing_to_checkpoint(session) {
+    } else if crate::controller::has_nothing_to_checkpoint(session, subagent) {
         CloseRoute::SettleWithoutCheckpoint
     } else {
         CloseRoute::Graceful

@@ -111,8 +111,8 @@ pub(crate) use config::*;
 mod options;
 #[cfg(test)]
 pub(crate) use options::EngineProbe;
-pub(crate) use options::LocalEngineChecks;
 use options::*;
+pub(crate) use options::{LocalEngineChecks, target_availability};
 mod sessions;
 use sessions::*;
 mod subagents;

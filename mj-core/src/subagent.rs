@@ -118,9 +118,13 @@ impl SubagentOptions {
         let SubagentPolicy::SingleModel { model, effort } = policy else {
             return Ok(());
         };
+        if model.is_empty() {
+            return Err(format!("Choose a subagent model. {PROFILE_HELP}"));
+        }
         if !self.models.iter().any(|choice| &choice.value == model) {
             return Err(format!(
-                "Selected subagent model {model:?} is unavailable. {PROFILE_HELP}"
+                "Selected subagent model {model:?} is unavailable.{} {PROFILE_HELP}",
+                choice_list(" Available models", &self.models)
             ));
         }
         if self.efforts.is_empty() && effort.is_none() {
@@ -132,10 +136,29 @@ impl SubagentOptions {
         {
             return Ok(());
         }
+        if self.efforts.is_empty() {
+            return Err(format!(
+                "Subagent model {model:?} offers no efforts; leave the effort unset."
+            ));
+        }
         Err(format!(
-            "Select an available effort for subagent model {model:?}. {PROFILE_HELP}"
+            "Select an available effort for subagent model {model:?}.{} {PROFILE_HELP}",
+            choice_list(" Available efforts", &self.efforts)
         ))
     }
+}
+
+/// "<label>: a, b." for a non-empty list of choices, otherwise nothing.
+fn choice_list(label: &str, choices: &[crate::acp::SessionConfigChoice]) -> String {
+    if choices.is_empty() {
+        return String::new();
+    }
+    let values = choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{label}: {values}.")
 }
 
 pub fn delegation_policy(limit: usize) -> String {
@@ -613,6 +636,25 @@ pub fn is_handback_reminder(command_id: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('-'))
 }
 
+/// The command id of the handback reminder for the turn that finished at
+/// `completed_ordinal`. The id is deterministic so a reminder is sent at most
+/// once per turn, and [`reminded_turn_ordinal`] reads it back.
+#[must_use]
+pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
+    format!("{HANDBACK_REMINDER_PREFIX}-{completed_ordinal}")
+}
+
+/// The ordinal at which the reminded turn finished, when `command_id` names a
+/// handback reminder.
+#[must_use]
+pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
+    command_id
+        .strip_prefix(HANDBACK_REMINDER_PREFIX)?
+        .strip_prefix('-')?
+        .parse()
+        .ok()
+}
+
 /// A report a child handed back during the turn `command_id` names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentHandback {
@@ -658,11 +700,29 @@ pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
 ) -> bool {
-    awaited_ordinal.is_some_and(|awaited| {
-        last_turn
-            .and_then(|turn| turn.accepted_ordinal)
-            .is_none_or(|answered| answered < awaited)
-    })
+    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
+}
+
+/// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
+/// finished turn that answers prompts up to `answered_ordinal` (see
+/// [`answered_ordinal`]). This is the one comparison every reader applies.
+#[must_use]
+pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
+    awaited_ordinal
+        .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
+}
+
+/// The newest prompt a finished turn answers, by acceptance ordinal.
+///
+/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
+/// reminder is Mjolnir's, not the parent's: the store gives its turn no
+/// acceptance ordinal, and the report the child hands back in it answers the
+/// turn it reminded about, so it answers every prompt accepted before that
+/// turn finished. A prompt accepted after that runs after the reminder and is
+/// still owed.
+#[must_use]
+pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
+    reminded_turn_ordinal(&turn.command_id).or(turn.accepted_ordinal)
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -911,31 +971,39 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
 }
 
 /// The conversation line a person sees when a parent whose suspend stopped
-/// sub-agents resumes. `None` when nothing was stopped.
+/// sub-agents resumes. It names only the children that had not handed back,
+/// since those lost work; the idle ones that had are counted. `None` when
+/// nothing was stopped.
 #[must_use]
 pub fn stopped_subagents_notice(stopped: &[StoppedSubagent]) -> Option<String> {
     if stopped.is_empty() {
         return None;
     }
-    let children = stopped
+    let working = stopped
         .iter()
-        .map(|child| {
-            format!(
-                "\"{}\" ({})",
-                child.title,
-                if child.handed_back {
-                    "had handed back"
-                } else {
-                    "had not handed back"
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "Suspend stopped {}: {children}.",
-        crate::text::counted(stopped.len(), "sub-agent", "sub-agents")
-    ))
+        .filter(|child| !child.handed_back)
+        .map(|child| format!("\"{}\"", child.title))
+        .collect::<Vec<_>>();
+    let idle = stopped.len() - working.len();
+    if working.is_empty() {
+        return Some(format!(
+            "Suspend stopped {}.",
+            crate::text::counted(idle, "idle sub-agent", "idle sub-agents")
+        ));
+    }
+    let mut notice = format!(
+        "Suspend stopped {}: {}",
+        crate::text::counted(working.len(), "working sub-agent", "working sub-agents"),
+        working.join(", ")
+    );
+    if idle > 0 {
+        notice.push_str(&format!(
+            "; {} stopped too",
+            crate::text::counted(idle, "idle sub-agent was", "idle sub-agents were")
+        ));
+    }
+    notice.push('.');
+    Some(notice)
 }
 
 /// What a person is told before a suspend stops sub-agents that have not
@@ -1032,6 +1100,57 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_choices_list_what_is_available() {
+        let choice = |value: &str| crate::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let single = |model: &str, effort: Option<&str>| SubagentPolicy::SingleModel {
+            model: model.into(),
+            effort: effort.map(str::to_owned),
+        };
+        let options = SubagentOptions {
+            models: vec![choice("haiku"), choice("sonnet")],
+            efforts: vec![choice("low"), choice("high")],
+            unavailable: Vec::new(),
+        };
+        let message = options.validate(&single("opus", None)).unwrap_err();
+        assert!(
+            message.contains("Available models: haiku, sonnet."),
+            "{message}"
+        );
+        let message = options.validate(&single("haiku", Some("max"))).unwrap_err();
+        assert!(
+            message.contains("Available efforts: low, high."),
+            "{message}"
+        );
+        assert!(options.validate(&single("haiku", Some("low"))).is_ok());
+
+        // A model with no efforts refuses one, saying so, instead of asking
+        // for a selection that cannot be made.
+        let no_efforts = SubagentOptions {
+            models: vec![choice("haiku")],
+            ..SubagentOptions::default()
+        };
+        let message = no_efforts
+            .validate(&single("haiku", Some("low")))
+            .unwrap_err();
+        assert!(message.contains("offers no efforts"), "{message}");
+        assert!(no_efforts.validate(&single("haiku", None)).is_ok());
+    }
+
+    #[test]
+    fn single_model_without_a_model_asks_for_one_instead_of_quoting_nothing() {
+        let policy = SubagentPolicy::SingleModel {
+            model: String::new(),
+            effort: None,
+        };
+        let message = SubagentOptions::default().validate(&policy).unwrap_err();
+        assert!(message.starts_with("Choose a subagent model."), "{message}");
+        assert!(!message.contains("\"\""), "{message}");
+    }
     #[test]
     fn policies_preserve_legacy_records_but_public_policy_rejects_booleans() {
         #[derive(Deserialize)]
@@ -1629,8 +1748,39 @@ mod tests {
         );
         assert_eq!(
             stopped_subagents_notice(&lost).unwrap(),
-            "Suspend stopped 2 sub-agents: \"Fix the parser\" (had not handed back), \
-             \"Review the docs\" (had not handed back)."
+            "Suspend stopped 2 working sub-agents: \"Fix the parser\", \"Review the docs\"."
+        );
+
+        // Idle children are counted, not named; the model's note above still
+        // lists every child.
+        let idle_only = [
+            stopped("Done", None, true),
+            stopped("Also done", None, true),
+        ];
+        assert_eq!(
+            stopped_subagents_notice(&idle_only[..1]).unwrap(),
+            "Suspend stopped 1 idle sub-agent."
+        );
+        assert_eq!(
+            stopped_subagents_notice(&idle_only).unwrap(),
+            "Suspend stopped 2 idle sub-agents."
+        );
+        let one_working_one_idle = [lost[0].clone(), idle_only[0].clone()];
+        assert_eq!(
+            stopped_subagents_notice(&one_working_one_idle).unwrap(),
+            "Suspend stopped 1 working sub-agent: \"Fix the parser\"; \
+             1 idle sub-agent was stopped too."
+        );
+        let mixed_many = [
+            lost[0].clone(),
+            lost[1].clone(),
+            idle_only[0].clone(),
+            idle_only[1].clone(),
+        ];
+        assert_eq!(
+            stopped_subagents_notice(&mixed_many).unwrap(),
+            "Suspend stopped 2 working sub-agents: \"Fix the parser\", \"Review the docs\"; \
+             2 idle sub-agents were stopped too."
         );
 
         let one = stopped_subagents_prompt_context(&lost[..1]).unwrap();
@@ -1706,6 +1856,37 @@ mod tests {
             suspend_warning(3).as_deref(),
             Some("3 sub-agents have not handed back; suspending stops them")
         );
+    }
+
+    /// A report handed back in a reminder turn answers the prompts accepted
+    /// before the reminded turn finished, though the reminder turn has no
+    /// acceptance ordinal of its own (I1-3, I1-4).
+    #[test]
+    fn a_report_handed_back_in_a_reminder_turn_answers_the_reminded_prompt() {
+        let reminder_id = handback_reminder_command_id(103);
+        assert_eq!(reminded_turn_ordinal(&reminder_id), Some(103));
+        assert_eq!(reminded_turn_ordinal("subagent-input-1"), None);
+        let reminder_turn = crate::state::MaterializedTurnOutcome {
+            accepted_ordinal: None,
+            turn_start_position: None,
+            completed_ordinal: 118,
+            ..finished(&reminder_id, "end_turn")
+        };
+        let report = SubagentReport {
+            handback: handback(&reminder_id),
+            awaited_ordinal: Some(84),
+            ..SubagentReport::default()
+        };
+        assert!(!awaiting_prompt(Some(84), Some(&reminder_turn)));
+        assert!(has_handed_back(
+            true,
+            &report,
+            false,
+            Some(&reminder_turn),
+            0
+        ));
+        // A prompt accepted after the reminded turn ended is still owed.
+        assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
     }
 
     #[test]

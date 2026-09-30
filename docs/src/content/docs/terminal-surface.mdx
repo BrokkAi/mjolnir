@@ -460,6 +460,8 @@ Start a message with `!` to run the remainder through `bash -lc` inside the sele
 
 The command runs independently of an active agent turn, so it does not block the harness. Mjolnir streams bounded live output into the transcript and saves the result there. After the command finishes, its result is included once as hidden context with the next prompt you submit, letting the agent respond to what the command found without copying the output into Prompt.
 
+A shell command finishes when the shell exits, and its exit code and duration are the shell's. Mjolnir then collects output that is still arriving for up to 2 seconds and stops any background process the command left running, such as `(sleep 300 &)`, so a process started that way does not outlive the command.
+
 Press `Esc` to cancel a running shell command. The same `!` syntax works in the [web viewer](/web-viewer/), where a Cancel button replaces the terminal key. A shell command has the permissions of the selected target, so review destructive commands just as you would in a directly attached shell.
 
 ## Help, footer, and terminal setup

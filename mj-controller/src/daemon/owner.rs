@@ -40,6 +40,10 @@ pub(super) struct RuntimeStateOwner {
     pub(super) close_requested: BTreeSet<String>,
     pub(super) indexes: RecordIndexes,
     pub(super) sessions: mj_core::snapshot_map::SnapshotMap<String, RuntimeSessionView>,
+    /// Sessions the session manager is told to run a relay actor for. Only
+    /// these hold a view in `sessions`: a retired actor publishes no final
+    /// view, so without this a stopped session kept its last live one.
+    relay_sessions: BTreeSet<String>,
     pub(super) background_policies: BTreeMap<String, snapshot::BackgroundPolicyState>,
     completed: VecDeque<(String, String)>,
     store: StoreState,
@@ -75,6 +79,23 @@ impl RuntimeStateOwner {
         &self.controller
     }
 
+    /// Record the sessions the manager now runs actors for and drop the view
+    /// of every other one. Returns whether a published view went away.
+    pub(super) fn install_relay_sessions(&mut self, sessions: BTreeSet<String>) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|id, _| sessions.contains(id));
+        self.background_policies
+            .retain(|id, _| sessions.contains(id));
+        self.relay_sessions = sessions;
+        self.sessions.len() != before
+    }
+
+    /// Whether a view for `session_id` comes from an actor the manager is
+    /// still meant to run. A late view from a retired actor does not.
+    pub(super) fn runs_relay_actor(&self, session_id: &str) -> bool {
+        self.relay_sessions.contains(session_id)
+    }
+
     pub(super) fn install_config(&mut self, config: Config) {
         self.controller.config = config;
     }
@@ -97,6 +118,7 @@ impl RuntimeStateOwner {
             close_requested: BTreeSet::new(),
             indexes,
             sessions: Default::default(),
+            relay_sessions: BTreeSet::new(),
             background_policies: BTreeMap::new(),
             completed: VecDeque::new(),
             store: StoreState::Bootstrap,

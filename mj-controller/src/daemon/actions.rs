@@ -179,6 +179,19 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Text(title))
         }
+        DaemonAction::SetSessionWorkspace {
+            session_id,
+            workspace_id,
+        } => {
+            ensure!(
+                !crate::controller::move_session::move_owns_session(&session_id),
+                "session is moving; change its workspace after Move finishes"
+            );
+            blocking(move || Controller::load()?.set_session_workspace(&session_id, &workspace_id))
+                .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SetSessionContainerSettings {
             session_id,
             cpus,
@@ -234,6 +247,9 @@ pub(super) async fn handle_action(
         )),
         DaemonAction::WikiSearch { query, limit } => Ok(DaemonReply::WikiRows(
             state.wiki_search(query, limit).await?,
+        )),
+        DaemonAction::SessionTextSearch { query } => Ok(DaemonReply::SessionTextMatches(
+            state.session_text_search(query).await?,
         )),
         DaemonAction::WikiBrief { wiki_id, max_chars } => {
             let markdown = state
@@ -597,7 +613,20 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::Done)
         }
         DaemonAction::Stop => {
-            cancellation.cancel();
+            // A destroy in flight was acknowledged as accepted and nothing
+            // about it is durable, so the stop waits for it, up to a bound
+            // (#1191). The reply does not wait.
+            if crate::upgrade::gate().destroys_hold_the_stop() {
+                let cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    while crate::upgrade::gate().destroys_hold_the_stop() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    cancellation.cancel();
+                });
+            } else {
+                cancellation.cancel();
+            }
             Ok(DaemonReply::Done)
         }
     }

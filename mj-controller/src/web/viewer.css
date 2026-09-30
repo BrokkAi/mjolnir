@@ -1650,18 +1650,6 @@ body[data-connection='reconnecting'] .connection {
   display: block;
 }
 
-body[data-connection='reconnecting'] .connection::before {
-  content: 'Reconnecting…';
-}
-
-body[data-connection='reconnecting'] .connection {
-  font-size: 0;
-}
-
-body[data-connection='reconnecting'] .connection::before {
-  font-size: 16px;
-}
-
 /* ---- desktop ----
  * The dashboard uses the available width for sessions; forms keep a readable
  * measure. A conversation sizes its scrolling transcript from the actual

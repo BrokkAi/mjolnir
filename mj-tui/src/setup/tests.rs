@@ -210,14 +210,14 @@ fn clicking_a_checkbox_setting_label_toggles_once_without_keyboard_selection_tog
     assert_eq!(dialog.draft["profiles"]["codex-1"]["enabled"], true);
 }
 
-fn choose(dashboard: &mut DashboardState, name: &str) {
+fn choose(dashboard: &mut DashboardState, name: &str) -> DashboardAction {
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
     dialog.selected = dialog.keys().iter().position(|key| key == name).unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.handle_key(key(KeyCode::Enter))
 }
 
 fn activate(dashboard: &mut DashboardState, control: SetupControl) {
@@ -952,6 +952,45 @@ fn stopped_session_visibility_is_only_editable_under_advanced() {
     assert!(!saved.show_stopped_sessions);
 }
 
+/// Launch campaign finding A-3: once `ascii` was chosen, the popup offered no
+/// way back to "Follows the terminal", and saving that choice must remove the
+/// key rather than write a third value.
+#[test]
+fn symbols_can_return_to_the_unset_state_and_saving_removes_the_key() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let mut config = dashboard.config.clone();
+    config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+    dashboard.set_config(config);
+    dashboard.begin_setup();
+    choose(&mut dashboard, "advanced");
+    choose(&mut dashboard, "symbols");
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let popup = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(popup.contains("Follows the terminal"), "{popup}");
+    assert!(
+        popup.contains("unicode") && popup.contains("ascii"),
+        "{popup}"
+    );
+
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Up));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["advanced"]["symbols"],
+        Value::Null
+    );
+    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    let DashboardAction::SaveSetup { updated, .. } = action else {
+        panic!("expected Settings save, got {action:?}")
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    assert_eq!(saved.advanced.symbols, None);
+    assert!(!updated.contains("symbols"), "{updated}");
+}
+
 #[test]
 fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_draft() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -1633,7 +1672,14 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     );
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
     let Mode::Setup(dialog) = &mut dashboard.mode else {
         panic!("settings");
     };
@@ -1644,15 +1690,12 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         .unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    // Opening the page starts the host lookup exactly once.
-    let DashboardAction::PreviewBuildCache {
-        generation,
-        key: preview_key,
-        ..
-    } = dashboard.handle_key(key(KeyCode::Enter))
-    else {
-        panic!("preview build cache");
-    };
+    // Opening the machine starts the host lookup; opening its cache page does
+    // not start a second one.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Down)),
         DashboardAction::None
@@ -1699,6 +1742,33 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         );
     }
 
+    // The status line belongs to this page: leaving it takes the line along.
+    let shown = setup_dialog_mut(&mut dashboard.mode)
+        .expect("settings")
+        .notice
+        .clone();
+    assert!(
+        shown
+            .as_deref()
+            .is_some_and(|notice| notice.contains("build cache")),
+        "{shown:?}"
+    );
+    dashboard.handle_key(key(KeyCode::Esc));
+    let left = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(
+        left.notice, None,
+        "the build cache status outlived its page"
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    dialog.form.get_mut().focus(SetupControl::List);
+    dialog.selected = dialog
+        .keys()
+        .iter()
+        .position(|key| key == "build_cache")
+        .unwrap();
+    dialog.prepare();
+    dashboard.handle_key(key(KeyCode::Enter));
+
     // A host that cannot support the cache cannot be overruled from here: the
     // row is disabled, so Enter on it does nothing.
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
@@ -1736,7 +1806,14 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
     choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     dialog.selected = dialog
         .keys()
@@ -1745,14 +1822,10 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
         .unwrap();
     dialog.form.get_mut().focus(SetupControl::List);
     dialog.prepare();
-    let DashboardAction::PreviewBuildCache {
-        generation,
-        key: preview_key,
-        ..
-    } = dashboard.handle_key(key(KeyCode::Enter))
-    else {
-        panic!("preview build cache");
-    };
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
     dashboard.build_cache_previewed(
         generation,
         &preview_key,
@@ -3264,4 +3337,124 @@ fn unsupported_cache_host_does_not_show_a_pending_managed_policy() {
     assert!(text.contains("requires a Linux host"), "{text}");
     assert!(!text.contains("Pending application"), "{text}");
     assert!(!text.contains("Mj-managed mbx"), "{text}");
+}
+
+/// Launch campaign finding A-4: with `symbols = "ascii"`, dialog titles and
+/// hints kept `·`, popup headers kept `↑/↓`, notices kept `…`, and Settings
+/// fields kept `▾`. Every page and popup below is drawn with the ASCII set
+/// and must contain nothing else.
+#[test]
+fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
+    fn assert_ascii(context: &str, lines: &[String]) {
+        let offenders = lines
+            .iter()
+            .flat_map(|line| line.chars())
+            .filter(|character| !character.is_ascii())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            offenders.is_empty(),
+            "{context}: non-ASCII {offenders:?}\n{lines:#?}"
+        );
+    }
+    fn ascii_dashboard() -> DashboardState {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+        dashboard.set_config(config);
+        dashboard
+    }
+
+    let mut dashboard = ascii_dashboard();
+    dashboard.begin_setup();
+    let roots = setup_dialog_mut(&mut dashboard.mode).unwrap().keys();
+    assert_ascii("settings root", &drawn(&mut dashboard, 120, 40));
+    for root in &roots {
+        let mut dashboard = ascii_dashboard();
+        dashboard.begin_settings_section(root, None);
+        assert_ascii(&format!("settings {root}"), &drawn(&mut dashboard, 120, 40));
+        assert_ascii(
+            &format!("settings {root} narrow"),
+            &drawn(&mut dashboard, 80, 30),
+        );
+    }
+    // A field's popup and its header.
+    for (section, field) in [
+        ("advanced", "symbols"),
+        ("advanced", "session_order"),
+        ("interface", "theme"),
+        ("interface", "spinner"),
+        ("interface", "sessions_side"),
+    ] {
+        let mut dashboard = ascii_dashboard();
+        dashboard.begin_settings_section(section, None);
+        choose(&mut dashboard, field);
+        let lines = drawn(&mut dashboard, 100, 30);
+        assert!(
+            lines.iter().any(|line| line.contains("^/v select")),
+            "{field}: the popup header is drawn: {lines:#?}"
+        );
+        assert_ascii(&format!("settings {section} {field} popup"), &lines);
+    }
+
+    // The dashboard's own dialogs.
+    for command in [
+        crate::CommandId::Help,
+        crate::CommandId::Palette,
+        crate::CommandId::NewSessionWizard,
+        crate::CommandId::Workspaces,
+        crate::CommandId::ResumeDialog,
+    ] {
+        let mut dashboard = ascii_dashboard();
+        dashboard.dispatch_command(command);
+        assert_ascii(&format!("{command:?}"), &drawn(&mut dashboard, 120, 40));
+        assert_ascii(
+            &format!("{command:?} narrow"),
+            &drawn(&mut dashboard, 80, 30),
+        );
+    }
+}
+
+/// Test-and-fix M-3: the machine's list row said "Enabled by default" while
+/// the build cache page, opened next, said the host cannot share the cache.
+#[test]
+fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    // Opening the machine resolves its host, so the row does not have to wait
+    // for the build cache page to be opened.
+    let (generation, key) = {
+        let (_, key) = dialog.build_cache_machine_page().unwrap();
+        (dialog.generation, key)
+    };
+    assert_eq!(
+        dialog.build_cache_preview.as_ref().map(|p| &p.key),
+        Some(&key)
+    );
+    dashboard.build_cache_previewed(
+        generation,
+        &key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            directory: None,
+            max_size: None,
+            target_max_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        })),
+    );
+    let lines = drawn(&mut dashboard, 160, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("Build cache (mbx)")
+            && line.contains("Off")
+            && !line.contains("Enabled by default")),
+        "{lines:#?}"
+    );
 }

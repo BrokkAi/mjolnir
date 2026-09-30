@@ -41,6 +41,8 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::SuspendSession { .. } => &["Cancel", "Suspend session"],
         Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
+        Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
+        Confirmation::ChangeWorkspace { .. } => &["Cancel", "Move"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
         } => &["Cancel", "Open transcript", "Recover"],
@@ -130,6 +132,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::DiscardSinceCheckpoint { .. }
             | Confirmation::SuspendSession { .. }
             | Confirmation::InterruptWork { .. }
+            | Confirmation::InterruptAll { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::ConvertRawCheckout { .. }
     ) {
@@ -1270,6 +1273,49 @@ pub(crate) fn confirmation_body(
                 }),
             ],
         ),
+        Confirmation::InterruptAll {
+            session_id,
+            parent_running,
+            subagents_running,
+        } => {
+            let subagents = crate::widgets::counted(*subagents_running, "sub-agent", "sub-agents");
+            let running = match (*parent_running, *subagents_running) {
+                (true, 0) => "This session's turn is running.".to_owned(),
+                (true, _) => format!("This session and {subagents} have turns running."),
+                (false, 1) => "1 sub-agent has a turn running.".to_owned(),
+                (false, _) => format!("{subagents} have turns running."),
+            };
+            (
+                " Interrupt all? ",
+                vec![
+                    session_line(session_id, session_name),
+                    Line::raw(""),
+                    Line::styled(running, Style::default().fg(theme::palette().warning)),
+                    Line::raw(
+                        "Interrupting ends those turns. The sessions keep running, and their workspaces and conversations are kept.",
+                    ),
+                ],
+            )
+        }
+        Confirmation::ChangeWorkspace {
+            session_id,
+            workspace_name,
+            ..
+        } => {
+            let name = session_name
+                .filter(|name| !name.is_empty())
+                .unwrap_or(session_id);
+            (
+                " Change workspace? ",
+                vec![
+                    Line::raw(format!(
+                        "Move session \"{name}\" to workspace \"{workspace_name}\"?"
+                    )),
+                    Line::raw(""),
+                    Line::raw("The session keeps running. Its sub-agents move with it."),
+                ],
+            )
+        }
         Confirmation::SuspendSession {
             session_id,
             children_not_handed_back,
@@ -1436,6 +1482,8 @@ pub(crate) fn render_confirmation(
         Confirmation::DiscardSinceCheckpoint { .. } => 12,
         Confirmation::SuspendSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
+        Confirmation::InterruptAll { .. } => 10,
+        Confirmation::ChangeWorkspace { .. } => 9,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,
         Confirmation::RecoverMove { .. } => 14,

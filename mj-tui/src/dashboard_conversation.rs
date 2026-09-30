@@ -380,8 +380,14 @@ impl DashboardState {
     /// one this surface knows about becomes an empty pane rather than a
     /// failure: sessions are closed and removed outside this client.
     pub(crate) fn restore_conversation_layout(&mut self, layout: &ConversationLayout) {
-        self.navigation
-            .restore(layout, |id| self.state.sessions.contains_key(id));
+        self.navigation.restore(layout, |id| {
+            session_belongs_in_layout(
+                &self.state,
+                &self.native_agents,
+                self.active_workspace_id.as_deref(),
+                id,
+            )
+        });
         self.browse_pane = Some(PaneId::from_raw(layout.browse.unwrap_or(layout.focus)));
         self.pin_ids = layout.pins.clone();
         self.conversation_zoomed = false;
@@ -402,6 +408,24 @@ impl DashboardState {
             self.workspace_layouts_modified.insert(workspace_id.clone());
         }
     }
+}
+
+/// Whether a conversation pane of the active workspace may keep showing this
+/// session. The session record owns which workspace a session is in; a pane,
+/// and the selection that follows it, leaves with the record when the record
+/// moves to another workspace. Native agent views have no record of their
+/// own and stay with the pane that opened them.
+pub(crate) fn session_belongs_in_layout<V>(
+    state: &State,
+    native_agents: &BTreeMap<String, V>,
+    active_workspace_id: Option<&str>,
+    session_id: &str,
+) -> bool {
+    let Some(record) = state.sessions.get(session_id) else {
+        return false;
+    };
+    native_agents.contains_key(session_id)
+        || active_workspace_id.is_none_or(|active| record.workspace_id == active)
 }
 
 #[cfg(test)]

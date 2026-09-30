@@ -162,51 +162,68 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     for state in [SessionState::Closing, SessionState::Destroying] {
         let mut session = runtime_test_session("session", "workspace", state);
         session.target = target.clone();
-        assert_eq!(close_route(Some(&session)), CloseRoute::RecoverInterrupted);
+        assert_eq!(
+            close_route(Some(&session), false),
+            CloseRoute::RecoverInterrupted
+        );
         // Without a target there is nothing left for recovery to finish, and
         // nothing to checkpoint either: the close settles instead of waiting
         // on a relay that does not exist.
         session.target = None;
         assert_eq!(
-            close_route(Some(&session)),
+            close_route(Some(&session), false),
             CloseRoute::SettleWithoutCheckpoint
         );
     }
 
     let mut running = runtime_test_session("session", "workspace", SessionState::Running);
     running.target = target.clone();
-    assert_eq!(close_route(Some(&running)), CloseRoute::Graceful);
-    assert_eq!(close_route(None), CloseRoute::Graceful);
+    assert_eq!(close_route(Some(&running), false), CloseRoute::Graceful);
+    assert_eq!(close_route(None, false), CloseRoute::Graceful);
 
     // A session wedged in provisioning has no harness state and no relay, with
     // or without the container it managed to create (#1059).
     let mut provisioning = runtime_test_session("session", "workspace", SessionState::Provisioning);
     assert_eq!(
-        close_route(Some(&provisioning)),
+        close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
     provisioning.target = target.clone();
     assert_eq!(
-        close_route(Some(&provisioning)),
+        close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
 
     // The same session once startup reconciliation has failed it (#1070).
     let failed = runtime_test_session("session", "workspace", SessionState::Error);
     assert_eq!(
-        close_route(Some(&failed)),
+        close_route(Some(&failed), false),
         CloseRoute::SettleWithoutCheckpoint
     );
     // A failed session that still names its target keeps a workspace worth
     // checkpointing, so it takes the graceful close.
     let mut failed_with_target = failed.clone();
     failed_with_target.target = target.clone();
-    assert_eq!(close_route(Some(&failed_with_target)), CloseRoute::Graceful);
+    assert_eq!(
+        close_route(Some(&failed_with_target), false),
+        CloseRoute::Graceful
+    );
+    // A failed sub-agent's worker is stopped and a child keeps no archive,
+    // so its close settles without a checkpoint even with its target (I1-2).
+    assert_eq!(
+        close_route(Some(&failed_with_target), true),
+        CloseRoute::SettleWithoutCheckpoint
+    );
+    // A running child still takes the graceful close.
+    assert_eq!(close_route(Some(&running), true), CloseRoute::Graceful);
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
-    assert_eq!(close_route(Some(&stopped)), CloseRoute::Done);
+    assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
     stopped.target = target;
-    assert_eq!(close_route(Some(&stopped)), CloseRoute::DeferredCleanup);
+    assert_eq!(
+        close_route(Some(&stopped), false),
+        CloseRoute::DeferredCleanup
+    );
 }
 
 /// A process that has exited but has not been reaped still answers
@@ -2182,6 +2199,70 @@ async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
         .expect("a cancelled-and-finished lifecycle lets force destruction proceed");
 }
 
+/// A second destroy of a session that is already being destroyed (a person's
+/// `mj destroy` of a sub-agent while its parent's destroy is destroying it)
+/// waits for that teardown instead of cancelling it half way (I2-9).
+#[tokio::test]
+async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cancelling_it() {
+    let state = test_runtime_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
+            let release = release.clone();
+            move |_state, _session_id, cancelled| async move {
+                release.notified().await;
+                assert!(
+                    !cancelled.load(Ordering::Acquire),
+                    "a second destroy must not cancel a teardown in progress"
+                );
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    let preempt_state = state.clone();
+    let waited =
+        tokio::spawn(async move { preempt_state.preempt_active_lifecycle("session-1").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waited.is_finished(), "the second destroy waits");
+    assert!(
+        !state
+            .owner()
+            .lifecycle
+            .get("session-1")
+            .expect("lifecycle entry")
+            .cancelled
+            .load(Ordering::Acquire)
+    );
+
+    release.notify_one();
+    waited.await.expect("wait task").expect("teardown finished");
+}
+
+/// A teardown that never finishes is still cancelled, after the wait: force
+/// destruction remains the escape hatch for a wedged operation.
+#[tokio::test(start_paused = true)]
+async fn force_destruction_cancels_a_teardown_that_outlives_the_wait() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::ForceDestroy, {
+            |_state, _session_id, cancelled| async move {
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    state
+        .preempt_active_lifecycle("session-1")
+        .await
+        .expect("the wedged teardown is cancelled and stops");
+}
+
 #[tokio::test(start_paused = true)]
 async fn force_destruction_preemption_times_out_without_destroying() {
     let state = test_runtime_state();
@@ -2334,6 +2415,9 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2392,6 +2476,9 @@ async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     let mut view = ready_startup_view();
     let snapshot = view.snapshot.as_mut().unwrap();
     snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
@@ -2434,6 +2521,9 @@ async fn disconnected_and_removed_sessions_stop_background_retries() {
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session);
     });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
     state
         .publish_session("session-1".into(), ready_startup_view())
         .await
@@ -3312,6 +3402,77 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
     ))
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive() {
+    const NAME: &str = "a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive";
+    const CHILD: &str = "MJ_TEST_CHECKPOINT_IO_RESPONSIVENESS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Checkpoint I/O").unwrap();
+    let session = runtime_test_session("checkpoint-io", &workspace.id, SessionState::Stopped);
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state_loading_the_store();
+
+    // Hold the checkpoint's first write at a real I/O boundary. The native
+    // watchdog releases it even if the checkpoint blocks this current-thread
+    // runtime, so the old implementation fails instead of hanging the suite.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let lock = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked_tx.send(()).unwrap();
+        match release_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("checkpoint test release channel failed: {error}"),
+        }
+        connection.execute_batch("ROLLBACK").unwrap();
+    });
+    locked_rx.await.unwrap();
+    let checkpoint = tokio::spawn({
+        let state = state.clone();
+        async move { state.checkpoint_session_now("checkpoint-io").await }
+    });
+    let started = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let elapsed = started.elapsed();
+    let pending = !checkpoint.is_finished();
+    let reply = handle_action(
+        DaemonAction::Ping,
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let released = release_tx.send(());
+    lock.join().unwrap();
+    // This fixture has no live target: after the write is released it must
+    // report the checkpoint failure and leave the session in its prior state.
+    assert!(checkpoint.await.unwrap().is_err());
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions["checkpoint-io"].state,
+        SessionState::Stopped
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "timer stalled for {elapsed:?}"
+    );
+    released.unwrap();
+    assert!(pending, "checkpoint should still be waiting for I/O");
+    assert!(matches!(reply, DaemonReply::Pong));
+}
+
 /// The startup sweep picks up tombstones an older build left behind and any
 /// discard a daemon stop interrupted, and nothing else.
 #[test]
@@ -3729,6 +3890,131 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
             .starts_with(mj_core::state::CLOSE_FAILURE_PREFIX)
     );
     assert!(!restarted.close_is_requested(&session.id));
+}
+
+/// #1191: `mj destroy` is answered "accepted" before the destroy finishes,
+/// and a parent's destroy (its sub-agents first, then its own worker) can
+/// still be running when `mj daemon restart` or `mj daemon stop` asks the
+/// daemon to stop. Nothing about the destroy is durable, so the graceful stop
+/// waits for it: the daemon stops only once the destroy has finished, and the
+/// upgrade handoff names it as work it waits for.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
+    const NAME: &str = "a_graceful_stop_waits_for_a_destroy_in_flight";
+    const CHILD: &str = "MJ_TEST_STOP_DRAINS_DESTROY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .env(
+            mj_core::config::SESSION_INDEX_ENV,
+            directory.path().join("sessionwiki"),
+        )
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Destroy drain").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "11111111111111111111111111111111";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: root.path().join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+    let child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
+    let shutdown = CancellationToken::new();
+    // An operation on the parent that does not stop when cancelled holds the
+    // destroy after its sub-agent is gone and before the parent's worker is
+    // stopped, the stretch a Codex parent's destroy was in when the restart
+    // came.
+    let release = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle(parent_id.into(), LifecycleKind::Resume, {
+            let release = release.clone();
+            move |_state, _session_id, _cancelled| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let destroy = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state
+                .force_destroy_session(parent_id.to_owned(), BranchDisposition::Keep)
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while crate::database::load_state()
+        .unwrap()
+        .sessions
+        .contains_key(child_id)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sub-agent is destroyed first"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let blockers = match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+        .await
+        .unwrap()
+    {
+        DaemonReply::UpgradeBlockers(labels) => labels,
+        other => panic!("expected named blockers, got {other:?}"),
+    };
+    assert!(
+        blockers
+            .iter()
+            .any(|label| label.starts_with("session destroy")),
+        "the upgrade handoff waits for the destroy: {blockers:?}"
+    );
+    assert!(matches!(
+        handle_action(DaemonAction::Stop, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !shutdown.is_cancelled(),
+        "the daemon does not stop under a destroy it accepted"
+    );
+    assert!(!destroy.is_finished());
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), shutdown.cancelled())
+        .await
+        .expect("the daemon stops once the destroy is done");
+    assert!(
+        destroy.is_finished(),
+        "the destroy finished before the stop"
+    );
+    destroy.await.unwrap().unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(parent_id)
+    );
 }
 
 /// Suspending a parent stops its sub-agents instead of suspending them, and
@@ -4528,7 +4814,7 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
     assert!(
         parent
             .journal()
-            .contains("Suspend stopped 1 sub-agent: \\\"Fix the parser\\\" (had not handed back)."),
+            .contains("Suspend stopped 1 working sub-agent: \\\"Fix the parser\\\"."),
         "{}",
         parent.journal()
     );
@@ -4846,6 +5132,9 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
         );
     });
     state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+    state
         .publish_session("session-1".into(), ready_startup_view())
         .await
         .unwrap();
@@ -4854,6 +5143,56 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
         sessions.remove("session-1");
     });
     assert!(!state.owner().sessions.contains_key("session-1"));
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(!state.owner().sessions.contains_key("session-1"));
+}
+
+/// A retired relay actor publishes no final view. Removing its session from
+/// the manager's targets must drop the view it left, and a view it sends late
+/// must not bring it back, so no client keeps a live-looking stopped session.
+#[tokio::test]
+async fn a_session_without_a_relay_actor_has_no_runtime_view() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(
+            "session-1".into(),
+            runtime_test_session("session-1", "workspace", SessionState::Running),
+        );
+    });
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    assert!(
+        !state.owner().sessions.contains_key("session-1"),
+        "a view arrived before its actor was installed"
+    );
+
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+    state
+        .publish_session("session-1".into(), ready_startup_view())
+        .await
+        .unwrap();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    assert!(replica.projection.sessions.contains_key("session-1"));
+    let cursor = replica.cursor.clone();
+
+    assert!(state.owner().install_relay_sessions(Default::default()));
+    state.publish_revision();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert!(!replica.projection.sessions.contains_key("session-1"));
+    assert!(state.owner().background_policies.is_empty());
+
     state
         .publish_session("session-1".into(), ready_startup_view())
         .await
@@ -5475,4 +5814,82 @@ async fn move_copy_releases_admission_and_control_transition_reacquires_it() {
     );
     release.notify_one();
     RuntimeState::wait_lifecycle_result(result).await.unwrap();
+}
+
+/// Changing a live session's workspace is published to every dashboard: the
+/// runtime row carries the new workspace id, and a dashboard that attaches
+/// afterwards is given the session under the new workspace only.
+#[tokio::test]
+async fn changing_a_sessions_workspace_reaches_the_published_projection() {
+    let Some(_writer) =
+        startup_prompt_test_store("changing_a_sessions_workspace_reaches_the_published_projection")
+    else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    let destination = crate::database::create_workspace("destination").unwrap();
+    let mut live = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    live.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/worker/session-1".into(),
+    });
+    crate::database::save_session(&live).unwrap();
+    assert!(state.session_record("session-1").is_some());
+    let initial = state.runtime_changes(None, false).await.unwrap();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica.apply(initial).unwrap();
+    assert_eq!(
+        replica
+            .projection
+            .records
+            .get("session-1")
+            .unwrap()
+            .workspace_id,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID
+    );
+
+    handle_action(
+        DaemonAction::SetSessionWorkspace {
+            session_id: "session-1".into(),
+            workspace_id: destination.id.clone(),
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("change the workspace");
+
+    let cursor = replica.cursor.clone();
+    replica
+        .apply(state.runtime_changes(cursor, false).await.unwrap())
+        .unwrap();
+    assert_eq!(
+        replica
+            .projection
+            .records
+            .get("session-1")
+            .unwrap()
+            .workspace_id,
+        destination.id,
+        "the attached dashboard kept the old workspace"
+    );
+    let fresh = state.runtime_changes(None, false).await.unwrap();
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } = fresh else {
+        panic!("a new dashboard is given a snapshot")
+    };
+    let members = |workspace: &str| {
+        projection
+            .records
+            .iter()
+            .filter(|(_, record)| record.workspace_id == workspace)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(members(&destination.id), ["session-1"]);
+    assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
 }

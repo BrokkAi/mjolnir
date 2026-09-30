@@ -3771,6 +3771,40 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
 }
 
 #[test]
+fn a_running_session_and_its_sub_agent_change_workspace_together() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut parent = session("session-parent", "project-1");
+    parent.workspace_id = source.id.clone();
+    parent.state = SessionState::Running;
+    let mut child = session("session-child", "project-1");
+    child.workspace_id = source.id.clone();
+    child.state = SessionState::Running;
+    save_session_to(&database, &parent).unwrap();
+    save_session_to(&database, &child).unwrap();
+
+    let ids = vec![parent.id.clone(), child.id.clone()];
+    set_sessions_workspace_at(&database, &ids, &destination.id).unwrap();
+    for id in &ids {
+        assert_eq!(
+            workspace_for_session_at(&database, id).unwrap(),
+            Some(destination.id.clone())
+        );
+    }
+
+    // A missing destination or session changes nothing.
+    assert!(set_sessions_workspace_at(&database, &ids, "missing-workspace").is_err());
+    let with_missing = vec![parent.id.clone(), "no-such-session".to_owned()];
+    assert!(set_sessions_workspace_at(&database, &with_missing, &source.id).is_err());
+    assert_eq!(
+        workspace_for_session_at(&database, &parent.id).unwrap(),
+        Some(destination.id)
+    );
+}
+
+#[test]
 fn setup_workspace_creation_returns_the_concurrent_name_winner() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -4289,6 +4323,99 @@ fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
         Some("second answer"),
         "a message recorded after the turn ended is not the turn's answer"
     );
+}
+
+/// A turn's summary counts the tool calls inside the turn's own span, so a
+/// wait can say how much work the turn did without loading its transcript.
+#[test]
+fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+
+    let item = |position: u64, body: TranscriptBody| TranscriptItem {
+        stable_id: format!("item:{position}"),
+        position,
+        latest_content_event_ordinal: None,
+        created_at_ms: position as i64 * 100,
+        last_changed_at_ms: position as i64 * 100,
+        body,
+    };
+    let user = |position: u64| {
+        let mut user = item(
+            position,
+            TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": "go"})],
+            },
+        );
+        user.stable_id = format!("user:{position}");
+        user
+    };
+    let tool = |position: u64| {
+        item(
+            position,
+            TranscriptBody::Tool {
+                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        )
+    };
+    let agent = |position: u64| {
+        let mut agent = item(
+            position,
+            TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "done"}})],
+                streaming: false,
+            },
+        );
+        agent.latest_content_event_ordinal = Some(position);
+        agent
+    };
+    let items = [
+        user(1),
+        tool(2),
+        tool(3),
+        agent(4),
+        user(5),
+        tool(6),
+        agent(7),
+        user(8),
+        agent(9),
+    ];
+    for (index, item) in items.into_iter().enumerate() {
+        let ordinal = index as u64 + 1;
+        let previous = if ordinal == 1 {
+            RELAY_EVENT_GENESIS_DIGEST.to_owned()
+        } else {
+            event_digest(ordinal - 1)
+        };
+        apply_projection_event_to(
+            &database,
+            "session-1",
+            ordinal,
+            &previous,
+            &event_digest(ordinal),
+            &MaterializedSessionMutation {
+                transcript: vec![TranscriptMutation::Upsert(item)],
+                ..MaterializedSessionMutation::default()
+            },
+        )
+        .unwrap();
+    }
+    let calls = |start, end| {
+        load_materialized_turn_summary_from(&database, "session-1", start, end)
+            .unwrap()
+            .tool_calls
+    };
+    assert_eq!(calls(1, 4), 2);
+    assert_eq!(
+        calls(5, 7),
+        1,
+        "the first turn's calls are not counted again"
+    );
+    assert_eq!(calls(8, 9), 0);
 }
 
 /// A finished child session reports the answer of the turn it ran, so a
@@ -5493,6 +5620,23 @@ fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
 /// does not know as a broken store, so it must refuse this one.
 #[test]
 fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
+    // Other tests install subscribers that make tracing cache "no interest"
+    // in the migration event, so the log is checked alone, in a child with a
+    // global subscriber (the same shape as the worker-source pinning test).
+    const CHILD: &str = "MJ_PARKED_MIGRATION_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "the_parked_state_migration_keeps_every_session_and_refuses_older_builds",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("parked-migration.sqlite3");
     let mut old = session("old-session", "project-1");
@@ -5522,7 +5666,21 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
     drop(raw);
     schema::forget_verified_schema(&database);
 
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
     let connection = open(&database).unwrap();
+    let logged: Vec<String> = log
+        .at_or_above(tracing::Level::INFO)
+        .into_iter()
+        .filter(|event| event.contains("database migrations applied"))
+        .collect();
+    assert_eq!(logged.len(), 1, "{logged:#?}");
+    assert!(
+        logged[0].contains("database migrations applied")
+            && logged[0].contains("from_revision=52")
+            && logged[0].contains(&format!("to_revision={SCHEMA_VERSION}")),
+        "{logged:#?}"
+    );
     let state = schema::read_schema_state(&connection).unwrap();
     assert_eq!(state.revision, SCHEMA_VERSION);
     let floor: i64 = connection

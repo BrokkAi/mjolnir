@@ -145,6 +145,15 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    // Views are published only from the serving loop below, so the first
+    // targets are installed before any can arrive.
+    state.owner().install_relay_sessions(
+        manager_targets
+            .borrow()
+            .iter()
+            .map(|target| target.session_id.clone())
+            .collect(),
+    );
     let cancellation = crate::termination::Coordinator::install().token();
     // Bootstrap already owns live managers. Capture its error so those owners
     // are shut down before the process-level writer can be closed.
@@ -311,6 +320,33 @@ pub(super) async fn run_daemon_runtime(
             }
         });
         interrupted_close_tasks.push(interrupted_close_task);
+    }
+    // A destroy that failed left its record in `Error` with the target still
+    // present; it is finished the way `mj destroy` finishes it. The branch is
+    // kept, because whether to delete it was that command's choice and is not
+    // recorded.
+    for session_id in interrupted_destroy_session_ids(&controller) {
+        let recovery_state = state.clone();
+        let recovery_shutdown = cancellation.clone();
+        let updates = interrupted_close_tx.clone();
+        let upgrade_work = startup_work.clone();
+        interrupted_close_tasks.push(tokio::spawn(async move {
+            let _upgrade_work = upgrade_work;
+            let result = tokio::select! {
+                result = recovery_state.force_destroy_session(
+                    session_id.clone(),
+                    crate::daemon::BranchDisposition::Keep,
+                ) => result,
+                () = recovery_shutdown.cancelled() => return,
+            }
+            .map(|()| crate::pollers::LifecycleSuccess::ForceDestroyed)
+            .map_err(|error| format!("{error:#}"));
+            let _ = updates.send(crate::pollers::LifecycleUpdate {
+                session_id,
+                result,
+                deferred_cleanup: false,
+            });
+        }));
     }
     // Whatever is still in an in-flight lifecycle state now has no owner: the
     // moves, the interrupted closes, and the checkpointing rows above are
@@ -816,9 +852,9 @@ pub(super) fn spawn_manager_target_refresher(
                 let retained = refreshed
                     .iter()
                     .map(|target| target.session_id.clone())
-                    .collect();
-                {
-                    let owner = state.owner();
+                    .collect::<BTreeSet<_>>();
+                let views_dropped = {
+                    let mut owner = state.owner();
                     // A lifecycle may have claimed a target while its commands
                     // were being prepared. Only the owner can authorize install.
                     if owner.pollable_worker_inputs() != inputs {
@@ -832,6 +868,12 @@ pub(super) fn spawn_manager_target_refresher(
                             true
                         }
                     });
+                    // Same lock as the install, so a view is published only
+                    // while its actor is still wanted.
+                    owner.install_relay_sessions(retained.clone())
+                };
+                if views_dropped {
+                    state.publish_revision();
                 }
                 state.review_host().retain_sessions(retained);
                 installed = Some(inputs);

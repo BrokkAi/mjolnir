@@ -45,23 +45,24 @@ The command is listed in `mj --help`. It connects to your daemon and starts it i
 the first session may take a moment while the daemon comes up. `mj api-info`
 reports the daemon it reached.
 
-To start a bundle repository at a recorded full commit on a new private branch:
+To start a bundle's primary repository at a recorded full commit on a new
+private branch:
 
 ```sh
 mj acp --workspace town --profile codex-work --target builder --bundle product \
-  --checkout-repository project \
-  --checkout-commit 0123456789abcdef0123456789abcdef01234567 \
-  --checkout-branch town/run-123
+  --at 0123456789abcdef0123456789abcdef01234567 \
+  --branch town/run-123
 ```
 
-Both `--checkout-repository` and `--checkout-commit` are required together with
-`--bundle`. Omitting `--checkout-branch` leaves HEAD detached. The repository ID
-is its configured name within the bundle; other repositories use their defaults.
-See the [exact checkout contract](/api-reference/#create-a-session) for failure,
+`--at` requires `--bundle` and always checks out the bundle's primary
+repository; other repositories use their defaults. Omitting `--branch` leaves
+HEAD detached. `--base <revision>` sets a different diff base; it defaults to
+`--at`. Without `--at`, `--branch` names an existing branch to check out.
+See the [create-a-session contract](/api-reference/#create-a-session) for failure,
 retry, and receipt semantics. `session/new` waits for preparation and reports a
 failure before a prompt can run. Its successful session ID is the Mjolnir session
-ID, usable with the HTTP session endpoint to read the retained `checkout`
-selection. Ownership and `--on-exit` also apply to sessions whose preparation is
+ID, usable with the HTTP session endpoint to read the retained `at`, `branch`
+and `base`. Ownership and `--on-exit` also apply to sessions whose preparation is
 still running or failed; creating a session through HTTP does not let another
 adapter attach to it.
 

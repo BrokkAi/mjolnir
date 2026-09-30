@@ -219,6 +219,7 @@ pub fn run_with_config_path(
     checks.push(daemon_build_check());
     checks.extend(worker_freshness_checks(offered));
     checks.extend(review_residue_checks(config));
+    checks.extend(bifrost_check(config, executor));
     // Reported last, where it has always been.
     checks.push(apple_container);
     checks
@@ -2907,4 +2908,82 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         format!("Mjolnir left these in repositories it does not own: {detail}."),
         format!("Remove them yourself when you are ready:\n{commands}"),
     )]
+}
+
+/// The Bifrost a turn review would run on this machine, and whether it is new
+/// enough. A review needs Bifrost's `analyze_diff`, which older releases lack,
+/// and an old `bifrost` on the login `PATH` is otherwise found only when the
+/// first review fails. This is a warning: containers carry their own Bifrost,
+/// and reviews may be off. The check reads `MJ_BIFROST_BIN` from the
+/// environment `mj doctor` runs in, which is the daemon's environment when the
+/// daemon was started from the same shell.
+fn bifrost_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Option<DoctorCheck> {
+    let config = config.ok()?;
+    if !mj_core::review::settings::can_review(config) {
+        return None;
+    }
+    Some(bifrost_check_for(
+        &mj_review::bifrost::bifrost_binary(),
+        executor,
+    ))
+}
+
+fn bifrost_check_for(binary: &Path, executor: &impl CommandExecutor) -> DoctorCheck {
+    const ID: &str = "review.bifrost";
+    const TITLE: &str = "Bifrost for turn review";
+    let required = mj_review::bifrost::REQUIRED_BIFROST_VERSION;
+    let shown = binary.display();
+    let remediation = format!(
+        "Install Bifrost {required} or later (`cargo install brokk-bifrost@{required} --locked --bin bifrost`), or start the daemon with {env} set to a newer binary (`{env}=/path/to/bifrost mj daemon restart`), then rerun `mj doctor`.",
+        env = mj_review::bifrost::BIFROST_BIN_ENV,
+    );
+    let command = CommandSpec::new(binary.display().to_string(), ["--version"])
+        .purpose("read the Bifrost version used by turn review");
+    let output = match executor.execute(&command) {
+        Ok(output) if output.status == 0 => output,
+        Ok(output) => {
+            return DoctorCheck::warning(
+                ID,
+                TITLE,
+                format!("`{shown} --version` exited with status {}.", output.status),
+                remediation,
+            );
+        }
+        Err(error) => {
+            return DoctorCheck::warning(
+                ID,
+                TITLE,
+                format!("Could not run `{shown}` for the turn review: {error}"),
+                remediation,
+            );
+        }
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let first_line = text.lines().next().unwrap_or_default().trim();
+    let version = first_line
+        .split_whitespace()
+        .next_back()
+        .and_then(|token| semver::Version::parse(token).ok());
+    let minimum = semver::Version::parse(required).expect("the required Bifrost version is semver");
+    match version {
+        Some(version) if version >= minimum => DoctorCheck::ready(
+            ID,
+            TITLE,
+            format!("`{shown}` is Bifrost {version}; turn review needs {required} or later."),
+        ),
+        Some(version) => DoctorCheck::warning(
+            ID,
+            TITLE,
+            format!(
+                "`{shown}` is Bifrost {version}, older than the {required} turn review needs, so every review would fail."
+            ),
+            remediation,
+        ),
+        None => DoctorCheck::warning(
+            ID,
+            TITLE,
+            format!("`{shown} --version` printed {first_line:?}, which does not name a version."),
+            remediation,
+        ),
+    }
 }

@@ -1361,12 +1361,53 @@ function abortPendingNewPreflight() {
   pendingNewPreflight = null;
 }
 
+// A target whose runtime (Docker, Podman) is not installed on the daemon's
+// host will never run a session there, so no picker lists it. A host that
+// merely did not answer its last check is a different fact and stays listed.
+function launchableTargets(targets) {
+  return (targets || []).filter(target => !target.runtime_missing);
+}
+
+// What to say beside a target whose host did not answer its last check. The
+// target stays selectable: the check may be out of date, and only the daemon
+// knows whether a launch would work. A missing runtime is filtered out before
+// this is asked, and `unknown` (nobody has checked yet) says nothing.
+function targetStatus(target) {
+  return target?.availability === 'unavailable' && !target.runtime_missing
+    ? 'did not answer its last check'
+    : '';
+}
+
+// Whether a target id may be offered: unknown ids pass, because the server
+// answers for those.
+function targetLaunchable(id) {
+  return !(snapshot?.targets || []).find(target => target.id === id)?.runtime_missing;
+}
+
+// The daemon's saved default pair, read from `/api/v1/options` (the snapshot
+// does not carry it). Null until read, or when nothing was ever saved.
+let launchDefault = null;
+
+async function loadLaunchDefault() {
+  try {
+    launchDefault = (await request('/api/v1/options'))?.default || null;
+  } catch {
+    // The form still works from the lists; it just preselects the first entry.
+  }
+}
+
+// The id a new form starts on: the daemon's default when that entry is offered,
+// else the first offered one.
+function preferredId(items, wanted) {
+  return items.find(item => item.id === wanted)?.id || items[0]?.id || '';
+}
+
 function freshDraft() {
   return {
     workspaceId: selectedWorkspaceId(),
     step: 0,
-    profileId: snapshot?.profiles[0]?.id || '',
-    targetId: snapshot?.targets[0]?.id || '',
+    profileId: preferredId(snapshot?.profiles || [], launchDefault?.profile_id),
+    targetId: preferredId(launchableTargets(snapshot?.targets), launchDefault?.target_id),
     bundleId: '',
     projectDirectory: '',
     title: '',
@@ -1537,7 +1578,7 @@ function renderNewForm() {
   const signature = JSON.stringify({
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
-    targets: step.key === 'target' ? snapshot.targets.map(t => [t.id, t.kind]) : null,
+    targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t)]) : null,
     project: step.key === 'project' ? [
       newDraft.targetId, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
       newDraft.projectMultiple, newDraft.bundleSources,
@@ -1573,7 +1614,7 @@ function renderNewForm() {
     }
     case 'target': {
       body.append(
-        pickerField('Where to run', 'new-target', snapshot.targets, newDraft.targetId, value => {
+        pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
           cancelProjectRequests();
           newDraft.projectPicker = freshProjectPicker();
           newDraft.projectPickers = {};
@@ -1711,7 +1752,7 @@ function renderNewForm() {
 function pickerField(label, id, items, value, onChange) {
   const field = choiceControl({
     label,
-    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: item.kind || item.harness_kind })),
+    options: items.map(item => ({ value: item.id, title: item.label ?? item.id, description: [item.kind || item.harness_kind, targetStatus(item)].filter(Boolean).join(' · ') })),
     values: [value],
     onChange: () => onChange(field.querySelector('input:checked')?.value || ''),
   });
@@ -2344,7 +2385,7 @@ async function advanceNew() {
     newError.textContent = 'Choose an available account before continuing.';
     return;
   }
-  if (step.key === 'target' && !snapshot.targets.some(t => t.id === newDraft.targetId)) {
+  if (step.key === 'target' && !launchableTargets(snapshot.targets).some(t => t.id === newDraft.targetId)) {
     newError.textContent = 'Choose where to run before continuing.';
     return;
   }
@@ -2559,8 +2600,9 @@ function resumeChoiceField(label, id, items, value, onChange) {
   const field = el('label', 'field resume-choice');
   field.id = id;
   field.append(el('span', '', label));
+  const named = item => `${item.label ?? item.id}${item.status ? ` (${item.status})` : ''}`;
   if (items.length === 1 && items[0].id === value) {
-    field.append(el('span', 'field-value', items[0].label ?? items[0].id));
+    field.append(el('span', 'field-value', named(items[0])));
     return field;
   }
   if (!items.length) {
@@ -2575,7 +2617,7 @@ function resumeChoiceField(label, id, items, value, onChange) {
   empty.selected = !value || !items.some(item => String(item.id) === String(value));
   select.append(empty);
   for (const item of items) {
-    const option = el('option', '', item.label ?? item.id);
+    const option = el('option', '', named(item));
     option.value = item.id;
     option.selected = String(item.id) === String(value);
     select.append(option);
@@ -2851,9 +2893,9 @@ function wikiDraft(wikiId) {
       profileId: held(snapshot?.profiles, row?.profile)
         ? row.profile
         : (snapshot?.profiles?.length === 1 ? snapshot.profiles[0].id : ''),
-      targetId: held(snapshot?.targets, row?.target)
+      targetId: held(launchableTargets(snapshot?.targets), row?.target)
         ? row.target
-        : (snapshot?.targets?.length === 1 ? snapshot.targets[0].id : ''),
+        : (launchableTargets(snapshot?.targets).length === 1 ? launchableTargets(snapshot.targets)[0].id : ''),
       error: '',
     };
     wikiState.drafts.set(wikiId, draft);
@@ -2909,9 +2951,10 @@ function renderWikiDetail(wikiId) {
   else briefBox.append(renderMarkdown(brief.markdown));
   card.append(briefBox);
   const profileItems = (snapshot?.profiles || []).map(profile => ({ id: profile.id, label: profile.id }));
-  const targetItems = (snapshot?.targets || []).map(target => ({
+  const targetItems = launchableTargets(snapshot?.targets).map(target => ({
     id: target.id,
     label: target.label || target.name || target.id,
+    status: targetStatus(target),
   }));
   if (!profileItems.some(item => item.id === draft.profileId)) draft.profileId = profileItems.length === 1 ? profileItems[0].id : '';
   if (!targetItems.some(item => item.id === draft.targetId)) draft.targetId = targetItems.length === 1 ? targetItems[0].id : '';
@@ -3068,12 +3111,13 @@ function conversionBlocksResume(draft) {
 function resumeCardSignature(session) {
   const draft = resumeDraft(session);
   return JSON.stringify([
-    session.compatible_resume_targets || [],
+    (session.compatible_resume_targets || []).filter(targetLaunchable),
     draft.targetId,
     draft.conversion?.status || '',
     draft.conversion?.detail || '',
     draft.conversion?.preview || null,
     (snapshot.profiles || []).map(profile => [profile.id, profile.harness_kind]),
+    resumeTargetItems(session).map(item => item.status),
     session.move_recovery,
     session.profile_id,
     session.target_id,
@@ -3093,9 +3137,9 @@ function resumeCardSignature(session) {
 }
 
 function resumeTargetItems(session) {
-  return (session.compatible_resume_targets || []).map(id => {
+  return (session.compatible_resume_targets || []).filter(targetLaunchable).map(id => {
     const target = (snapshot.targets || []).find(item => item.id === id);
-    return { id, label: target?.label || target?.name || id };
+    return { id, label: target?.label || target?.name || id, status: targetStatus(target) };
   });
 }
 
@@ -3290,7 +3334,7 @@ function renderResumeDetail() {
 // under an old confirmation.
 
 function freshMoveDraft(session) {
-  const compatible = session.compatible_resume_targets || [];
+  const compatible = (session.compatible_resume_targets || []).filter(targetLaunchable);
   const recovery = session.move_recovery;
   const recoveryTarget = recovery?.destination_target_template_id;
   return {
@@ -3329,11 +3373,8 @@ function moveSubagentChange(draft) {
   return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
 }
 
-/// Children that are live or parked, which Move stops as a suspend would.
 function moveStoppedChildren(session) {
-  return (session.subagent_session_ids || [])
-    .map(id => sessionById(id))
-    .filter(child => child?.lifecycle === 'live').length;
+  return workingChildCount(session);
 }
 
 function moveQueueItemText(item) {
@@ -3466,7 +3507,7 @@ function renderMoveForm() {
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
-    ].filter(Boolean))];
+    ].filter(Boolean).filter(targetLaunchable))];
     const targets = targetIds.map(id => snapshot.targets.find(target => target.id === id) || { id });
     const targetPicker = pickerField('Target', `move-target-${session.id}`, targets, draft.targetId, value => {
       if (draft.queueLocked) return;
@@ -3486,7 +3527,7 @@ function renderMoveForm() {
         draft.preparation = null;
       });
     }
-    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target, attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
+    moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
     clearResourcesInput.type = 'checkbox';
@@ -3533,7 +3574,7 @@ function renderMoveForm() {
     }
     const stoppedChildren = moveStoppedChildren(session);
     if (stoppedChildren) {
-      moveStep.append(el('p', 'move-warning', `${stoppedChildren} sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
+      moveStep.append(el('p', 'move-warning', `${stoppedChildren} working sub-agent${stoppedChildren === 1 ? '' : 's'} will be stopped; the session is told which when it resumes.`));
     }
     if (preparation.conversion) {
       moveStep.append(el('p', '', conversionSummary(preparation.conversion)));
@@ -4066,6 +4107,15 @@ const viewerState = new ViewerRuntimeState(
 );
 
 function sessionById(id) { return viewerState.rows.get(id); }
+/// Children still at their task, which a suspend or a Move stops and loses.
+/// An idle child has handed back and is stopped without a word.
+function workingChildCount(session) {
+  return (session?.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
+    .length;
+}
+
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -4220,6 +4270,7 @@ async function refresh() {
     if (eventSource) eventSource.close();
     eventSource = undefined;
     viewerState.install(value);
+    await loadLaunchDefault();
     return presentSnapshot();
   } catch (e) {
     if (e.message === 'unauthorized') showLogin();
@@ -4803,9 +4854,10 @@ function renderTurnReview(session) {
   }
   const card = el('section', 'card turn-review');
   card.append(el('strong', '', `Reviewing this turn (${review.tier})`));
-  if (review.roles.length) {
+  const roles = review.roles || [];
+  if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');
-    strip.textContent = review.roles
+    strip.textContent = roles
       .map(role => `${role.label}: ${role.state}`)
       .join('  ·  ');
     card.append(strip);
@@ -6943,10 +6995,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     const session = sessionById(dataset.id);
     // A suspend stops the sub-agents without a checkpoint. Only the ones
     // still at their task lose anything; an idle one has handed back.
-    const workingChildren = (session?.subagent_session_ids || [])
-      .map(id => sessionById(id))
-      .filter(child => child && child.lifecycle === 'live' && child.chat_phase === 'running')
-      .length;
+    const workingChildren = workingChildCount(session);
     const question = 'Suspend session?\n\nSave a recovery copy and release the environment. You can resume this session later.'
       + '\n\nAny unpublished or unverified Git work will be kept in the recovery copy until you resume.'
       + (session?.chat_phase === 'running' ? '\n\nThe current turn will be interrupted.' : '')
@@ -7342,12 +7391,20 @@ document.body.dataset.connection = navigator.onLine ? 'online' : 'offline';
 /// What the viewer believes about its link to the daemon.
 let connection = 'online';
 
+/// What the connection banner says in each state it is shown. The banner is
+/// the one live region for the offline state: a screen reader hears this text
+/// once, not also a separate announcement of the same change.
+const CONNECTION_BANNER_TEXT = {
+  offline: 'Offline. Showing the last state received.',
+  reconnecting: 'Reconnecting… Showing the last state received.',
+};
+
 function setConnection(next) {
   if (connection === next) return;
   connection = next;
   document.body.dataset.connection = next;
-  if (next === 'offline') announce('Offline. Showing the last state received.');
-  if (next === 'reconnecting') announce('Reconnecting.');
+  const bannerText = CONNECTION_BANNER_TEXT[next];
+  if (bannerText) document.querySelector('#connection').textContent = bannerText;
   if (next === 'online') announce('Connected.');
 }
 

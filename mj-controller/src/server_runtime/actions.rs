@@ -136,9 +136,9 @@ pub(super) async fn apply_phone_action(
             title,
             project_directory,
             create_managed_worktree,
-            launch_base,
-            launch_branch,
-            checkout,
+            at,
+            branch,
+            base,
             expected_runtime_identity,
             subagents,
             dirty_ack: _dirty_ack,
@@ -180,9 +180,9 @@ pub(super) async fn apply_phone_action(
                 .start_create_session_controlled(
                     CreateSessionRequest {
                         create_managed_worktree,
-                        launch_base,
-                        launch_branch,
-                        checkout,
+                        at,
+                        branch,
+                        base,
                         expected_runtime_identity,
                         subagents,
                         initial_prompt: None,
@@ -313,7 +313,7 @@ pub(super) async fn apply_phone_action(
             .await
             .map(|_| ()),
         ControllerAction::Move { request } => {
-            let outcome = services.daemon_runtime.move_session(request).await?;
+            let outcome = services.daemon_runtime.move_session(*request).await?;
             match outcome.outcome.as_str() {
                 "completed" | "unchanged" | "interrupted" => Ok(()),
                 "cancelled" | "failed" => {

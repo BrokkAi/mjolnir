@@ -343,6 +343,7 @@ impl Controller {
         // parent's work as the child's.
         launch.review_capture =
             mj_core::review::settings::can_review(&self.config) && subagent.is_none();
+        launch.bifrost_binary = mj_review::bifrost::configured_bifrost_binary();
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -686,6 +687,7 @@ pub(super) fn worker_launch_config(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             review_capture: false,
+            bifrost_binary: None,
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the marker's path

@@ -16,6 +16,10 @@ pub fn is_control_origin_prompt(text: &str) -> bool {
     text.trim_start().starts_with(HARNESS_NOTE_MARKER)
 }
 
+/// How every command a second opinion sends begins, so a reviewer's running
+/// prompt says which kind of review it belongs to.
+pub const COMMAND_ID_PREFIX: &str = "second-opinion-";
+
 /// The harness note that asks the primary for the context a reviewer needs.
 ///
 /// The plan itself is already captured, so the primary is asked only for what

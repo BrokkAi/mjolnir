@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use mj_client::daemon::{
-    WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSessionInfo, WikiSessionStatus,
-    WikiStatus,
+    SessionTextMatch, SessionTextMatchKind, WikiHitBlock, WikiHitTranscript, WikiIndexState,
+    WikiRow, WikiSessionInfo, WikiSessionStatus, WikiStatus,
 };
 use mj_core::config::HarnessKind;
 use mj_core::state::{SessionRecord, State};
@@ -561,6 +561,21 @@ impl WikiIndexer {
         }
         self.inner.requested.store(true, Ordering::Release);
         self.inner.notify.notify_one();
+    }
+
+    /// An indexer with no worker, so a test can see a request that nothing
+    /// takes and no test runs a sync against the real index.
+    #[cfg(test)]
+    pub(crate) fn inert() -> Self {
+        Self {
+            inner: Arc::new(Indexer::default()),
+        }
+    }
+
+    /// Whether a sync has been requested and not yet taken by the worker.
+    #[cfg(test)]
+    pub(crate) fn sync_requested(&self) -> bool {
+        self.inner.requested.load(Ordering::Acquire)
     }
 
     /// Run a sync and wait for it, joining a sync already in flight.
@@ -1409,6 +1424,90 @@ pub fn query_rows(
     }
     fill_session_tags(&connection, &mut rows)?;
     Ok(rows)
+}
+
+/// How many message rows one text search reads before it stops. A term common
+/// enough to pass this can miss sessions whose only match ranks past it; the
+/// person narrows the query, as with the resume dialog's own search.
+const TEXT_SEARCH_MESSAGE_LIMIT: i64 = 20_000;
+
+/// The live Mjolnir sessions whose user or agent messages contain `query`,
+/// ignoring case, and where: a session with a user match reports the user
+/// match. Tool messages never match. Runs SQLite work, so callers on the async
+/// runtime wrap it in `spawn_blocking`.
+pub fn session_text_matches(query: &str, live: &BTreeSet<String>) -> Result<Vec<SessionTextMatch>> {
+    let query = query.trim();
+    if query.is_empty() || !index_is_writable() {
+        return Ok(Vec::new());
+    }
+    let connection = open_readonly()?;
+    text_matches_in(&connection, query, live)
+}
+
+fn text_matches_in(
+    connection: &rusqlite::Connection,
+    query: &str,
+    live: &BTreeSet<String>,
+) -> Result<Vec<SessionTextMatch>> {
+    let mut statement;
+    let rows = if query.chars().count() < MIN_FULLTEXT_QUERY {
+        // Too short for the trigram index; scan the newest messages instead.
+        let pattern = format!(
+            "%{}%",
+            sessionwiki::util::nfc(query)
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        statement = connection.prepare(
+            "SELECT f.path, m.role
+             FROM messages m JOIN files f ON f.session_id = m.session_id
+             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')
+               AND m.text LIKE ?2 ESCAPE '\\'
+             ORDER BY m.id DESC LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                rusqlite::params![TOOL, pattern, TEXT_SEARCH_MESSAGE_LIMIT],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    } else {
+        let phrase = format!("\"{}\"", sessionwiki::util::nfc(query).replace('"', "\"\""));
+        statement = connection.prepare(
+            "SELECT f.path, m.role
+             FROM (SELECT rowid AS mid FROM msgs WHERE msgs MATCH ?2 LIMIT ?3) x
+             JOIN messages m ON m.id = x.mid
+             JOIN files f ON f.session_id = m.session_id
+             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')",
+        )?;
+        statement
+            .query_map(
+                rusqlite::params![TOOL, phrase, TEXT_SEARCH_MESSAGE_LIMIT],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }
+    .context("search the indexed messages")?;
+    let mut found = BTreeMap::<String, SessionTextMatchKind>::new();
+    for (path, role) in rows {
+        // The adapter writes the session id as the last path segment.
+        let session_id = path.rsplit('/').next().unwrap_or_default();
+        if !live.contains(session_id) {
+            continue;
+        }
+        let kind = if role == "user" {
+            SessionTextMatchKind::User
+        } else {
+            SessionTextMatchKind::Agent
+        };
+        let entry = found.entry(session_id.to_owned()).or_insert(kind);
+        *entry = (*entry).min(kind);
+    }
+    Ok(found
+        .into_iter()
+        .map(|(session_id, kind)| SessionTextMatch { session_id, kind })
+        .collect())
 }
 
 /// Fill in the target, profile and harness of every Mjolnir row on this page
@@ -3581,5 +3680,110 @@ mod tests {
             ["parent", "child", "grandchild"]
         );
         assert!(session_tree(&state, "unknown").is_empty());
+    }
+
+    /// The text search over an in-memory index shaped like SessionWiki's.
+    mod text_search {
+        use super::super::{SessionTextMatch, SessionTextMatchKind, text_matches_in};
+        use std::collections::BTreeSet;
+
+        fn index(sessions: &[(&str, &[(&str, &str)])]) -> rusqlite::Connection {
+            let connection = rusqlite::Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE files(path TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                                        tool TEXT NOT NULL);
+                     CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                                           role TEXT NOT NULL, text TEXT NOT NULL);
+                     CREATE VIRTUAL TABLE msgs USING fts5(
+                         text, content='messages', content_rowid='id', tokenize='trigram');",
+                )
+                .unwrap();
+            for (id, messages) in sessions {
+                connection
+                    .execute(
+                        "INSERT INTO files VALUES (?1, ?2, 'mjolnir')",
+                        rusqlite::params![format!("/checkpoints/{id}"), id],
+                    )
+                    .unwrap();
+                for (role, text) in *messages {
+                    connection
+                        .execute(
+                            "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![id, role, text],
+                        )
+                        .unwrap();
+                    let rowid = connection.last_insert_rowid();
+                    connection
+                        .execute(
+                            "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                            rusqlite::params![rowid, text],
+                        )
+                        .unwrap();
+                }
+            }
+            connection
+        }
+
+        fn live(ids: &[&str]) -> BTreeSet<String> {
+            ids.iter().map(|id| (*id).to_owned()).collect()
+        }
+
+        fn matches(kinds: &[(&str, SessionTextMatchKind)]) -> Vec<SessionTextMatch> {
+            kinds
+                .iter()
+                .map(|(id, kind)| SessionTextMatch {
+                    session_id: (*id).to_owned(),
+                    kind: *kind,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn user_and_agent_messages_match_and_tool_output_does_not() {
+            let connection = index(&[
+                ("said-by-user", &[("user", "please fix the Zebra crossing")]),
+                ("said-by-agent", &[("assistant", "the zebra is fixed")]),
+                (
+                    "only-in-tool",
+                    &[("tool", "zebra stack trace"), ("user", "hello")],
+                ),
+                (
+                    "both",
+                    &[("assistant", "a ZEBRA appears"), ("user", "a zebra please")],
+                ),
+                ("gone", &[("user", "zebra")]),
+            ]);
+            let live = live(&["said-by-user", "said-by-agent", "only-in-tool", "both"]);
+            assert_eq!(
+                text_matches_in(&connection, "zebra", &live).unwrap(),
+                matches(&[
+                    ("both", SessionTextMatchKind::User),
+                    ("said-by-agent", SessionTextMatchKind::Agent),
+                    ("said-by-user", SessionTextMatchKind::User),
+                ])
+            );
+        }
+
+        #[test]
+        fn a_query_too_short_for_the_trigram_index_still_matches() {
+            let connection = index(&[
+                ("a", &[("user", "go to the zoo")]),
+                ("b", &[("assistant", "zoo")]),
+                ("c", &[("tool", "zoo")]),
+            ]);
+            assert_eq!(
+                text_matches_in(&connection, "zo", &live(&["a", "b", "c"])).unwrap(),
+                matches(&[
+                    ("a", SessionTextMatchKind::User),
+                    ("b", SessionTextMatchKind::Agent),
+                ])
+            );
+            // A percent sign is text, not a wildcard.
+            assert_eq!(
+                text_matches_in(&connection, "%z", &live(&["a"])).unwrap(),
+                Vec::new()
+            );
+        }
     }
 }

@@ -23,11 +23,12 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         }
         WizardStep::Target => {
             let enabled = target_advance_enabled(dashboard, wizard);
+            let offered = dashboard.offered_target_indices();
             form.declare_with_enabled(
                 WizardControl::TargetList,
                 ControlKind::ChoiceList {
-                    len: dashboard.config.targets.len(),
-                    selected: wizard.target(),
+                    len: offered.len(),
+                    selected: dashboard.target_row(wizard.target()),
                 },
                 true,
             );
@@ -40,7 +41,9 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
                             .config
                             .targets
                             .keys()
-                            .map(|id| wizard.target_rejection(dashboard, id).is_none()),
+                            .enumerate()
+                            .filter(|(index, _)| offered.contains(index))
+                            .map(|(_, id)| wizard.target_rejection(dashboard, id).is_none()),
                     )
                     .collect(),
             );
@@ -249,7 +252,14 @@ impl DashboardState {
                 }
                 self.keep(wizard)
             }
-            Interaction::Select(WizardControl::TargetList, selected) => {
+            Interaction::Select(WizardControl::TargetList, row) => {
+                // The list shows only the offered targets; the wizard keeps
+                // indexing the full configuration.
+                let selected = self
+                    .offered_target_indices()
+                    .get(row)
+                    .copied()
+                    .unwrap_or_else(|| wizard.target());
                 let target_changed = wizard.target() != selected;
                 if target_changed {
                     wizard.note_draft_change(self, DraftChange::TargetSelected);
@@ -481,6 +491,9 @@ impl DashboardState {
         );
         if key.code == KeyCode::Backspace && picker_focused {
             return self.activate_wizard_control(wizard, WizardControl::Back);
+        }
+        if key.code == KeyCode::Delete && focused == Some(WizardControl::BundleList) {
+            return self.activate_wizard_control(wizard, WizardControl::RemoveBundle);
         }
         if key.code == KeyCode::Delete && focused == Some(WizardControl::ReviewAttachments) {
             wizard.note_draft_change(self, DraftChange::AttachmentRemoved);

@@ -104,11 +104,7 @@ impl RuntimeState {
     /// Search the user's SessionWiki index, with this daemon's own live
     /// sessions marked so a surface can resume them instead of restoring them.
     pub async fn wiki_search(&self, query: String, limit: usize) -> Result<WikiSearchPage> {
-        if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
-            // Fresh enough matters less than answering now: the sync runs in
-            // the background and the next keystroke sees its result.
-            self.wiki.request_sync(false);
-        }
+        self.request_wiki_sync_if_stale();
         let live = self.live_session_ids();
         // Every caller is a resume list, and a sub-agent is never resumed on
         // its own.
@@ -120,6 +116,25 @@ impl RuntimeState {
             rows,
             status: self.wiki.status(),
         })
+    }
+
+    /// Ask for a background sync when the index is stale. Every search asks
+    /// here, so this is the one place that decides when a search syncs.
+    /// Answering now matters more than answering fresh: the sync runs in the
+    /// background and the next keystroke sees its result.
+    fn request_wiki_sync_if_stale(&self) {
+        if crate::sessionwiki::sync_is_stale(self.wiki.last_success()) {
+            self.wiki.request_sync(false);
+        }
+    }
+
+    /// The live sessions whose user or agent messages contain `query`. Like
+    /// [`Self::wiki_search`], it answers from the index as it is and asks for
+    /// a sync for the next search.
+    pub async fn session_text_search(&self, query: String) -> Result<Vec<SessionTextMatch>> {
+        self.request_wiki_sync_if_stale();
+        let live = self.live_session_ids();
+        blocking(move || crate::sessionwiki::session_text_matches(&query, &live)).await
     }
 
     /// The markdown briefing for one indexed session, or `None` when the index
@@ -198,9 +213,9 @@ impl RuntimeState {
         let _startup_admission = self.startup_enqueue.lock().await;
         let registered = self
             .start_create_session(CreateSessionRequest {
-                launch_base: None,
-                launch_branch: None,
-                checkout: None,
+                at: None,
+                branch: None,
+                base: None,
                 expected_runtime_identity: None,
                 create_managed_worktree: None,
                 subagents: None,
@@ -723,7 +738,10 @@ impl RuntimeState {
         self: &Arc<Self>,
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        blocking(crate::database::prune_settled_startup_deliveries).await?;
+        let pruned = blocking(crate::database::prune_settled_startup_deliveries).await?;
+        if pruned > 0 {
+            tracing::info!(rows = pruned, "pruned settled startup steps");
+        }
         let deliveries = blocking(crate::database::load_startup_deliveries).await?;
         for delivery in deliveries {
             self.start_persisted_startup_delivery(delivery, cancellation);
@@ -952,12 +970,21 @@ impl RuntimeState {
                         {
                             let id = session_id.to_owned();
                             let reason = format!("{error:#}");
-                            if let Err(persistence) = blocking(move || {
-                                crate::database::fail_startup_group(&id, &group_id, &reason)
+                            let persisted = reason.clone();
+                            match blocking(move || {
+                                crate::database::fail_startup_group(&id, &group_id, &persisted)
                             })
                             .await
                             {
-                                tracing::error!(session_id, %persistence, "could not persist startup rejection");
+                                // The group failed as a whole, and was never
+                                // accepted: say so, and settle its other rows.
+                                Ok(()) => {
+                                    self.reject_startup(session_id, &reason).await;
+                                    continue;
+                                }
+                                Err(persistence) => {
+                                    tracing::error!(session_id, %persistence, "could not persist startup rejection");
+                                }
                             }
                         }
                         let refused = error
@@ -1150,7 +1177,7 @@ impl RuntimeState {
     /// up: an API group fails so its client's wait answers, a user's prompt
     /// goes back to the draft, and anything else is marked failed. The drain
     /// then continues with the next step.
-    async fn abandon_startup_step(&self, session_id: &str) {
+    async fn abandon_startup_step(self: &Arc<Self>, session_id: &str) {
         let lookup_id = session_id.to_owned();
         let step = match blocking(move || crate::database::next_startup_delivery(&lookup_id)).await
         {
@@ -1179,7 +1206,7 @@ impl RuntimeState {
             {
                 tracing::error!(session_id, %error, "could not fail an abandoned startup group");
             }
-            self.push_notice(session_id, reason);
+            self.reject_startup(session_id, &reason).await;
             return;
         }
         let decoded: Option<StartupStep> = serde_json::from_str(&step.step_json).ok();
@@ -1198,6 +1225,18 @@ impl RuntimeState {
             tracing::error!(session_id, %error, "could not mark an abandoned startup step failed");
         }
         self.push_notice(session_id, reason);
+    }
+
+    /// An API startup group failed for good: its step was refused, or kept
+    /// failing until it was given up. Nothing of it was accepted, so the
+    /// notice says the startup failed, not that work remains saved. A
+    /// sub-agent whose first prompt can therefore never run is recorded as
+    /// failed and its worker stopped (I1-2); its parent reads the same cause
+    /// from `wait` and `list_agents`.
+    async fn reject_startup(self: &Arc<Self>, session_id: &str, reason: &str) {
+        tracing::warn!(session_id, reason, "session startup failed");
+        self.push_notice(session_id, format!("Session startup failed: {reason}"));
+        self.fail_subagent_start(session_id, reason).await;
     }
 
     /// A prompt the worker will not take is the user's text again, not a
@@ -1303,5 +1342,29 @@ impl RuntimeState {
             }
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::test_runtime_state;
+    use std::sync::Arc;
+
+    /// RCL-1 (2026-09-29): the Sessions filter's conversation search asks for
+    /// the same non-forced sync the resume dialog's search asks for, so a
+    /// message sent since the last sync is found by the next keystroke.
+    #[tokio::test]
+    async fn a_session_text_search_asks_for_a_sync_like_the_resume_search() {
+        let mut state = test_runtime_state();
+        Arc::get_mut(&mut state).expect("the only handle").wiki =
+            crate::sessionwiki::WikiIndexer::inert();
+        assert!(!state.wiki().sync_requested());
+
+        // An empty query never reads the index, so the request is all it does.
+        state.session_text_search("  ".into()).await.unwrap();
+        assert!(
+            state.wiki().sync_requested(),
+            "a stale index is synced for the next search"
+        );
     }
 }

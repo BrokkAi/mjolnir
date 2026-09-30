@@ -76,6 +76,7 @@ pub(crate) enum WizardControl {
     NewBundleRepositories,
     NewBundleSource,
     NewBundleRemove,
+    RemoveBundle,
     ProjectRecent,
     ProjectGithub,
     ProjectFolders,
@@ -130,6 +131,12 @@ pub(crate) struct TargetReadiness {
     template: TargetTemplate,
     generation: u64,
     result: Option<Result<(), String>>,
+    /// Whether the target's runtime is not present on this host (Docker or
+    /// Podman not installed). That is permanent for the host, unlike a host
+    /// that did not answer, so the pickers leave the target out. It is kept
+    /// while a recheck is pending, so the row does not come back as
+    /// "checking…" every minute.
+    runtime_missing: bool,
     /// When `result` was stored. Only meaningful once `result` is `Some`; a
     /// pending check (`result: None`) is never considered stale, so a
     /// probe already in flight is never re-requested.
@@ -173,6 +180,9 @@ pub(crate) struct NewWizard {
     pub(crate) new_bundle_repositories: Vec<String>,
     pub(crate) new_bundle_source: PathInput,
     pub(crate) bundle_creation_in_flight: bool,
+    /// Removing a saved project rewrites the config, so the project list is
+    /// frozen until the runtime feed shows it gone.
+    pub(crate) bundle_removal_in_flight: bool,
     pub(crate) project_directory: PathInput,
     pub(crate) project_directory_error: Option<String>,
     project_history: Vec<std::path::PathBuf>,
@@ -207,6 +217,7 @@ impl PartialEq for NewWizard {
             && self.new_bundle_repositories == other.new_bundle_repositories
             && self.new_bundle_source == other.new_bundle_source
             && self.bundle_creation_in_flight == other.bundle_creation_in_flight
+            && self.bundle_removal_in_flight == other.bundle_removal_in_flight
             && self.project_directory == other.project_directory
             && self.project_directory_error == other.project_directory_error
             && self.project_history == other.project_history

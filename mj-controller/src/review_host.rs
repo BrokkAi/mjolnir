@@ -43,7 +43,9 @@ use mj_review::driver::{
     TurnReviewPhase, TurnReviewSeed,
 };
 
-pub use mj_client::review::{RuntimeReviewView, VerdictKind, VerdictView, role_session_id};
+pub use mj_client::review::{
+    ReviewerQuestion, RuntimeReviewView, VerdictKind, VerdictView, role_session_id,
+};
 
 mod prompts;
 pub use prompts::*;

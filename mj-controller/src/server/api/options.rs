@@ -184,15 +184,51 @@ fn launch_target(
     let host = hosts
         .iter()
         .find(|host| host.target_ids.iter().any(|id| id == &target.id));
+    let status = target_availability(target, hosts, engine);
+    LaunchTarget {
+        id: target.id.clone(),
+        kind: target.kind.clone(),
+        requires_project_directory: target.requires_project_directory,
+        availability: status.availability,
+        unavailable_reason: status.unavailable_reason,
+        runtime_missing: status.runtime_missing,
+        host: host.map(|host| host.label.clone()),
+    }
+}
+
+/// What is known about whether one target can run a session right now.
+pub(crate) struct TargetStatus {
+    pub(crate) availability: LaunchAvailability,
+    pub(crate) unavailable_reason: Option<String>,
+    pub(crate) runtime_missing: bool,
+}
+
+/// The one classifier behind a target's availability and reason. The launch
+/// options call it with the engine probe's answer; the viewer snapshot calls it
+/// with `None`, since the probe runs on the request path and not in the
+/// publication, so the web pickers see the host reading and the missing
+/// runtime, and `/api/v1/options` adds the engine's own check.
+pub(crate) fn target_availability(
+    target: &ViewerTarget,
+    hosts: &[ViewerTargetCapacity],
+    engine: Option<&LocalEngineReadiness>,
+) -> TargetStatus {
+    let host = hosts
+        .iter()
+        .find(|host| host.target_ids.iter().any(|id| id == &target.id));
+    // Not installed is permanent for this host, and is read from the
+    // snapshot as well as the probe so the two cannot disagree.
+    let runtime_missing =
+        target.runtime_missing || matches!(engine, Some(LocalEngineReadiness::NotInstalled));
     let engine_failure = match engine {
-        Some(LocalEngineReadiness::NotInstalled) => Some(crate::targets::engine_not_installed(
-            engine_name(&target.kind),
+        _ if runtime_missing => Some(crate::targets::engine_not_installed(
+            crate::server::engine_name(&target.kind),
         )),
         Some(LocalEngineReadiness::NotReady) => Some(format!(
             "{} did not answer its check on this host; start it and try again",
-            engine_name(&target.kind)
+            crate::server::engine_name(&target.kind)
         )),
-        Some(LocalEngineReadiness::Ready) | None => None,
+        Some(LocalEngineReadiness::Ready | LocalEngineReadiness::NotInstalled) | None => None,
     };
     let availability = match host {
         _ if engine_failure.is_some() => LaunchAvailability::Unavailable,
@@ -209,23 +245,10 @@ fn launch_target(
         )),
         _ => None,
     };
-    LaunchTarget {
-        id: target.id.clone(),
-        kind: target.kind.clone(),
-        requires_project_directory: target.requires_project_directory,
+    TargetStatus {
         availability,
         unavailable_reason,
-        host: host.map(|host| host.label.clone()),
-    }
-}
-
-/// How a person names the engine behind a local container target kind.
-fn engine_name(kind: &str) -> &'static str {
-    match kind {
-        "local-podman" => "Podman",
-        "local-docker" => "Docker",
-        "apple-container" => "Apple container",
-        _ => "The container engine",
+        runtime_missing,
     }
 }
 

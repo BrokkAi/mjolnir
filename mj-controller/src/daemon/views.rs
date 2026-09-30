@@ -203,8 +203,15 @@ impl RuntimeState {
         if let Some(busy) = self.session_lifecycle_busy(session_id) {
             return Err(anyhow::Error::new(busy));
         }
-        let mut controller = blocking(Controller::load).await?;
-        let checkpoint = controller.checkpoint_session(session_id).await?;
+        let session_id = session_id.to_owned();
+        // Checkpoint capture and cleanup run synchronous filesystem, database
+        // and SSH operations between relay awaits. Keep the whole future,
+        // including its destructors, off the daemon's event loop.
+        let checkpoint = blocking(move || {
+            let mut controller = Controller::load()?;
+            mj_core::runtime::block_on(controller.checkpoint_session(&session_id))?
+        })
+        .await?;
         refresh_runtime_controller(self).await;
         Ok(checkpoint)
     }

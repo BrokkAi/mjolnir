@@ -118,6 +118,24 @@ pub struct WikiStatus {
     pub topping_up: bool,
 }
 
+/// Where in a session's conversation a text search matched. A match in a
+/// user message ranks ahead of one in an agent message; a match only in tool
+/// output is not a match at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTextMatchKind {
+    User,
+    Agent,
+}
+
+/// One live session whose conversation contains a search query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTextMatch {
+    pub session_id: String,
+    pub kind: SessionTextMatchKind,
+}
+
 /// One page of search results with the state of the index behind them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -354,13 +372,18 @@ pub struct ResumeSessionRequest {
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub create_managed_worktree: Option<bool>,
-    /// Git revision the session starts at, as the caller typed it.
-    #[serde(default)]
-    pub launch_base: Option<String>,
-    #[serde(default)]
-    pub launch_branch: Option<String>,
+    /// Full commit object ID to start the workspace at: an exact checkout of
+    /// the bundle's primary repository, detached unless `branch` is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// With `at`, the new branch created there; otherwise the existing branch
+    /// to check out in a new isolated workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base, when it is not `at`. Without `at`, also the starting
+    /// revision for a raw managed worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
     /// Omitted reuses the last accepted top-level session choice.
@@ -496,6 +519,10 @@ pub enum DaemonAction {
         session_id: String,
         title: String,
     },
+    SetSessionWorkspace {
+        session_id: String,
+        workspace_id: String,
+    },
     SetSessionContainerSettings {
         session_id: String,
         cpus: Option<String>,
@@ -520,6 +547,11 @@ pub enum DaemonAction {
     WikiSearch {
         query: String,
         limit: usize,
+    },
+    /// The live sessions whose user or agent messages contain a query,
+    /// ignoring case. Tool calls and tool output do not count.
+    SessionTextSearch {
+        query: String,
     },
     /// The markdown briefing for one indexed session.
     WikiBrief {
@@ -742,6 +774,7 @@ pub enum DaemonReply {
     Checkpoint(mj_core::state::CheckpointMetadata),
     RecoveryScan(mj_core::state::RecoveryScan),
     WikiRows(WikiSearchPage),
+    SessionTextMatches(Vec<SessionTextMatch>),
     WikiHits(Option<WikiHitTranscript>),
     WikiSession(Option<Box<WikiSessionInfo>>),
     Reviewer(Box<crate::session::ReviewerOutcome>),
@@ -897,7 +930,11 @@ pub fn process_is_zombie(pid: u32) -> bool {
 /// stop": a daemon that is still winding down has not refused, and the two
 /// read very differently to somebody deciding whether to reach for a kill.
 pub async fn wait_for_exit(pid: u32) -> Result<()> {
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    wait_for_exit_within(pid, STOP_TIMEOUT).await
+}
+
+async fn wait_for_exit_within(pid: u32, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     while daemon_process_is_alive(pid) {
         ensure!(Instant::now() < deadline, "process {pid} is still running");
         tokio::time::sleep(RETRY_DELAY).await;
@@ -1007,9 +1044,12 @@ pub struct DaemonNotRunning {
     pub metadata_path: std::path::PathBuf,
 }
 
+/// What a caller shows for [`DaemonNotRunning`].
+pub const DAEMON_NOT_RUNNING_MESSAGE: &str = "the Mjolnir daemon is not running";
+
 impl std::fmt::Display for DaemonNotRunning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the Mjolnir daemon is not running")
+        formatter.write_str(DAEMON_NOT_RUNNING_MESSAGE)
     }
 }
 
@@ -1454,6 +1494,23 @@ impl DaemonClient {
         }
     }
 
+    pub async fn set_session_workspace(
+        &mut self,
+        session_id: String,
+        workspace_id: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SetSessionWorkspace {
+                session_id,
+                workspace_id,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected session-workspace reply {reply:?}"),
+        }
+    }
+
     pub async fn set_session_container_settings(
         &mut self,
         session_id: String,
@@ -1534,6 +1591,19 @@ impl DaemonClient {
         {
             DaemonReply::WikiRows(page) => Ok(page),
             reply => bail!("unexpected SessionWiki search reply {reply:?}"),
+        }
+    }
+
+    /// The live sessions whose user or agent messages contain `query`, and
+    /// which of the two matched. Answers from the SessionWiki index, so a very
+    /// new message can be missing until the next sync.
+    pub async fn session_text_search(&mut self, query: String) -> Result<Vec<SessionTextMatch>> {
+        match self
+            .request(DaemonAction::SessionTextSearch { query })
+            .await?
+        {
+            DaemonReply::SessionTextMatches(matches) => Ok(matches),
+            reply => bail!("unexpected session text search reply {reply:?}"),
         }
     }
 
@@ -2017,12 +2087,14 @@ impl ManagementClient {
     pub async fn stop_and_wait(mut self) -> Result<()> {
         let pid = self.inner.metadata.pid;
         self.stop().await?;
-        wait_for_exit(pid).await.with_context(|| {
-            format!(
-                "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
-                STOP_TIMEOUT.as_secs()
-            )
-        })
+        wait_for_exit_within(pid, STOP_DRAIN_TIMEOUT)
+            .await
+            .with_context(|| {
+                format!(
+                    "Mjolnir daemon {pid} accepted the stop but was still running after {}s",
+                    STOP_DRAIN_TIMEOUT.as_secs()
+                )
+            })
     }
 }
 
@@ -2059,8 +2131,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// Delegation policies replace boolean creation fields and extend runtime snapshots.
-pub const PROTOCOL_VERSION: u32 = 41;
+// Session creation names its starting selection `at`, `branch` and `base`.
+pub const PROTOCOL_VERSION: u32 = 42;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2072,6 +2144,9 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// reporting a stop that had in fact worked as `did not stop` and aborting the
 /// restart that depended on it.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a requested stop may take: the daemon waits up to 60 seconds for
+/// session destroys in flight (#1191) before it winds down.
+pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RETRY_DELAY: Duration = Duration::from_millis(40);
 impl DaemonClient {
     pub async fn prepare_move_session(

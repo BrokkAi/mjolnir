@@ -534,9 +534,9 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         subagents: None,
         create_managed_worktree: None,
@@ -573,23 +573,23 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
 }
 
 #[test]
-fn registration_rejects_a_launch_base_it_cannot_honour() {
+fn registration_rejects_a_base_it_cannot_honour() {
     let mut controller = Controller {
         config: registration_config(),
         state: State::default(),
     };
 
     let mut options = launch_options(Vec::new());
-    options.launch_base = Some("   ".into());
+    options.base = Some("   ".into());
     let error = controller
         .register_session_with_resources("codex", "project", "podman", "blank", options)
         .unwrap_err();
-    assert!(error.to_string().contains("launch base must not be empty"));
+    assert!(error.to_string().contains("`base` must not be empty"));
 
     // Without a worktree there is nowhere to apply the base: the session runs
     // in the selected directory as it stands.
     let mut options = launch_options(Vec::new());
-    options.launch_base = Some("HEAD~1".into());
+    options.base = Some("HEAD~1".into());
     options.create_managed_worktree = Some(false);
     let error = controller
         .register_session_with_resources("codex", "project", "podman", "no worktree", options)
@@ -638,8 +638,8 @@ fn muse_registration_rejects_more_than_one_workspace_root_before_persisting() {
 }
 
 #[test]
-fn registration_rejects_exact_checkout_without_a_valid_repository_and_unambiguous_options() {
-    for case in ["missing_repository", "short_sha", "base", "branch", "raw"] {
+fn registration_rejects_a_start_commit_it_cannot_honour() {
+    for case in ["short_sha", "bad_branch", "raw", "no_isolated_workspace"] {
         let mut controller = Controller {
             config: registration_config(),
             state: State::default(),
@@ -649,30 +649,117 @@ fn registration_rejects_exact_checkout_without_a_valid_repository_and_unambiguou
             .targets
             .insert("local".into(), TargetTemplate::LocalBare);
         let mut options = launch_options(Vec::new());
-        options.checkout = Some(mj_core::remote_git::ExactCheckout {
-            repository_id: "project".into(),
-            commit: "a".repeat(40),
-            branch: Some("town/run-123".into()),
-        });
+        options.at = Some("a".repeat(40));
+        options.branch = Some("town/run-123".into());
         let target = if case == "raw" { "local" } else { "podman" };
-        match case {
-            "missing_repository" => {
-                options.checkout.as_mut().unwrap().repository_id = "absent".into()
+        let expected = match case {
+            "short_sha" => {
+                options.at = Some("abcdef0".into());
+                "`at` must be a full nonzero commit object ID"
             }
-            "short_sha" => options.checkout.as_mut().unwrap().commit = "abcdef0".into(),
-            "base" => options.launch_base = Some("HEAD".into()),
-            "branch" => options.launch_branch = Some("main".into()),
-            "raw" => options.project_directory = Some(PathBuf::from("/project")),
+            "bad_branch" => {
+                options.branch = Some("HEAD".into());
+                "`branch`"
+            }
+            "raw" => {
+                options.project_directory = Some(PathBuf::from("/project"));
+                "requires a bundle-backed session"
+            }
+            "no_isolated_workspace" => {
+                options.create_managed_worktree = Some(false);
+                "`at` requires an isolated workspace"
+            }
             _ => unreachable!(),
-        }
-        assert!(
-            controller
-                .register_session_with_resources("codex", "project", target, "exact", options)
-                .is_err(),
-            "{case}"
-        );
+        };
+        let error = controller
+            .register_session_with_resources("codex", "project", target, "exact", options)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
         assert!(controller.state.sessions.is_empty());
     }
+}
+
+#[test]
+fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repository() {
+    const MARKER: &str = "MJ_TEST_START_COMMIT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repository",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut config = registration_config();
+    // A second repository that is not the primary one: `at` must not pick it.
+    let bundle = config.bundles.get_mut("project").unwrap();
+    let mut second = bundle.repositories[0].clone();
+    second.id = "second".into();
+    second.github = Some("owner/second".into());
+    second.destination = PathBuf::from("second");
+    bundle.repositories.insert(0, second);
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "start commit",
+            SessionLaunchOptions {
+                at: Some(at.to_uppercase()),
+                branch: Some("town/run-1".into()),
+                ..launch_options(Vec::new())
+            },
+        )
+        .unwrap();
+    let stored = crate::database::load_state().unwrap().sessions[&id].clone();
+    assert_eq!(
+        stored.checkout,
+        Some(mj_core::remote_git::ExactCheckout {
+            repository_id: "project".into(),
+            commit: at.into(),
+            branch: Some("town/run-1".into()),
+        })
+    );
+    // The checkout owns the branch, and the base is left to default to `at`.
+    assert_eq!((stored.launch_base, stored.launch_branch), (None, None));
+    assert_eq!(
+        controller.state.sessions[&id].start_selection(),
+        mj_core::state::StartSelection {
+            at: Some(at.into()),
+            branch: Some("town/run-1".into()),
+            base: Some(at.into()),
+        }
+    );
+
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "start commit with base",
+            SessionLaunchOptions {
+                at: Some(at.into()),
+                base: Some("v1.0".into()),
+                ..launch_options(Vec::new())
+            },
+        )
+        .unwrap();
+    let stored = &crate::database::load_state().unwrap().sessions[&id];
+    assert_eq!(
+        stored.start_selection(),
+        mj_core::state::StartSelection {
+            at: Some(at.into()),
+            branch: None,
+            base: Some("v1.0".into()),
+        }
+    );
 }
 
 /// MJ_DATA_DIR is process-global, so every test that reaches the
@@ -1460,6 +1547,63 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
     );
 }
 
+/// I1-5: the review runs inside the worker, whose environment is the target's
+/// login environment, so the daemon's `MJ_BIFROST_BIN` reaches it only through
+/// the launch configuration.
+#[test]
+fn a_launch_config_carries_the_daemons_bifrost_choice_to_the_worker() {
+    const MARKER: &str = "MJ_TEST_LAUNCH_BIFROST_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_launch_config_carries_the_daemons_bifrost_choice_to_the_worker",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let id = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "bifrost",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    let backend = crate::targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: crate::targets::resource_name(&id).unwrap(),
+        workspace_storage: Default::default(),
+    };
+
+    // SAFETY: this test runs alone in its own child process.
+    unsafe { std::env::remove_var(mj_review::bifrost::BIFROST_BIN_ENV) };
+    assert_eq!(
+        controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .bifrost_binary,
+        None,
+        "without a choice the worker uses `bifrost` from the target's PATH"
+    );
+
+    // SAFETY: as above.
+    unsafe { std::env::set_var(mj_review::bifrost::BIFROST_BIN_ENV, "/opt/bifrost-new") };
+    assert_eq!(
+        controller
+            .current_worker_launch_config(&id, &backend)
+            .unwrap()
+            .bifrost_binary,
+        Some(std::path::PathBuf::from("/opt/bifrost-new")),
+    );
+}
+
 fn durable_remote_template(host: &str) -> TargetTemplate {
     serde_json::from_value(serde_json::json!({
         "kind": "ssh-podman", "host": host, "user": "builder",
@@ -1867,4 +2011,38 @@ fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
     crate::database::delete_session(&session.id).unwrap();
     controller.reload().unwrap();
     assert!(!controller.state.sessions.contains_key(&session.id));
+}
+
+/// Test-and-fix C-8: a running daemon whose configuration file gained a
+/// `from_secret` entry with no secret answered `mj new` with an opaque 500.
+/// The reason is the person's to fix, so it must travel as a refusal.
+#[test]
+fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
+    const MARKER: &str = "MJ_TEST_UNLOADABLE_CONFIG_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            format!(
+                "version = {}\n\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+                 [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        run_registration_child(
+            MARKER,
+            "a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure",
+            directory.path(),
+        );
+        return;
+    }
+    let error = Controller::load().err().expect("the config cannot load");
+    let refusal = mj_core::refusal::Refusal::of(&error).expect("the failure is a refusal");
+    assert!(
+        refusal.message().starts_with("FAKE_TOKEN = { from_secret"),
+        "{}",
+        refusal.message()
+    );
+    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Precondition);
 }

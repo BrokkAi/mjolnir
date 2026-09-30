@@ -9,7 +9,6 @@
 pub(crate) use mj_core::clock::epoch_seconds;
 
 use mj_client::review::RuntimeReviewView;
-use mj_core::state::SessionState;
 
 use crate::render::{
     CAPACITY_SAMPLE_STALE_AFTER_SECONDS, checkpoint_age, quota_reset_cells, refresh_age,
@@ -301,16 +300,8 @@ impl DashboardState {
                 if !self.session_row_is_visible_at(index) {
                     return false;
                 }
-                let detail = self.session_details.get(&session.id);
                 let review = self.session_review(&session.id);
-                let primary = session.state == SessionState::Running
-                    && !self.unreachable_sessions.contains(&session.id)
-                    && detail.is_some_and(|detail| {
-                        detail.activity.is_working(
-                            detail.current_turn_started_at,
-                            !detail.pending_elicitations.is_empty(),
-                        )
-                    });
+                let primary = self.session_is_working(&session.id);
                 let transition = self
                     .transition_kind(&session.id)
                     .is_some_and(|_| session.last_error.is_none());

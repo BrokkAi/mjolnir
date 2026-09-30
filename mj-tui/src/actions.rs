@@ -24,6 +24,7 @@ use crate::{DashboardAction, DashboardState, Focus};
 pub enum CommandId {
     OpenSession,
     PinSession,
+    ChangeWorkspace,
     UnpinSession,
     OpenSessionSplitRight,
     OpenSessionSplitBelow,
@@ -91,6 +92,7 @@ pub enum CommandId {
     OpenSubagents,
     SessionActions,
     InterruptTurn,
+    InterruptAll,
     Help,
 }
 
@@ -363,6 +365,19 @@ fn live_session(dashboard: &DashboardState) -> Availability {
     }
 }
 
+fn change_workspace_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if dashboard.workspace_ids().len() < 2 {
+        return Availability::Blocked("there is no other workspace");
+    }
+    if dashboard.move_queue_admission_incomplete(&session.id) {
+        return Availability::Blocked("Move queue admission is incomplete; retry Move first");
+    }
+    Availability::Ready
+}
+
 fn container_session(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.selected_container_session() else {
         return Availability::Hidden;
@@ -454,6 +469,19 @@ fn interrupt_available(dashboard: &DashboardState) -> Availability {
         Availability::Ready
     } else {
         Availability::Blocked("no turn is running")
+    }
+}
+
+/// Interrupt all stays listed with its reason when nothing in the session's
+/// tree is running, for the same reason Interrupt turn does.
+fn interrupt_all_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session_id() else {
+        return Availability::Hidden;
+    };
+    if dashboard.interrupt_all_targets(session).is_empty() {
+        Availability::Blocked("no turn is running here or in its sub-agents")
+    } else {
+        Availability::Ready
     }
 }
 
@@ -930,6 +958,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: interrupt_available,
     },
     CommandSpec {
+        id: CommandId::InterruptAll,
+        label: "Interrupt all",
+        description: "Stop the running turn of the selected session and of every sub-agent under it, after you confirm. The sessions keep running.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: interrupt_all_available,
+    },
+    CommandSpec {
         id: CommandId::SessionActions,
         label: "Session actions…",
         description: "Open the selected session's actions menu, the same one the ⋯ on its row opens.",
@@ -964,6 +1004,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: container_session,
+    },
+    CommandSpec {
+        id: CommandId::ChangeWorkspace,
+        label: "Change workspace…",
+        description: "Move the selected session, and its sub-agents, to another workspace, after you confirm.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: change_workspace_available,
     },
     CommandSpec {
         id: CommandId::MoveSession,
@@ -1447,6 +1499,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
                         | CommandId::MoveSession
+                        | CommandId::ChangeWorkspace
                         | CommandId::DestroySession
                 ))
         })
@@ -1536,6 +1589,7 @@ impl DashboardState {
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
                     | CommandId::MoveSession
+                    | CommandId::ChangeWorkspace
                     | CommandId::SuspendSession
                     | CommandId::DestroySession
             )
@@ -1670,6 +1724,10 @@ impl DashboardState {
                 self.begin_container_edit();
                 DashboardAction::None
             }
+            CommandId::ChangeWorkspace => {
+                self.begin_change_workspace();
+                DashboardAction::None
+            }
             CommandId::ChangedFiles => self.begin_changed_files(),
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self
@@ -1678,6 +1736,30 @@ impl DashboardState {
                     .map_or(DashboardAction::None, |session_id| {
                         DashboardAction::InterruptTurn { session_id }
                     }),
+                Availability::Blocked(reason) => {
+                    self.set_notice(crate::help::sentence(reason));
+                    DashboardAction::None
+                }
+                Availability::Hidden => DashboardAction::None,
+            },
+            CommandId::InterruptAll => match interrupt_all_available(self) {
+                Availability::Ready => {
+                    if let Some(session) = self.command_session() {
+                        let session_id = session.id.clone();
+                        let name = session.listed_title().to_owned();
+                        let targets = self.interrupt_all_targets(&session_id);
+                        let parent_running = targets.sessions.contains(&session_id);
+                        self.mode = crate::Mode::Confirm(
+                            ConfirmDialog::new(Confirmation::InterruptAll {
+                                subagents_running: targets.len() - usize::from(parent_running),
+                                parent_running,
+                                session_id,
+                            })
+                            .naming_session(&name),
+                        );
+                    }
+                    DashboardAction::None
+                }
                 Availability::Blocked(reason) => {
                     self.set_notice(crate::help::sentence(reason));
                     DashboardAction::None
@@ -2012,6 +2094,51 @@ mod tests {
         dashboard.focus_prompt();
         dashboard.dispatch_command(CommandId::SessionActions);
         assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
+    }
+
+    /// Interrupt all asks first, then ends the turns that are running when
+    /// it is confirmed: the parent's and its working sub-agent's, through
+    /// the daemon, whether or not those conversations are open here.
+    #[test]
+    fn interrupt_all_confirms_then_interrupts_parent_and_working_subagents() {
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        dashboard.focus_sessions();
+        dashboard
+            .session_details
+            .insert("child-session".into(), Default::default());
+        assert_eq!(
+            (spec(CommandId::InterruptAll).available)(&dashboard),
+            Availability::Blocked("no turn is running here or in its sub-agents")
+        );
+
+        crate::test_support::set_working(&mut dashboard, "child-session");
+        assert_eq!(
+            dashboard.dispatch_command(CommandId::InterruptAll),
+            DashboardAction::None
+        );
+        let crate::Mode::Confirm(dialog) = &dashboard.mode else {
+            panic!("Interrupt all asks first");
+        };
+        assert_eq!(
+            dialog.confirmation,
+            Confirmation::InterruptAll {
+                session_id: parent.clone(),
+                parent_running: false,
+                subagents_running: 1,
+            }
+        );
+
+        // The parent's turn starts while the dialog is open; confirming
+        // interrupts what is running then.
+        crate::test_support::set_working(&mut dashboard, &parent);
+        let action = dashboard.handle_key(key(KeyCode::Char('i')));
+        let DashboardAction::InterruptAll { targets } = action else {
+            panic!("confirming interrupts, got {action:?}");
+        };
+        let mut sessions = targets.sessions.clone();
+        sessions.sort();
+        assert_eq!(sessions, vec!["child-session".to_owned(), parent]);
+        assert!(targets.native.is_empty());
     }
 
     /// B-16: the terminal said "Interrupt turn" nowhere. The command is in

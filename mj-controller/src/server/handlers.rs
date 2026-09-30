@@ -503,9 +503,9 @@ pub(super) async fn preflight_new(
     let action = ControllerAction::New {
         subagents: None,
         create_managed_worktree: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
+        at: None,
+        branch: None,
+        base: None,
         expected_runtime_identity: None,
         workspace_id: request.workspace_id,
         profile_id: request.profile_id,

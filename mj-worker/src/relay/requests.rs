@@ -13,6 +13,15 @@ impl DurableRelay {
                     detail: None,
                 },
             });
+        // A completed or released barrier ends the hold on the worker's own
+        // writes. The request itself already succeeded, so a journal failure
+        // here is reported rather than turned into its answer.
+        if let Err(error) = self.settle_held_writes() {
+            tracing::error!(
+                session_id = %self.snapshot.session_id,
+                "could not journal writes held behind a checkpoint barrier: {error:#}"
+            );
+        }
         let protocol_version = match &body {
             RelayResponseBody::Ok {
                 payload: RelayResponsePayload::Hello { negotiated, .. },

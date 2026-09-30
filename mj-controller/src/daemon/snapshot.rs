@@ -230,7 +230,9 @@ impl RuntimeState {
         {
             let mut owner = self.owner();
             let controller = owner.controller();
-            if !controller.state.sessions.contains_key(&session_id) {
+            if !controller.state.sessions.contains_key(&session_id)
+                || !owner.runs_relay_actor(&session_id)
+            {
                 return Ok(());
             }
             if view.connected

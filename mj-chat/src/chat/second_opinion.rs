@@ -771,7 +771,11 @@ impl super::ChatState {
     /// prompt the composer submitted.
     pub(super) fn next_second_opinion_command_id(&mut self, purpose: &str) -> String {
         self.second_opinion_sequence += 1;
-        format!("second-opinion-{purpose}-{}", self.second_opinion_sequence)
+        format!(
+            "{}{purpose}-{}",
+            mj_core::second_opinion::COMMAND_ID_PREFIX,
+            self.second_opinion_sequence
+        )
     }
 
     /// Activates the split action under the pointer, if any.

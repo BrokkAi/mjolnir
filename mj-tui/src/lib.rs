@@ -33,7 +33,7 @@ use mj_core::targets::AdditionalMount;
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, Confirmation, ContainerEditor,
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
-    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    RepositoryOriginDialog, TargetActionsDialog, WebDialog, WorkspacePicker,
 };
 use crate::help::HelpOverlay;
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
@@ -373,6 +373,9 @@ pub enum DashboardAction {
     CreateBundle {
         sources: Vec<String>,
     },
+    RemoveBundle {
+        bundle_id: String,
+    },
     Suspend {
         session_id: String,
         acknowledge_unpublished_work: bool,
@@ -395,6 +398,12 @@ pub enum DashboardAction {
     RenameSession {
         session_id: String,
         title: String,
+    },
+    /// Move a session, and its sub-agents, to another workspace.
+    ChangeWorkspace {
+        session_id: String,
+        workspace_id: String,
+        workspace_name: String,
     },
     /// Re-probe every target's capacity and ask every profile for its quota
     /// again. One key does both, so there is one action rather than two.
@@ -517,6 +526,12 @@ pub enum DashboardAction {
     /// Esc in its composer does.
     InterruptTurn {
         session_id: String,
+    },
+    /// End every turn Interrupt all found under one session: each Mjolnir
+    /// session's turn through the daemon, and each harness-native
+    /// sub-agent through its owner.
+    InterruptAll {
+        targets: InterruptAllTargets,
     },
     /// Show a session's sub-agents in their own workspace. The controller
     /// saves the composer draft first, as the prompt border's click does.
@@ -713,6 +728,8 @@ pub(crate) enum Mode {
     Web(WebDialog),
     WorkspaceManager(WorkspaceManager),
     Rename(RenameEditor),
+    /// The workspace choice for one session, before its confirmation.
+    ChangeWorkspace(WorkspacePicker),
     /// The selected session's changed files, branch, and upstream distance.
     ChangedFiles(ChangedFilesDialog),
     /// The last notices the footer showed, newest first.
@@ -874,6 +891,8 @@ pub struct DashboardState {
     pub(crate) session_menu_ids: Vec<String>,
     /// The Sessions pane's search and state filter, when one is open.
     pub(crate) sessions_filter: Option<SessionsFilter>,
+    /// What the daemon said about the Sessions filter's text in conversations.
+    pub(crate) sessions_text: dashboard_sessions::SessionsTextSearch,
     /// The commands run lately, newest first, for the palette's Recent group.
     pub(crate) recent_commands: std::collections::VecDeque<CommandId>,
     /// The rows the open resume dialog shows, derived from the records, the
@@ -1032,7 +1051,7 @@ mod dashboard_input;
 mod dashboard_panes;
 mod dashboard_sessions;
 mod pane_controls;
-pub use dashboard_sessions::{AttentionEntry, AttentionLevel};
+pub use dashboard_sessions::{AttentionEntry, AttentionLevel, InterruptAllTargets};
 mod dashboard_standby;
 mod dashboard_workspaces;
 pub use dashboard_workspaces::StoppedBySuspend;
@@ -1113,6 +1132,7 @@ impl DashboardState {
             session_action_focus: None,
             session_menu_ids: Vec::new(),
             sessions_filter: None,
+            sessions_text: Default::default(),
             recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
             resume_hit_counts: [0; crate::resume::ResumeTab::COUNT],

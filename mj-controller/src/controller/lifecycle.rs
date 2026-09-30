@@ -327,8 +327,34 @@ impl Controller {
                 .await
         };
         if let Err(error) = close_result {
-            self.record_interrupted_close(session_id, &error)?;
-            return Err(error.context("seal verified checkpoint for close"));
+            let error = error.context("seal verified checkpoint for close");
+            if !close_was_refused(&error) {
+                // The Close may have been accepted before the answer was
+                // lost, so only the interrupted-close recovery may decide.
+                self.record_interrupted_close(session_id, &error)?;
+                return Err(error);
+            }
+            // The worker answered and did not accept the Close, so its relay
+            // is not sealed and the session is still live. Nothing about this
+            // close can be resumed: release the barrier and return the
+            // session to work, keeping the checkpoint it just verified.
+            if let Err(cancel) = latched.relay.cancel_abandoned_barrier().await {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{cancel:#}"),
+                    "could not release the checkpoint barrier of a refused close"
+                );
+            }
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = state_after_unsealed_close(&previous);
+            record.last_error = Some(format!("{error:#}"));
+            record.updated_at = now();
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "restore a session whose worker refused its close",
+            )?;
+            return Err(error);
         }
         let close_result = {
             let _closing = ProvisionStageGuard::new(executor, ProvisionStage::Closing);
@@ -626,7 +652,7 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         ensure!(
-            has_nothing_to_checkpoint(&session),
+            has_nothing_to_checkpoint(&session, self.state.subagents.contains_key(session_id)),
             "session {session_id} has a workspace to checkpoint; suspend it instead"
         );
         self.stop_target_and_settle(session_id, &session, executor, &persist)
@@ -1043,6 +1069,51 @@ impl Controller {
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
     ) -> Result<()> {
+        let result = self.force_destroy_session_steps(session_id, executor, branch, delete);
+        if result.is_err() {
+            self.settle_failed_destroy(session_id);
+        }
+        result
+    }
+
+    /// A destroy that stopped partway leaves a record whose worker it may have
+    /// stopped already. The destroy is the decision, so the record stops being
+    /// a live session: `Error` is not polled, so the daemon does not keep
+    /// reconnecting a relay proxy to the worker it stopped (I2-9). The target
+    /// stays recorded, and the next destroy finishes the removal.
+    fn settle_failed_destroy(&mut self, session_id: &str) {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return;
+        };
+        if !record.state.is_active() || record.state == SessionState::Error {
+            return;
+        }
+        let previous = record.clone();
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.state = SessionState::Error;
+        record.updated_at = now();
+        if let Err(error) = persist_session_record_transition_or_restore(
+            &mut self.state,
+            session_id,
+            &previous,
+            "persist the failed destroy",
+            &crate::database::save_lifecycle_session,
+        ) {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not record a failed destroy"
+            );
+        }
+    }
+
+    fn force_destroy_session_steps(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+        delete: impl Fn(&str) -> Result<()>,
+    ) -> Result<()> {
         let session = self
             .state
             .sessions
@@ -1093,13 +1164,16 @@ impl Controller {
 /// failed, with no target locator left, has no target to read a workspace
 /// from at all. Every other state may hold work and must take the graceful
 /// close's checkpoint.
-pub fn has_nothing_to_checkpoint(session: &SessionRecord) -> bool {
+///
+/// `subagent` says the session is a Mjolnir sub-agent. A child is never
+/// resumed on its own, so a close keeps no archive of it; its conversation
+/// and report are already in the store. A parked child's worker is stopped,
+/// and so is that of a failed one: its first prompt was refused for good and
+/// its worker was stopped when it was recorded as failed (I1-2).
+pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> bool {
     match session.state {
-        SessionState::Provisioning => true,
-        // A parked sub-agent's worker is stopped. A child is never resumed on
-        // its own, so its close keeps no archive; its conversation and report
-        // are already in the store.
-        SessionState::Parked => true,
+        SessionState::Provisioning | SessionState::Parked => true,
+        SessionState::Error if subagent => true,
         SessionState::Closing
         | SessionState::Destroying
         | SessionState::Error
@@ -1185,6 +1259,17 @@ fn apply_close_checkpoint_failure(
 /// relay. `Closing` there is only the intent of this close, or of one
 /// interrupted before it sealed the relay, and the relay is still open, so the
 /// session is running.
+/// Whether the worker answered a Close with a definite refusal. A validation
+/// rejection means the relay never accepted the command; a lost or retryable
+/// answer does not say that, so it is not a refusal.
+fn close_was_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::worker_client::RelayRejected>()
+            .is_some_and(|rejected| !rejected.is_retryable())
+    })
+}
+
 fn state_after_unsealed_close(previous: &SessionRecord) -> SessionState {
     if previous.state == SessionState::Closing {
         SessionState::Running

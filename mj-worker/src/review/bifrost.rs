@@ -7,10 +7,13 @@ use std::process::Stdio;
 /// Every repository must succeed. A partial packet would tell the supervisor
 /// that a repository changed nothing when in truth Bifrost could not read it,
 /// which is the fabricated-evidence failure the whole design refuses.
-pub async fn changed_functions_packet(requests: &[AnalyzeRequest]) -> Result<String, String> {
+pub async fn changed_functions_packet(
+    binary: &std::path::Path,
+    requests: &[AnalyzeRequest],
+) -> Result<String, String> {
     let mut sections = Vec::new();
     for request in requests {
-        let analysis = analyze_diff(request).await?;
+        let analysis = analyze_diff_with(binary, request).await?;
         sections.push(format!(
             "Repository: {}\n{}",
             request.repository.display(),
@@ -22,11 +25,6 @@ pub async fn changed_functions_packet(requests: &[AnalyzeRequest]) -> Result<Str
         CHANGED_FUNCTIONS_LIMIT,
         "changed functions",
     ))
-}
-
-/// Runs Bifrost's one-shot `analyze_diff` for one repository.
-pub async fn analyze_diff(request: &AnalyzeRequest) -> Result<AnalyzeDiffResult, String> {
-    analyze_diff_with(&bifrost_binary(), request).await
 }
 
 async fn analyze_diff_with(
@@ -194,7 +192,7 @@ async fn incompatible_bifrost(binary: &std::path::Path) -> String {
     .filter(|version| !version.is_empty())
     .unwrap_or_else(|| "an unknown version".to_owned());
     format!(
-        "the `{}` binary is {version}, which has no analyze_diff tool; the review needs Bifrost {REQUIRED_BIFROST_VERSION} or later (`cargo install brokk-bifrost@{REQUIRED_BIFROST_VERSION} --locked --bin bifrost`, or set {BIFROST_BIN_ENV} to a newer binary)",
+        "the `{}` binary is {version}, which has no analyze_diff tool; the review needs Bifrost {REQUIRED_BIFROST_VERSION} or later (`cargo install brokk-bifrost@{REQUIRED_BIFROST_VERSION} --locked --bin bifrost`, or start the daemon with {BIFROST_BIN_ENV} set to a newer binary)",
         binary.display()
     )
 }
@@ -204,22 +202,16 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn a_missing_bifrost_binary_fails_the_review_with_the_fix() {
-        // Safety: the env var is process-global; this test names a unique
-        // path and does not race another test that reads it, because no other
-        // test in this module spawns Bifrost.
-        unsafe {
-            std::env::set_var(BIFROST_BIN_ENV, "/nonexistent/hel-review-bifrost");
-        }
-        let error = analyze_diff(&AnalyzeRequest {
-            repository: std::env::temp_dir(),
-            base_tree: "base".to_string(),
-            target_tree: "target".to_string(),
-        })
+        let error = analyze_diff_with(
+            std::path::Path::new("/nonexistent/hel-review-bifrost"),
+            &AnalyzeRequest {
+                repository: std::env::temp_dir(),
+                base_tree: "base".to_string(),
+                target_tree: "target".to_string(),
+            },
+        )
         .await
         .expect_err("a missing binary must fail the review");
-        unsafe {
-            std::env::remove_var(BIFROST_BIN_ENV);
-        }
         assert!(error.contains("rebuild the image"), "{error}");
     }
 

@@ -20,6 +20,7 @@ fn session_id(test: &str) -> String {
 fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
     let mut view = RuntimeReviewView {
         session_id: "activity".to_owned(),
+        questions: Vec::new(),
         tier: ReviewTier::Quick,
         phase: TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
@@ -245,6 +246,21 @@ impl FakeManager {
         manager
     }
 
+    /// The next request that is not a reviewer status check or pause, which
+    /// is how the host stops a review's leftover reviewers.
+    async fn next_past_reviewer_stops(&mut self) -> RemoteSessionRequest {
+        loop {
+            match self.next().await {
+                RemoteSessionRequest::Reviewer { action, reply, .. }
+                    if matches!(action, ReviewerAction::Status | ReviewerAction::Pause) =>
+                {
+                    let _ = reply.send(answer_for(&action));
+                }
+                other => return other,
+            }
+        }
+    }
+
     fn refuse_next_capture(&mut self, reason: &str) {
         self.capture_refusals.push_back(reason.to_owned());
     }
@@ -392,6 +408,9 @@ struct FakeEnvironment {
     /// own database.
     state: Mutex<TurnReviewState>,
     writes: Mutex<Vec<(TurnReviewState, std::thread::ThreadId)>>,
+    /// The session the state belongs to, learned from the first save, so the
+    /// restart sweep can name it the way the database's sweep does.
+    owner: Mutex<Option<String>>,
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     subagent: std::sync::atomic::AtomicBool,
     /// Refusals the next reviewer resolutions answer with, in order.
@@ -450,6 +469,7 @@ impl FakeEnvironment {
             staged: Mutex::new(Vec::new()),
             state: Mutex::new(TurnReviewState::default()),
             writes: Mutex::new(Vec::new()),
+            owner: Mutex::new(None),
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
@@ -578,7 +598,11 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(self.state())
     }
 
-    fn save_state(&self, _session_id: &str, state: &TurnReviewState) -> Result<(), String> {
+    fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String> {
+        *self
+            .owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.to_owned());
         let gate = self
             .save_gate
             .lock()
@@ -599,11 +623,18 @@ impl ReviewEnvironment for FakeEnvironment {
     }
 
     fn clear_interrupted(&self) -> Result<Vec<String>, String> {
-        self.state
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let interrupted = state.active.is_some() || state.pending_forward.is_some();
+        state.active = None;
+        let owner = self
+            .owner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active = None;
-        Ok(Vec::new())
+            .clone();
+        Ok(owner.filter(|_| interrupted).into_iter().collect())
     }
 
     fn background_work_settled<'a>(
@@ -1338,7 +1369,10 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
         .expect("shared drain");
     host.shutdown().await.expect("shutdown stays idempotent");
 
-    assert_eq!(environment.state().active, None);
+    assert!(
+        environment.state().active.is_some(),
+        "the in-flight marker survives shutdown, so the next daemon can tell the person"
+    );
     assert!(host.view(session).is_none());
     let writes = environment.writes();
     assert!(
@@ -1349,13 +1383,152 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
     assert!(
         writes
             .last()
-            .is_some_and(|(state, _)| state.active.is_none())
+            .is_some_and(|(state, _)| state.active.is_some())
     );
     let test_thread = std::thread::current().id();
     assert!(
         writes.iter().all(|(_, writer)| *writer != test_thread),
         "synchronous database writes run off the Tokio host thread"
     );
+}
+
+/// I1-8: `mj daemon restart` during a review left no notice, because the old
+/// daemon cleared its own in-flight marker while shutting down and the new
+/// daemon's startup sweep then found nothing to report.
+#[tokio::test]
+async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its_baseline() {
+    let session = session_id("restartnotice");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    {
+        let mut state = environment.state.lock().unwrap();
+        state
+            .baselines
+            .insert("/workspace/app".into(), "before-turn".into());
+    }
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &old).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("before-turn".to_owned()),
+            current_tree: "after-turn".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+    let _first_request = manager.next().await;
+    assert!(environment.state().active.is_some());
+
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the new daemon tells the person the review was cancelled");
+    assert_eq!(
+        notice,
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
+    );
+    let state = environment.state();
+    assert_eq!(state.active, None);
+    assert_eq!(
+        state.baselines[&PathBuf::from("/workspace/app")],
+        "before-turn",
+        "the baseline did not advance, so the next review covers both turns"
+    );
+    new.shutdown().await.unwrap();
+}
+
+/// I1-8 as observed: the restart came while the review was still choosing its
+/// reviewer, before any review state was written, and the row read
+/// `Reviewing`.
+#[tokio::test]
+async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() {
+    let session = session_id("restartprep");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    {
+        let mut state = environment.state.lock().unwrap();
+        state
+            .baselines
+            .insert("/workspace/app".into(), "before-turn".into());
+    }
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &old).await;
+    // Preparation asks the reviewer for its status; leave it unanswered.
+    let (_, _, _status_reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    assert!(old.view(session).is_some(), "the review is preparing");
+
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } = manager.next().await
+            {
+                let _ = reply.send(Ok(1));
+                return text;
+            }
+        }
+    })
+    .await
+    .expect("the new daemon tells the person the review was cancelled");
+    assert_eq!(
+        notice,
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
+    );
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "before-turn"
+    );
+    new.shutdown().await.unwrap();
 }
 
 /// Queued prompts hold the review back: reviewing now would hold work the
@@ -1396,7 +1569,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         admission,
         reply,
         ..
-    } = manager.next().await
+    } = manager.next_past_reviewer_stops().await
     else {
         panic!("recovery submits the pending handoff directly, without starting a reviewer");
     };
@@ -1887,4 +2060,536 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     assert_eq!(recorded.reviewed_through_ordinal, 12);
     assert_eq!(recorded.active, None);
     host.shutdown().await.expect("shutdown the host");
+}
+
+fn elicitation_event(ordinal: u64, previous_digest: &str, id: &str, message: &str) -> RelayEvent {
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal,
+        previous_digest: previous_digest.to_owned(),
+        digest: String::new(),
+        recorded_at_ms: i64::try_from(ordinal).unwrap_or_default() * 100,
+        command_id: None,
+        observation: RelayObservation::ElicitationRequested {
+            request: mj_core::elicitation::ElicitationRequest {
+                id: id.to_owned(),
+                message: message.to_owned(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+            },
+        },
+    };
+    event.digest = relay_event_digest(&event).expect("digest");
+    event
+}
+
+/// Opens a quick review of a one-line change and answers every step up to
+/// the reviewer's first journal poll, which is returned for the test.
+async fn open_a_quick_review_to_its_first_poll(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+) -> oneshot::Sender<Result<ReviewerOutcome, String>> {
+    finish_a_turn(manager, host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: std::path::PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Started(Box::new(
+        crate::worker_client::StartedReviewer {
+            native_session_id: None,
+            config_options: Vec::new(),
+            reused: false,
+            state: operational(),
+        },
+    ))));
+    let (_, _, reply) = manager
+        .next_reviewer(|role, action| {
+            role.as_deref() == Some(mj_core::review::driver::REVIEWER_ROLE)
+                && matches!(action, ReviewerAction::Attach { .. })
+        })
+        .await;
+    reply
+}
+
+/// RVC-3: the Auto reviewer's harness declined and asked "Retry with
+/// claude-opus-4-8?". Only the terminal's review pane showed that form; the
+/// session list, `mj elicitations` and the phone did not. The host projects
+/// the form from the role's journal into the review it publishes, and the
+/// review reads as a question rather than as work in progress.
+#[tokio::test]
+async fn a_reviewers_question_is_published_with_its_review() {
+    let session = session_id("reviewerform");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let message = "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?";
+    let asked = elicitation_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "decline-1",
+        message,
+    );
+    let through_digest = asked.digest.clone();
+    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
+        crate::worker_client::RelayAttachment {
+            state: operational(),
+            events: vec![asked],
+            through_ordinal: 1,
+            through_digest,
+        },
+    ))));
+    let view = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(view) = host.view(session).filter(|view| !view.questions.is_empty()) {
+                return view;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reviewer's form is published with the review");
+    assert_eq!(view.questions.len(), 1);
+    assert_eq!(
+        view.questions[0].role,
+        mj_core::review::driver::REVIEWER_ROLE
+    );
+    assert_eq!(view.questions[0].request.message, message);
+    assert_eq!(view.activity_label(), Some("Question"));
+    assert!(
+        !view.is_working(),
+        "a review waiting on a person is not working"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// `mj respond`, the phone and the terminal's session answer all reach the
+/// session handle. An id from a reviewer's question goes back to the role
+/// that asked, the same reviewer action the terminal's review pane sends.
+#[tokio::test]
+async fn an_answer_to_a_reviewers_question_reaches_that_role() {
+    let session = session_id("reviewanswer");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let handle = manager.control.session(session.to_owned()).await.unwrap();
+    let id = mj_client::review::ReviewerQuestion {
+        role: mj_core::review::driver::REVIEWER_ROLE.to_owned(),
+        request: mj_core::elicitation::ElicitationRequest {
+            id: "decline-1".into(),
+            message: "Retry?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        },
+    }
+    .session_request()
+    .id;
+    let answer = tokio::spawn(async move {
+        handle
+            .respond_elicitation(id, mj_core::elicitation::ElicitationResponse::Decline)
+            .await
+    });
+    match manager.next().await {
+        RemoteSessionRequest::Reviewer {
+            role,
+            action:
+                ReviewerAction::RespondElicitation {
+                    elicitation_id,
+                    response,
+                },
+            reply,
+            ..
+        } => {
+            assert_eq!(
+                role.as_deref(),
+                Some(mj_core::review::driver::REVIEWER_ROLE)
+            );
+            assert_eq!(elicitation_id, "decline-1");
+            assert_eq!(response, mj_core::elicitation::ElicitationResponse::Decline);
+            let _ = reply.send(Ok(ReviewerOutcome::ElicitationResolved));
+        }
+        other => panic!(
+            "a reviewer's question is answered through the reviewer, not the primary: {}",
+            other.session_id()
+        ),
+    }
+    answer.await.unwrap().expect("the answer is delivered");
+}
+
+/// The reviewer's operational state while a prompt with this id runs.
+fn busy_with(command_id: &str) -> RelayOperationalState {
+    let mut state = operational();
+    state.execution = mj_core::relay::RelayExecutionState::Running;
+    state.active_prompt = Some(mj_core::relay::ActiveRelayPrompt {
+        command_id: command_id.to_owned(),
+        created_at_ms: 0,
+        started_at_ms: 0,
+    });
+    state
+}
+
+/// Answers the host's requests until it records a line in the conversation,
+/// and returns that line.
+async fn next_notice(manager: &mut FakeManager) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return text;
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    let _ = reply.send(answer_for(&action));
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the host records a notice")
+}
+
+/// What the host reached while [`serve_leftover_worker`] answered it.
+#[derive(Debug)]
+enum Reached {
+    Notice(String),
+    /// A new review asked for the capture, so it started.
+    Capture,
+}
+
+/// Plays a worker whose default reviewing role still runs a turn review's
+/// prompt, blocked on a form, until the host pauses that role; paused roles
+/// are recorded in `paused`. Answers the host until it records a notice or a
+/// new review asks for its capture.
+async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<String>) -> Reached {
+    let leftover = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return Reached::Notice(text);
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer {
+                    role,
+                    action,
+                    reply,
+                    ..
+                } => {
+                    let role =
+                        role.unwrap_or_else(|| mj_core::review::driver::REVIEWER_ROLE.to_owned());
+                    match action {
+                        ReviewerAction::CaptureDelta { .. } => return Reached::Capture,
+                        ReviewerAction::Status => {
+                            let state = if role == mj_core::review::driver::REVIEWER_ROLE
+                                && !paused.contains(&role)
+                            {
+                                busy_with(&leftover)
+                            } else {
+                                operational()
+                            };
+                            let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(state))));
+                        }
+                        ReviewerAction::Pause => {
+                            paused.push(role);
+                            let _ = reply.send(Ok(ReviewerOutcome::Paused));
+                        }
+                        other => {
+                            let _ = reply.send(answer_for(&other));
+                        }
+                    }
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the host reaches a notice or a new review")
+}
+
+/// RVC-3(b): after a daemon restart, the worker's reviewer was still waiting
+/// on the Fable decline form from the review the restart cut off, which no
+/// surface could show. Every later turn's review was refused with "the
+/// reviewer is busy with a second opinion". A review that meets such a
+/// leftover prompt stops it, since no daemon can use its answer, and starts.
+#[tokio::test]
+async fn a_review_that_meets_a_leftover_reviewer_stops_it_and_starts() {
+    let session = session_id("leftoverstop");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let mut paused = Vec::new();
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
+    assert!(
+        matches!(reached, Reached::Capture),
+        "the review starts instead of being refused: {reached:?}"
+    );
+    assert!(
+        paused
+            .iter()
+            .any(|role| role == mj_core::review::driver::REVIEWER_ROLE),
+        "the leftover reviewer is stopped: {paused:?}"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// RVC-3(c): the next daemon said the review was cancelled while the
+/// worker's reviewer kept running it and holding its form. The daemon now
+/// stops that reviewer before it says so, and the next review starts.
+#[tokio::test]
+async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
+    let session = session_id("sweepstops");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    let mut paused = Vec::new();
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
+    let Reached::Notice(notice) = reached else {
+        panic!("the next daemon reports the cut-off review: {reached:?}");
+    };
+    assert_eq!(
+        notice,
+        "Turn review was cancelled when Mjolnir restarted; the next review covers the same changes"
+    );
+    for role in [
+        mj_core::review::driver::REVIEWER_ROLE,
+        mj_core::review::driver::VALIDATOR_ROLE,
+        mj_core::review::driver::SUPERVISOR_ROLE,
+        mj_core::review::driver::INTENT_ROLE,
+    ] {
+        assert!(
+            paused.iter().any(|paused| paused == role),
+            "{role} is stopped before the notice: {paused:?}"
+        );
+    }
+
+    finish_a_turn(&manager, &new).await;
+    let reached = serve_leftover_worker(&mut manager, &mut paused).await;
+    assert!(
+        matches!(reached, Reached::Capture),
+        "the next review starts: {reached:?}"
+    );
+    new.shutdown().await.unwrap();
+}
+
+/// The second-opinion wording stays for a real second opinion, which the
+/// terminal runs on the same reviewer.
+#[tokio::test]
+async fn a_review_refused_by_a_second_opinion_still_says_second_opinion() {
+    let session = session_id("secondopinion");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(busy_with(&format!(
+        "{}critique-1",
+        mj_core::second_opinion::COMMAND_ID_PREFIX
+    ))))));
+    assert_eq!(
+        next_notice(&mut manager).await,
+        "Turn review did not start: the reviewer is busy with a second opinion. \
+         The next review covers these changes."
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// A review asked for while the open one waits on a person names that
+/// question rather than only saying a review is open.
+#[tokio::test]
+async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
+    let session = session_id("openwaiting");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let asked = elicitation_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "decline-1",
+        "Retry with claude-opus-4-8?",
+    );
+    let through_digest = asked.digest.clone();
+    let _ = reply.send(Ok(ReviewerOutcome::Attached(Box::new(
+        crate::worker_client::RelayAttachment {
+            state: operational(),
+            events: vec![asked],
+            through_ordinal: 1,
+            through_digest,
+        },
+    ))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host
+            .view(session)
+            .is_none_or(|view| view.questions.is_empty())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the question is published");
+    let refusal = host
+        .start(session, true)
+        .await
+        .expect_err("one review at a time");
+    assert_eq!(
+        refusal.0,
+        "the previous review is waiting for your answer to a question \
+         (\"Retry with claude-opus-4-8?\"); answer or dismiss it"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
+/// RVC-3(c): a daemon restart posted "Turn review was cancelled when Mjolnir
+/// restarted" while the worker's reviewer was still running that review's
+/// prompt. A review the worker still holds should continue under the next
+/// daemon: no cancellation notice, and its verdict when the reviewer answers.
+///
+/// Today the reviewer's prompt survives in the worker but the review does
+/// not: the driver that reads the answer, checks it with the validator and
+/// advances the baseline (captured trees, awaited command ids, phase) lives
+/// only in the daemon's memory. Reattaching needs that state in the worker,
+/// which is issue #1185.
+#[tokio::test]
+#[ignore = "needs the turn-review driver in the worker (issue #1185); the daemon keeps the \
+            driver's state only in memory, so the next daemon cannot finish the review"]
+async fn a_review_the_worker_still_holds_continues_after_a_restart() {
+    let session = session_id("reattachreview");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let old = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    // The review prompts its reviewer, which the worker keeps running.
+    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    let command_id = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
+    old.shutdown().await.unwrap();
+
+    let new = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    new.observe(session, &view(session, MaterializedExecutionState::Idle));
+    // The worker still runs the review's prompt, and its journal then
+    // reports a clean answer that ends it.
+    let answer = agent_event(
+        1,
+        mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+        "No findings.",
+    );
+    let completion = completion_event(2, &answer.digest, &command_id);
+    let journal = vec![answer, completion];
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match manager.next().await {
+                RemoteSessionRequest::Submit {
+                    command: RelayCommand::RecordNotice { text },
+                    reply,
+                    ..
+                } => {
+                    let _ = reply.send(Ok(1));
+                    return text;
+                }
+                RemoteSessionRequest::Submit { reply, .. } => {
+                    let _ = reply.send(Ok(1));
+                }
+                RemoteSessionRequest::Reviewer { action, reply, .. } => {
+                    let _ = reply.send(match &action {
+                        ReviewerAction::Status => {
+                            Ok(ReviewerOutcome::Status(Box::new(busy_with(&command_id))))
+                        }
+                        ReviewerAction::Attach { after_ordinal, .. } if *after_ordinal == 0 => {
+                            Ok(ReviewerOutcome::Attached(Box::new(
+                                crate::worker_client::RelayAttachment {
+                                    state: operational(),
+                                    events: journal.clone(),
+                                    through_ordinal: 2,
+                                    through_digest: journal[1].digest.clone(),
+                                },
+                            )))
+                        }
+                        other => answer_for(other),
+                    });
+                }
+                other => panic!("unexpected request {}", other.session_id()),
+            }
+        }
+    })
+    .await
+    .expect("the next daemon says what became of the review");
+    assert_eq!(notice, "Review complete: no material findings");
+    assert_eq!(
+        environment.state().baselines[&PathBuf::from("/workspace/app")],
+        "new",
+        "the finished review moves the baseline as any clean review does"
+    );
+    new.shutdown().await.unwrap();
 }

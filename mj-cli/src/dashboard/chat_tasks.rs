@@ -1,6 +1,19 @@
 use super::*;
 
 impl DashboardContext {
+    /// Starts a background search of conversation text when the Sessions
+    /// filter's text changed since the last one. Cheap when it did not.
+    pub(crate) fn start_sessions_text_search(&mut self) {
+        if let Some((request_id, query)) = self.dashboard.next_sessions_text_search() {
+            crate::dashboard::io::spawn_sessions_text_search(
+                request_id,
+                query,
+                self.sessions_text_request.clone(),
+                self.dashboard_io_tx.clone(),
+            );
+        }
+    }
+
     /// Opens the resume dialog and starts one background scan per profile.
     /// Every profile appears immediately as a placeholder, so the dialog is
     /// usable while the scans are still running, and the scans run

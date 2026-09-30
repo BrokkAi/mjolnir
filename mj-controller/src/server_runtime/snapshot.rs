@@ -442,6 +442,20 @@ pub(super) fn viewer_snapshot_selected(
         ),
         None => ViewerSnapshot::from_config_state(&controller.config, &controller.state, revision),
     };
+    // Whether a target's runtime is installed is a fact about this host, so
+    // the daemon sets it where it publishes, from the one classifier the
+    // terminal wizards and the launch options also read.
+    let path = std::env::var_os("PATH");
+    for target in &mut snapshot.targets {
+        target.runtime_missing =
+            controller
+                .config
+                .targets
+                .get(&target.id)
+                .is_some_and(|template| {
+                    crate::targets::runtime_missing_on_host(template, path.as_deref())
+                });
+    }
     snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces
         .iter()
@@ -547,6 +561,16 @@ pub(super) fn viewer_snapshot_selected(
             .get(&session.id)
             .cloned()
             .unwrap_or_default();
+        // A reviewing harness's form is this session's question too: the
+        // person answers it here, and its id routes the answer to that role.
+        if let Some(review) = reviews.get(&session.id) {
+            session.pending_elicitations.extend(
+                review
+                    .questions
+                    .iter()
+                    .map(crate::review_host::ReviewerQuestion::session_request),
+            );
+        }
         session.prompt_images_supported = prompt_images.contains(&session.id);
         session.operation = operations.get(&session.id).cloned();
         // Runtime ownership takes precedence over the durable record. Move
@@ -714,6 +738,13 @@ pub(super) fn viewer_snapshot_selected(
         session.capabilities.open = session.conversation_available && !session.transitioning;
     }
     snapshot.capacity = capacity.to_vec();
+    // The same classifier `/api/v1/options` uses, so a picker can say which
+    // host did not answer its last check. The engine probe is not run here.
+    for target in &mut snapshot.targets {
+        let status = crate::server::api::target_availability(target, capacity, None);
+        target.availability = status.availability;
+        target.unavailable_reason = status.unavailable_reason;
+    }
     snapshot
 }
 

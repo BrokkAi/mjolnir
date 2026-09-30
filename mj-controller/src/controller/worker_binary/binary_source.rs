@@ -198,10 +198,20 @@ impl WorkerBinarySourceSnapshot {
                             local_cache.insert(path.clone(), cached.clone());
                         })
                     }) {
-                        Ok(cached) => Ok(WorkerBinaryAvailability::Local {
-                            path: cached,
-                            source,
-                        }),
+                        Ok(cached) => {
+                            tracing::info!(
+                                triple = requirement.triple(arch),
+                                source = source.as_str(),
+                                path = %path.display(),
+                                pinned = %cached.display(),
+                                build = BUILD_ID,
+                                "worker source selected"
+                            );
+                            Ok(WorkerBinaryAvailability::Local {
+                                path: cached,
+                                source,
+                            })
+                        }
                         Err(error) => {
                             let error = format!(
                                 "pin worker source {} for {arch} ({requirement:?}): {error:#}",
@@ -216,11 +226,21 @@ impl WorkerBinarySourceSnapshot {
                     url,
                     sha256,
                     triple,
-                }) => Ok(WorkerBinaryAvailability::Remote {
-                    url,
-                    sha256,
-                    triple,
-                }),
+                }) => {
+                    tracing::info!(
+                        triple = triple.as_str(),
+                        source = "MJ_WORKER_URL",
+                        url = url.as_str(),
+                        sha256 = sha256.as_str(),
+                        build = BUILD_ID,
+                        "worker source selected"
+                    );
+                    Ok(WorkerBinaryAvailability::Remote {
+                        url,
+                        sha256,
+                        triple,
+                    })
+                }
                 Err(error) => {
                     let error = format!("{error:#}");
                     tracing::debug!(

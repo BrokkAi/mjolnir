@@ -115,8 +115,8 @@ pub(super) async fn prepare(
     if child {
         return Err(StartRefusal(SUBAGENT_REFUSAL.to_owned()));
     }
-    // Mutual exclusion with a plan-review second opinion: they share the
-    // default reviewer role, and the running one keeps the slot. Checked
+    // Mutual exclusion on the default reviewer role, which a plan-review
+    // second opinion shares: the running prompt keeps the role. Checked
     // against the worker rather than against any UI's state, because the
     // worker is the only place that knows.
     let handle = control
@@ -124,11 +124,22 @@ pub(super) async fn prepare(
         .await
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
     match handle.reviewer(ReviewerAction::Status).await {
-        Ok(ReviewerOutcome::Status(state)) if state.active_prompt.is_some() => {
-            return Err(StartRefusal(
-                "the reviewer is busy with a second opinion".to_owned(),
-            ));
-        }
+        Ok(ReviewerOutcome::Status(state)) => match &state.active_prompt {
+            // Preparation runs only while this host holds no review for the
+            // session, so a turn review's prompt here belongs to a review an
+            // earlier daemon started and no daemon can finish. Stop it, as
+            // the startup sweep does, and review in its place.
+            Some(prompt) if is_turn_review_command(&prompt.command_id) => {
+                stop_leftover_review(&handle).await.map_err(|error| {
+                    StartRefusal(format!(
+                        "the review left running when Mjolnir restarted could not be \
+                         stopped: {error}"
+                    ))
+                })?;
+            }
+            Some(prompt) => return Err(StartRefusal(busy_reviewer(&prompt.command_id))),
+            None => {}
+        },
         Ok(_) => {}
         Err(error) => return Err(StartRefusal(format!("{error:#}"))),
     }
@@ -253,13 +264,20 @@ pub(super) async fn prepare_recovery(
     let state = tokio::task::spawn_blocking(move || environment.load_state(&session))
         .await
         .map_err(|error| format!("loading the pending review handoff stopped: {error}"))??;
-    let Some(pending) = state.pending_forward.clone() else {
-        return Ok(None);
-    };
     let handle = control
         .session(session_id.to_owned())
         .await
         .map_err(|error| format!("{error:#}"))?;
+    // The interrupted review's reviewers may still be running in the worker.
+    // Nothing will read them now, so they stop before anyone is told the
+    // review was cancelled. A failure is left to the next review's
+    // preparation, which meets the same leftover and stops it.
+    if let Err(error) = stop_leftover_review(&handle).await {
+        tracing::warn!(%session_id, %error, "could not stop the interrupted review's reviewers");
+    }
+    let Some(pending) = state.pending_forward.clone() else {
+        return Ok(None);
+    };
     let view = handle.view();
     if !view.connected {
         return Err("the primary session is not connected".to_owned());
@@ -285,6 +303,75 @@ pub(super) async fn prepare_recovery(
         resume_forward: Some(pending),
         captured: None,
     }))
+}
+
+/// Why the default reviewing role cannot take a new review, from the id of
+/// a prompt it is running that is not a turn review's.
+fn busy_reviewer(command_id: &str) -> String {
+    if command_id.starts_with(mj_core::second_opinion::COMMAND_ID_PREFIX) {
+        "the reviewer is busy with a second opinion".to_owned()
+    } else {
+        "the reviewer is busy".to_owned()
+    }
+}
+
+fn is_turn_review_command(command_id: &str) -> bool {
+    command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
+}
+
+/// Stops, in the worker, every reviewing role a turn review left running
+/// when the daemon that drove it went away.
+///
+/// The worker keeps a reviewer's harness, journal and pending form across a
+/// daemon restart, but the review that would read its answer lived in that
+/// daemon's memory. Left alone, the prompt holds the default role, so every
+/// later review is refused, and its form waits on a question no surface can
+/// show. Stopping it makes the daemon's "cancelled" true in the worker too.
+///
+/// The default role is shared with a plan-review second opinion, so it is
+/// stopped only while it runs a turn review's prompt. The other roles belong
+/// to turn reviews alone; pausing one that is not running does nothing.
+pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
+    use mj_core::review::driver::{INTENT_ROLE, REVIEWER_ROLE, SUPERVISOR_ROLE, VALIDATOR_ROLE};
+    let mut roles = vec![VALIDATOR_ROLE, INTENT_ROLE, SUPERVISOR_ROLE];
+    roles.extend(mj_review::lanes::REVIEW_LANES.iter().map(|lane| lane.id));
+    let status = handle
+        .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    if let ReviewerOutcome::Status(state) = status
+        && state
+            .active_prompt
+            .as_ref()
+            .is_some_and(|prompt| is_turn_review_command(&prompt.command_id))
+    {
+        roles.insert(0, REVIEWER_ROLE);
+    }
+    let mut failures = Vec::new();
+    for role in roles {
+        if let Err(error) = handle
+            .reviewer_as(Some(role.to_owned()), ReviewerAction::Pause)
+            .await
+        {
+            failures.push(format!("{role}: {error:#}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// A question's first line, quoted and kept short enough for a notice.
+pub(super) fn quoted_question(message: &str) -> String {
+    const LIMIT: usize = 160;
+    let line = message.lines().next().unwrap_or_default().trim();
+    if line.chars().count() > LIMIT {
+        format!("\"{}…\"", line.chars().take(LIMIT).collect::<String>())
+    } else {
+        format!("\"{line}\"")
+    }
 }
 
 /// How long a review waits for other work holding its session, such as the

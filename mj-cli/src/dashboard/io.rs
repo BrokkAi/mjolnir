@@ -130,6 +130,12 @@ pub(crate) enum DashboardIoUpdate {
         child: String,
         result: std::result::Result<(), String>,
     },
+    /// Interrupt all finished sending. Each failure names the session or
+    /// native sub-agent view it was for.
+    InterruptAllFinished {
+        targets: mj_tui::InterruptAllTargets,
+        failures: Vec<(String, String)>,
+    },
     ReviewRefused {
         session_id: String,
         message: String,
@@ -160,6 +166,11 @@ pub(crate) enum DashboardIoUpdate {
     RenameSession {
         title: String,
         result: std::result::Result<String, String>,
+    },
+    ChangeWorkspace {
+        session_id: String,
+        workspace_name: String,
+        result: std::result::Result<(), String>,
     },
     /// A prompt typed into a standby composer and handed to the daemon for
     /// delivery once the session is live.
@@ -200,6 +211,13 @@ pub(crate) enum DashboardIoUpdate {
     WikiRows {
         request_id: u64,
         result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
+    },
+    /// The daemon's answer to a Sessions filter search of conversation text.
+    /// The request id is the dashboard's; an answer for an older one is
+    /// dropped there.
+    SessionTextMatches {
+        request_id: u64,
+        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
     },
     /// One archived session's briefing, for the resume dialog's preview.
     WikiBrief {
@@ -267,6 +285,10 @@ pub(crate) enum DashboardIoUpdate {
     },
     CreatedBundle {
         result: Box<std::result::Result<CreatedBundleUpdate, String>>,
+    },
+    RemovedBundle {
+        bundle_id: String,
+        result: std::result::Result<(), String>,
     },
     ImportedSessionApplied {
         result: Box<std::result::Result<ImportedDashboardSessionApply, String>>,
@@ -468,6 +490,9 @@ impl DashboardIoUpdate {
             Self::CreatedBundle { result } => result.as_ref().as_ref().is_ok_and(|created| {
                 controller.config.bundles.get(&created.bundle_id) != Some(&created.bundle)
             }),
+            Self::RemovedBundle { bundle_id, result } => {
+                result.is_ok() && controller.config.bundles.contains_key(bundle_id)
+            }
             Self::ImportedSessionApplied { result } => {
                 result.as_ref().as_ref().is_ok_and(|applied| {
                     !controller.state.sessions.contains_key(&applied.session.id)
@@ -487,6 +512,10 @@ impl DashboardIoUpdate {
         match self {
             Self::CreatedBundle { .. } => Self::CreatedBundle {
                 result: Box::new(Err(error)),
+            },
+            Self::RemovedBundle { bundle_id, .. } => Self::RemovedBundle {
+                bundle_id,
+                result: Err(error),
             },
             Self::ImportedSessionApplied { .. } => Self::ImportedSessionApplied {
                 result: Box::new(Err(error)),
@@ -657,6 +686,9 @@ impl DashboardContext {
             } => {
                 self.dashboard
                     .native_agent_stop_finished(&owner, &child, result);
+            }
+            DashboardIoUpdate::InterruptAllFinished { targets, failures } => {
+                self.dashboard.interrupt_all_finished(&targets, failures);
             }
             DashboardIoUpdate::ReviewRefused {
                 session_id,
@@ -948,6 +980,20 @@ impl DashboardContext {
                         .set_notice(format!("Rename failed for {title}: {error}"));
                 }
             },
+            DashboardIoUpdate::ChangeWorkspace {
+                session_id,
+                workspace_name,
+                result,
+            } => match result {
+                Ok(()) => self.dashboard.set_notice(format!(
+                    "Moved {} to workspace \"{workspace_name}\".",
+                    self.session_notice_name(&session_id)
+                )),
+                Err(error) => self.dashboard.set_failure_notice(format!(
+                    "Could not move {} to workspace \"{workspace_name}\": {error}",
+                    self.session_notice_name(&session_id)
+                )),
+            },
             DashboardIoUpdate::ContainerSettings { session_id, result } => match result {
                 Ok(controller) => {
                     self.apply_controller_metadata(controller);
@@ -993,8 +1039,14 @@ impl DashboardContext {
                          again only when its configuration changes or the engine is installed"
                     );
                 }
-                self.dashboard
-                    .apply_target_readiness(generation, target_id, result);
+                match (&absent_engine, result) {
+                    (Some(_), Err(message)) => self
+                        .dashboard
+                        .apply_target_runtime_missing(generation, target_id, message),
+                    (_, result) => self
+                        .dashboard
+                        .apply_target_readiness(generation, target_id, result),
+                }
             }
             DashboardIoUpdate::TargetTest { target_id, result } => {
                 self.target_test_cancel = None;
@@ -1052,6 +1104,9 @@ impl DashboardContext {
                     .dashboard
                     .set_notice(format!("Archive search failed: {error}")),
             },
+            DashboardIoUpdate::SessionTextMatches { request_id, result } => {
+                self.dashboard.apply_sessions_text(request_id, result);
+            }
             DashboardIoUpdate::WikiBrief { wiki_id, result } => match result {
                 Ok(markdown) => self.dashboard.apply_wiki_brief(wiki_id, markdown),
                 Err(error) => self
@@ -1210,6 +1265,12 @@ impl DashboardContext {
                 Err(error) => {
                     self.dashboard.fail_bundle_creation(&error);
                 }
+            },
+            DashboardIoUpdate::RemovedBundle { bundle_id, result } => match result {
+                Ok(()) => self
+                    .dashboard
+                    .apply_removed_bundle(self.controller.config.clone(), &bundle_id),
+                Err(error) => self.dashboard.fail_bundle_removal(&error),
             },
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
                 Ok(applied) => {
@@ -1579,7 +1640,9 @@ impl DashboardContext {
                 }
                 self.dashboard
                     .set_notice(format!("Session {} is ready", name));
-                self.request_quota_refresh();
+                // No quota probe here. Creating, resuming or moving a session
+                // reads the quota already held; only the explicit Refresh and
+                // the scheduled poll ask the usage endpoint.
             }
             Ok(LifecycleSuccess::Resumed {
                 profile_id,
@@ -1596,7 +1659,6 @@ impl DashboardContext {
                 }
                 self.dashboard
                     .set_notice(format!("Resumed {} with {profile_id} on {target_id}", name));
-                self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Moved(outcome)) => {
                 if focus_session && owns_chat {
@@ -1616,7 +1678,6 @@ impl DashboardContext {
                             name, outcome.operation_id
                         )
                     });
-                self.request_quota_refresh();
             }
             Ok(LifecycleSuccess::Closed) => {
                 self.dashboard.set_notice(format!("Suspended {}", name));
@@ -1941,6 +2002,30 @@ mod tests {
         assert!(text.contains("[jev]"), "{text}");
         assert!(!text.contains("[targets."), "{text}");
         assert!(Config::load_from(&path).unwrap().targets.is_empty());
+    }
+
+    /// Launch campaign finding A-3: choosing "Follows the terminal" in Settings
+    /// removes `symbols` from `[advanced]` instead of leaving the old value.
+    #[test]
+    fn setup_save_removes_the_symbols_key_when_it_returns_to_unset() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut original = Config::default();
+        original.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+        original.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("symbols"));
+        let mut edited = original.clone();
+        edited.advanced.symbols = None;
+        save_setup_at(
+            &path,
+            &serde_json::to_string(&original).unwrap(),
+            &serde_json::to_string(&edited).unwrap(),
+            &State::default(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("symbols"), "{text}");
+        assert_eq!(Config::load_from(&path).unwrap().advanced.symbols, None);
     }
 
     #[test]

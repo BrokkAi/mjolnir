@@ -23,8 +23,10 @@ use serde::Deserialize;
 /// changesets can require several minutes before review fan-out can begin.
 pub const ANALYZE_DIFF_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The binary baked into the container image. An operator or a test can point
-/// this elsewhere, which is also how the worker's own tests drive a fake.
+/// Set on the daemon to choose the Bifrost binary. The daemon passes it to each
+/// worker in its launch configuration (`WorkerLaunchConfig::bifrost_binary`),
+/// because the worker's own environment is the target's login environment.
+/// Unset, a review runs `bifrost` from the target's `PATH`.
 pub const BIFROST_BIN_ENV: &str = "MJ_BIFROST_BIN";
 const DEFAULT_BIFROST_BIN: &str = "bifrost";
 
@@ -33,12 +35,26 @@ const DEFAULT_BIFROST_BIN: &str = "bifrost";
 /// `analyze_diff` is reported as needing this release.
 pub const REQUIRED_BIFROST_VERSION: &str = "0.10.7";
 
-/// What a review runs Bifrost as.
+/// The Bifrost the operator chose with `MJ_BIFROST_BIN` on the daemon, if any.
+/// The daemon passes it to each worker in the launch configuration.
+#[must_use]
+pub fn configured_bifrost_binary() -> Option<PathBuf> {
+    mj_core::config::env_override_os("BIFROST_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// What a review runs Bifrost as on the daemon's machine: the operator's
+/// choice, else `bifrost` on `PATH`.
 #[must_use]
 pub fn bifrost_binary() -> PathBuf {
-    mj_core::config::env_override_os("BIFROST_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BIFROST_BIN))
+    configured_bifrost_binary().unwrap_or_else(default_bifrost_binary)
+}
+
+/// The Bifrost a review runs when nothing selects one: `bifrost` on `PATH`.
+#[must_use]
+pub fn default_bifrost_binary() -> PathBuf {
+    PathBuf::from(DEFAULT_BIFROST_BIN)
 }
 
 /// The MCP server command line for one reviewed repository. `toolset` is

@@ -371,7 +371,15 @@ pub fn render_combined_with_theme(
     let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
-            render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected)
+            let drawn =
+                render_combined_themed(frame, dashboard, chats, opening_panes, transcript_selected);
+            // Dialog titles, hints and notices spell marks like `·` and `…`
+            // as literal text; ASCII mode folds whatever the glyph table did
+            // not already draw.
+            if theme::ascii() {
+                theme::fold_buffer_to_ascii(frame.buffer_mut());
+            }
+            drawn
         })
     })
 }

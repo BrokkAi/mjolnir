@@ -347,6 +347,8 @@ pub fn restore_single_repository_into_checkout(
 }
 
 /// Native session files use harness-specific working-directory keys. Rewrite
+/// the archived key to the one the harness derives from `target_cwd`, the
+/// directory the worker launches it in.
 pub(super) fn restored_native_relative_path(
     harness: HarnessKind,
     relative_path: &Path,
@@ -355,6 +357,7 @@ pub(super) fn restored_native_relative_path(
     let Some(target_cwd) = target_cwd else {
         return Ok(relative_path.to_path_buf());
     };
+    let target_cwd = &harness_storage_cwd(harness, target_cwd);
     let mut components = relative_path.components();
     match harness {
         HarnessKind::Claude => {
@@ -415,6 +418,7 @@ pub(super) fn restored_native_artifact_bytes(
     let Some(target_cwd) = target_cwd else {
         return Ok(data.to_vec());
     };
+    let target_cwd = &harness_storage_cwd(harness, target_cwd);
     if harness == HarnessKind::Muse
         && relative_path
             .file_name()

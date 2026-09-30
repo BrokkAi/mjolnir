@@ -442,6 +442,7 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     assert!(idle.contains("Idle"));
     let mut view = RuntimeReviewView {
         session_id: "session".to_owned(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),

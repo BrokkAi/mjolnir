@@ -93,6 +93,7 @@ impl HostState {
             None if self.preparing.contains(session_id) => {
                 let next = RuntimeReviewView {
                     session_id: session_id.into(),
+                    questions: Vec::new(),
                     tier: (self.config)().tier,
                     phase: TurnReviewPhase::LaunchingReviewer,
                     roles: Vec::new(),
@@ -131,8 +132,30 @@ impl HostState {
         // No sender may survive the join below or the receiver can never
         // observe EOF.
         let lane = self.persistence.take();
-        for (session_id, slot) in &mut self.reviews {
-            slot.state.active = None;
+        // A review still preparing has no state row to keep its marker in.
+        for session_id in &self.preparing {
+            if self.reviews.contains_key(session_id) {
+                continue;
+            }
+            let queued = lane
+                .as_ref()
+                .ok_or_else(|| "the review persistence lane stopped".to_owned())
+                .and_then(|persistence| {
+                    persistence
+                        .send(PersistenceRequest::MarkInterrupted {
+                            session_id: session_id.clone(),
+                        })
+                        .map_err(|_| "the review persistence lane stopped".to_owned())
+                });
+            if let Err(error) = queued {
+                tracing::warn!(session_id, %error, "could not queue review shutdown persistence");
+            }
+        }
+        // A review open now keeps its in-flight marker. The next daemon's
+        // startup sweep reads it to tell the person the review was cancelled;
+        // clearing it here made the restart silent. The baseline has not
+        // advanced, so the next review covers the same changes.
+        for (session_id, slot) in &self.reviews {
             let queued = lane
                 .as_ref()
                 .ok_or_else(|| "the review persistence lane stopped".to_owned())
@@ -161,28 +184,12 @@ impl HostState {
             self.publish(session_id);
         }
 
-        let clear_result = match lane {
-            Some(lane) => {
-                let (reply, cleared) = oneshot::channel();
-                let sent = lane
-                    .send(PersistenceRequest::ClearActive { reply })
-                    .map_err(|_| "the review persistence lane stopped during shutdown".to_owned());
-                drop(lane);
-                match sent {
-                    Ok(()) => cleared.await.map_err(|_| {
-                        "the review persistence lane stopped before cleanup".to_owned()
-                    })?,
-                    Err(error) => Err(error),
-                }
-            }
-            None => Err("the review persistence lane already stopped".to_owned()),
-        };
-        let task_result = match self.persistence_task.take() {
+        drop(lane);
+        match self.persistence_task.take() {
             Some(task) => task
                 .await
                 .map_err(|error| format!("review persistence lane panicked: {error}")),
             None => Ok(()),
-        };
-        clear_result.and(task_result)
+        }
     }
 }

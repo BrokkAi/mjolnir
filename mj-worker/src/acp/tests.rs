@@ -7891,3 +7891,113 @@ fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
         "start worker: durable relay open failed"
     );
 }
+
+/// A form the harness withdraws itself (`$/cancel_request` on its
+/// `elicitation/create`) still resolves as cancelled. Keeping the classifier
+/// away from open forms must not keep a withdrawn form alive (I1-6).
+#[tokio::test(flavor = "current_thread")]
+async fn a_form_the_harness_withdraws_still_resolves() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(async move {
+        let (read, mut write) = tokio::io::split(bridge_stream);
+        let mut lines = BufReader::new(read).lines();
+        let mut prompt_id = None;
+        while let Some(line) = lines.next_line().await.expect("read bridge input") {
+            let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
+            let id = message
+                .get("id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            if id == "ask-1" {
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": prompt_id.take().expect("prompt id recorded"),
+                    "result": {"stopReason": "cancelled"},
+                });
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                continue;
+            }
+            let response = match message.get("method").and_then(serde_json::Value::as_str) {
+                Some("initialize") => {
+                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"protocolVersion":1}})
+                }
+                Some("session/new") => {
+                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"sessionId":"scripted"}})
+                }
+                Some("session/prompt") => {
+                    prompt_id = Some(id);
+                    write
+                        .write_all(format!("{}\n", architecture_form()).as_bytes())
+                        .await
+                        .unwrap();
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "$/cancel_request",
+                        "params": {"requestId": "ask-1"},
+                    })
+                }
+                _ => continue,
+            };
+            if write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    let mut driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::from("Ask me which architecture to use")],
+        })
+        .await
+        .unwrap();
+    let (requested, resolved) = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut requested = None;
+        loop {
+            let Some(event) = event_rx.recv().await else {
+                panic!("runtime stopped: {:?}", (&mut driver).await);
+            };
+            match event {
+                RuntimeEvent::ElicitationRequested { request } => requested = Some(request.id),
+                RuntimeEvent::ElicitationResolved {
+                    elicitation_id,
+                    action,
+                } => break (requested, (elicitation_id, action)),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("a withdrawn form resolves");
+    assert_eq!(requested.as_deref(), Some("elicitation-1"));
+    assert_eq!(resolved, ("elicitation-1".to_owned(), "cancel".to_owned()));
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    bridge.abort();
+}

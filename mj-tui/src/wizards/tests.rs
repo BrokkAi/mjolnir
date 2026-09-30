@@ -536,33 +536,148 @@ fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Target);
 }
 
-#[test]
-fn project_picker_saved_projects_keep_add_project_beside_navigation() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+/// A saved-projects fixture: `hel` from the shared config, plus a second
+/// project with two repositories, one of them a path too long for a row.
+fn two_project_config() -> mj_core::config::Config {
+    let mut configuration = config();
+    let long_path =
+        "/tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0-9d1a-0123456789ab/bifrost";
+    configuration.bundles.insert(
+        "bifrost2".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "bifrost-dev".into(),
+            repositories: vec![
+                mj_core::config::ProjectRepository {
+                    id: "bifrost-dev".into(),
+                    github: Some("BrokkAi/bifrost-dev".into()),
+                    local: None,
+                    destination: PathBuf::from("bifrost-dev"),
+                    git_ref: None,
+                },
+                mj_core::config::ProjectRepository {
+                    id: "bifrost".into(),
+                    github: None,
+                    local: Some(PathBuf::from(long_path)),
+                    destination: PathBuf::from("bifrost"),
+                    git_ref: None,
+                },
+            ],
+        },
+    );
+    configuration
+}
+
+fn dashboard_at_saved_projects(state: State) -> DashboardState {
+    let mut dashboard = DashboardState::new(two_project_config(), state, BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+    dashboard
+}
+
+fn select_saved_project(dashboard: &mut DashboardState, bundle_id: &str) {
+    let index = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
+        .iter()
+        .position(|id| *id == bundle_id)
+        .unwrap();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard.bundle = index;
+    wizard.form.get_mut().focus(WizardControl::BundleList);
+}
+
+#[test]
+fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() {
+    let mut dashboard = dashboard_at_saved_projects(State::default());
+    select_saved_project(&mut dashboard, "bifrost2");
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let lines = draw_project_picker(&mut dashboard, &mut terminal);
     let text = lines.join("\n");
-    assert!(text.contains("hel  1 repository"), "{text}");
     assert!(text.contains("choose a project"), "{text}");
-    let action_row = lines
-        .iter()
-        .find(|line| line.contains("Add project"))
-        .unwrap();
+    // Rows name the first source and count the rest.
     assert!(
-        action_row.contains("Cancel") && action_row.contains("Next"),
+        lines
+            .iter()
+            .any(|line| line.contains("bifrost2") && line.contains("BrokkAi/bifrost-dev  +1 more")),
         "{text}"
     );
+    // The details under the list spell out every source of the selection,
+    // wrapped rather than cut, and name the primary repository.
+    assert!(text.contains("bifrost2 · 2 repositories"), "{text}");
+    assert!(text.contains("BrokkAi/bifrost-dev  (primary)"), "{text}");
+    let joined = lines
+        .iter()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .collect::<String>();
+    assert!(joined.contains("0123456789ab/bifrost"), "{text}");
+    // Add and Remove stack at the upper right, apart from the navigation row.
+    let row_of = |label: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("missing {label:?}:\n{text}"))
+    };
+    let (add, remove, cancel) = (row_of("Add…"), row_of("Remove"), row_of("Cancel"));
+    assert_eq!(remove, add + 1, "{text}");
+    assert!(add < row_of("bifrost2 ·") && cancel > remove, "{text}");
+    assert!(!lines[cancel].contains("Add"), "{text}");
     assert_eq!(
-        click_project_text(&mut dashboard, &mut terminal, "Add project"),
+        click_project_text(&mut dashboard, &mut terminal, "Add…"),
         DashboardAction::None
     );
     assert_eq!(project_wizard(&dashboard).step, WizardStep::NewBundle);
     activate_project_control(&mut dashboard, WizardControl::Back);
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+}
+
+#[test]
+fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selection() {
+    let mut state = State::default();
+    let session = stopped_session();
+    state.sessions.insert(session.id.clone(), session);
+    let mut dashboard = dashboard_at_saved_projects(state);
+
+    // A suspended session still resumes from `hel`, so Delete explains why
+    // it stays instead of removing it.
+    select_saved_project(&mut dashboard, "hel");
+    assert_eq!(
+        ready_key(&mut dashboard, key(KeyCode::Delete)),
+        DashboardAction::None
+    );
+    let notice = dashboard.notice().unwrap();
+    assert!(notice.contains("\"hel\" is used by a session"), "{notice}");
+    assert!(notice.contains("ACP pretty name"), "{notice}");
+    assert!(!project_wizard(&dashboard).bundle_removal_in_flight);
+
+    select_saved_project(&mut dashboard, "bifrost2");
+    assert_eq!(
+        activate_project_control(&mut dashboard, WizardControl::RemoveBundle),
+        DashboardAction::RemoveBundle {
+            bundle_id: "bifrost2".into()
+        }
+    );
+    assert!(project_wizard(&dashboard).bundle_removal_in_flight);
+    // The list is frozen until the config write is confirmed.
+    for code in [KeyCode::Delete, KeyCode::Enter, KeyCode::Up] {
+        assert_eq!(ready_key(&mut dashboard, key(code)), DashboardAction::None);
+    }
+
+    let mut removed = dashboard.config.clone();
+    removed.bundles.remove("bifrost2");
+    dashboard.apply_removed_bundle(removed, "bifrost2");
+    let wizard = project_wizard(&dashboard);
+    assert!(!wizard.bundle_removal_in_flight);
+    assert_eq!(wizard.step, WizardStep::Bundle);
+    assert_eq!(
+        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        "hel"
+    );
+    assert_eq!(
+        dashboard.notice().as_deref(),
+        Some("Removed project bifrost2.")
+    );
 }
 
 #[test]
@@ -2505,6 +2620,40 @@ fn move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind
     assert!(
         rendered.contains("/work/repo stays on this machine and will no longer track this session"),
         "{rendered}"
+    );
+}
+
+/// A Move stops the parent's sub-agents as a suspend does. The review counts
+/// only the ones still at their task; idle ones have handed back and are not
+/// mentioned.
+#[test]
+fn move_review_counts_only_working_subagents() {
+    let review = |working: bool| {
+        let (mut dashboard, _) = dashboard_with_one_subagent();
+        if working {
+            dashboard
+                .session_details
+                .get_mut("child-session")
+                .unwrap()
+                .current_turn_started_at = Some(1);
+        }
+        let request_id = open_move_review(&mut dashboard);
+        assert!(dashboard.apply_move_preparation(request_id, move_preparation()));
+        let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .expect("draw move review");
+        let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
+        rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let idle = review(false);
+    assert!(!idle.contains("will be stopped"), "{idle}");
+    let working = review(true);
+    assert!(
+        working.contains(
+            "1 working sub-agent will be stopped; the session is told which when it resumes."
+        ),
+        "{working}"
     );
 }
 
@@ -5231,6 +5380,121 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     assert!(!wizard.target_step_skipped);
     let target = drawn(&mut dashboard, 140, 40).join("\n");
     assert!(target.contains("Move · 2/3 new target"), "{target}");
+}
+
+/// Answers the profile step's availability checks the way the dashboard loop
+/// does on a host with no Docker: `docker` is not installed (permanent for
+/// the host), `machine` did not answer (transient), and the rest are ready.
+fn answer_checks_without_docker(dashboard: &mut DashboardState) {
+    let Some(DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = dashboard.take_prerequisite_check()
+    else {
+        panic!("the profile step checks the targets");
+    };
+    for id in target_ids {
+        match id.as_str() {
+            "docker" => dashboard.apply_target_runtime_missing(
+                generation,
+                id,
+                "Docker is not installed on this host. Install Docker or choose another target."
+                    .into(),
+            ),
+            "machine" => dashboard.apply_target_readiness(
+                generation,
+                id,
+                Err("the host did not answer its last check".into()),
+            ),
+            _ => dashboard.apply_target_readiness(generation, id, Ok(())),
+        }
+    }
+}
+
+/// The user's rule: a target whose runtime is not on this host is left out of
+/// the pickers, while a host that did not answer stays listed with its
+/// status. The step shows the same rows for New, Resume and Move.
+#[test]
+fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
+    for flow in ["New session", "Resume", "Move"] {
+        let mut session = if flow == "Move" {
+            running_session()
+        } else {
+            stopped_session()
+        };
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some("/work/project".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.config = standard_local_targets_config();
+        dashboard
+            .config
+            .targets
+            .insert("machine".into(), bare_ssh_target());
+        match flow {
+            "New session" => {
+                open_new_session_wizard(&mut dashboard);
+            }
+            "Resume" => {
+                assert_eq!(
+                    dashboard.begin_resume_for("session-1"),
+                    DashboardAction::None
+                );
+            }
+            _ => {
+                dashboard.focus_sessions();
+                assert_eq!(dashboard.begin_move(), DashboardAction::None);
+            }
+        }
+        answer_checks_without_docker(&mut dashboard);
+        dashboard.handle_key(key(KeyCode::Enter));
+        let text = drawn(&mut dashboard, 160, 40).join("\n");
+        assert!(text.contains("target"), "{flow}: {text}");
+        assert!(text.contains("podman"), "{flow}: {text}");
+        assert!(
+            text.contains("machine") && text.contains("unavailable"),
+            "{flow}: an unresponsive host stays listed with its status: {text}"
+        );
+        assert!(
+            !text.contains("docker"),
+            "{flow}: a missing runtime is not listed: {text}"
+        );
+        assert!(
+            !text.contains("Docker is not installed"),
+            "{flow}: nor is its reason: {text}"
+        );
+    }
+}
+
+/// Moving the selection lands on the next listed target, not the next config
+/// entry, because the hidden target shifts the rows.
+#[test]
+fn selecting_a_row_skips_the_hidden_target() {
+    let mut dashboard = DashboardState::new(
+        standard_local_targets_config(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    open_new_session_wizard(&mut dashboard);
+    answer_checks_without_docker(&mut dashboard);
+    dashboard.handle_key(key(KeyCode::Enter));
+    // Config order is docker, localhost, podman; the rows are the last two.
+    let position = |dashboard: &DashboardState, id: &str| {
+        dashboard
+            .config
+            .targets
+            .keys()
+            .position(|key| key == id)
+            .unwrap()
+    };
+    let localhost = position(&dashboard, "localhost");
+    let podman = position(&dashboard, "podman");
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("expected the new-session wizard");
+    };
+    wizard.target = localhost;
+    drawn(&mut dashboard, 160, 40);
+    dashboard.handle_key(key(KeyCode::Down));
+    assert_eq!(new_wizard(&dashboard).target, podman);
 }
 
 fn ctrl_space() -> KeyEvent {

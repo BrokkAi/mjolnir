@@ -377,7 +377,7 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
             assert_eq!(unfiltered.line.to_string(), "Sessions", "{symbols:?}");
             assert_eq!(unfiltered.clear_chip, None, "{symbols:?}");
 
-            for label in ["working", "working · 3 hidden"] {
+            for label in ["working", "3 hidden · working"] {
                 let without = sessions_title(label, 120, true, false);
                 assert_eq!(without.line.to_string(), format!(" Sessions · {label} "));
                 assert_eq!(without.clear_chip, None);
@@ -407,6 +407,50 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
     }
 }
 
+/// RCL-2 (2026-09-29): a minimized Sessions pane swaps its title for the
+/// attention count when the title is narrow. A filter in force must still show
+/// on it: the label gives way first, and the clear chip stays.
+#[test]
+fn a_narrow_sessions_title_with_attention_keeps_the_filter_clear_chip() {
+    use crate::AttentionLevel;
+    use mj_core::config::SymbolSet;
+
+    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+        theme::with_symbols(symbols, || {
+            let badge = Some((AttentionLevel::Waiting, 1));
+            let mut saw_label = false;
+            for width in 14..=60u16 {
+                let title = sessions_title_with_attention("/needle", width, badge, true, true);
+                let text = title.line.to_string();
+                let budget = usize::from(pane_title_content_width(width, true));
+                if text.chars().count() > budget {
+                    // Only the base title may overflow, and it is the one that
+                    // truncates its own label; it still ends with the chip.
+                    assert!(text.contains(close), "{symbols:?} {width}: {text:?}");
+                    continue;
+                }
+                // The full form puts the attention suffix after the chip.
+                assert!(
+                    text.contains(&format!(" {close} ")),
+                    "{symbols:?} {width}: {text:?}"
+                );
+                let chip = usize::from(title.clear_chip.expect("chip has room"));
+                assert!(
+                    text.chars()
+                        .skip(chip)
+                        .collect::<String>()
+                        .starts_with(&format!(" {close} ")),
+                    "{symbols:?} {width}: {text:?}"
+                );
+                saw_label |= text.contains("/n");
+            }
+            assert!(saw_label, "{symbols:?}: some width keeps part of the label");
+            let none = sessions_title_with_attention("", 20, badge, true, false);
+            assert!(!none.line.to_string().contains(close), "no filter, no chip");
+        });
+    }
+}
+
 /// The drawn Sessions pane shows the chip on its title row exactly while a
 /// filter is in force, with the state label and, given the room, the hidden
 /// count before it.
@@ -414,7 +458,7 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
 fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
     use mj_core::config::SymbolSet;
 
-    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
+    for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')] {
         let mut dashboard = dashboard_with_session(running_session());
         let mut config = dashboard.config.clone();
         config.advanced.symbols = Some(symbols);
@@ -440,7 +484,7 @@ fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
         dashboard.handle_key(key(KeyCode::Char('w')));
         let working = title(&mut dashboard, 120);
         assert!(
-            working.contains(&format!(" Sessions · working{chip}")),
+            working.contains(&format!(" Sessions {dot} working{chip}")),
             "{symbols:?}: {working:?}"
         );
 
@@ -449,7 +493,7 @@ fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
         dashboard.handle_key(key(KeyCode::Char('b')));
         let blocked = title(&mut dashboard, 240);
         assert!(
-            blocked.contains(&format!(" Sessions · blocked{chip}")),
+            blocked.contains(&format!(" Sessions {dot} blocked{chip}")),
             "{symbols:?}: {blocked:?}"
         );
 
@@ -1391,6 +1435,16 @@ fn current_agent_excerpt_never_repeats_an_old_answer() {
         ..SessionDetail::default()
     };
     assert_eq!(current_agent_excerpt(&old_only), None);
+}
+
+#[test]
+fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
+    let asking = SessionDetail {
+        latest_agent_activity_after_last_user: Some("request_user_input".into()),
+        pending_elicitations: vec![crate::test_support::question("session-1")],
+        ..SessionDetail::default()
+    };
+    assert_eq!(current_agent_excerpt(&asking), Some("Choose a path"));
 }
 
 #[test]
@@ -2338,6 +2392,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
     );
     dashboard.set_session_reviews([RuntimeReviewView {
         session_id: "session-second".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
         roles: Vec::new(),
@@ -2371,6 +2426,7 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
     // must not pair a live review with the primary's idle marker.
     dashboard.set_session_reviews([RuntimeReviewView {
         session_id: "session-second".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
         roles: Vec::new(),

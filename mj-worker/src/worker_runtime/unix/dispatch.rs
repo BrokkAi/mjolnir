@@ -65,10 +65,21 @@ async fn run_relay_coordinator_with_verdict(
     // turn's first ordinal, and when to end the turn if nothing answers it.
     let mut stop_timer: Option<(u64, tokio::time::Instant)> = None;
     loop {
-        relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .prepare_pending_assessment()?;
+        // While a checkpoint barrier holds its cut, or a Close has sealed the
+        // relay at one, the worker writes nothing of its own: the classifier's
+        // answer, its assessment bookkeeping and the retry and stop timers all
+        // wait. A barrier ends through a relay request or a disconnect, and
+        // both wake this loop, so the branches below open again then.
+        let held = {
+            let relay = relay.lock().expect("relay state lock poisoned");
+            relay.worker_writes_held() || relay.close_pending()
+        };
+        if !held {
+            relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .prepare_pending_assessment()?;
+        }
         let invalidated_generation = verdict_generation.filter(|generation| {
             !relay
                 .lock()
@@ -82,10 +93,14 @@ async fn run_relay_coordinator_with_verdict(
             verdict_tasks.abort_all();
             verdict_generation = None;
         }
-        let pending = relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .pending_replied_verdict();
+        let pending = (!held)
+            .then(|| {
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .pending_replied_verdict()
+            })
+            .flatten();
         if let Some((generation, evidence, assessment)) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
@@ -203,7 +218,7 @@ async fn run_relay_coordinator_with_verdict(
                     &mut user_shells,
                 )?;
             }
-            _ = tokio::time::sleep_until(wake_at), if capacity_deadline.is_some() => {
+            _ = tokio::time::sleep_until(wake_at), if capacity_deadline.is_some() && !held => {
                 let admitted = relay.lock().expect("relay state lock poisoned")
                     .submit_due_capacity_retry(mj_core::clock::epoch_millis().max(capacity_deadline.expect("guarded retry timer")))?;
                 if !admitted {
@@ -213,7 +228,7 @@ async fn run_relay_coordinator_with_verdict(
                 }
                 dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
             }
-            _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() => {
+            _ = tokio::time::sleep_until(stop_at), if stop_timer.is_some() && !held => {
                 let (turn, _) = stop_timer.take().expect("guarded stop timer");
                 relay
                     .lock()
@@ -222,7 +237,7 @@ async fn run_relay_coordinator_with_verdict(
                 // A checkpoint barrier may have been waiting for this turn.
                 dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
             }
-            _ = kimi_poll.tick(), if kimi_tasks.is_some() => {
+            _ = kimi_poll.tick(), if kimi_tasks.is_some() && !held => {
                 kimi_tasks
                     .as_mut()
                     .expect("Kimi poll branch is guarded")
@@ -230,7 +245,7 @@ async fn run_relay_coordinator_with_verdict(
                     .await?;
             }
             _ = verdict_poll.tick(), if verdict.is_some() => {}
-            result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() => {
+            result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() && !held => {
                 match result {
                     Some(Ok((generation, _assessment, mut attempt, answer))) => {
                         if verdict_generation == Some(generation) {
@@ -408,6 +423,19 @@ pub(crate) fn record_runtime_event(
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
     let mut relay = relay.lock().expect("relay state lock poisoned");
+    // Only harness output that changes no work can wait behind a ready
+    // checkpoint barrier; the relay decides which of it does. Anything else
+    // (a question for a person, a restart, command progress, background
+    // work) spoils the cut, so the writes that waited go first.
+    if !matches!(
+        event,
+        RuntimeEvent::SessionUpdate { .. }
+            | RuntimeEvent::NativeAgent { .. }
+            | RuntimeEvent::Notice { .. }
+            | RuntimeEvent::Warning { .. }
+    ) {
+        relay.end_checkpoint_hold()?;
+    }
     match event {
         RuntimeEvent::Connected {
             protocol_version: Some(protocol_version),

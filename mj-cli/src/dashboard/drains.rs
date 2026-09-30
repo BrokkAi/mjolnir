@@ -199,7 +199,12 @@ impl DashboardContext {
         while let Some(update) = self.worker.next_ready() {
             let session_id = update.session_id.clone();
             let connected = update.view.connected;
-            apply_session_activity(&mut self.dashboard, &session_id, &update.view);
+            apply_worker_activity(
+                &mut self.dashboard,
+                &mut self.chats,
+                &session_id,
+                &update.view,
+            );
             // Only unreachable relays drive the worker diagnostics flow.
             let connection_error = match update.view.error.as_ref() {
                 Some(ViewError::Unreachable(detail)) => Some(detail.clone()),
@@ -672,13 +677,27 @@ pub(crate) fn refresh_open_chats(
         if dashboard.go_mode().is_some() {
             chat.set_display_title(dashboard.go_conversation_title(chat.session_id()));
         }
-        let count = dashboard.subagent_count_for(chat.session_id());
-        chat.set_subagent_count(count);
         chat.set_subagents_enabled(record.is_some_and(|session| {
             session_uses_subagents(session, controller.state.is_subagent_session(&session.id))
         }));
-        let working = dashboard.working_subagent_count_for(chat.session_id());
-        chat.set_subagent_working_count(working);
+    }
+    refresh_subagent_counts(chats, dashboard);
+}
+
+/// Hands every open conversation the dashboard's count of its sub-agents and
+/// of how many are working, which the composer footer shows as `N/M`.
+///
+/// The working count changes whenever a child's worker reports different
+/// activity, which is not a change to any record, so it is refreshed from the
+/// worker updates as well as with the records (I2-7).
+pub(crate) fn refresh_subagent_counts(
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    dashboard: &DashboardState,
+) {
+    for chat in chats.values_mut() {
+        let session_id = chat.session_id().to_owned();
+        chat.set_subagent_count(dashboard.subagent_count_for(&session_id));
+        chat.set_subagent_working_count(dashboard.working_subagent_count_for(&session_id));
     }
 }
 

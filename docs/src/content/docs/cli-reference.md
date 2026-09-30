@@ -121,6 +121,8 @@ Creates and verifies a recovery copy for an active session. It waits for a safe 
 ```text
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--queue discard|start] [--clear-resources] [--yes] [--json]
+        [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
+mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
 Move keeps the logical session, workspace, transcript, and recoverable
@@ -139,8 +141,27 @@ A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
 refused with `this session's working tree lives on <host>; resume it there`.
 Such a session can change profile in place, or move to another bare target on
-the same host. To continue elsewhere, push its branch and start a new session
+the same host; that Move is the same in-place profile switch, keeping the
+checkout and transferring no files. To continue elsewhere, push its branch and start a new session
 from that branch. The same rule applies to `mj resume --target`.
+
+When the move copies a workspace, it transfers the repository history and
+tracked edits, plus the untracked files you keep selected. Three flags control
+that selection:
+
+- `--prepare` inspects the transfer and prints the preparation as JSON without
+  moving anything. Use it to see the eligible files, their sizes, and any
+  blockers.
+- `--exclude <repository>:<path>` leaves an untracked file or directory at
+  the source. Repeat it for each path.
+- `--allow-large-transfer` accepts a workspace transfer of at least 1 GB.
+  Without it, a large selection is refused, and the error says which of these
+  flags can resolve it.
+
+Paths left behind stay in a retained source. `mj move-sources --session <id>`
+lists the retained sources for a session as JSON. To delete one together with
+its excluded files, pass its operation ID as `--cleanup <operation-id>` and
+confirm with `--yes`; `--cleanup` without `--yes` is refused.
 
 An interactive invocation prepares the destination and asks for confirmation.
 `--yes` confirms the interruption for unattended use, but it does not choose
@@ -176,7 +197,8 @@ Inspect `scan` output before adopting or destroying anything. See [session recov
 mj workspaces list [--json]
 mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
-       [--project-directory <path>] [--branch <name>] [--base <revision>] [--title <text>]
+       [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
+       [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|all-models|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -204,12 +226,16 @@ mj models --profile <id> [--model <name>] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 ```
 
-`mj new --branch <name>` selects the branch checked out in a new isolated clone;
-otherwise the clone starts on the remote default branch. `--base <revision>`
-records a separate launch base for `mj diff`; it does not change the selected
-branch. A local clone resolves the base in the source repository, while a
-network clone resolves it from fetched Git history. A base cannot be combined
-with a session that runs directly in the selected directory.
+`mj new --at <sha>` starts the workspace checked out at that full commit ID in
+the bundle's primary repository, before the first prompt. It requires
+`--bundle`. With `--at`, `--branch <name>` creates that new branch at the
+commit; without `--branch`, HEAD is detached. Without `--at`, `--branch <name>`
+selects an existing branch to check out in a new isolated clone; otherwise the
+clone starts on the remote default branch. `--base <revision>` records the diff
+base for `mj diff` when it should not be `--at`; it defaults to `--at` and does
+not move the checkout. A local clone resolves the base in the source
+repository, while a network clone resolves it from fetched Git history. A base
+cannot be combined with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
@@ -270,16 +296,19 @@ without a workspace lists them in a workspace named `default`.
 
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints
-the outcome, the turn number, the elapsed time, and the agent's final message,
+the outcome, the elapsed time, the number of tool calls, and the agent's final message,
 and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
 
 The first line of a wait says how the turn ended in the same words as
 `mj sessions --session <id>`, for example
-`finished turn 16 (completed, end of turn) in 5.3s` or
-`error turn 4 (failed: harness inactive) in 30.3s`. With `--json`, the
-`stop_reason` field keeps the harness's own spelling, such as `EndTurn`.
+`turn finished (completed, end of turn) in 5.3s · 4 tool calls` or
+`turn error (failed: harness inactive) in 30.3s`. The tool-call count appears
+when the turn made any. The line carries no turn number: the number `mj prompt`
+prints is the handle `mj wait --turn` takes, not a count. With `--json`, the
+`stop_reason` field keeps the harness's own spelling, such as `EndTurn`, and
+`turn_id` and `tool_calls` are separate fields.
 
 `mj resume` continues a session that `mj suspend` suspended. The session keeps its
 id, its transcript, and its work; Mjolnir provisions a fresh target and restores
@@ -344,7 +373,9 @@ replacement and perform no lifecycle action.
 `mj export` writes a patch, a bundle, or one workspace file (`--kind file
 --path <path>`) to `--out`, or to standard output when no file is named;
 `--kind branch` pushes the session's work and reports the branch and remote
-instead. `mj transcript` pages by `--after-seq`, so a caller that
+instead. With `--json` and `--out`, `mj export` prints one object with the
+`path`, the `bytes` written, and the `format` (`patch`, `bundle`, or `file`);
+with `--json` and no `--out` the export itself is still the output. `mj transcript` pages by `--after-seq`, so a caller that
 remembers the last `seq` it read sees only what is new.
 
 Each command in this section except `mj events` and `mj respond` takes
@@ -370,7 +401,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `MJ_DESKTOP_BINARY` | Explicit `mj-desktop` executable used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Explicit controller executable used by companion launchers. |
 | `MJ_VOICE_WORKER` | Explicit local voice-worker executable. |
-| `MJ_BIFROST_BIN` | Explicit Bifrost analysis executable used by turn review. |
+| `MJ_BIFROST_BIN` | Set on the daemon (`MJ_BIFROST_BIN=/path/to/bifrost mj daemon restart`), not in a profile. The daemon passes it to each new session's worker, which runs Bifrost for turn review; the path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. It needs Bifrost 0.10.7 or later, and `mj doctor` warns when the Bifrost on this machine is older. |
 | `CODEX_HOME` | Codex home used by setup discovery and native import. |
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |

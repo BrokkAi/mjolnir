@@ -37,10 +37,7 @@ impl DashboardState {
                 #[cfg(test)]
                 self.reconciliation_visits
                     .set(self.reconciliation_visits.get() + 1);
-                self.session_details.get(id).is_some_and(|d| {
-                    d.activity
-                        .is_working(d.current_turn_started_at, d.awaiting_input)
-                })
+                self.session_is_working(id)
             })
             .count();
         let native: BTreeSet<_> = self

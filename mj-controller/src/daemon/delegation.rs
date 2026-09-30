@@ -144,8 +144,15 @@ async fn run(
                 } else {
                     dispatch.retire(&id);
                     observations.remove(&id);
-                    noticed.remove(&id);
                     retry.remove(&id);
+                    // A parked child loses its observer and gets a new one
+                    // when `send_input` starts it again. That observer first
+                    // reports the turn this loop already settled; forgetting
+                    // it here parked the child again under the input that
+                    // was starting it. Forget a session only once it is gone.
+                    if state.session_record(&id).is_none() {
+                        noticed.remove(&id);
+                    }
                 }
             }
             completed = jobs.join_next_with_id(), if !jobs.is_empty() => {

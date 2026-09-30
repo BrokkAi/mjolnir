@@ -117,6 +117,9 @@ pub struct ReviewerPlacement {
     /// started without one cannot be reviewed: with no record of what the tree
     /// held before the turn, every file would be reported as new work.
     pub review_capture: bool,
+    /// The Bifrost the review runs, as the controller chose it; `None` is
+    /// `bifrost` on the target's `PATH`.
+    pub bifrost_binary: Option<PathBuf>,
     /// Which untracked paths each repository already held at the point the
     /// current baseline was taken. A review needs this to tell a file the turn
     /// created from one that was already lying in the working tree, without
@@ -738,8 +741,13 @@ impl ReviewerRole {
                 target_tree: repository.current_tree,
             });
         }
+        let binary = self
+            .placement
+            .bifrost_binary
+            .clone()
+            .unwrap_or_else(mj_review::bifrost::default_bifrost_binary);
         let packet = tokio::select! {
-            result = crate::review::bifrost::changed_functions_packet(&requests) =>
+            result = crate::review::bifrost::changed_functions_packet(&binary, &requests) =>
                 result.map_err(|error| anyhow::anyhow!("{error}"))?,
             () = self.request_cancel.cancelled() => bail!("reviewer analysis cancelled"),
         };

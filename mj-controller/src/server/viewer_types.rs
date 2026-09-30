@@ -173,9 +173,12 @@ impl ViewerSnapshot {
                     .get(&session.id)
                     .map(|children| children.keys().cloned().collect())
                     .unwrap_or_default();
+                let start = session.start_selection();
                 ViewerSession {
                     subagents: session.subagents.clone().unwrap_or_default(),
-                    checkout: session.checkout.clone(),
+                    at: start.at,
+                    branch: start.branch,
+                    base: start.base,
                     expected_runtime_identity: session.expected_runtime_identity.clone(),
                     targeted_turn_control_supported: false,
                     native_subagents: Vec::new(),
@@ -306,6 +309,9 @@ impl ViewerSnapshot {
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
+                runtime_missing: false,
+                availability: crate::server::api::LaunchAvailability::Unknown,
+                unavailable_reason: None,
                 recent_project_directories: project_history_host(target)
                     .map(|host| {
                         state
@@ -375,8 +381,15 @@ pub struct ViewerSession {
     pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_runtime_identity: Option<String>,
+    /// Commit the workspace started checked out at, when one was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    pub at: Option<String>,
+    /// Branch created at `at`, or the existing branch checked out without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Diff base the session was started with; `at` unless another was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -881,12 +894,29 @@ pub struct ViewerTargetCapacity {
     pub has_error: bool,
 }
 
+fn unknown_availability() -> crate::server::api::LaunchAvailability {
+    crate::server::api::LaunchAvailability::Unknown
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
     pub requires_project_directory: bool,
+    /// Whether this target's runtime (Docker, Podman) is not installed on the
+    /// host running the daemon. That is permanent for the host, so pickers
+    /// leave the target out and a request that names it is refused. A host
+    /// that merely did not answer is not this; it stays listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_missing: bool,
+    /// Whether the host's last check answered, from the same classifier as
+    /// `/api/v1/options`. `Unknown` until the capacity poller has run.
+    #[serde(default = "unknown_availability")]
+    pub availability: crate::server::api::LaunchAvailability,
+    /// A short sentence for a person when `availability` is `Unavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
     /// Recent raw project directories for this target's physical host. Managed
     /// targets intentionally publish an empty list because they select a
     /// configured bundle rather than a host checkout.

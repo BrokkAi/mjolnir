@@ -712,6 +712,97 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     );
 }
 
+/// A sub-agent whose first prompt was refused for good was recorded as
+/// failed on a bare target, with its worker stopped.
+fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -> Controller {
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Error;
+    session.last_error = Some("this agent does not offer high as a effort".into());
+    session.checkpoint = None;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.to_owned(),
+    });
+    let relation = mj_core::subagent::SubagentRecord {
+        child_session_id: session_id.into(),
+        parent_session_id: "parent-1".into(),
+        task_name: "count lines".into(),
+        profile_id: "claude".into(),
+        model: Some("haiku".into()),
+        effort: None,
+        working_directory: Default::default(),
+        initial_prompt: "count lines".into(),
+        request_key: "request-1".into(),
+        created_at: "2026-09-29T00:00:00Z".into(),
+        noticed_turn: None,
+        handback_tool: true,
+    };
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            subagents: [(session_id.into(), relation)].into_iter().collect(),
+            ..State::default()
+        },
+    }
+}
+
+/// I1-2: closing a failed sub-agent that still names its target takes no
+/// checkpoint (its worker is stopped and a child keeps no archive); it tears
+/// the target down and settles.
+#[test]
+fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+
+    controller
+        .suspend_session_without_checkpoint_with(session_id, &ProcessExecutor, |_| Ok(()))
+        .unwrap();
+
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+    assert!(!worker_root.exists(), "the child's worker root is removed");
+}
+
+/// I1-2: a failed sub-agent can be destroyed.
+#[test]
+fn force_destroy_removes_a_failed_subagent() {
+    if !in_isolated_store("force_destroy_removes_a_failed_subagent") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let deleted = RefCell::new(Vec::new());
+
+    controller
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Keep,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(!worker_root.exists(), "the child's worker root is removed");
+    assert!(!controller.state.sessions.contains_key(session_id));
+    assert!(!controller.state.subagents.contains_key(session_id));
+    assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+}
+
 /// An in-flight state with nobody to finish it becomes a failure the user can
 /// read, and a state that still has an owner is left alone (#1070).
 #[test]
@@ -1181,6 +1272,10 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
 
 #[test]
 fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
+    if !in_isolated_store("force_destroy_aborts_and_keeps_the_record_when_the_target_survives") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
@@ -1202,6 +1297,7 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
             ..State::default()
         },
     };
+    crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let deleted = RefCell::new(Vec::new());
 
     let error = controller
@@ -1229,6 +1325,13 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
         "a surviving target must keep the recovery archive"
     );
     assert!(deleted.into_inner().is_empty());
+    // The record is being destroyed: it must stop being polled, so the daemon
+    // does not keep reconnecting to a worker the destroy stopped (I2-9). It
+    // keeps its target, so the next destroy finishes the removal.
+    let record = &controller.state.sessions[session_id];
+    assert_eq!(record.state, SessionState::Error);
+    assert!(record.target.is_some());
+    assert!(!crate::pollers::session_target_is_pollable(record));
 }
 
 #[test]

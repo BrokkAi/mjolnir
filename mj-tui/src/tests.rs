@@ -1434,6 +1434,34 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
 }
 
 #[test]
+fn a_feed_record_with_a_new_workspace_moves_the_row_between_tabs() {
+    let mut dashboard = dashboard_with_attention_mix();
+    let ids = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    dashboard.set_active_workspace(Some("default".into()));
+    // The session is open in a pane, so it is the selected one: the list keeps
+    // the selected row visible, which must not outlive its workspace.
+    dashboard.select_active_session("quiet");
+    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+    assert!(ids(&dashboard).contains(&"quiet".to_owned()));
+    let mut next = dashboard.state.clone();
+    next.sessions.get_mut("quiet").unwrap().workspace_id = "other".into();
+    dashboard.set_state(next);
+    assert_eq!(dashboard.selected_session_id(), None);
+    assert!(!ids(&dashboard).contains(&"quiet".to_owned()));
+    dashboard.set_active_workspace(Some("other".into()));
+    assert!(ids(&dashboard).contains(&"quiet".to_owned()));
+    dashboard.set_active_workspace(Some("default".into()));
+    assert!(!ids(&dashboard).contains(&"quiet".to_owned()));
+    assert_eq!(dashboard.selected_session_id(), None);
+}
+
+#[test]
 fn workspace_arrows_keep_focus_while_restoring_other_workspace_views() {
     let mut dashboard = dashboard_with_session(running_session());
     let first = dashboard.active_workspace_id().unwrap().to_owned();
@@ -3614,6 +3642,7 @@ fn a_failure_outranks_a_question_and_an_unreachable_worker_sits_between_them() {
     // session must win, so the row, the queue, and the badge all say failure.
     dashboard.set_session_reviews([mj_client::review::RuntimeReviewView {
         session_id: "asks".into(),
+        questions: Vec::new(),
         tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Verdict(
             mj_core::review::verdict::ReviewVerdict::Failed {
@@ -4071,6 +4100,79 @@ fn priority_order_lists_waiting_first_without_project_headings() {
     assert_eq!(ids[0], "done");
 }
 
+/// User request 2026-09-29: the Sessions title puts the hidden count first,
+/// then the state, then the clear chip: `8 hidden · idle ×`, and
+/// `8 hidden - idle x` with ASCII symbols. The chip still clears the filter.
+#[test]
+fn the_sessions_title_leads_with_the_hidden_count_and_ends_with_the_clear_chip() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::config::SymbolSet;
+
+    for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')] {
+        let mut dashboard = dashboard_with_attention_mix();
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(symbols);
+        dashboard.set_config(config);
+        dashboard.set_active_workspace(Some("default".into()));
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(dashboard.sessions_hidden_count(), 2);
+
+        let lines = drawn(&mut dashboard, 240, 40);
+        let label = format!("2 hidden {dot} idle {close} ");
+        let (x, y) = point(&lines, &label);
+        let pane = dashboard.pane_areas.expect("pane areas")[0];
+        assert_eq!(y, pane.y, "{symbols:?}: the label is on the title");
+        assert!(
+            !lines.iter().any(|line| line.contains("idle 2 hidden")
+                || line.contains(&format!("idle {dot} 2 hidden"))),
+            "{symbols:?}: {lines:#?}"
+        );
+
+        // The chip is the glyph after the state, and only it clears the filter.
+        let chip = x + "2 hidden · idle ".chars().count() as u16;
+        assert_eq!(
+            lines[usize::from(y)].chars().nth(usize::from(chip)),
+            Some(close)
+        );
+        for cell in [x, chip - 2] {
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), (cell, y)));
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (cell, y)));
+            assert!(dashboard.sessions_filter.is_some(), "{symbols:?}: {cell}");
+            drawn(&mut dashboard, 240, 40);
+        }
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), (chip, y)));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (chip, y)));
+        assert_eq!(dashboard.sessions_filter, None, "{symbols:?}");
+    }
+}
+
+/// RCL-2 (2026-09-29): with the Sessions pane minimized, the title still says
+/// a filter is on.
+#[test]
+fn a_minimized_sessions_pane_title_still_shows_the_filter_chip() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for c in "ask".chars() {
+        dashboard.handle_key(key(KeyCode::Char(c)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    assert!(dashboard.sessions_filter.is_some());
+
+    let lines = drawn(&mut dashboard, 80, 40);
+    let pane = dashboard.pane_areas.expect("pane areas")[0];
+    let title = &lines[usize::from(pane.y)];
+    let title = title
+        .chars()
+        .skip(usize::from(pane.x))
+        .take(usize::from(pane.width))
+        .collect::<String>();
+    assert!(title.contains('×'), "{title:?}");
+}
+
 #[test]
 fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -4108,7 +4210,7 @@ fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
     let wide = drawn(&mut dashboard, 240, 40);
     assert!(
         wide.iter()
-            .any(|line| line.contains("Sessions · /qui · 2 hidden")),
+            .any(|line| line.contains("Sessions · 2 hidden · /qui")),
         "{wide:#?}"
     );
 
@@ -5706,4 +5808,33 @@ fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
             "working count visited native history {count}"
         );
     }
+}
+
+/// I2-7: the composer footer's working count stayed 0 for a child's whole
+/// turn. The count must come from the facts the worker reports for the child,
+/// which is all a dashboard holds for a child nobody has opened, and it must
+/// agree with the child's Sessions row.
+#[test]
+fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    assert_eq!(dashboard.working_subagent_count_for(&parent), 0);
+
+    dashboard.set_session_activity(
+        "child-session",
+        mj_client::usage_format::SessionActivity {
+            execution: Some(mj_core::relay::RelayExecutionState::Running),
+            state: Some(mj_core::activity::ActivityState::Turn {
+                started_at_ms: Some(1_000),
+                last_activity_at_ms: None,
+            }),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        dashboard.attention_level("child-session"),
+        AttentionLevel::Working,
+        "the child's own row reads it as working"
+    );
+    assert_eq!(dashboard.working_subagent_count_for(&parent), 1);
 }

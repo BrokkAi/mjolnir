@@ -38,17 +38,36 @@ pub async fn validate_session_subagent_policy(
         .enabled_profile(profile_id)
         .context("parent profile unavailable")?
         .kind;
-    ensure!(
-        kind.supports_delegation_tools() || *policy == mj_core::subagent::SubagentPolicy::Native,
-        "subagent policies are supported only by Claude and Codex"
-    );
+    refuse_unsupported_policy(kind, policy)?;
     if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = policy {
-        subagent_options(profile_id.to_owned(), Some(model.clone()))
-            .await?
-            .validate(policy)
-            .map_err(anyhow::Error::msg)?;
+        let options = subagent_options(profile_id.to_owned(), Some(model.clone())).await?;
+        refuse_unavailable_choice(&options, policy)?;
     }
     Ok(())
+}
+
+/// These two failures name something in the request the caller can change, so
+/// they are refusals: the HTTP API answers 422 with the sentence, where an
+/// unmarked error would be a 500 that hides it in the daemon log.
+fn refuse_unsupported_policy(
+    kind: mj_core::config::HarnessKind,
+    policy: &mj_core::subagent::SubagentPolicy,
+) -> Result<()> {
+    if kind.supports_delegation_tools() || *policy == mj_core::subagent::SubagentPolicy::Native {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(mj_core::refusal::Refusal::unusable(
+        "subagent policies are supported only by Claude and Codex",
+    )))
+}
+
+fn refuse_unavailable_choice(
+    options: &mj_core::subagent::SubagentOptions,
+    policy: &mj_core::subagent::SubagentPolicy,
+) -> Result<()> {
+    options
+        .validate(policy)
+        .map_err(|message| anyhow::Error::new(mj_core::refusal::Refusal::unusable(message)))
 }
 
 async fn subagent_options_with<F, Fut>(
@@ -454,7 +473,61 @@ fn store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mj_core::refusal::Refusal;
+    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
     use std::cell::{Cell, RefCell};
+
+    fn refusal_message(error: &anyhow::Error) -> Option<String> {
+        Refusal::of(error).map(|refusal| refusal.message().to_owned())
+    }
+
+    #[test]
+    fn a_policy_on_a_harness_without_delegation_is_refused_with_its_message() {
+        let error =
+            refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::None)
+                .unwrap_err();
+        assert_eq!(
+            refusal_message(&error).as_deref(),
+            Some("subagent policies are supported only by Claude and Codex")
+        );
+        assert!(
+            refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::Native)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unavailable_model_or_effort_is_refused_with_its_message() {
+        let unavailable = SubagentPolicy::SingleModel {
+            model: "fake-child-model".into(),
+            effort: None,
+        };
+        let error =
+            refuse_unavailable_choice(&SubagentOptions::default(), &unavailable).unwrap_err();
+        let message = refusal_message(&error).expect("a refusal, not an internal error");
+        assert!(
+            message.contains("\"fake-child-model\" is unavailable"),
+            "{message}"
+        );
+
+        // A model that is offered but a missing effort is refused the same way.
+        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let options = SubagentOptions {
+            models: vec![choice("haiku")],
+            efforts: vec![choice("high")],
+            unavailable: Vec::new(),
+        };
+        let policy = SubagentPolicy::SingleModel {
+            model: "haiku".into(),
+            effort: Some("low".into()),
+        };
+        let error = refuse_unavailable_choice(&options, &policy).unwrap_err();
+        assert!(refusal_message(&error).is_some(), "{error:#}");
+    }
 
     #[tokio::test]
     async fn subagent_options_use_eligible_profiles_and_model_specific_efforts() {

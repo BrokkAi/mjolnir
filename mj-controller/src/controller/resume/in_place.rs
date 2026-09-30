@@ -27,7 +27,7 @@ impl Controller {
     /// The session must be the one [`Controller::suspend_session_for_move`] left
     /// behind for an in-place swap: `Closing`, with its verified checkpoint and
     /// its target still on the record. On success the session is `Running` on
-    /// `profile_id` in the same target. Failures stop only the worker and keep
+    /// `profile_id` in the same environment, recorded under `target_template_id`. Failures stop only the worker and keep
     /// the environment and checkpoint for an explicit retry.
     // The target gate below is an ordinary lock held across the restore on
     // purpose; see the comment where it is taken.
@@ -39,6 +39,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         profile_id: &str,
+        target_template_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
         let previous = self
@@ -72,14 +73,10 @@ impl Controller {
         let target_template = self
             .config
             .targets
-            .get(&previous.target_template_id)
-            .with_context(|| format!("unknown target template {:?}", previous.target_template_id))?
+            .get(target_template_id)
+            .with_context(|| format!("unknown target template {target_template_id:?}"))?
             .clone();
-        self.validate_muse_resume_destination(
-            &previous,
-            profile.kind,
-            &previous.target_template_id,
-        )?;
+        self.validate_muse_resume_destination(&previous, profile.kind, target_template_id)?;
         ensure!(
             profile.kind != mj_core::config::HarnessKind::Muse
                 || previous.additional_mounts.is_empty(),
@@ -109,7 +106,7 @@ impl Controller {
                 "retained checkout is missing; refusing to recreate it"
             );
         } else if let Some(path) = &previous.project_directory {
-            self.validate_project_directory(&previous.target_template_id, path, executor)?;
+            self.validate_project_directory(target_template_id, path, executor)?;
         }
         let source_profile = self
             .config
@@ -165,6 +162,10 @@ impl Controller {
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.harness_kind = profile.kind;
             record.last_profile = profile_id.to_string();
+            // Another bare target on the same machine is the same environment;
+            // the record only names it differently afterwards.
+            record.target_template_id = target_template_id.to_string();
+            record.target_runtime = Some((&target_template).into());
             record.native_session_id =
                 native_continuity.then(|| archive_manifest.session.native_session_id.clone());
             record.state = SessionState::Provisioning;
@@ -218,7 +219,6 @@ impl Controller {
                     // The repositories are already in the workspace, untouched
                     // by the swap; only the harness state is restored.
                     restore_repositories: false,
-                    primary_repository_root_from_conversion: false,
                     native_continuity,
                     discard_queued_prompts,
                     replay_queue: false,

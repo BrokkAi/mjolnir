@@ -222,7 +222,9 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
             assert_eq!(snapshot.records.len(), 1);
             assert_eq!(snapshot.records["session-1"].id, "session-1");
         }
-        RuntimeFeedUpdate::Session { .. } => panic!("session projection preceded its snapshot"),
+        RuntimeFeedUpdate::Session { .. } | RuntimeFeedUpdate::SessionRemoved(_) => {
+            panic!("session projection preceded its snapshot")
+        }
         RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
     }
 
@@ -232,7 +234,9 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
             assert_eq!(session_id, "session-1");
             assert_eq!(view.snapshot.unwrap().materialized.applied_event_ordinal, 4);
         }
-        RuntimeFeedUpdate::Snapshot(_) => panic!("session projection did not follow snapshot"),
+        RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {
+            panic!("session projection did not follow snapshot")
+        }
         RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
     }
 
@@ -333,6 +337,56 @@ async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections
     drop(feed);
 }
 
+/// The feed forgets the fingerprint of a session that leaves the daemon's
+/// snapshot, so it must say so: a consumer that kept its own copy would wait
+/// forever for a view this feed treats as already sent. The same unchanged
+/// view is sent again when the session returns.
+#[tokio::test]
+async fn a_session_leaving_the_snapshot_is_announced_and_republished_on_return() {
+    type PollRequest = (
+        u64,
+        tokio::sync::oneshot::Sender<anyhow::Result<daemon::RuntimeSnapshot>>,
+    );
+    let (poll_started_tx, mut poll_started_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PollRequest>();
+    let poll = move |_workspace_id: String, _after_revision: u64| {
+        let poll_started_tx = poll_started_tx.clone();
+        async move {
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            poll_started_tx
+                .send((0, finish_tx))
+                .expect("runtime feed poll receiver remains open");
+            finish_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("poll completion dropped"))?
+        }
+    };
+    let load = |session_id: String| async move { Ok(Some(projection(&session_id, 1, "digest-1"))) };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+    let mut answer = async |sessions| {
+        let (_, finish) = poll_started_rx.recv().await.expect("poll starts");
+        finish.send(Ok(snapshot(1, sessions, Vec::new()))).unwrap();
+        assert!(matches!(
+            feed.updates.recv().await,
+            Some(RuntimeFeedUpdate::Snapshot(_))
+        ));
+        feed.updates.recv().await
+    };
+
+    let published = answer(vec![runtime_view("session-1", 1, "digest-1")]).await;
+    assert!(
+        matches!(&published, Some(RuntimeFeedUpdate::Session { session_id, .. }) if session_id == "session-1")
+    );
+    let removed = answer(Vec::new()).await;
+    assert!(
+        matches!(&removed, Some(RuntimeFeedUpdate::SessionRemoved(session_id)) if session_id == "session-1")
+    );
+    let republished = answer(vec![runtime_view("session-1", 1, "digest-1")]).await;
+    assert!(
+        matches!(&republished, Some(RuntimeFeedUpdate::Session { session_id, .. }) if session_id == "session-1")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn runtime_feed_reports_poll_failure_and_recovers() {
     type PollRequest = (
@@ -363,7 +417,9 @@ async fn runtime_feed_reports_poll_failure_and_recovers() {
         .unwrap();
     match feed.updates.recv().await.expect("poll error update") {
         RuntimeFeedUpdate::Error(error) => assert!(error.contains("first poll failed"), "{error}"),
-        RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::Session { .. } => {
+        RuntimeFeedUpdate::Snapshot(_)
+        | RuntimeFeedUpdate::Session { .. }
+        | RuntimeFeedUpdate::SessionRemoved(_) => {
             panic!("poll failure was not surfaced")
         }
     }
@@ -534,7 +590,7 @@ async fn a_blocked_session_load_does_not_stop_other_sessions_with_four_workers()
                     session_updates.push(session_id);
                 }
             }
-            RuntimeFeedUpdate::Snapshot(_) => {}
+            RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {}
             RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
         }
     }

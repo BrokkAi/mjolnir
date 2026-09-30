@@ -228,19 +228,29 @@ pub(crate) async fn resolve_subagent_selection(
         .subagent_candidates(parent_profile.to_owned())
         .await?;
     let chosen = choose_subagent_profile(candidates, profile_id, parent_profile, &model)?;
-    let effort = match effort {
-        Some(effort) => {
-            validate_selectors(&chosen.choices, None, Some(effort))?;
-            Some(effort.to_owned())
-        }
-        None => parent_config.get("effort").cloned().filter(|effort| {
-            chosen
-                .choices
-                .efforts
-                .iter()
-                .any(|choice| &choice.value == effort)
-        }),
+    // A candidate's choices describe its default model. Efforts differ by
+    // model, and some models (Claude Haiku) offer none, so any other model's
+    // efforts are asked for.
+    let efforts = if chosen.choices.model.as_deref() == Some(model.as_str()) {
+        chosen.choices.efforts
+    } else {
+        backend
+            .profile_config(chosen.profile_id.clone(), Some(model.clone()), false)
+            .await
+            .map_err(|error| {
+                ApiFailure::unavailable(format!(
+                    "could not read the efforts profile {:?} offers for model {model:?}: {error:#}",
+                    chosen.profile_id
+                ))
+            })?
+            .efforts
     };
+    let effort = child_effort(
+        &model,
+        &efforts,
+        effort,
+        parent_config.get("effort").map(String::as_str),
+    )?;
     let fast_mode = mj_core::codex_catalog::is_luna_model(&model);
     Ok(SubagentSelection {
         profile_id: chosen.profile_id,
@@ -248,6 +258,35 @@ pub(crate) async fn resolve_subagent_selection(
         effort,
         fast_mode,
     })
+}
+
+/// The effort a child starts with, from the efforts its model offers. A
+/// requested effort must be one of them; a model that offers none takes no
+/// effort at all. An omitted effort follows the parent's only when the
+/// child's model offers it, so a parent at `high` can delegate to a model
+/// without efforts.
+fn child_effort(
+    model: &str,
+    offered: &[mj_core::acp::SessionConfigChoice],
+    requested: Option<&str>,
+    parent: Option<&str>,
+) -> Result<Option<String>, ApiFailure> {
+    let offers = |effort: &str| offered.iter().any(|choice| choice.value == effort);
+    match requested {
+        Some(effort) if offered.is_empty() => Err(ApiFailure::bad_request(format!(
+            "model {model:?} offers no effort choices; spawn it without effort, not {effort:?}"
+        ))),
+        Some(effort) if !offers(effort) => Err(ApiFailure::bad_request(format!(
+            "model {model:?} does not offer {effort:?} as effort; choices: {}",
+            offered
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        Some(effort) => Ok(Some(effort.to_owned())),
+        None => Ok(parent.filter(|effort| offers(effort)).map(str::to_owned)),
+    }
 }
 
 /// The profile a child runs on. A pinned profile must be a candidate that
@@ -667,6 +706,11 @@ mod tests {
                     .unwrap()
                     .choices
                     .clone();
+                // Like Claude Haiku: the profile's default model has efforts,
+                // this model has none.
+                if model.as_deref() == Some("no-effort") {
+                    choices.efforts.clear();
+                }
                 // Only the model-specific discovery exposes high effort.
                 if model.as_deref() == Some("fixed") && profile != "full-but-wrong-effort" {
                     choices.efforts = vec![mj_core::acp::SessionConfigChoice {
@@ -834,6 +878,100 @@ mod tests {
                 .unwrap();
         assert_eq!(selected.model, "plain");
         assert_eq!(selected.effort, None);
+    }
+
+    fn efforts(values: &[&str]) -> Vec<mj_core::acp::SessionConfigChoice> {
+        values
+            .iter()
+            .map(|value| mj_core::acp::SessionConfigChoice {
+                value: (*value).to_owned(),
+                name: (*value).to_owned(),
+                description: None,
+            })
+            .collect()
+    }
+
+    /// I1-2: a parent at `high` spawned Claude Haiku, which offers no efforts.
+    /// The child inherited `high`, and every explicit effort the parent tried
+    /// passed because it was checked against the profile's default model; the
+    /// child's first prompt then never ran ("this agent does not offer high as
+    /// a effort"). Efforts are the child model's own.
+    #[test]
+    fn a_child_effort_comes_from_the_efforts_its_own_model_offers() {
+        assert_eq!(
+            child_effort("haiku", &[], None, Some("high")).unwrap(),
+            None
+        );
+        assert_eq!(
+            child_effort("sonnet", &efforts(&["low", "high"]), None, Some("high")).unwrap(),
+            Some("high".into())
+        );
+        assert_eq!(
+            child_effort("sonnet", &efforts(&["low"]), None, Some("high")).unwrap(),
+            None
+        );
+        let none_offered = child_effort("haiku", &[], Some("low"), None).unwrap_err();
+        assert!(
+            none_offered.message.contains("offers no effort choices"),
+            "{}",
+            none_offered.message
+        );
+        let not_offered =
+            child_effort("sonnet", &efforts(&["low"]), Some("high"), None).unwrap_err();
+        assert!(
+            not_offered.message.contains("choices: low"),
+            "{}",
+            not_offered.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_checks_effort_against_the_model_it_names() {
+        let mut claude = candidate("claude", Some(50), &["sonnet", "no-effort"]);
+        claude.choices.efforts = efforts(&["low", "medium", "high"]);
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![claude],
+                unavailable: Vec::new(),
+            },
+        });
+        let refused = resolve_subagent_selection(
+            &backend,
+            "parent-session",
+            "claude",
+            None,
+            Some("no-effort"),
+            Some("low"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused.message.contains("offers no effort choices"),
+            "{}",
+            refused.message
+        );
+        let selection = resolve_subagent_selection(
+            &backend,
+            "parent-session",
+            "claude",
+            None,
+            Some("no-effort"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection.effort, None);
+        let selection = resolve_subagent_selection(
+            &backend,
+            "parent-session",
+            "claude",
+            None,
+            Some("sonnet"),
+            Some("low"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(selection.effort.as_deref(), Some("low"));
     }
 
     #[tokio::test]

@@ -96,12 +96,15 @@ pub(crate) struct NewArgs {
     /// Existing directory on the selected bare target to run the session against.
     #[arg(long)]
     project_directory: Option<PathBuf>,
-    /// Record this Git revision as the diff base, independently of the branch.
-    #[arg(long, value_name = "REV")]
-    base: Option<String>,
-    /// Branch to check out in the new isolated workspace.
+    /// Start the workspace checked out at this full commit ID in the bundle's primary repository.
+    #[arg(long, value_name = "SHA", requires = "bundle")]
+    at: Option<String>,
+    /// With --at, the new branch to create there; otherwise the existing branch to check out.
     #[arg(long)]
     branch: Option<String>,
+    /// Record this Git revision as the diff base, when it should not be --at.
+    #[arg(long, value_name = "REV")]
+    base: Option<String>,
     /// Workspace id to create the session in. `--workspace NAME`
     /// names the same workspace by name.
     #[arg(long)]
@@ -631,9 +634,9 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         subagents: new_subagent_policy(&args)?,
         create_managed_worktree: None,
-        launch_base: args.base.clone(),
-        launch_branch: args.branch.clone(),
-        checkout: None,
+        at: args.at.clone(),
+        branch: args.branch.clone(),
+        base: args.base.clone(),
         expected_runtime_identity: None,
         workspace_id,
         profile_id: args.profile.clone(),
@@ -659,14 +662,21 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
 
 /// Name the command-line flags where a refused start names the API's fields.
 ///
-/// The API speaks to every client, so its refusals name the request fields
-/// `profile_id` and `target_id`; someone at a shell typed `--profile` and
-/// `--target`, and that is what they need to read (F-9).
+/// The API speaks to every client, so its refusals name request fields such
+/// as `profile_id`, `target_id` and `at`; someone at a shell typed
+/// `--profile`, `--target` and `--at`, and that is what they need to read
+/// (F-9). Refusals quote the one-word fields in backticks, so only field
+/// names are replaced.
 pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
     let message = format!("{error:#}");
     let named = message
         .replace("profile_id", "--profile")
-        .replace("target_id", "--target");
+        .replace("target_id", "--target")
+        .replace("bundle_id", "--bundle")
+        .replace("project_directory", "--project-directory")
+        .replace("`at`", "--at")
+        .replace("`branch`", "--branch")
+        .replace("`base`", "--base");
     if named == message {
         return error;
     }
@@ -769,13 +779,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
         return vec!["session suspended".to_owned()];
     }
     let mut lines = Vec::new();
-    let mut summary = outcome_name(response.outcome).to_owned();
-    // The same number `mj prompt` printed and `mj wait --turn` takes. The
-    // turn's position in the conversation is a different count, and printing
-    // it here as well made one turn look like two (F-12); it stays in --json.
-    if let Some(turn_id) = response.turn_id {
-        summary.push_str(&format!(" turn {turn_id}"));
-    }
+    // No number: `turn_id` is where the turn's prompt sits in the transcript,
+    // not a count of anything a reader can use, so it stays in --json (I2-5).
+    let mut summary = format!("turn {}", outcome_name(response.outcome));
     // How the turn ended, in the words `mj sessions` and the sub-agent notice
     // use; the harness's own spelling (`EndTurn`) stays in --json (R12-1).
     if let Some(stop_reason) = &response.stop_reason {
@@ -786,6 +792,12 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
     }
     if let Some(elapsed_ms) = response.elapsed_ms {
         summary.push_str(&format!(" in {:.1}s", elapsed_ms.max(0) as f64 / 1000.0));
+    }
+    if let Some(tool_calls) = response.tool_calls.filter(|count| *count > 0) {
+        summary.push_str(&format!(
+            " · {tool_calls} tool call{}",
+            if tool_calls == 1 { "" } else { "s" }
+        ));
     }
     lines.push(summary);
     // The wait's message, the diagnostic and the agent's last message are
@@ -942,7 +954,7 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 .as_deref()
                 .context("`--kind file` needs --path, relative to the agent's directory")?;
             let bytes = client.read_file(&args.session, path).await?;
-            return write_bytes(&bytes, args.out.as_deref());
+            return write_bytes(&bytes, args.out.as_deref(), args.json, "file");
         }
     };
     let request = ExportRequest {
@@ -963,7 +975,13 @@ pub(crate) async fn export(args: ExportArgs) -> Result<()> {
                 Ok(())
             }
         },
-        ExportResult::Bytes(bytes) => write_bytes(&bytes, args.out.as_deref()),
+        ExportResult::Bytes(bytes) => {
+            let format = match args.kind {
+                ExportKindArg::Bundle => "bundle",
+                _ => "patch",
+            };
+            write_bytes(&bytes, args.out.as_deref(), args.json, format)
+        }
     }
 }
 
@@ -1097,7 +1115,7 @@ pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
     } else {
         println!("destruction accepted for {}", args.session);
         println!(
-            "check removal with `mj sessions --session {}`",
+            "it finishes in the background; check removal with `mj sessions --session {}`",
             args.session
         );
         Ok(())
@@ -1353,15 +1371,42 @@ fn read_stdin() -> Result<String> {
 }
 
 /// Write an export to a file, or to standard output when none was named.
-fn write_bytes(bytes: &[u8], out: Option<&std::path::Path>) -> Result<()> {
+/// Writes an export to `out`, or to standard output when no file is named.
+/// With `--json` and a file, the confirmation is one JSON object rather than
+/// a sentence; without a file the bytes are the output and stay unwrapped.
+fn write_bytes(
+    bytes: &[u8],
+    out: Option<&std::path::Path>,
+    json: bool,
+    format: &str,
+) -> Result<()> {
+    write_bytes_to(&mut std::io::stdout().lock(), bytes, out, json, format)
+}
+
+fn write_bytes_to(
+    stdout: &mut impl Write,
+    bytes: &[u8],
+    out: Option<&std::path::Path>,
+    json: bool,
+    format: &str,
+) -> Result<()> {
     match out {
         Some(path) => {
             std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))?;
-            println!("wrote {} bytes to {}", bytes.len(), path.display());
-            Ok(())
+            if json {
+                let report = serde_json::json!({
+                    "path": path,
+                    "bytes": bytes.len(),
+                    "format": format,
+                });
+                writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)
+                    .context("report the export")
+            } else {
+                writeln!(stdout, "wrote {} bytes to {}", bytes.len(), path.display())
+                    .context("report the export")
+            }
         }
         None => {
-            let mut stdout = std::io::stdout().lock();
             stdout.write_all(bytes).context("write the export")?;
             stdout.flush().context("write the export")
         }
@@ -1493,6 +1538,31 @@ mod tests {
     use crate::{Cli, Command};
     use clap::Parser as _;
 
+    #[test]
+    fn export_json_with_out_reports_one_object_and_text_stays_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.patch");
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), true, "patch").unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(report["bytes"], 4);
+        assert_eq!(report["format"], "patch");
+        assert_eq!(report["path"], path.to_str().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"diff");
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", Some(&path), false, "patch").unwrap();
+        assert!(
+            String::from_utf8(printed)
+                .unwrap()
+                .starts_with("wrote 4 bytes to ")
+        );
+
+        let mut printed = Vec::new();
+        write_bytes_to(&mut printed, b"diff", None, true, "patch").unwrap();
+        assert_eq!(printed, b"diff");
+    }
+
     fn wait_response(outcome: &str, extra: serde_json::Value) -> WaitResponse {
         let mut body = serde_json::json!({
             "outcome": outcome,
@@ -1546,6 +1616,56 @@ mod tests {
             panic!("expected the new command");
         };
         assert_eq!(args.base, None);
+    }
+
+    #[test]
+    fn new_at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--workspace", "town"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        let error = parse(&["--at", commit]).expect_err("--at without --bundle is refused");
+        assert!(error.to_string().contains("--bundle"), "{error}");
+
+        let Some(Command::New(args)) = parse(&["--bundle", "product", "--at", commit])
+            .unwrap()
+            .command
+        else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.at.as_deref(), Some(commit));
+        assert_eq!((args.branch, args.base), (None, None));
+
+        let Some(Command::New(args)) = parse(&[
+            "--bundle",
+            "product",
+            "--at",
+            commit,
+            "--branch",
+            "town/run-1",
+            "--base",
+            "v1.0",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.branch.as_deref(), Some("town/run-1"));
+        assert_eq!(args.base.as_deref(), Some("v1.0"));
+    }
+
+    #[test]
+    fn a_refused_start_names_quoted_fields_as_flags() {
+        let error = name_launch_flags(anyhow::anyhow!(
+            "`at` requires bundle_id: it checks out the bundle's primary repository"
+        ));
+        assert_eq!(
+            error.to_string(),
+            "--at requires --bundle: it checks out the bundle's primary repository"
+        );
     }
 
     #[test]
@@ -1619,7 +1739,7 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "quota_limit turn 8 (failed: quota limit reached)");
+        assert_eq!(lines[0], "turn quota_limit (failed: quota limit reached)");
         assert_eq!(
             lines
                 .iter()
@@ -1643,15 +1763,15 @@ mod tests {
             }),
         );
         let lines = wait_report_lines(&response);
-        assert_eq!(lines[0], "error (failed: harness inactive)");
+        assert_eq!(lines[0], "turn error (failed: harness inactive)");
 
-        // F-12: `mj prompt` printed "turn 8" and `mj wait` "turn 1" for the
-        // same turn. The wait names it by the number the prompt printed.
+        // I2-5: the transcript position of the turn's prompt is not a turn
+        // count, so the wait prints no number for it.
         let numbered = wait_response(
             "finished",
             serde_json::json!({"turn_id": 8, "turn_number": 1}),
         );
-        assert_eq!(wait_report_lines(&numbered)[0], "finished turn 8");
+        assert_eq!(wait_report_lines(&numbered)[0], "turn finished");
         assert!(
             lines.iter().any(|line| line.contains("job_output-7")),
             "the reason is printed: {lines:?}"
@@ -1741,8 +1861,25 @@ mod tests {
         );
         assert_eq!(
             wait_report_lines(&finished)[0],
-            "finished turn 16 (completed, end of turn) in 5.3s"
+            "turn finished (completed, end of turn) in 5.3s"
         );
+        let worked = wait_response(
+            "finished",
+            serde_json::json!({
+                "stop_reason": "EndTurn", "turn_id": 16, "elapsed_ms": 5300, "tool_calls": 4
+            }),
+        );
+        assert_eq!(
+            wait_report_lines(&worked)[0],
+            "turn finished (completed, end of turn) in 5.3s · 4 tool calls"
+        );
+        let one_call = wait_response("finished", serde_json::json!({"tool_calls": 1}));
+        assert_eq!(
+            wait_report_lines(&one_call)[0],
+            "turn finished · 1 tool call"
+        );
+        let no_calls = wait_response("finished", serde_json::json!({"tool_calls": 0}));
+        assert_eq!(wait_report_lines(&no_calls)[0], "turn finished");
         assert_eq!(
             serde_json::to_value(&finished).unwrap()["stop_reason"],
             "EndTurn",
@@ -1766,7 +1903,7 @@ mod tests {
             );
             assert_eq!(
                 wait_report_lines(&response)[0],
-                format!("{outcome} turn 2 ({words})")
+                format!("turn {outcome} ({words})")
             );
             // The same words `mj sessions --session` prints for that turn.
             let mut session = response.session.clone();

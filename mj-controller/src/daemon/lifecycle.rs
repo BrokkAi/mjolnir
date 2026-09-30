@@ -150,9 +150,14 @@ impl RuntimeState {
                 );
                 active.result.clone()
             } else {
-                let upgrade_work = Arc::new(Mutex::new(Some(crate::upgrade::activity(
-                    "session lifecycle",
-                )?)));
+                // A destroy is waited for by a stop or handoff, up to a bound;
+                // other lifecycles hold the handoff until they finish.
+                let admitted = if kind == LifecycleKind::ForceDestroy {
+                    crate::upgrade::destroy_activity(&session_id)?
+                } else {
+                    crate::upgrade::activity("session lifecycle")?
+                };
+                let upgrade_work = Arc::new(Mutex::new(Some(admitted)));
                 let cancelled = create_control
                     .as_ref()
                     .map(|control| control.cancelled.clone())

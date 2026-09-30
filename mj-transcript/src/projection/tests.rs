@@ -825,6 +825,102 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
     }
 }
 
+/// I2-8: Esc on a turn the harness started on its own (a goal continuation)
+/// cancelled it but left no "Interrupted" row and no cancelled outcome, which
+/// an ordinary cancelled turn gets. A stop with nothing running, or one that
+/// lands on a prompt of ours, adds neither: the prompt's own completion does.
+#[test]
+fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
+    let cancel = |session: &mut MaterializedSession, command_id: &str| {
+        apply_observation(
+            session,
+            RelayObservation::CommandQueued {
+                command_id: command_id.into(),
+                command: RelayCommand::CancelTurn,
+                created_at_ms: 40,
+            },
+        );
+        apply_observation(
+            session,
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: Some(mj_core::relay::RelayCommandKind::CancelTurn),
+                command_id: command_id.into(),
+                outcome: RelayCommandOutcome::Cancelled,
+            },
+        );
+    };
+    let interrupted_rows = |session: &MaterializedSession| {
+        session
+            .transcript
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.body,
+                    TranscriptBody::System { text }
+                        if text == crate::transcript::TURN_INTERRUPTED_TEXT
+                )
+            })
+            .count()
+    };
+
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 30 },
+    );
+    let started_at = session
+        .transcript
+        .iter()
+        .find(|item| {
+            item.stable_id
+                .starts_with(crate::transcript::HARNESS_TURN_ITEM_PREFIX)
+        })
+        .expect("the harness turn marker")
+        .position;
+    cancel(&mut session, "cancel-1");
+    assert_eq!(interrupted_rows(&session), 1, "{:?}", session.transcript);
+    let outcome = session.last_turn_outcome.as_ref().expect("a turn outcome");
+    assert_eq!(
+        outcome.result().kind,
+        mj_core::event_outcome::TurnResultKind::Cancelled
+    );
+    assert_eq!(outcome.turn_start_position, Some(started_at));
+    assert_eq!(
+        outcome.command_id,
+        mj_core::continuation::harness_turn_id(started_at)
+    );
+
+    // Nothing running: nothing to interrupt.
+    let mut idle = MaterializedSession::empty("session");
+    cancel(&mut idle, "cancel-idle");
+    assert_eq!(interrupted_rows(&idle), 0);
+    assert!(idle.last_turn_outcome.is_none());
+
+    // A prompt of ours is the running turn: its completion writes the row.
+    let mut prompted = MaterializedSession::empty("session");
+    apply_observation(
+        &mut prompted,
+        RelayObservation::CommandQueued {
+            command_id: "prompt".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("write a story")],
+            },
+            created_at_ms: 10,
+        },
+    );
+    apply_observation(
+        &mut prompted,
+        RelayObservation::CommandStarted {
+            command_id: "prompt".into(),
+            started_at_ms: 20,
+        },
+    );
+    cancel(&mut prompted, "cancel-prompt");
+    assert_eq!(interrupted_rows(&prompted), 0);
+    assert!(prompted.last_turn_outcome.is_none());
+}
+
 #[test]
 fn session_restarts_project_as_distinct_durable_system_lines() {
     let mut session = MaterializedSession::empty("session");

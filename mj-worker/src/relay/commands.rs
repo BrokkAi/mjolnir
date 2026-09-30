@@ -1483,6 +1483,7 @@ impl DurableRelay {
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
         }
+        self.settle_held_writes()?;
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1507,6 +1508,7 @@ impl DurableRelay {
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
         }
+        self.settle_held_writes()?;
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1569,6 +1571,7 @@ impl DurableRelay {
                     .to_owned(),
             },
         )?;
+        self.settle_held_writes()?;
         self.promote_next_queued_command()?;
         Ok(Some(ordinal))
     }
@@ -1592,6 +1595,12 @@ impl DurableRelay {
 
     fn close_requested(&self) -> bool {
         self.pending_close_barrier_id().is_some()
+    }
+
+    /// Whether an accepted Close is waiting to run. The relay is sealed at its
+    /// checkpoint cut from the moment it accepts one.
+    pub fn close_pending(&self) -> bool {
+        self.close_requested()
     }
 
     fn pending_close_barrier_id(&self) -> Option<&str> {

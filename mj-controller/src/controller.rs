@@ -290,6 +290,25 @@ pub fn create_bundle_from_sources(
     Ok(QuickBundleCreation { config, bundle_id })
 }
 
+/// Remove a saved project from the config. Only the config entry goes: no
+/// checkout, clone or file is touched. Refused while any session still uses
+/// the project, checked against fresh state so a dashboard's stale view
+/// cannot remove a project a new session just started with.
+pub fn remove_bundle(bundle_id: &str) -> Result<Config> {
+    let state = crate::database::load_state()?;
+    if let Some(refusal) = state.bundle_removal_refusal(bundle_id) {
+        bail!(refusal);
+    }
+    let (config, ()) = Config::update(|config| {
+        ensure!(
+            config.bundles.remove(bundle_id).is_some(),
+            "project {bundle_id:?} is no longer saved"
+        );
+        config.validate()
+    })?;
+    Ok(config)
+}
+
 /// Add a bundle for all `sources` to an already-loaded config. The source
 /// interpretation is shared with the persisted [`create_bundle_from_sources`]
 /// entry point and the legacy quick-bundle helper.
@@ -463,9 +482,12 @@ fn unique_id(base: &str, mut is_used: impl FnMut(&str) -> bool) -> String {
 
 pub struct SessionLaunchOptions {
     pub create_managed_worktree: Option<bool>,
-    pub launch_base: Option<String>,
-    pub launch_branch: Option<String>,
-    pub checkout: Option<mj_core::remote_git::ExactCheckout>,
+    /// Full commit ID to start the bundle's primary repository at.
+    pub at: Option<String>,
+    /// With `at`, the new branch created there; otherwise an existing branch.
+    pub branch: Option<String>,
+    /// Diff base; defaults to `at`.
+    pub base: Option<String>,
     pub expected_runtime_identity: Option<String>,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     pub initial_prompt: Option<String>,
@@ -501,7 +523,12 @@ fn selected_host_container_size(
 
 impl Controller {
     pub fn load() -> Result<Self> {
-        let config = Config::load()?;
+        // A configuration the person has to fix, such as an entry whose secret
+        // is missing, is the reason a request fails, not an internal error.
+        let config = Config::load().map_err(|error| {
+            let refusal = mj_core::refusal::Refusal::precondition(format!("{error:#}"));
+            error.context(refusal)
+        })?;
         let state = crate::database::load_state()?;
         Ok(Self { config, state })
     }
@@ -730,9 +757,9 @@ impl Controller {
     ) -> Result<String> {
         let SessionLaunchOptions {
             create_managed_worktree,
-            launch_base,
-            launch_branch,
-            checkout,
+            at,
+            branch,
+            base,
             expected_runtime_identity,
             subagents,
             initial_prompt,
@@ -745,26 +772,26 @@ impl Controller {
         if let Some(expected) = &expected_runtime_identity {
             mj_core::harness_runtime::validate_expected_identity(expected)?;
         }
-        let launch_base = match launch_base {
+        let launch_base = match base {
             Some(base) => {
                 let base = base.trim();
                 if base.is_empty() {
-                    bail!("launch base must not be empty");
+                    bail!("`base` must not be empty");
                 }
                 Some(base.to_owned())
             }
             None => None,
         };
-        let launch_branch = match launch_branch {
+        let branch = match branch {
             Some(branch) => {
                 let branch = branch.trim();
-                ensure!(!branch.is_empty(), "launch branch must not be empty");
+                ensure!(!branch.is_empty(), "`branch` must not be empty");
                 Some(branch.to_owned())
             }
             None => None,
         };
         if launch_base.is_some() && create_managed_worktree == Some(false) {
-            bail!("a launch base requires a managed worktree or a bundle session");
+            bail!("`base` requires a managed worktree or a bundle session");
         }
         let session_title_override = match session_title_override {
             Some(title) => {
@@ -804,30 +831,27 @@ impl Controller {
         if project_directory.is_none() && bundle.is_none() {
             bail!("unknown bundle {bundle_id:?}");
         }
-        let checkout = checkout
-            .map(|mut checkout| -> Result<_> {
-                checkout.validate()?;
-                let bundle = bundle.context("exact checkout requires a bundle-backed session")?;
-                ensure!(
-                    launch_base.is_none() && launch_branch.is_none(),
-                    "checkout cannot be combined with launch_base or launch_branch"
-                );
+        // `at` becomes an exact checkout of the bundle's primary repository,
+        // which then owns the branch. Without it, the branch is an existing
+        // one to check out.
+        let (checkout, launch_branch) = match at {
+            Some(at) => {
+                let bundle = bundle.context("`at` requires a bundle-backed session")?;
                 ensure!(
                     create_managed_worktree != Some(false),
-                    "checkout requires an isolated workspace"
+                    "`at` requires an isolated workspace"
                 );
-                ensure!(
-                    bundle
-                        .repositories
-                        .iter()
-                        .any(|repo| repo.id == checkout.repository_id),
-                    "checkout repository {:?} is not in bundle {bundle_id:?}",
-                    checkout.repository_id
-                );
+                let mut checkout = mj_core::remote_git::ExactCheckout {
+                    repository_id: bundle.primary_repo.clone(),
+                    commit: at.trim().to_owned(),
+                    branch,
+                };
+                checkout.validate()?;
                 checkout.commit.make_ascii_lowercase();
-                Ok(checkout)
-            })
-            .transpose()?;
+                (Some(checkout), None)
+            }
+            None => (None, branch),
+        };
         if profile.kind == mj_core::config::HarnessKind::Muse
             && (!additional_mounts.is_empty()
                 || bundle.is_some_and(|bundle| bundle.repositories.len() > 1))
@@ -948,6 +972,30 @@ impl Controller {
         record.session_title_override = Some(title.clone());
         record.updated_at = updated_at;
         Ok(title)
+    }
+
+    /// Move a session, and the sub-agents under it, to another workspace.
+    /// Returns how many sessions moved.
+    pub fn set_session_workspace(&mut self, session_id: &str, workspace_id: &str) -> Result<usize> {
+        ensure!(
+            self.state.sessions.contains_key(session_id),
+            "unknown session {session_id}"
+        );
+        let mut ids = vec![session_id.to_owned()];
+        ids.extend(
+            self.state
+                .subagents
+                .values()
+                .filter(|child| child.parent_session_id == session_id)
+                .map(|child| child.child_session_id.clone()),
+        );
+        crate::database::set_sessions_workspace(&ids, workspace_id)?;
+        for id in &ids {
+            if let Some(record) = self.state.sessions.get_mut(id) {
+                record.workspace_id = workspace_id.to_owned();
+            }
+        }
+        Ok(ids.len())
     }
 
     pub fn rename_profile_id(&mut self, old_id: &str, new_id: &str) -> Result<()> {

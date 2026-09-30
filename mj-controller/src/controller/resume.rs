@@ -465,10 +465,6 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub resumed_project_directory: Option<PathBuf>,
     pub resumed_container_workspace: Option<PathBuf>,
     pub restore_repositories: bool,
-    /// True when this resume converted a checkout, which is the only case where
-    /// the restored harness session is pointed at a directory the archive could
-    /// not have named.
-    pub primary_repository_root_from_conversion: bool,
     pub native_continuity: bool,
     pub discard_queued_prompts: bool,
     /// Whether the archived queue is resubmitted to a fresh native session.
@@ -501,7 +497,6 @@ impl Controller {
             resumed_project_directory,
             resumed_container_workspace,
             restore_repositories,
-            primary_repository_root_from_conversion,
             native_continuity,
             discard_queued_prompts,
             replay_queue,
@@ -583,15 +578,16 @@ impl Controller {
             // branch still needs the archive's dirty state.
             restore_repositories,
             restore_native: native_continuity,
-            // A move onto a checkout puts it somewhere the archive could
-            // not have named, so the restored harness session is pointed at
-            // the real working directory instead of the archived one. A
-            // move into a target has no host directory left, and the
-            // conversion archive already names the destination under
-            // `/workspace`, so this stays empty there.
-            primary_repository_root: primary_repository_root_from_conversion
-                .then(|| resumed_project_directory.clone())
-                .flatten()
+            // A session with a project directory launches its harness there,
+            // spelled exactly as recorded (the worker launch configuration's
+            // `cwd`), so the restored harness session is keyed by that same
+            // text. Rebuilding it from the archive's repository layout loses a
+            // trailing separator, which Grok Build keys by, and cannot name
+            // the checkout a move put the session on. A session in a target
+            // workspace has no project directory, and the archive's layout
+            // names its directory under `/workspace`.
+            primary_repository_root: resumed_project_directory
+                .as_ref()
                 .map(|directory| target_path(&directory.to_string_lossy())),
             queue_policy,
         };
@@ -1745,7 +1741,6 @@ impl Controller {
                     resumed_project_directory,
                     resumed_container_workspace,
                     restore_repositories,
-                    primary_repository_root_from_conversion: conversion.is_some(),
                     native_continuity,
                     discard_queued_prompts,
                     replay_queue: !discard_queue,

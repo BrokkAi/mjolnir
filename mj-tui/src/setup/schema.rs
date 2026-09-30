@@ -586,6 +586,11 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         }
         return values;
     }
+    // Unset is a choice of its own, so the setting can go back to following
+    // the terminal after ASCII or Unicode was picked.
+    if key == "symbols" && path.first().is_some_and(|key| key == "advanced") {
+        return vec![Value::Null, "unicode".into(), "ascii".into()];
+    }
     if key == "profile" {
         let mut values = vec![Value::Null];
         if let Some(entries) = draft["profiles"].as_object() {

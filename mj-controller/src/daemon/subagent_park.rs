@@ -20,11 +20,61 @@ impl RuntimeState {
         self: &Arc<Self>,
         child_session_id: String,
     ) -> Result<crate::controller::ParkOutcome> {
+        self.stop_idle_subagent(child_session_id, None).await
+    }
+
+    /// Record a sub-agent whose first prompt was refused for good as failed
+    /// with `cause`, stopping its worker (I1-2). It runs as the child's park
+    /// operation: the same idle stop, serialized with its close and every
+    /// other lifecycle operation. A child that took work meanwhile is left
+    /// running. Failures are logged; the parent already reads the cause from
+    /// the failed startup whatever happens here.
+    pub(super) async fn fail_subagent_start(self: &Arc<Self>, child_session_id: &str, cause: &str) {
+        if !self
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .contains_key(child_session_id)
+        {
+            return;
+        }
+        match self
+            .stop_idle_subagent(child_session_id.to_owned(), Some(cause.to_owned()))
+            .await
+        {
+            Ok(crate::controller::ParkOutcome::Parked) => {
+                tracing::info!(
+                    session_id = child_session_id,
+                    cause,
+                    "sub-agent recorded as failed: its first prompt was refused"
+                );
+            }
+            Ok(outcome) => tracing::warn!(
+                session_id = child_session_id,
+                ?outcome,
+                "a sub-agent whose first prompt was refused was left running"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = child_session_id,
+                error = format!("{error:#}"),
+                "could not record a sub-agent whose first prompt was refused as failed"
+            ),
+        }
+    }
+
+    /// The park lifecycle: stop an idle child's worker and record it
+    /// `Parked`, or `Error` with `failure`.
+    async fn stop_idle_subagent(
+        self: &Arc<Self>,
+        child_session_id: String,
+        failure: Option<String>,
+    ) -> Result<crate::controller::ParkOutcome> {
         let result = self
             .run_lifecycle(
                 child_session_id,
                 LifecycleKind::Park,
-                |state, session_id, _cancelled| async move {
+                move |state, session_id, _cancelled| async move {
                     // A park is short and not cancellable: a close that asks for
                     // the child waits for it instead, so it never finds a worker
                     // stopped under a record that still says running.
@@ -42,9 +92,27 @@ impl RuntimeState {
                     }
                     let controller = blocking(Controller::load).await?;
                     let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-                    let outcome = controller
-                        .park_subagent_worker(&session_id, &executor, &state.session_manager)
-                        .await?;
+                    let outcome = match &failure {
+                        None => {
+                            controller
+                                .park_subagent_worker(
+                                    &session_id,
+                                    &executor,
+                                    &state.session_manager,
+                                )
+                                .await?
+                        }
+                        Some(cause) => {
+                            controller
+                                .fail_subagent_start_worker(
+                                    &session_id,
+                                    cause,
+                                    &executor,
+                                    &state.session_manager,
+                                )
+                                .await?
+                        }
+                    };
                     tracing::info!(%session_id, ?outcome, "sub-agent park finished");
                     Ok(DaemonLifecycleResult::Park(outcome))
                 },

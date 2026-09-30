@@ -48,6 +48,8 @@ enum WhileClassifying {
     NewPrompt,
     Stop,
     KeepCurrent,
+    /// A checkpoint barrier becomes ready while the classifier is asked.
+    Checkpoint,
 }
 
 async fn completed_turn_verdict(action: WhileClassifying) {
@@ -240,9 +242,79 @@ async fn completed_turn_response(
             matches!(commands_rx.recv().await.unwrap(), CommandRequest::Prompt { request_id, .. } if request_id == "prompt-2")
         );
     }
+    let barrier = |relay: &mut DurableRelay, id: &str, command: RelayCommand| {
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: format!("request-{id}"),
+            protocol_version: crate::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: id.into(),
+                command,
+            },
+        });
+        assert!(
+            matches!(response.body, RelayResponseBody::Ok { .. }),
+            "{response:?}"
+        );
+    };
+    let cut = if matches!(action, WhileClassifying::Checkpoint) {
+        barrier(
+            &mut relay.lock().unwrap(),
+            "checkpoint-barrier",
+            RelayCommand::BeginCheckpoint { reason: None },
+        );
+        wakes_tx.send(()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .checkpoint_ready
+                .is_none()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        relay.lock().unwrap().operational_state().checkpoint_ready
+    } else {
+        None
+    };
     release_tx.send(()).unwrap();
     server.await.unwrap();
-    if matches!(action, WhileClassifying::Wait) {
+    if let Some(cut) = cut {
+        // The answer is back, but the barrier holds its cut: the answer waits.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let state = relay.lock().unwrap().operational_state();
+        assert_eq!(state.latest_ordinal, cut.ordinal);
+        assert_eq!(
+            state.assessment.as_ref().map(|a| a.status),
+            Some(mj_core::assessment::Status::Pending)
+        );
+        barrier(
+            &mut relay.lock().unwrap(),
+            "checkpoint-release",
+            RelayCommand::ReleaseCheckpoint {
+                barrier_command_id: "checkpoint-barrier".into(),
+            },
+        );
+        wakes_tx.send(()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .assessment
+                .as_ref()
+                .is_none_or(|a| a.status == mj_core::assessment::Status::Pending)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the held classifier answer is applied once the barrier ends");
+        assert!(relay.lock().unwrap().operational_state().latest_ordinal > cut.ordinal);
+    } else if matches!(action, WhileClassifying::Wait) {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let state = relay.lock().unwrap().operational_state();
@@ -347,6 +419,13 @@ async fn completed_turn_response(
 #[tokio::test]
 async fn replied_verdict_publishes_without_delaying_completion_and_clears_on_output() {
     completed_turn_verdict(WhileClassifying::Wait).await;
+}
+
+/// I2-3: the classifier's answer landed after a close's checkpoint cut and
+/// made the worker refuse the Close. The answer now waits for the barrier.
+#[tokio::test]
+async fn a_classifier_answer_waits_for_a_ready_checkpoint_barrier() {
+    completed_turn_with_background(WhileClassifying::Checkpoint, "finished", 0).await;
 }
 
 #[tokio::test]

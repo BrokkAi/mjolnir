@@ -2512,3 +2512,68 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
         assert_eq!(file_check.status, CheckStatus::Ready, "{file_check:?}");
     }
 }
+
+fn bifrost_report(version_output: Result<CommandOutput>) -> DoctorCheck {
+    bifrost_check_for(
+        Path::new("/tmp/bifrost-under-test"),
+        &FakeExecutor::new([version_output]),
+    )
+}
+
+#[test]
+fn doctor_accepts_a_bifrost_at_or_above_the_reviews_minimum() {
+    let minimum = mj_review::bifrost::REQUIRED_BIFROST_VERSION;
+    let executor = FakeExecutor::new([Ok(output(format!(
+        "bifrost {minimum}\nbuiltin-policy-pack x\n"
+    )))]);
+
+    let check = bifrost_check_for(Path::new("/opt/bifrost"), &executor);
+
+    assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
+    assert!(check.detail.contains(minimum), "{}", check.detail);
+    let commands = executor.commands.borrow();
+    assert_eq!(commands[0].program, "/opt/bifrost");
+    assert_eq!(commands[0].args, ["--version"]);
+    drop(commands);
+    assert_eq!(
+        bifrost_report(Ok(output("bifrost 0.11.5\n"))).status,
+        CheckStatus::Ready
+    );
+}
+
+/// I1-5: a host with an old `bifrost` on the login PATH failed every review.
+#[test]
+fn doctor_warns_when_bifrost_is_older_than_the_review_needs() {
+    let check = bifrost_report(Ok(output("bifrost 0.7.5\n")));
+
+    assert_eq!(check.status, CheckStatus::Warning, "{check:?}");
+    assert!(check.detail.contains("0.7.5"), "{}", check.detail);
+    assert!(
+        check
+            .detail
+            .contains(mj_review::bifrost::REQUIRED_BIFROST_VERSION),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("MJ_BIFROST_BIN"),
+        "{check:?}"
+    );
+}
+
+#[test]
+fn doctor_warns_when_bifrost_cannot_run_or_names_no_version() {
+    for response in [
+        Err(anyhow!("No such file or directory")),
+        Ok(failed("boom")),
+        Ok(output("something else\n")),
+    ] {
+        let check = bifrost_report(response);
+        assert_eq!(check.status, CheckStatus::Warning, "{check:?}");
+        assert!(check.remediation.is_some());
+    }
+}
