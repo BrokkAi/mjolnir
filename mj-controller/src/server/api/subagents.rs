@@ -19,7 +19,7 @@ pub(super) async fn spawn_subagent(
             "only Claude and Codex sessions can spawn sub-agents",
         ));
     }
-    validate_prompt_text(&request.instructions, false)?;
+    let initial_prompt = build_subagent_prompt(&request.instructions)?;
     if request.task_name.trim().is_empty() {
         return Err(ApiFailure::bad_request("task_name cannot be empty"));
     }
@@ -34,14 +34,6 @@ pub(super) async fn spawn_subagent(
     )
     .await?;
 
-    let initial_prompt = build_subagent_prompt(
-        &backend,
-        &parent_session_id,
-        &request.instructions,
-        request.context.as_deref(),
-        &request.files,
-    )
-    .await?;
     let relation = backend
         .start_subagent(crate::controller::RegisterSubagentRequest {
             parent_session_id: parent_session_id.clone(),
@@ -480,15 +472,34 @@ pub(super) async fn list_subagents(
     Ok(Json(SubagentListResponse { subagents }))
 }
 
-pub(crate) async fn build_subagent_prompt(
+/// New assignments have one text input; children read their own source files.
+pub(crate) fn build_subagent_prompt(instructions: &str) -> Result<String, ApiFailure> {
+    let prompt = instructions.trim();
+    validate_prompt_text(prompt, false)?;
+    if prompt.len() > MAX_SUBAGENT_CONTEXT_BYTES {
+        return Err(ApiFailure::bad_request(format!(
+            "sub-agent handoff exceeds the {MAX_SUBAGENT_CONTEXT_BYTES}-byte limit"
+        )));
+    }
+    Ok(prompt.to_owned())
+}
+
+/// Compatibility for accepted requests from workers running an older build.
+pub(crate) struct LegacySubagentSourceRange {
+    pub file: PathBuf,
+    pub start: u64,
+    pub end: u64,
+}
+
+pub(crate) async fn build_legacy_subagent_prompt(
     backend: &Arc<dyn SubagentBackend>,
     parent_session_id: &str,
     instructions: &str,
     context: Option<&str>,
-    ranges: &[SubagentSourceRange],
+    ranges: &[LegacySubagentSourceRange],
 ) -> Result<String, ApiFailure> {
-    let mut prompt = String::new();
-    prompt.push_str(instructions.trim());
+    // Accepted wire requests retain their original validation and byte limit.
+    let mut prompt = instructions.trim().to_owned();
     if let Some(context) = context.map(str::trim).filter(|context| !context.is_empty()) {
         prompt.push_str("\n\n<parent_context>\n");
         prompt.push_str(context);
@@ -565,6 +576,85 @@ pub(crate) async fn build_subagent_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_spawn_assignments_use_only_validated_instructions() {
+        assert_eq!(
+            build_subagent_prompt("  Read src/lib.rs:1-20 and report.\n").unwrap(),
+            "Read src/lib.rs:1-20 and report."
+        );
+        for text in ["   ", " !shell"] {
+            assert!(build_subagent_prompt(text).is_err());
+        }
+        assert!(build_subagent_prompt(&"🦀".repeat(MAX_SUBAGENT_CONTEXT_BYTES / 4)).is_ok());
+        assert!(build_subagent_prompt(&"🦀".repeat(MAX_SUBAGENT_CONTEXT_BYTES / 4 + 1)).is_err());
+        for (key, value) in [
+            ("files", serde_json::json!([])),
+            ("context", serde_json::json!("do not lose me")),
+        ] {
+            let mut request =
+                serde_json::json!({"task_name":"task", "instructions":"read src/lib.rs"});
+            request[key] = value;
+            let error = serde_json::from_value::<SpawnSubagentRequest>(request).unwrap_err();
+            assert!(error.to_string().contains("unknown field"));
+            assert!(error.to_string().contains("instructions"));
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_legacy_spawn_preserves_context_and_source_ranges() {
+        let action: mj_core::subagent::SubagentToolAction = serde_json::from_value(serde_json::json!({
+            "action":"spawn", "params":{"task_name":"legacy", "instructions":"inspect", "context":"prior findings",
+            "files":[{"file":"legacy.rs", "ranges":[{"start":2,"end":3}]}]}
+        })).unwrap();
+        let mj_core::subagent::SubagentToolAction::Spawn {
+            instructions,
+            context,
+            files,
+            ..
+        } = action
+        else {
+            panic!("spawn expected")
+        };
+        let ranges = files
+            .iter()
+            .flat_map(|file| {
+                file.ranges.iter().map(|range| LegacySubagentSourceRange {
+                    file: file.file.clone(),
+                    start: range.start,
+                    end: range.end,
+                })
+            })
+            .collect::<Vec<_>>();
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            candidates: SubagentCandidates {
+                offered: vec![],
+                unavailable: vec![],
+            },
+        });
+        let prompt = build_legacy_subagent_prompt(
+            &backend,
+            "parent",
+            &instructions,
+            context.as_deref(),
+            &ranges,
+        )
+        .await
+        .unwrap();
+        assert!(prompt.starts_with("inspect\n\n<parent_context>\nprior findings"));
+        assert!(
+            prompt.contains("     2  selected\n     3  evidence"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("unselected"));
+        let long_instructions = "x".repeat(65_537);
+        assert_eq!(
+            build_legacy_subagent_prompt(&backend, "parent", &long_instructions, None, &[])
+                .await
+                .unwrap(),
+            long_instructions
+        );
+    }
 
     fn candidate(profile_id: &str, remaining: Option<u8>, models: &[&str]) -> SubagentCandidate {
         SubagentCandidate {
@@ -776,6 +866,17 @@ mod tests {
             _options: DiffOptions,
         ) -> BoxFuture<'_, Result<String, ExportError>> {
             Box::pin(async { Err(ExportError::Refused("not used in this test".into())) })
+        }
+        fn read_context_file(
+            &self,
+            session: String,
+            path: PathBuf,
+        ) -> BoxFuture<'_, Result<Vec<u8>, ExportError>> {
+            Box::pin(async move {
+                assert_eq!(session, "parent");
+                assert_eq!(path, PathBuf::from("legacy.rs"));
+                Ok(b"unselected\nselected\nevidence\nunselected\n".to_vec())
+            })
         }
         fn read_file(
             &self,
