@@ -709,6 +709,7 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
+        default_targets: Default::default(),
         machines: Default::default(),
         profiles: BTreeMap::new(),
         bundles: BTreeMap::new(),

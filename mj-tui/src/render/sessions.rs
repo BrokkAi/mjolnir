@@ -1494,7 +1494,12 @@ pub(crate) fn capacity_target_labels(
 ) -> Line<'static> {
     let config = &dashboard.config;
     let mut spans = Vec::new();
-    for (index, target_id) in target_ids.iter().enumerate() {
+    // A default candidate whose runtime is missing is not listed: the user
+    // never configured it. A configured one stays, marked unavailable.
+    let listed = target_ids
+        .iter()
+        .filter(|id| !(config.is_default_target(id) && dashboard.target_runtime_missing(id)));
+    for (index, target_id) in listed.enumerate() {
         if index > 0 {
             spans.push(Span::raw(", "));
         }

@@ -560,6 +560,7 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),
+            default_targets: Default::default(),
             machines: Default::default(),
             profiles: Default::default(),
             bundles: Default::default(),

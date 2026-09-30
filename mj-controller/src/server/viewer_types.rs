@@ -310,6 +310,7 @@ impl ViewerSnapshot {
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
                 runtime_missing: false,
+                default_candidate: config.is_default_target(id),
                 availability: crate::server::api::LaunchAvailability::Unknown,
                 unavailable_reason: None,
                 recent_project_directories: project_history_host(target)
@@ -914,6 +915,12 @@ pub struct ViewerTarget {
     /// that merely did not answer is not this; it stays listed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runtime_missing: bool,
+    /// Whether this target is a default candidate that Mjolnir supplies
+    /// (`Config::with_local_targets`) and the user did not write in
+    /// `config.toml`. A default candidate whose runtime is missing is listed
+    /// nowhere; a configured one stays listed as unavailable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_candidate: bool,
     /// Whether the host's last check answered, from the same classifier as
     /// `/api/v1/options`. `Unknown` until the capacity poller has run.
     #[serde(default = "unknown_availability")]

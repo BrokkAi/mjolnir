@@ -413,6 +413,11 @@ pub struct Config {
     /// The hosts runtimes run on. `local` is implied even when it is absent.
     pub machines: BTreeMap<String, Machine>,
     pub targets: BTreeMap<String, TargetTemplate>,
+    /// Ids in `targets` that [`Config::with_local_targets`] inserted because
+    /// the file names no target of that id. They are candidates, not choices
+    /// the user made, and they are never written to the file. The file is
+    /// the only source of an origin: this set is not serialized.
+    pub default_targets: BTreeSet<String>,
 }
 
 /// The configuration file's own shape: hosts under `[machines.<id>]` and
@@ -671,6 +676,7 @@ impl TryFrom<StoredConfig> for Config {
             bundles,
             machines,
             targets: resolved,
+            default_targets: BTreeSet::new(),
         })
     }
 }
@@ -735,6 +741,7 @@ impl Default for Config {
             bundles: BTreeMap::new(),
             machines: BTreeMap::new(),
             targets: BTreeMap::new(),
+            default_targets: BTreeSet::new(),
         }
     }
 }
@@ -849,6 +856,8 @@ impl Config {
     /// Supply standard local choices without requiring setup or writing a file.
     /// These are candidates: callers must check availability before offering launch.
     /// Explicit entries with the same name override the standard defaults.
+    // The default list is built with per-platform pushes.
+    #[allow(clippy::vec_init_then_push)]
     pub fn with_local_targets(mut self) -> Self {
         let container = ContainerTemplate {
             build_cache: None,
@@ -860,25 +869,42 @@ impl Config {
             environment: Default::default(),
             workspace_storage: Default::default(),
         };
+        let mut defaults: Vec<(&str, TargetTemplate)> = Vec::new();
         #[cfg(unix)]
-        self.targets
-            .entry("localhost".into())
-            .or_insert(TargetTemplate::LocalBare);
-        self.targets
-            .entry("podman".into())
-            .or_insert_with(|| TargetTemplate::LocalPodman {
+        defaults.push(("localhost", TargetTemplate::LocalBare));
+        defaults.push((
+            "podman",
+            TargetTemplate::LocalPodman {
                 container: container.clone(),
-            });
-        self.targets
-            .entry("docker".into())
-            .or_insert_with(|| TargetTemplate::LocalDocker {
+            },
+        ));
+        defaults.push((
+            "docker",
+            TargetTemplate::LocalDocker {
                 container: container.clone(),
-            });
+            },
+        ));
         #[cfg(target_os = "macos")]
-        self.targets
-            .entry("apple-container".into())
-            .or_insert_with(|| TargetTemplate::AppleContainer { container });
+        defaults.push((
+            "apple-container",
+            TargetTemplate::AppleContainer { container },
+        ));
+        for (id, template) in defaults {
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.targets.entry(id.into())
+            {
+                entry.insert(template);
+                self.default_targets.insert(id.into());
+            }
+        }
         self
+    }
+
+    /// Whether target `id` is a default candidate that
+    /// [`Self::with_local_targets`] supplied, rather than an entry the user
+    /// wrote in the config file. Read this, do not compare names: a user who
+    /// writes `[targets.docker]` configured it.
+    pub fn is_default_target(&self, id: &str) -> bool {
+        self.default_targets.contains(id)
     }
 
     /// Whether the user configured target `id`: the file names it and the
@@ -990,6 +1016,7 @@ impl Config {
                     runtime.targets.remove(&id);
                 }
             }
+            runtime.default_targets.clear();
             *config = runtime;
             Ok(value)
         })

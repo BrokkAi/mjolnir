@@ -136,3 +136,21 @@ test('resume shows the status beside the target and keeps it selectable', () => 
   assert.deepEqual(options.map(option => option.textContent), ['macbook (did not answer its last check)', 'podman']);
   assert.ok(options.every(option => !option.disabled));
 });
+
+test('the Targets page leaves out a default candidate whose runtime is missing and keeps a configured one', () => {
+  const context = vm.createContext({
+    snapshot: {
+      targets: [
+        { id: 'docker', kind: 'local-docker', runtime_missing: true, default_candidate: true },
+        { id: 'sandbox', kind: 'local-docker', runtime_missing: true },
+        { id: 'podman', kind: 'local-podman', default_candidate: true },
+        { id: 'localhost', kind: 'local-bare', default_candidate: true },
+      ],
+    },
+  });
+  vm.runInContext(sourceBetween('function listedTargetIds(', '\nfunction renderTargets()'), context);
+  assert.deepEqual(
+    vm.runInContext("listedTargetIds({ target_ids: ['docker', 'localhost', 'podman', 'sandbox'] }).join(',')", context),
+    'localhost,podman,sandbox',
+  );
+});
