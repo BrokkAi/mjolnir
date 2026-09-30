@@ -325,6 +325,7 @@ mod tests {
 
     fn session_record(state: SessionState) -> SessionRecord {
         SessionRecord {
+            project: None,
             target_runtime: None,
             launch_base: None,
             launch_branch: None,

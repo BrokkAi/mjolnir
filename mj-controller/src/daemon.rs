@@ -142,6 +142,7 @@ pub struct RuntimeState {
     startup_enqueue: tokio::sync::Mutex<()>,
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
+    projects: Arc<crate::project_catalog::Catalog>,
     recovery_observer: RecoveryObserver,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.

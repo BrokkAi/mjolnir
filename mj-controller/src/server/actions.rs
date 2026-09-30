@@ -331,6 +331,13 @@ pub enum PreflightRequest {
     Resume(ResumePreflightRequest),
     CompletePath(PathCompletionRequest),
     DiscoverProjects(ProjectDiscoveryPreflight),
+    ProjectCatalog {
+        refresh: bool,
+        retry: bool,
+        reply: tokio::sync::oneshot::Sender<
+            Result<mj_core::project_catalog::ProjectCatalogView, String>,
+        >,
+    },
 }
 
 /// A project picker lookup sharing the preflight supervision and concurrency cap.

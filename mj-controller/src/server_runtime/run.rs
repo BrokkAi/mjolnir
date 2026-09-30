@@ -884,6 +884,14 @@ pub(crate) async fn run_server(
                             );
                             continue;
                         }
+                        crate::server::PreflightRequest::ProjectCatalog{refresh,retry,reply}=>{
+                            let runtime=daemon_runtime.clone();
+                            preflight_jobs.spawn(async move {
+                                let result=runtime.project_catalog(refresh,retry).await.map_err(|error|format!("{error:#}"));
+                                if reply.send(result).is_err(){tracing::debug!("project catalog reader disconnected");}
+                            });
+                            continue;
+                        }
                         crate::server::PreflightRequest::DiscoverProjects(request) => {
                             project_discovery::spawn(&mut preflight_jobs, request, &termination);
                             continue;

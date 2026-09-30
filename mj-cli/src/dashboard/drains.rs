@@ -736,6 +736,7 @@ mod tests {
 
     fn claude_session(choice: Option<bool>) -> mj_core::state::SessionRecord {
         mj_core::state::SessionRecord {
+            project: None,
             target_runtime: None,
             launch_base: None,
             launch_branch: None,

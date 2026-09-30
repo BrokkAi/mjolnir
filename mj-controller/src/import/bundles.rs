@@ -1,39 +1,21 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RepositoryIdentity {
-    Github(String, String),
-    Local(PathBuf),
-}
+pub(crate) use mj_core::repository::RepositoryIdentity;
 
 pub(super) fn root_identity(root: &Path) -> Result<RepositoryIdentity> {
-    let origin = git_optional_text(root, ["remote", "get-url", "origin"])?;
-    if let Some(github) = origin.as_deref().and_then(github_repository_from_origin) {
-        return Ok(RepositoryIdentity::Github(
-            github.owner.to_ascii_lowercase(),
-            github.repository.to_ascii_lowercase(),
-        ));
-    }
-    // A linked worktree shares the identity of its main working tree.
-    let root = main_worktree_root(root)?;
-    Ok(RepositoryIdentity::Local(
-        fs::canonicalize(&root).unwrap_or(root),
-    ))
+    mj_core::repository::local_identity(
+        root,
+        &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(8)),
+    )
 }
 
-pub(super) fn configured_repository_identity(
+pub(crate) fn configured_repository_identity(
     repository: &ProjectRepository,
-) -> Option<RepositoryIdentity> {
+) -> Result<Option<RepositoryIdentity>> {
     if let Some(source) = repository.github.as_deref() {
-        let github = github_repository_from_origin(source)?;
-        return Some(RepositoryIdentity::Github(
-            github.owner.to_ascii_lowercase(),
-            github.repository.to_ascii_lowercase(),
-        ));
+        return Ok(RepositoryIdentity::from_remote(source));
     }
-    repository.local.as_ref().map(|path| {
-        RepositoryIdentity::Local(fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
-    })
+    repository.local.as_deref().map(root_identity).transpose()
 }
 
 /// Reuse an exact configured bundle or synthesize one from all detected roots.
@@ -60,15 +42,15 @@ pub fn resolve_bundle(
             .get(bundle_id)
             .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
         ensure!(
-            bundle_matches(bundle, &detected, &primary_identity),
+            bundle_matches(bundle, &detected, &primary_identity)?,
             "bundle {bundle_id:?} does not exactly match the session's edited Git roots and cwd primary repository"
         );
         return Ok(BundleResolution::Existing(bundle_id.to_owned()));
     }
-    if let Some(id) = config.bundles.iter().find_map(|(id, bundle)| {
-        bundle_matches(bundle, &detected, &primary_identity).then(|| id.clone())
-    }) {
-        return Ok(BundleResolution::Existing(id));
+    for (id, bundle) in &config.bundles {
+        if bundle_matches(bundle, &detected, &primary_identity)? {
+            return Ok(BundleResolution::Existing(id.clone()));
+        }
     }
 
     let primary_name = cwd_root
@@ -107,15 +89,10 @@ pub fn resolve_bundle(
         if root == cwd_root {
             primary_repo = Some(id.clone());
         }
-        let origin = git_optional_text(&root, ["remote", "get-url", "origin"])?;
-        let github = origin
-            .as_deref()
-            .and_then(github_repository_from_origin)
-            .map(|source| format!("{}/{}", source.owner, source.repository));
         repositories.push(ProjectRepository {
             id: id.clone(),
-            local: github.is_none().then_some(root),
-            github,
+            local: Some(root),
+            github: None,
             destination: PathBuf::from(id),
             git_ref: None,
         });
@@ -133,25 +110,33 @@ pub(crate) fn bundle_matches(
     bundle: &ProjectBundle,
     detected: &BTreeSet<RepositoryIdentity>,
     primary: &RepositoryIdentity,
-) -> bool {
+) -> Result<bool> {
     let identities = bundle
         .repositories
         .iter()
-        .filter_map(configured_repository_identity)
+        .map(configured_repository_identity)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .collect::<BTreeSet<_>>();
-    identities.len() == bundle.repositories.len()
+    Ok(identities.len() == bundle.repositories.len()
         && &identities == detected
         && bundle
             .primary()
-            .and_then(configured_repository_identity)
+            .map(configured_repository_identity)
+            .transpose()?
+            .flatten()
             .as_ref()
-            == Some(primary)
+            == Some(primary))
 }
 
 /// Return the matching configured bundle for an origin. It accepts setup's
 /// `owner/repository` shorthand as well as normal GitHub remote URLs.
 pub fn configured_bundle_for_origin(config: &Config, origin: &GithubRepository) -> Option<String> {
     config.bundles.iter().find_map(|(id, bundle)| {
+        if bundle.repositories.len() != 1 {
+            return None;
+        }
         let primary = bundle.primary()?;
         let configured = github_repository_from_origin(primary.github.as_deref()?)?;
         same_github_repository(&configured, origin).then(|| id.clone())
@@ -159,10 +144,13 @@ pub fn configured_bundle_for_origin(config: &Config, origin: &GithubRepository) 
 }
 
 pub fn configured_bundle_for_local(config: &Config, local: &Path) -> Option<String> {
-    let local = fs::canonicalize(local).unwrap_or_else(|_| local.to_path_buf());
+    let local = mj_core::local_git::canonical_repository(local).ok()?;
     config.bundles.iter().find_map(|(id, bundle)| {
+        if bundle.repositories.len() != 1 {
+            return None;
+        }
         let configured = bundle.primary()?.local.as_ref()?;
-        let configured = fs::canonicalize(configured).unwrap_or_else(|_| configured.to_path_buf());
+        let configured = mj_core::local_git::canonical_repository(configured).ok()?;
         (configured == local).then(|| id.clone())
     })
 }

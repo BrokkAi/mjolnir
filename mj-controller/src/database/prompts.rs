@@ -36,17 +36,22 @@ pub(super) fn record_prompt_to(
     }
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let canonical_bundle = super::projects::session_project_id(&tx, session_id, bundle_id)?;
     tx.execute(
         "INSERT INTO session_contexts(session_id, bundle_id, created_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(session_id) DO NOTHING",
-        params![session_id, bundle_id, submitted_at.unwrap_or("unknown")],
+        params![
+            session_id,
+            canonical_bundle,
+            submitted_at.unwrap_or("unknown")
+        ],
     )?;
     let actual_bundle: String = tx.query_row(
         "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
         [session_id],
         |row| row.get(0),
     )?;
-    if actual_bundle != bundle_id {
+    if actual_bundle != canonical_bundle {
         bail!("session {session_id} belongs to bundle {actual_bundle}, not {bundle_id}");
     }
     tx.execute(
@@ -104,6 +109,8 @@ pub(super) fn search_prompts_bounded_from(
     const MAX_ROWS_SCANNED: usize = 4_096;
 
     let connection = open_reader(path)?;
+    let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
+    let bundle_id = canonical_bundle.as_str();
     let query = query.to_lowercase();
     let mut seen = std::collections::HashSet::new();
     let mut matches = Vec::new();
@@ -169,6 +176,8 @@ pub(super) fn search_prompts_from(
 ) -> Result<Vec<PromptHistoryEntry>> {
     const PAGE_SIZE: usize = 256;
     let connection = open_reader(path)?;
+    let canonical_bundle = super::projects::session_project_id(&connection, session_id, bundle_id)?;
+    let bundle_id = canonical_bundle.as_str();
     let query = query.to_lowercase();
     let mut seen = std::collections::HashSet::new();
     let mut matches = Vec::new();

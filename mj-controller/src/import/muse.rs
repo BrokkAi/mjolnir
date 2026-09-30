@@ -688,6 +688,37 @@ fn is_path_key(key: &str) -> bool {
     )
 }
 
+pub(super) fn recent_directories(
+    home: &Path,
+    limit: usize,
+    executor: &impl crate::targets::CommandExecutor,
+) -> Result<NativeProjectSeed> {
+    let mut candidates = muse_candidates(&mj_checkpoint::native::muse_sessions_root(home)?)?;
+    candidates.sort_by(|a, b| {
+        b.modified_at
+            .cmp(&a.modified_at)
+            .then_with(|| b.session_path.cmp(&a.session_path))
+    });
+    let mut seed = NativeProjectSeed {
+        directories: Vec::new(),
+        errors: Vec::new(),
+    };
+    for candidate in candidates.into_iter().take(limit) {
+        ensure!(
+            !executor.cancellation_requested(),
+            "project discovery cancelled"
+        );
+        match native_project_directory(&candidate.session_path, HarnessKind::Muse, executor) {
+            Ok(directory) => seed.directories.push(directory),
+            Err(error) => seed.errors.push((
+                candidate.session_path.clone(),
+                format!("{}: {error:#}", candidate.session_path.display()),
+            )),
+        }
+    }
+    Ok(seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

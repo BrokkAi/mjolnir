@@ -121,10 +121,8 @@ impl Controller {
         }
         ensure!(
             source.project_directory.is_some()
-                || self
-                    .config
-                    .bundles
-                    .get(&source.bundle_id)
+                || source
+                    .project_bundle(&self.config)
                     .is_none_or(|bundle| bundle.repositories.len() == 1),
             "Muse Code ACP supports one workspace root; use a single-repository bundle"
         );
@@ -252,10 +250,8 @@ impl Controller {
                 },
             ));
         }
-        let bundle = self
-            .config
-            .bundles
-            .get(&session.bundle_id)
+        let bundle = session
+            .project_bundle(&self.config)
             .with_context(|| format!("session bundle {:?} is missing", session.bundle_id))?;
         let configured = verified
             .repositories
@@ -289,6 +285,10 @@ impl Controller {
                 }
                 checkpoint_source_missing_commit(
                     configured,
+                    session
+                        .project
+                        .as_ref()
+                        .and_then(|project| project.network_sources.get(&configured.id)),
                     archived,
                     executor,
                     github_token.as_deref(),
@@ -341,7 +341,7 @@ impl Controller {
         if receipt.repositories.is_empty() {
             return true;
         }
-        let Some(bundle) = self.config.bundles.get(&session.bundle_id) else {
+        let Some(bundle) = session.project_bundle(&self.config) else {
             return false;
         };
         receipt.repositories.iter().all(|expected| {
@@ -373,6 +373,11 @@ impl Controller {
             .as_ref()
             .context("session has no checkpoint")?;
         let replacement = replacement_repository_source(repository_id, replacement)?;
+        let replacement_network = session
+            .project
+            .as_ref()
+            .map(|_| mj_core::remote_git::resolve_repository(&replacement, executor))
+            .transpose()?;
         let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
         let verified = ResumeRepositoryBundles {
             checkpoint_sha256: checkpoint.sha256.clone(),
@@ -385,6 +390,7 @@ impl Controller {
             .with_context(|| format!("checkpoint does not contain repository {repository_id:?}"))?;
         if let Some(missing_commit) = checkpoint_source_missing_commit(
             &replacement,
+            replacement_network.as_ref(),
             archived,
             executor,
             controller_github_token().as_deref(),
@@ -400,15 +406,63 @@ impl Controller {
                 },
             ));
         }
+        let previous = session.clone();
+        let mut project = session.project.clone();
+        if let Some(project) = &mut project {
+            let repository = project
+                .bundle
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.id == repository_id)
+                .context("accepted project no longer contains the repaired repository")?;
+            repository.github = replacement.github.clone();
+            repository.local = replacement.local.clone();
+            project.network_sources.insert(
+                repository_id.to_owned(),
+                replacement_network
+                    .clone()
+                    .expect("accepted project source resolved above"),
+            );
+        }
+        // A merged project can use different repository IDs. Its destination
+        // and identity identify the authoring entry; the session keeps its IDs.
+        let saved = crate::database::saved_project(&bundle_id)?;
+        let config_repository_id = saved
+            .as_ref()
+            .and_then(|(_, saved)| {
+                let accepted = previous.project.as_ref()?;
+                let original = accepted
+                    .bundle
+                    .repositories
+                    .iter()
+                    .find(|repository| repository.id == repository_id)?;
+                saved
+                    .bundle
+                    .repositories
+                    .iter()
+                    .find(|repository| {
+                        repository.destination == original.destination
+                            && saved.identities.get(&repository.id)
+                                == accepted.identities.get(repository_id)
+                    })
+                    .map(|repository| repository.id.clone())
+            })
+            .unwrap_or_else(|| repository_id.to_owned());
+        let config_bundle_id = saved
+            .as_ref()
+            .map_or(bundle_id.as_str(), |(id, _)| id.as_str());
         let (config, ()) = Config::update(|config| {
+            if project.is_some() && !config.bundles.contains_key(config_bundle_id) {
+                return Ok(());
+            }
             let bundle = config
                 .bundles
-                .get_mut(&bundle_id)
+                .get_mut(config_bundle_id)
                 .with_context(|| format!("session bundle {bundle_id:?} is missing"))?;
             let repository = bundle
                 .repositories
                 .iter_mut()
-                .find(|repository| repository.id == repository_id)
+                .find(|repository| repository.id == config_repository_id)
                 .with_context(|| {
                     format!(
                         "session bundle {:?} no longer contains repository {repository_id:?}",
@@ -420,6 +474,18 @@ impl Controller {
             Ok(())
         })?;
         self.config = config;
+        if let Some(project) = project {
+            self.state
+                .sessions
+                .get_mut(session_id)
+                .expect("session checked above")
+                .project = Some(project);
+            self.persist_session_transition_or_restore(
+                session_id,
+                &previous,
+                "save repaired project source",
+            )?;
+        }
         self.preflight_verified_repository_sources(
             session_id,
             verified,
@@ -941,6 +1007,7 @@ fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectR
 
 fn checkpoint_source_missing_commit(
     configured: &ProjectRepository,
+    accepted_source: Option<&mj_core::remote_git::NetworkGitSource>,
     archived: &CheckpointRepositoryBundle,
     executor: &impl CommandExecutor,
     github_token: Option<&str>,
@@ -975,7 +1042,14 @@ fn checkpoint_source_missing_commit(
     // needs to establish that the source still serves each boundary object, so
     // stop at that object instead of downloading and walking its whole graph.
     for commit in missing {
-        let output = fetch_source_commit(executor, &repository, configured, &commit, github_token)?;
+        let output = fetch_source_commit(
+            executor,
+            &repository,
+            configured,
+            accepted_source,
+            &commit,
+            github_token,
+        )?;
         if output.status != 0 {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if source_does_not_have_commit(&stderr) {
@@ -1020,13 +1094,16 @@ fn fetch_source_commit(
     executor: &impl CommandExecutor,
     repository: &Path,
     configured: &ProjectRepository,
+    accepted_source: Option<&mj_core::remote_git::NetworkGitSource>,
     commit: &str,
     github_token: Option<&str>,
 ) -> Result<CommandOutput> {
     let mut arguments = Vec::new();
     let mut token_auth = false;
     let mut ssh_transport = false;
-    let source = if let Some(local) = &configured.local {
+    let source = if let Some(source) = accepted_source {
+        source.fetch_url.clone()
+    } else if let Some(local) = &configured.local {
         local.to_string_lossy().into_owned()
     } else {
         let source = configured
@@ -1052,6 +1129,16 @@ fn fetch_source_commit(
             format!("git@github.com:{}/{}.git", github.owner, github.repository)
         }
     };
+    if accepted_source.is_some() {
+        if source.starts_with("https://github.com/") && github_token.is_some() {
+            token_auth = true;
+            arguments.extend([
+                "-c".to_owned(), "credential.helper=".to_owned(), "-c".to_owned(),
+                "credential.helper=!f() { if [ \"$1\" = get ]; then echo username=x-access-token; echo \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
+            ]);
+        }
+        ssh_transport = source.starts_with("git@") || source.starts_with("ssh://");
+    }
     arguments.extend([
         "-C".to_owned(),
         repository.to_string_lossy().into_owned(),
@@ -1510,6 +1597,20 @@ impl Controller {
                 .targets
                 .get(&previous.target_template_id)
                 .is_some_and(mj_core::config::is_container_target);
+        let converted_project = conversion
+            .as_ref()
+            .and_then(ResumeConversion::raw_to_workspace)
+            .map(|conversion| {
+                crate::project_catalog::snapshot(
+                    self.config
+                        .bundles
+                        .get(&conversion.bundle_id)
+                        .context("converted project is missing")?,
+                    executor,
+                    true,
+                )
+            })
+            .transpose()?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if record.container_workspace.is_none() && moving_into_first_container {
             record.container_workspace = Some(targets::new_container_workspace(session_id)?);
@@ -1535,6 +1636,7 @@ impl Controller {
         match &conversion {
             Some(ResumeConversion::RawToWorkspace(conversion)) => {
                 apply_raw_to_workspace(record, conversion);
+                record.project = converted_project;
             }
             Some(ResumeConversion::WorkspaceToRaw(conversion)) => {
                 apply_workspace_to_raw(record, conversion);

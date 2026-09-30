@@ -632,8 +632,34 @@ fn verify_ssh_connectivity(ssh: &SshTarget, executor: &impl CommandExecutor) -> 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn backend_bundle(
     bundle: &ProjectBundle,
+    executor: &impl CommandExecutor,
+) -> Result<ProjectBundleSpec> {
+    backend_bundle_with_sources(bundle, None, executor)
+}
+
+pub(super) fn backend_session_bundle(
+    session: &SessionRecord,
+    config: &mj_core::config::Config,
+    executor: &impl CommandExecutor,
+) -> Result<ProjectBundleSpec> {
+    backend_bundle_with_sources(
+        session
+            .project_bundle(config)
+            .context("session bundle is missing")?,
+        session
+            .project
+            .as_ref()
+            .map(|project| &project.network_sources),
+        executor,
+    )
+}
+
+fn backend_bundle_with_sources(
+    bundle: &ProjectBundle,
+    sources: Option<&std::collections::BTreeMap<String, mj_core::remote_git::NetworkGitSource>>,
     executor: &impl CommandExecutor,
 ) -> Result<ProjectBundleSpec> {
     let primary = bundle.primary().context("bundle primary is missing")?;
@@ -643,8 +669,11 @@ pub(super) fn backend_bundle(
             .repositories
             .iter()
             .map(|repository| {
-                let source = mj_core::remote_git::resolve_repository(repository, executor)
-                    .with_context(|| format!("repository {:?}", repository.id))?;
+                let source = match sources.and_then(|sources| sources.get(&repository.id)) {
+                    Some(source) => source.clone(),
+                    None => mj_core::remote_git::resolve_repository(repository, executor)
+                        .with_context(|| format!("repository {:?}", repository.id))?,
+                };
                 Ok(RepositorySpec {
                     url: Some(source.fetch_url),
                     push_urls: source.push_urls,

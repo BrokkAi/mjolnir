@@ -435,6 +435,9 @@ pub enum DashboardAction {
     /// Read the stored mount and project-directory history on a worker and
     /// hand it back through `DashboardState::apply_mount_history`.
     LoadMountHistory,
+    RefreshProjects {
+        retry: bool,
+    },
     LoadWebAccess,
     /// Stop the running daemon and start one from the build this surface is
     /// running, then report which build came up. The keep-alive never starts
