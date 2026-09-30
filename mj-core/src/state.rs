@@ -1242,12 +1242,11 @@ pub struct BuildCachePreview {
     /// The cache directory sessions would mount, once known.
     pub directory: Option<PathBuf>,
     /// The budget sessions would run with, once known.
-    pub max_size: Option<BuildCacheLimit>,
-    pub target_max_size: Option<BuildCacheLimit>,
+    pub max_total_size: Option<BuildCacheLimit>,
     /// True when a general-purpose host installation owns the configuration.
     pub user_managed: bool,
     pub application: BuildCacheApplication,
-    /// Other mbx limits can further reduce the space available to worktrees.
+    /// Explanation of the shared storage budget.
     pub budget_note: Option<String>,
     /// What the cache on that host has done so far, when it has a tally.
     pub stats: Option<BuildCacheStats>,

@@ -550,7 +550,7 @@ fn build_cache_gigabytes_label(size: &str) -> String {
 
 /// Whether a full path names the given field of a machine's build cache.
 fn is_build_cache_budget(path: &[String]) -> bool {
-    is_build_cache_field(path, "max_size") || is_build_cache_field(path, "target_max_size")
+    is_build_cache_field(path, "max_total_size")
 }
 
 fn is_build_cache_field(path: &[String], field: &str) -> bool {
@@ -599,7 +599,7 @@ fn machine_build_cache_summary(
         Some(true) => "Enabled",
         None => "Enabled by default",
     };
-    let budget = value["max_size"].as_str().map_or_else(
+    let budget = value["max_total_size"].as_str().map_or_else(
         || "automatic budget".to_owned(),
         |size| format!("{} GB budget", build_cache_gigabytes_label(size)),
     );
@@ -1331,12 +1331,8 @@ impl SetupDialog {
                     .unwrap_or_else(|| "Unknown".to_owned()),
                 // Resolved sizes are shown in the same whole GB the field is
                 // edited in.
-                "max_size" | "target_max_size" => {
-                    let limit = if field == "max_size" {
-                        &preview.max_size
-                    } else {
-                        &preview.target_max_size
-                    };
+                "max_total_size" => {
+                    let limit = &preview.max_total_size;
                     match limit {
                         Some(BuildCacheLimit::Size(size)) => {
                             format!("{} GB, mj setting", build_cache_gigabytes_label(size))

@@ -30,10 +30,10 @@ use mj_core::state::{
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
-pub(crate) const MBX_VERSION: &str = "1.16.0";
+pub(crate) const MBX_VERSION: &str = "1.21.0";
 
-const MBX_X86_64_SHA256: &str = "be74eb96c62e774d90e8e036ed3d5541bde682802b11dfb1bf340d57276f5ab1";
-const MBX_AARCH64_SHA256: &str = "01cce632e7bacacd78935226e778c5199f6942a55789645eb3e56c662f448792";
+const MBX_X86_64_SHA256: &str = "5225a3b77f90e1cd3d1ef0d1054ccd4593ae19b2c98b815af1b82a4dfed0f97b";
+const MBX_AARCH64_SHA256: &str = "107f86955f8323ea96ca90ca2d06d49b9b1b99789dd8007f71f9c59bb17bb6d7";
 
 /// Overrides the download with a local mbx binary for the current machine's
 /// architecture. Used for development against an unreleased mbx.
@@ -438,8 +438,7 @@ fn inspect_host(
             preview: BuildCachePreview {
                 native_mbx: None,
                 directory: None,
-                max_size: None,
-                target_max_size: None,
+                max_total_size: None,
                 user_managed: false,
                 application: BuildCacheApplication::Pending,
                 budget_note: None,
@@ -461,8 +460,7 @@ fn inspect_host(
         return Ok(off(BuildCachePreview {
             native_mbx: native_version.clone(),
             directory: None,
-            max_size: None,
-            target_max_size: None,
+            max_total_size: None,
             user_managed: true,
             application: BuildCacheApplication::Pending,
             budget_note: None,
@@ -503,7 +501,7 @@ fn inspect_host(
             Some(size) => size,
             None => default_max_size(host, &directory, executor)?,
         };
-        let limit = match &settings.max_size {
+        let limit = match &settings.max_total_size {
             Some(size) => BuildCacheLimit::Size(size.clone()),
             None => BuildCacheLimit::MjDefault(automatic.clone()),
         };
@@ -515,31 +513,6 @@ fn inspect_host(
     let target_root = config_file
         .as_deref()
         .and_then(|text| relocated_target_root(text, &directory));
-    let configured_target =
-        configuration::configured_limit(config_file.as_deref(), "target", "max_size")?;
-    let target_limit = match configured_target {
-        Some(size) if user_managed => Some(BuildCacheLimit::HostConfiguration(Some(size))),
-        Some(size) => Some(BuildCacheLimit::Size(size)),
-        None => {
-            let disk = configuration::disk_total(
-                host,
-                target_root.as_deref().unwrap_or(&directory),
-                executor,
-            );
-            match disk {
-                Ok(total) => Some(BuildCacheLimit::MbxDefault(Some(
-                    configuration::scaled_budget(Some(total), 10, 10, 100, 30),
-                ))),
-                Err(error) => {
-                    tracing::warn!(
-                        host = host.key(),
-                        "could not resolve the worktree default: {error:#}"
-                    );
-                    None
-                }
-            }
-        }
-    };
     let mut application =
         configuration::application(previous_config.as_deref(), config_file.as_deref());
     if application == BuildCacheApplication::Pending
@@ -553,18 +526,18 @@ fn inspect_host(
     // Read before the checks below, so a host that cannot share the cache
     // right now still reports what the cache did while it could.
     let stats = read_stats(host, &directory, executor);
-    let preview = |off_reason: Option<BuildCacheOff>| {
-        BuildCachePreview {
+    let preview = |off_reason: Option<BuildCacheOff>| BuildCachePreview {
         native_mbx: native_version.clone(),
         directory: Some(directory.clone()),
-        max_size: Some(limit.clone()),
-        target_max_size: target_limit.clone(),
+        max_total_size: Some(limit.clone()),
         user_managed,
         application: application.clone(),
-        budget_note: Some("The combined budget also reserves shared compiler outputs and incremental state; worktrees may be collected below their own limit.".into()),
+        budget_note: Some(
+            "One budget covers shared compiler outputs, managed worktrees, and incremental state."
+                .into(),
+        ),
         stats: stats.clone(),
         off_reason,
-    }
     };
 
     // The directory may not exist yet; its filesystem is its nearest
@@ -821,9 +794,7 @@ fn nearest_existing_ancestor(
 /// smaller of 100 GB and a quarter of the free space on the cache volume.
 ///
 /// It is written as `gc.max_total_size`, so it bounds the whole cache
-/// rather than the action store alone. mbx's own per-part budgets still apply
-/// underneath it; they are fractions of the disk and this total is the
-/// binding constraint whenever it is the smaller number.
+/// including shared compiler outputs, managed worktrees, and incremental state.
 fn default_max_size(
     host: &CacheHost,
     directory: &Path,
@@ -1686,8 +1657,7 @@ mod tests {
             &podman(Some(TargetBuildCache {
                 enabled: Some(true),
                 directory: Some(PathBuf::from("/mnt/nvme/mbx")),
-                max_size: Some("250GiB".into()),
-                target_max_size: None,
+                max_total_size: Some("250GiB".into()),
             })),
             &executor,
         )
@@ -1706,23 +1676,18 @@ mod tests {
     }
 
     #[test]
-    fn total_and_worktree_budgets_resolve_into_one_machine_document() {
+    fn one_total_budget_resolves_without_component_caps() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&plain_host());
         let settings = TargetBuildCache {
-            max_size: Some("500GiB".into()),
-            target_max_size: Some("250GiB".into()),
+            max_total_size: Some("500GiB".into()),
             ..Default::default()
         };
         let inspection = inspect_host(&CacheHost::Local, &settings, &executor).unwrap();
         assert!(!inspection.preview.user_managed);
         assert_eq!(
-            inspection.preview.max_size,
+            inspection.preview.max_total_size,
             Some(BuildCacheLimit::Size("500GiB".into()))
-        );
-        assert_eq!(
-            inspection.preview.target_max_size,
-            Some(BuildCacheLimit::Size("250GiB".into()))
         );
         assert_eq!(
             inspection.preview.application,
@@ -1733,7 +1698,7 @@ mod tests {
             configuration::configured_limit(cache.config_file.as_deref(), "target", "max_size")
                 .unwrap()
                 .as_deref(),
-            Some("250GiB")
+            None
         );
         assert!(
             !executor
@@ -1745,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn a_native_installation_owns_both_budgets_despite_saved_mj_overrides() {
+    fn a_native_installation_owns_the_budget_despite_saved_mj_overrides() {
         let _isolated = isolated();
         let native = current_native_mbx();
         let mut answers = vec![
@@ -1765,20 +1730,15 @@ mod tests {
         let executor = ProbeExecutor::new(&answers);
         let settings = TargetBuildCache {
             directory: Some("/ignored".into()),
-            max_size: Some("1GB".into()),
-            target_max_size: Some("2GB".into()),
+            max_total_size: Some("1GB".into()),
             ..Default::default()
         };
         let inspection = inspect_host(&CacheHost::Local, &settings, &executor).unwrap();
         assert!(inspection.preview.user_managed);
         assert_eq!(inspection.preview.directory, Some("/native/cache".into()));
         assert_eq!(
-            inspection.preview.max_size,
+            inspection.preview.max_total_size,
             Some(BuildCacheLimit::HostConfiguration(Some("400GiB".into())))
-        );
-        assert_eq!(
-            inspection.preview.target_max_size,
-            Some(BuildCacheLimit::HostConfiguration(Some("none".into())))
         );
         assert!(
             !executor
@@ -1799,10 +1759,37 @@ mod tests {
             .unwrap()
             .preview;
         assert_eq!(
-            preview.max_size,
+            preview.max_total_size,
             Some(BuildCacheLimit::MjDefault("17GB".into()))
         );
         assert_eq!(preview.application, BuildCacheApplication::Applied);
+    }
+
+    #[test]
+    fn legacy_managed_budgets_are_replaced_by_a_fresh_shared_default() {
+        let _isolated = isolated();
+        let saved = "# mj automatic total: 17GB\n[gc]\nmax_total_size = '500GiB'\n[target]\nmax_size = '250GiB'\n";
+        let mut answers = vec![(".mjolnir/config/mbx/config.toml", 0, saved)];
+        answers.extend(plain_host());
+        let executor = ProbeExecutor::new(&answers);
+        let inspection =
+            inspect_host(&CacheHost::Local, &TargetBuildCache::default(), &executor).unwrap();
+        assert_eq!(
+            inspection.preview.max_total_size,
+            Some(BuildCacheLimit::MjDefault("100000000000B".into()))
+        );
+        assert_eq!(
+            inspection.preview.application,
+            BuildCacheApplication::Pending
+        );
+        let cache = inspection.cache.unwrap();
+        let policy: toml::Value = toml::from_str(cache.config_file.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            policy["gc"]["max_total_size"].as_str(),
+            Some("100000000000B")
+        );
+        assert!(policy.get("target").is_none());
+        assert!(policy["gc"].get("max_size").is_none());
     }
 
     /// Turning the cache on cannot override the host: without reflinks a
@@ -1819,8 +1806,7 @@ mod tests {
                 &podman(Some(TargetBuildCache {
                     enabled: Some(true),
                     directory: None,
-                    max_size: None,
-                    target_max_size: None,
+                    max_total_size: None,
                 })),
                 &executor,
             ),
@@ -1851,7 +1837,7 @@ mod tests {
         assert_eq!(preview.native_mbx, None);
         assert_eq!(preview.directory, Some(default_cache_directory()));
         assert_eq!(
-            preview.max_size,
+            preview.max_total_size,
             Some(BuildCacheLimit::MjDefault("100000000000B".into()))
         );
         assert!(
@@ -1883,7 +1869,10 @@ mod tests {
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))
         );
-        assert_eq!(preview.max_size, Some(BuildCacheLimit::MbxDefault(None)));
+        assert_eq!(
+            preview.max_total_size,
+            Some(BuildCacheLimit::MbxDefault(None))
+        );
         assert_eq!(preview.off_reason, None);
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
     }

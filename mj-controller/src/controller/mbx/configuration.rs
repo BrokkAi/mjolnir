@@ -4,7 +4,7 @@
 use super::*;
 use mj_core::state::BuildCacheApplication;
 
-const DEFAULT_MARKER: &str = "# mj automatic total: ";
+const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
 /// provisioned before machine-level policy. No container recreation is needed.
@@ -67,23 +67,14 @@ pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> 
     #[derive(serde::Serialize)]
     struct Document<'a> {
         gc: Gc<'a>,
-        target: Target<'a>,
     }
     #[derive(serde::Serialize)]
     struct Gc<'a> {
         max_total_size: &'a str,
     }
-    #[derive(serde::Serialize)]
-    struct Target<'a> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_size: Option<&'a str>,
-    }
     let document = Document {
         gc: Gc {
-            max_total_size: settings.max_size.as_deref().unwrap_or(automatic),
-        },
-        target: Target {
-            max_size: settings.target_max_size.as_deref(),
+            max_total_size: settings.max_total_size.as_deref().unwrap_or(automatic),
         },
     };
     Ok(format!(
@@ -112,59 +103,6 @@ pub(super) fn configured_limit(
         "mbx {table}.{field} is not a size: {value:?}"
     );
     Ok(Some(value.to_owned()))
-}
-
-/// Match the pinned mbx 1.16.0 defaults, not whatever a newer host binary uses.
-pub(super) fn scaled_budget(
-    total: Option<u64>,
-    percent: u64,
-    floor: u64,
-    ceiling: u64,
-    fallback: u64,
-) -> String {
-    const GIB: u64 = 1 << 30;
-    let bytes = match total.filter(|total| *total > 0) {
-        Some(total) => ((total / 100).saturating_mul(percent) / (5 * GIB) * (5 * GIB))
-            .clamp(floor * GIB, ceiling * GIB),
-        None => fallback * GIB,
-    };
-    format!("{bytes}B")
-}
-
-pub(super) fn disk_total(
-    host: &CacheHost,
-    directory: &Path,
-    executor: &impl CommandExecutor,
-) -> Result<u64> {
-    let volume = nearest_existing_ancestor(host, directory, executor)?;
-    let command = host.command(
-        vec![
-            "df".into(),
-            "-B1".into(),
-            "-P".into(),
-            "--".into(),
-            volume.to_string_lossy().into_owned(),
-        ],
-        "measure build cache capacity",
-    );
-    let output = checked(executor.execute(&command)?, &command)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields = text
-        .lines()
-        .nth(1)
-        .context("missing cache capacity")?
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    fields
-        .get(
-            fields
-                .len()
-                .checked_sub(5)
-                .context("missing cache capacity column")?,
-        )
-        .context("missing cache capacity column")?
-        .parse()
-        .context("invalid cache capacity")
 }
 
 // A lock belongs to the host, not the container or daemon. Compare-and-replace
@@ -259,8 +197,7 @@ mod tests {
         let executor = targets::ProcessExecutor;
         let first = managed_document(
             &TargetBuildCache {
-                max_size: Some("500GiB".into()),
-                target_max_size: Some("200GiB".into()),
+                max_total_size: Some("500GiB".into()),
                 ..Default::default()
             },
             "100GB",
@@ -278,7 +215,7 @@ mod tests {
         }
         let second = managed_document(
             &TargetBuildCache {
-                target_max_size: Some("300GiB".into()),
+                max_total_size: Some("100GB".into()),
                 ..Default::default()
             },
             "100GB",
@@ -295,7 +232,7 @@ mod tests {
                 configured_limit(Some(&text), "target", "max_size")
                     .unwrap()
                     .as_deref(),
-                Some("300GiB")
+                None
             );
             assert_eq!(
                 configured_limit(Some(&text), "gc", "max_total_size")
@@ -371,8 +308,7 @@ mod tests {
         let automatic = automatic_total(Some(&initial)).unwrap();
         let explicit = managed_document(
             &TargetBuildCache {
-                max_size: Some("500GiB".into()),
-                target_max_size: Some("250GiB".into()),
+                max_total_size: Some("500GiB".into()),
                 ..Default::default()
             },
             &automatic,
@@ -404,27 +340,6 @@ mod tests {
         );
         assert!(
             configured_limit(Some("[target]\nmax_size = 'lots'"), "target", "max_size").is_err()
-        );
-    }
-
-    #[test]
-    fn pinned_target_default_scales_and_caps_independently_of_the_total() {
-        let gib = 1 << 30;
-        assert_eq!(
-            scaled_budget(Some(40 * gib), 10, 10, 100, 30),
-            format!("{}B", 10 * gib)
-        );
-        assert_eq!(
-            scaled_budget(Some(777 * gib), 10, 10, 100, 30),
-            format!("{}B", 75 * gib)
-        );
-        assert_eq!(
-            scaled_budget(Some(4000 * gib), 10, 10, 100, 30),
-            format!("{}B", 100 * gib)
-        );
-        assert_eq!(
-            scaled_budget(None, 10, 10, 100, 30),
-            format!("{}B", 30 * gib)
         );
     }
 }

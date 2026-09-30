@@ -1143,8 +1143,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
     container.build_cache = Some(crate::config::TargetBuildCache {
         enabled: None,
         directory: None,
-        max_size: Some("20GB".into()),
-        target_max_size: None,
+        max_total_size: Some("20GB".into()),
     });
     state.validate_setup_update(&before, &after).unwrap();
     // Any other container change is still refused.
