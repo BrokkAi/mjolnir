@@ -45,6 +45,12 @@ impl Policy {
         stop: &CancellationToken,
     ) -> Self {
         let catalog = ProfileCatalog::new(stop.child_token());
+        let weak_state = Arc::downgrade(&state);
+        catalog.set_publisher(Arc::new(move || {
+            if let Some(state) = weak_state.upgrade() {
+                state.publish_revision();
+            }
+        }));
         assert!(
             state.profile_catalog.set(catalog.clone()).is_ok(),
             "daemon catalogue installed once"

@@ -47,9 +47,9 @@ use crate::short_id;
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
     RuntimeConfirmationMissing(String),
-    SubagentOptions {
-        id: u64,
-        result: std::result::Result<mj_core::subagent::SubagentOptions, String>,
+    ProfileHydration {
+        key: String,
+        result: std::result::Result<(), String>,
     },
     HelpSearchFinished {
         generation: u64,
@@ -1483,8 +1483,8 @@ impl DashboardContext {
                 episode_id,
                 result,
             } => self.apply_worker_diagnosis(session_id, episode_id, result),
-            DashboardIoUpdate::SubagentOptions { id, result } => {
-                self.dashboard.apply_subagent_options(id, result)
+            DashboardIoUpdate::ProfileHydration { key, result } => {
+                self.dashboard.apply_profile_hydration(key, result)
             }
             DashboardIoUpdate::ProjectDiscovery { context, result } => {
                 self.dashboard.apply_project_discovery(&context, result);

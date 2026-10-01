@@ -1,19 +1,8 @@
 use super::*;
 use mj_core::subagent::{SubagentOptions, SubagentPolicy};
 
-/// One namespace for replies delivered to Setup and Move. Retiring either
-/// dialog cannot make its outstanding request belong to the next dialog.
-pub(crate) fn next_subagent_discovery_id() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubagentDiscovery {
-    pub id: u64,
-    pub profile: String,
-    pub model: Option<String>,
-    key: String,
     pub result: Option<Result<SubagentOptions, String>>,
 }
 
@@ -24,9 +13,7 @@ pub(crate) struct SubagentDraft {
     pub(crate) policy: SubagentPolicy,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
-    cache: BTreeMap<String, SubagentOptions>,
     models: Vec<mj_core::acp::SessionConfigChoice>,
-    inputs: String,
 }
 
 impl SubagentDraft {
@@ -274,48 +261,23 @@ impl SubagentDraft {
         }
     }
 
-    /// Starts discovery for a single-model policy on `profile` unless the
-    /// current one already covers it.
-    fn take_discovery(&mut self, profile: String, config: &Config) -> Option<DashboardAction> {
+    fn update_choices(
+        &mut self,
+        profile: &str,
+        config: &Config,
+        snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) {
         let SubagentPolicy::SingleModel { model, .. } = &self.policy else {
-            return None;
+            return;
         };
-        let model = (!model.is_empty()).then(|| model.clone());
-        let inputs = config.subagent_discovery_key(&profile, None);
-        if self.inputs != inputs {
-            self.models.clear();
-            self.inputs = inputs;
-        }
-        let key = config.subagent_discovery_key(&profile, model.as_deref());
-        if self
-            .discovery
-            .as_ref()
-            .is_some_and(|discovery| discovery.key == key)
-        {
-            return None;
-        }
-        let id = next_subagent_discovery_id();
+        let model = (!model.is_empty()).then_some(model.as_str());
+        self.models = snapshot
+            .options(config, profile, None)
+            .map(|options| options.models)
+            .unwrap_or_default();
         self.discovery = Some(SubagentDiscovery {
-            id,
-            profile: profile.clone(),
-            model: model.clone(),
-            key: key.clone(),
-            result: self.cache.get(&key).cloned().map(Ok),
+            result: snapshot.options(config, profile, model).map(Ok),
         });
-        if self
-            .discovery
-            .as_ref()
-            .is_some_and(|discovery| discovery.result.is_some())
-        {
-            self.models = self.cache[&key].models.clone();
-            return None;
-        }
-        Some(DashboardAction::DiscoverSubagentOptions {
-            id,
-            profile,
-            model,
-            config: serde_json::to_string(config).expect("config serializes"),
-        })
     }
 }
 
@@ -339,42 +301,10 @@ impl DashboardState {
 
     pub(crate) fn take_subagent_discovery(&mut self) -> Option<DashboardAction> {
         let config = self.config.clone();
+        let snapshot = self.profile_capabilities.clone();
         let (draft, profile) = self.review_subagent_draft()?;
-        draft.take_discovery(profile, &config)
-    }
-
-    pub(crate) fn apply_move_subagent_options(
-        &mut self,
-        id: u64,
-        result: Result<SubagentOptions, String>,
-    ) {
-        let key = match &self.mode {
-            Mode::Resume(wizard) => {
-                let profile = wizard.destination_profile(self);
-                let model = match &wizard.subagents.policy {
-                    SubagentPolicy::SingleModel { model, .. } => {
-                        (!model.is_empty()).then_some(model.as_str())
-                    }
-                    _ => None,
-                };
-                self.config.subagent_discovery_key(&profile, model)
-            }
-            _ => return,
-        };
-        let Mode::Resume(wizard) = &mut self.mode else {
-            return;
-        };
-        let draft = &mut *wizard.subagents;
-        if let Some(discovery) = &mut draft.discovery
-            && discovery.id == id
-            && discovery.key == key
-        {
-            if let Ok(options) = &result {
-                draft.models = options.models.clone();
-                draft.cache.insert(discovery.key.clone(), options.clone());
-            }
-            discovery.result = Some(result);
-        }
+        draft.update_choices(&profile, &config, &snapshot);
+        None
     }
 }
 

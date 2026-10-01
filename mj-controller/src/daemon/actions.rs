@@ -54,6 +54,14 @@ pub(super) async fn handle_action(
                 }
             }
         }
+        DaemonAction::WarmProfileCapabilities { config } => {
+            state
+                .profile_catalog
+                .get()
+                .context("profile catalogue unavailable")?
+                .ensure(&config);
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RecoverWebViewer(action) => {
             state.web_viewer.recover(action)?;
             Ok(DaemonReply::Done)
@@ -706,6 +714,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Stop
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SubagentOptions { .. }
+            | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
     ) {
         Ok(None)

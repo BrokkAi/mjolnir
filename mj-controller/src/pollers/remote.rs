@@ -16,6 +16,7 @@ pub fn spawn_remote_dashboard_worker_poller(
     let (reviews_tx, reviews_rx) = tokio::sync::watch::channel(Vec::new());
     let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::new());
     let (quotas_tx, quotas_rx) = tokio::sync::watch::channel(Default::default());
+    let (capabilities_tx, capabilities_rx) = tokio::sync::watch::channel(Default::default());
     let (config_tx, config_rx) = tokio::sync::watch::channel(mj_core::config::Config::default());
     let (health_tx, health_rx) = tokio::sync::watch::channel(RuntimeFeedHealth::default());
     tokio::spawn(async move {
@@ -76,6 +77,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 launch_recency: metadata.launch_recency,
                             });
                             send_if_changed(&reviews_tx, metadata.reviews);
+                            send_if_changed(&capabilities_tx, metadata.profile_capabilities);
                             send_if_changed(&notices_tx, metadata.notices);
                             send_if_changed(&quotas_tx, metadata.quotas);
                         }
@@ -110,6 +112,7 @@ pub fn spawn_remote_dashboard_worker_poller(
         reviews: reviews_rx,
         notices: notices_rx,
         quotas: quotas_rx,
+        profile_capabilities: capabilities_rx,
         config: config_rx,
         health: health_rx,
     })

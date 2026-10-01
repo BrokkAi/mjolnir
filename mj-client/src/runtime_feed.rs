@@ -34,6 +34,8 @@ pub struct RuntimeProjection {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    #[serde(default)]
+    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     pub config: Config,
     pub last_subagent_policy: SubagentPolicy,
     pub workspace_names: BTreeMap<String, String>,

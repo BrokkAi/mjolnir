@@ -722,3 +722,52 @@ pub(crate) fn operation(
         resume_destination: None,
     }
 }
+
+/// A published daemon catalog, independent of any open dialog or selection.
+pub(crate) fn profile_capabilities_fixture(
+    config: &mj_core::config::Config,
+    models: &[(&str, &[&str])],
+) -> mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
+    use mj_core::profile_capabilities::{
+        CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
+    };
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    ProfileCapabilitiesSnapshot {
+        profiles: config
+            .enabled_profiles()
+            .map(|(id, profile)| {
+                (
+                    profile.capabilities_key(id),
+                    ProfileCapabilities {
+                        choices: CapabilityState::Ready(mj_core::worker_launch::ProfileConfig {
+                            model: models.first().map(|(model, _)| (*model).into()),
+                            models: models.iter().map(|(model, _)| choice(model)).collect(),
+                            efforts: models
+                                .first()
+                                .map(|(_, efforts)| {
+                                    efforts.iter().map(|effort| choice(effort)).collect()
+                                })
+                                .unwrap_or_default(),
+                            observed_at: 1,
+                        }),
+                        efforts: models
+                            .iter()
+                            .map(|(model, efforts)| {
+                                (
+                                    (*model).into(),
+                                    CapabilityState::Ready(
+                                        efforts.iter().map(|effort| choice(effort)).collect(),
+                                    ),
+                                )
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}

@@ -1,6 +1,5 @@
 //! Automatically populated, persistent profile capabilities.
 
-use mj_core::hex::lower_hex;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -9,7 +8,7 @@ use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec, T
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{Config, HarnessProfile};
 use mj_core::worker_launch::{ProfileConfig, ProfileProbeSpec};
-use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 /// Pre-session choices use the same eligibility predicate as delegation.
 /// Discovery remains supervised and cached; independent profiles run concurrently.
@@ -45,21 +44,12 @@ pub(crate) async fn discover_for(
     config: Config,
     id: String,
     model: Option<String>,
+    cancellation: CancellationToken,
 ) -> Result<ProfileConfig> {
-    serialized(id.clone(), move |cancelled| {
+    serialized_until(id.clone(), cancellation, move |cancelled| {
         discover_from_config(&config, &id, model, false, cancelled)
     })
     .await
-}
-
-pub(crate) fn discovery_fingerprint(id: &str, profile: &HarnessProfile) -> Result<String> {
-    let mut environment = profile.environment.resolved().clone();
-    super::worker_binary::apply_claude_setup_token(
-        &mut environment,
-        profile.kind,
-        &mj_core::credentials::claude_oauth_token_path(id),
-    );
-    fingerprint(profile, &environment)
 }
 
 /// Validates a newly selected top-level policy, not a recorded resume policy.
@@ -191,7 +181,7 @@ where
 #[derive(Default)]
 struct ProbeLock {
     gate: tokio::sync::Mutex<()>,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancellation: CancellationToken,
 }
 
 pub fn cancel_all() {
@@ -202,9 +192,7 @@ pub fn cancel_all() {
             .values()
             .filter_map(Weak::upgrade)
         {
-            probe
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
+            probe.cancellation.cancel();
         }
     }
 }
@@ -227,6 +215,14 @@ async fn serialized(
     profile_id: String,
     job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<ProfileConfig> + Send + 'static,
 ) -> Result<ProfileConfig> {
+    serialized_until(profile_id, CancellationToken::new(), job).await
+}
+
+async fn serialized_until(
+    profile_id: String,
+    cancellation: CancellationToken,
+    job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<ProfileConfig> + Send + 'static,
+) -> Result<ProfileConfig> {
     let lock = {
         let mut locks = PROBES
             .get_or_init(Default::default)
@@ -241,11 +237,38 @@ async fn serialized(
         lock
     };
     tokio::spawn(async move {
-        let _guard = lock.gate.lock().await;
-        let cancelled = lock.cancelled.clone();
-        let result = tokio::task::spawn_blocking(move || job(cancelled))
-            .await
-            .context("profile discovery task panicked")?;
+        let _guard = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => anyhow::bail!("profile definition retired"),
+            _ = lock.cancellation.cancelled() => anyhow::bail!("profile discovery cancelled"),
+            guard = lock.gate.lock() => guard,
+        };
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Runtime shutdown can drop this supervisor before it polls a token.
+        // Its blocking process must still receive cancellation before the
+        // profile lock is released.
+        struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
+        let job_cancelled = cancelled.clone();
+        let mut task = tokio::task::spawn_blocking(move || job(job_cancelled));
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+                task.await
+            }
+            _ = lock.cancellation.cancelled() => {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+                task.await
+            }
+            result = &mut task => result,
+        }
+        .context("profile discovery task panicked")?;
         if let Err(error) = &result {
             tracing::warn!(error = %format!("{error:#}"), "profile discovery failed");
         }
@@ -294,12 +317,7 @@ pub async fn observe(
             &executor,
         )?;
         if mj_core::worker_launch::worker_executable_digest(&worker)? == worker_build {
-            store(
-                &profile_id,
-                &fingerprint(profile, &profile.environment)?,
-                &choices.model,
-                &choices,
-            )?;
+            store(&profile_id, &fingerprint(profile), &choices.model, &choices)?;
         }
         Ok(choices)
     })
@@ -307,41 +325,10 @@ pub async fn observe(
     .map(|_| ())
 }
 
-/// The files in a profile home that decide what a session advertises: the
-/// harness's own configuration, which names the model provider and the default
-/// model, and the model catalog Mjolnir merges over a provider's list. They are
-/// read for the discovery fingerprint, so editing one is not a change Mjolnir
-/// can answer from a catalogue discovered before the edit.
-const HOME_CATALOG_INPUTS: [&str; 3] = ["config.toml", "models.json", "settings.json"];
-
-fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>) -> Result<String> {
-    let mut hash = Sha256::new();
-    hash.update(b"profile-config-v5\0");
-    hash.update(serde_json::to_vec(&profile.discovery_inputs())?);
-    hash.update(serde_json::to_vec(environment)?);
-    hash.update(
-        mj_core::harness_runtime::pin(profile.kind)
-            .install_id
-            .as_bytes(),
-    );
-    // The profile record names a home; what that home holds is what the
-    // harness reads. Pointing a Codex profile at another provider, or
-    // correcting its catalog, changes the models and efforts a session
-    // offers without changing a single field of the record, so the contents
-    // of those files belong in the key as much as the record does.
-    for name in HOME_CATALOG_INPUTS {
-        let path = profile.home.join(name);
-        hash.update(name.as_bytes());
-        match std::fs::read(&path) {
-            Ok(bytes) => hash.update(&bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hash.update(b"\0absent"),
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", path.display()));
-            }
-        }
-        hash.update(b"\0");
-    }
-    Ok(lower_hex(hash.finalize()))
+/// Persistent identity follows configured definitions only. Harness-home
+/// files and refreshed credentials do not invalidate advertised choices.
+fn fingerprint(profile: &HarnessProfile) -> String {
+    profile.capabilities_key("")
 }
 
 fn discover_blocking(
@@ -365,6 +352,10 @@ fn discover_from_config(
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
+    ensure!(
+        !cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "profile discovery cancelled"
+    );
     let profile = config
         .enabled_profile(profile_id)
         .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
@@ -374,7 +365,7 @@ fn discover_from_config(
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(profile_id),
     );
-    let fingerprint = fingerprint(profile, &environment)?;
+    let fingerprint = fingerprint(profile);
     resolve_cached(
         refresh,
         || {
@@ -570,7 +561,7 @@ mod tests {
                 effort: Some("high".into()),
             },
         };
-        let key = fingerprint(&profile, profile.environment.resolved()).unwrap();
+        let key = fingerprint(&profile);
         let choice = |value: &str| mj_core::acp::SessionConfigChoice {
             value: value.into(),
             name: value.into(),
@@ -797,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn pointing_a_profile_at_another_provider_invalidates_the_discovery_cache() {
+    fn harness_home_files_do_not_invalidate_configured_capabilities() {
         let home = tempfile::tempdir().unwrap();
         let profile = HarnessProfile {
             enabled: true,
@@ -808,7 +799,7 @@ mod tests {
             subagents: Default::default(),
             guardian_review_model: None,
         };
-        let key = || fingerprint(&profile, &BTreeMap::new()).unwrap();
+        let key = || fingerprint(&profile);
 
         let built_in = key();
         std::fs::write(
@@ -823,19 +814,19 @@ mod tests {
         )
         .unwrap();
         let provider = key();
-        assert_ne!(
+        assert_eq!(
             built_in, provider,
-            "a home that gained a model provider offers other models"
+            "only configured profile definitions invalidate capabilities"
         );
         std::fs::write(
             home.path().join("models.json"),
             r#"{"models":[{"slug":"glm-5.3-flash"}]}"#,
         )
         .unwrap();
-        assert_ne!(
+        assert_eq!(
             provider,
             key(),
-            "a catalog override changes the models a session offers"
+            "a home catalog edit does not invalidate capabilities"
         );
     }
 
@@ -851,7 +842,7 @@ mod tests {
             subagents: Default::default(),
             guardian_review_model: None,
         };
-        let original = fingerprint(&profile, &BTreeMap::new()).unwrap();
+        let original = fingerprint(&profile);
         for effort in ["low", "high"] {
             profile.subagents = SubagentPolicy::SingleModel {
                 model: "chosen".into(),
@@ -859,16 +850,16 @@ mod tests {
             };
             profile.context_window_bytes = Some(42);
             profile.guardian_review_model = Some("session".into());
-            assert_eq!(fingerprint(&profile, &BTreeMap::new()).unwrap(), original);
+            assert_eq!(fingerprint(&profile), original);
         }
         profile.environment = [("PROVIDER".into(), "different".into())]
             .into_iter()
             .collect();
-        assert_ne!(fingerprint(&profile, &BTreeMap::new()).unwrap(), original);
+        assert_ne!(fingerprint(&profile), original);
     }
 
     #[test]
-    fn setup_token_changes_invalidate_the_discovery_cache() {
+    fn setup_token_rotation_preserves_configured_capabilities() {
         use mj_core::credentials::{CLAUDE_OAUTH_TOKEN_ENV, write_claude_oauth_token};
         let root = tempfile::tempdir().unwrap();
         let token = root.path().join("token");
@@ -890,24 +881,121 @@ mod tests {
             );
             environment
         };
-        let login = fingerprint(&profile, &resolve(BTreeMap::new())).unwrap();
+        let login = fingerprint(&profile);
         write_claude_oauth_token(&token, b"setup-first").unwrap();
         let first = resolve(BTreeMap::new());
         assert_eq!(first[CLAUDE_OAUTH_TOKEN_ENV], "setup-first");
-        let first_key = fingerprint(&profile, &first).unwrap();
-        assert_ne!(login, first_key);
+        let first_key = fingerprint(&profile);
+        assert_eq!(login, first_key);
         write_claude_oauth_token(&token, b"setup-second").unwrap();
         assert_eq!(
             first[CLAUDE_OAUTH_TOKEN_ENV], "setup-first",
             "an in-flight probe retains its authentication snapshot"
         );
-        assert_ne!(
-            first_key,
-            fingerprint(&profile, &resolve(BTreeMap::new())).unwrap()
-        );
+        assert_eq!(first_key, fingerprint(&profile));
         let explicit = BTreeMap::from([(CLAUDE_OAUTH_TOKEN_ENV.into(), "explicit".into())]);
         assert_eq!(resolve(explicit.clone()), explicit);
         assert!(!first_key.contains("setup-first"));
+    }
+
+    #[tokio::test]
+    async fn retiring_a_definition_cancels_probes_and_preserves_its_replacement() {
+        let cancellation = CancellationToken::new();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn(serialized_until(
+            "retirement-test".into(),
+            cancellation.clone(),
+            move |cancelled| {
+                started.send(()).unwrap();
+                while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                anyhow::bail!("running probe cancelled")
+            },
+        ));
+        running.await.unwrap();
+        let queued_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = queued_ran.clone();
+        let queued = serialized_until("retirement-test".into(), cancellation.clone(), move |_| {
+            marker.store(true, std::sync::atomic::Ordering::Release);
+            Ok(ProfileConfig {
+                model: None,
+                models: vec![],
+                efforts: vec![],
+                observed_at: 0,
+            })
+        });
+        tokio::pin!(queued);
+        tokio::select! {
+            biased;
+            _ = &mut queued => panic!("queued probe passed the running owner"),
+            _ = tokio::task::yield_now() => {}
+        }
+        cancellation.cancel();
+        let queued_result = tokio::time::timeout(Duration::from_secs(1), &mut queued)
+            .await
+            .unwrap();
+        assert!(queued_result.is_err());
+        assert!(!queued_ran.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let replacement =
+            serialized_until("retirement-test".into(), CancellationToken::new(), |_| {
+                Ok(ProfileConfig {
+                    model: None,
+                    models: vec![],
+                    efforts: vec![],
+                    observed_at: 0,
+                })
+            });
+        tokio::time::timeout(Duration::from_secs(1), replacement)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn runtime_shutdown_cancels_a_probes_blocking_job_even_if_its_supervisor_is_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let saw_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = saw_cancellation.clone();
+        runtime.block_on(async move {
+            tokio::spawn(serialized_until(
+                "runtime-drop-test".into(),
+                CancellationToken::new(),
+                move |cancelled| {
+                    started.send(()).unwrap();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    stopped.store(
+                        cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    Ok(ProfileConfig {
+                        model: None,
+                        models: vec![],
+                        efforts: vec![],
+                        observed_at: 0,
+                    })
+                },
+            ));
+            running.await.unwrap();
+        });
+        drop(runtime);
+        assert!(saw_cancellation.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

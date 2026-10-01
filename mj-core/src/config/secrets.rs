@@ -10,7 +10,7 @@
 //! sees plain strings, and they are serialized as written, so a save keeps
 //! the reference rather than the value it stood for.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -243,6 +243,12 @@ impl Serialize for Environment {
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let sources = BTreeMap::<String, EnvironmentValue>::deserialize(deserializer)?;
+        if SOURCES_ONLY.get() {
+            return Ok(Self {
+                sources,
+                resolved: BTreeMap::new(),
+            });
+        }
         Self::from_sources(sources).map_err(|error| {
             let message = format!("{error:#}");
             // The TOML parser wraps this in a parse error with a source
@@ -337,6 +343,21 @@ impl SecretResolver {
 thread_local! {
     static FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<SecretResolver>> = const { RefCell::new(None) };
+    static SOURCES_ONLY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Deserialize a configuration projection without reading credentials or
+/// secret files. Its environments retain their configured sources, but have
+/// no resolved values: serialize them for background resolution before use.
+pub fn with_environment_sources_only<T>(read: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SOURCES_ONLY.set(self.0);
+        }
+    }
+    let _restore = Restore(SOURCES_ONLY.replace(true));
+    read()
 }
 
 /// Run `read` with `resolver` answering every environment reference it meets.
@@ -456,6 +477,36 @@ mod tests {
         let back: Environment =
             with_secret_resolver(fixed(), || serde_json::from_value(json)).unwrap();
         assert_eq!(back, environment);
+    }
+
+    #[test]
+    fn source_projections_need_no_credentials_and_preserve_references_for_background_resolution() {
+        let json = serde_json::json!({
+            "A": {"from_env": "UNDEFINED"},
+            "B": {"from_secret": "UNDEFINED"},
+            "C": "literal"
+        });
+        with_secret_resolver(
+            SecretResolver::fixed(BTreeMap::new(), BTreeMap::new()),
+            || {
+                let projected: Environment =
+                    with_environment_sources_only(|| serde_json::from_value(json.clone())).unwrap();
+                assert!(projected.resolved().is_empty());
+                assert_eq!(serde_json::to_value(projected).unwrap(), json);
+                let resolved: Result<Environment, _> = serde_json::from_value(json);
+                assert!(
+                    resolved.is_err(),
+                    "normal reads still require real credentials"
+                );
+                let malformed: Result<Environment, _> = with_environment_sources_only(|| {
+                    serde_json::from_value(serde_json::json!({"A": {"from_secret": ""}}))
+                });
+                assert!(
+                    malformed.is_err(),
+                    "projections still validate source syntax"
+                );
+            },
+        );
     }
 
     #[test]

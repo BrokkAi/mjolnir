@@ -305,6 +305,11 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
+        full.metadata.profile_capabilities = self
+            .profile_catalog
+            .get()
+            .map(|catalog| catalog.snapshot())
+            .unwrap_or_default();
         full.metadata.launch_recency = if launch_inputs_changed(&history.full, &full) {
             mj_client::runtime_feed::launch_recency(&full.records)
         } else {
@@ -397,6 +402,60 @@ mod tests {
             history.frame(Some(&original)),
             RuntimeFrame::ResetRequired
         ));
+    }
+
+    #[tokio::test]
+    async fn draft_hydration_publishes_shared_capabilities_without_adopting_the_draft() {
+        use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, test_config};
+        use mj_core::config::HarnessKind;
+        use mj_core::profile_capabilities::CapabilityState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = super::super::tests::test_runtime_state();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+        let weak = Arc::downgrade(&state);
+        catalog.set_publisher(Arc::new(move || {
+            if let Some(state) = weak.upgrade() {
+                state.publish_revision();
+            }
+        }));
+        assert!(state.profile_catalog.set(catalog.clone()).is_ok());
+        let config = test_config(&[("draft", HarnessKind::Codex)], &[]);
+        let key = config.profiles["draft"].capabilities_key("draft");
+        let mut replica = RuntimeReplica::default();
+        replica
+            .apply(state.runtime_changes(None, false).await.unwrap())
+            .unwrap();
+        let cursor = replica.cursor.clone();
+        let metadata = super::super::tests::test_metadata("127.0.0.1:1".parse().unwrap());
+        let cancellation = CancellationToken::new();
+        for _ in 0..2 {
+            let reply = super::super::actions::handle_action(
+                DaemonAction::WarmProfileCapabilities {
+                    config: Box::new(config.clone()),
+                },
+                &metadata,
+                &state,
+                &cancellation,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(reply, DaemonReply::Done));
+            catalog.options_for(&config, "draft", None).await.unwrap();
+        }
+        let frame =
+            tokio::time::timeout(Duration::from_secs(1), state.runtime_changes(cursor, true))
+                .await
+                .unwrap()
+                .unwrap();
+        replica.apply(frame).unwrap();
+        assert!(matches!(
+            replica.projection.metadata.profile_capabilities.profiles[&key].choices,
+            CapabilityState::Ready(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replica.projection.metadata.config, Config::default());
     }
 
     #[tokio::test]

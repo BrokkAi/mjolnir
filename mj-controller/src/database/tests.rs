@@ -4696,7 +4696,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
 }
 
 #[test]
-fn profile_configuration_cache_survives_reopen_and_expires_or_invalidates() {
+fn profile_configuration_cache_survives_reopen_and_age_but_requires_matching_identity() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("cache.sqlite3");
     let connection = open(&path).unwrap();
@@ -4725,7 +4725,7 @@ fn profile_configuration_cache_survives_reopen_and_expires_or_invalidates() {
     assert!(
         load_profile_config_cache_from(&path, "kimi", "model-1", "pin-1")
             .unwrap()
-            .is_none()
+            .is_some()
     );
 }
 

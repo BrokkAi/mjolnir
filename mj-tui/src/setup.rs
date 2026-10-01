@@ -34,7 +34,7 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
 
 /// Which section of the configuration a detection run fills in. Each scope
@@ -187,9 +187,7 @@ pub(crate) struct SetupDialog {
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     subagent_choices: Option<ProfileSubagentChoices>,
-    subagent_cache: BTreeMap<String, mj_core::subagent::SubagentOptions>,
     subagent_models: Vec<mj_core::acp::SessionConfigChoice>,
-    subagent_inputs: String,
     subagent_combo: ComboBoxState<SetupControl>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
     pub(crate) saving: bool,
@@ -217,8 +215,6 @@ struct NoticeAnchor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProfileSubagentChoices {
-    id: u64,
-    key: String,
     profile: String,
     model: Option<String>,
     result: Option<Result<mj_core::subagent::SubagentOptions, String>>,
@@ -316,7 +312,9 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
             entries.remove(key);
         }
     }
-    serde_json::from_value(draft)
+    // UI projections inspect sources only. Saving/warming serializes those
+    // sources for credential resolution in the background request.
+    mj_core::config::with_environment_sources_only(|| serde_json::from_value(draft))
 }
 
 /// The first page's groups, in the order they are drawn.
@@ -837,9 +835,7 @@ impl SetupDialog {
             review_editor: None,
             review_validation: None,
             subagent_choices: None,
-            subagent_cache: BTreeMap::new(),
             subagent_models: Vec::new(),
-            subagent_inputs: String::new(),
             subagent_combo: ComboBoxState::default(),
             form: RefCell::new(Dialog::default()),
             saving: false,
@@ -1972,57 +1968,49 @@ impl SetupDialog {
         }
     }
 
-    fn take_subagent_choices(&mut self) -> Option<DashboardAction> {
+    fn update_subagent_choices(
+        &mut self,
+        snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) {
         if self.path.len() < 3 || self.path[0] != "profiles" || self.path[2] != "subagents" {
-            return None;
+            return;
         }
         let profile = self.path[1].clone();
         let policy = &self.draft["profiles"][&profile]["subagents"];
         if policy["mode"] != "single_model" {
-            return None;
+            if self.subagent_choices.take().is_some() {
+                self.notice = None;
+            }
+            return;
         }
         let model = policy["model"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
-        let config = config_from_draft(self.draft.clone()).ok()?;
-        let inputs = config.subagent_discovery_key(&profile, None);
-        if self.subagent_inputs != inputs {
-            self.subagent_models.clear();
-            self.subagent_inputs = inputs.clone();
-        }
-        let key = config.subagent_discovery_key(&profile, model.as_deref());
-        if self
-            .subagent_choices
-            .as_ref()
-            .is_some_and(|choices| choices.key == key)
-        {
-            return None;
-        }
-        let id = crate::wizards::next_subagent_discovery_id();
-        self.notice = Some("Loading subagent models and efforts…".into());
-        self.subagent_choices = Some(ProfileSubagentChoices {
-            id,
-            key: key.clone(),
-            profile: profile.clone(),
-            model: model.clone(),
-            result: self.subagent_cache.get(&key).cloned().map(Ok),
-        });
-        if self
-            .subagent_choices
-            .as_ref()
-            .is_some_and(|choices| choices.result.is_some())
-        {
-            self.subagent_models = self.subagent_cache[&key].models.clone();
-            self.notice = None;
-            return None;
-        }
-        Some(DashboardAction::DiscoverSubagentOptions {
-            id,
+        let Ok(config) = config_from_draft(self.draft.clone()) else {
+            return;
+        };
+        self.subagent_models = snapshot
+            .options(&config, &profile, None)
+            .map(|options| options.models)
+            .unwrap_or_default();
+        let result = snapshot.options(&config, &profile, model.as_deref());
+        let choices = ProfileSubagentChoices {
             profile,
             model,
-            config: serde_json::to_string(&config).expect("config serializes"),
-        })
+            result: result.clone().map(Ok),
+        };
+        if self.subagent_choices.as_ref() == Some(&choices) {
+            return;
+        }
+        self.notice = match &result {
+            None => Some("Loading subagent models and efforts…".into()),
+            Some(options) if !options.unavailable.is_empty() => {
+                Some(options.unavailable.join("\n"))
+            }
+            _ => None,
+        };
+        self.subagent_choices = Some(choices);
     }
 
     fn save(&mut self) -> DashboardAction {
@@ -2310,51 +2298,70 @@ impl DashboardState {
         action
     }
 
-    pub(crate) fn take_setup_subagent_choices(&mut self) -> Option<DashboardAction> {
-        let Mode::Setup(dialog) = &mut self.mode else {
-            return None;
-        };
-        dialog.take_subagent_choices()
+    pub fn set_profile_capabilities(
+        &mut self,
+        snapshot: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) {
+        self.profile_hydration_requests.retain(|_, identities| {
+            !identities
+                .iter()
+                .all(|identity| snapshot.profiles.contains_key(identity))
+        });
+        self.profile_hydration_errors
+            .retain(|key, _| self.profile_hydration_requests.contains_key(key));
+        self.profile_capabilities = snapshot;
+        self.take_setup_subagent_choices();
+        self.take_subagent_discovery();
     }
 
-    pub fn apply_subagent_options(
-        &mut self,
-        id: u64,
-        result: Result<mj_core::subagent::SubagentOptions, String>,
-    ) {
-        if matches!(self.mode, Mode::Resume(_)) {
-            self.apply_move_subagent_options(id, result);
-            return;
-        }
-        let Mode::Setup(dialog) = &mut self.mode else {
-            return;
+    pub(crate) fn take_profile_hydration(&mut self) -> Option<DashboardAction> {
+        let Mode::Setup(dialog) = &self.mode else {
+            return None;
         };
-        let current_key = dialog.subagent_choices.as_ref().and_then(|choices| {
-            let config = config_from_draft(dialog.draft.clone()).ok()?;
-            let model = dialog.draft["profiles"][&choices.profile]["subagents"]["model"]
-                .as_str()
-                .filter(|s| !s.is_empty());
-            Some(config.subagent_discovery_key(&choices.profile, model))
-        });
-        if let Some(choices) = &mut dialog.subagent_choices
-            && choices.id == id
-            && current_key.as_ref() == Some(&choices.key)
+        let config = config_from_draft(dialog.draft.clone()).ok()?;
+        let key = config.profiles_discovery_key();
+        // Saved profiles are already hydrating from daemon startup/reload.
+        if key == self.config.profiles_discovery_key()
+            || self.profile_hydration_requests.contains_key(&key)
         {
-            dialog.notice = match &result {
-                Err(error) => Some(format!("Subagent model discovery failed: {error}")),
-                Ok(options) if !options.unavailable.is_empty() => {
-                    Some(options.unavailable.join("\n"))
-                }
-                Ok(_) => None,
-            };
-            if let Ok(options) = &result {
-                dialog.subagent_models = options.models.clone();
-                dialog
-                    .subagent_cache
-                    .insert(choices.key.clone(), options.clone());
-            }
-            choices.result = Some(result);
+            return None;
         }
+        let missing = config
+            .enabled_profiles()
+            .map(|(id, profile)| profile.capabilities_key(id))
+            .filter(|identity| !self.profile_capabilities.profiles.contains_key(identity))
+            .collect::<BTreeSet<_>>();
+        if missing.is_empty() {
+            return None;
+        }
+        self.profile_hydration_requests.insert(key.clone(), missing);
+        Some(DashboardAction::WarmProfileCapabilities {
+            key,
+            config: serde_json::to_string(&config).expect("config serializes"),
+        })
+    }
+
+    pub fn apply_profile_hydration(&mut self, key: String, result: Result<(), String>) {
+        if let Err(error) = result
+            && self.profile_hydration_requests.contains_key(&key)
+        {
+            self.profile_hydration_errors.insert(key, error.clone());
+            self.set_notice(format!("Profile capability hydration failed: {error}"));
+        }
+    }
+
+    pub(crate) fn take_setup_subagent_choices(&mut self) -> Option<DashboardAction> {
+        if let Mode::Setup(dialog) = &mut self.mode {
+            dialog.update_subagent_choices(&self.profile_capabilities);
+            if let Ok(config) = config_from_draft(dialog.draft.clone())
+                && let Some(error) = self
+                    .profile_hydration_errors
+                    .get(&config.profiles_discovery_key())
+            {
+                dialog.notice = Some(format!("Profile capability hydration failed: {error}"));
+            }
+        }
+        None
     }
 
     pub(crate) fn handle_setup_event(

@@ -6706,9 +6706,13 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
 }
 
 #[test]
-fn move_model_discovery_preserves_model_list_and_rejects_retired_replies() {
-    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
+fn move_uses_global_models_and_efforts_across_selections_and_policy_switches() {
+    use mj_core::subagent::SubagentPolicy;
     let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_profile_capabilities(crate::test_support::profile_capabilities_fixture(
+        &dashboard.config,
+        &[("a", &["low"]), ("b", &["high"])],
+    ));
     let request = open_move_review(&mut dashboard);
     dashboard.apply_move_preparation(request, move_preparation());
     let Mode::Resume(wizard) = &mut dashboard.mode else {
@@ -6718,61 +6722,42 @@ fn move_model_discovery_preserves_model_list_and_rejects_retired_replies() {
         model: "a".into(),
         effort: Some("low".into()),
     };
-    let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
-        dashboard.take_prerequisite_check()
-    else {
-        panic!("discovery");
-    };
-    assert_eq!(
-        resume_wizard(&dashboard).subagents.models(),
-        ["Select model", "a (unverified)"]
-    );
-    assert_eq!(
-        resume_wizard(&dashboard).subagents.efforts(),
-        ["Loading efforts…", "low (unverified)"]
-    );
-    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
-        value: value.into(),
-        name: value.into(),
-        description: None,
-    };
-    let options = SubagentOptions {
-        models: vec![choice("a"), choice("b")],
-        efforts: vec![choice("low")],
-        ..Default::default()
-    };
-    dashboard.apply_subagent_options(id, Ok(options.clone()));
-    let Mode::Resume(wizard) = &mut dashboard.mode else {
-        panic!("move");
-    };
-    wizard.subagents.select_model(2);
-    let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
-        dashboard.take_prerequisite_check()
-    else {
-        panic!("model efforts");
-    };
+    dashboard.take_subagent_discovery();
     assert_eq!(
         resume_wizard(&dashboard).subagents.models(),
         ["Select model", "a", "b"]
     );
-    dashboard.apply_subagent_options(id, Ok(SubagentOptions::default()));
-    assert!(resume_wizard(&dashboard).subagents.options().is_none());
-    dashboard.apply_subagent_options(next, Ok(options));
+    for (model_index, effort) in [(2, "high"), (1, "low")] {
+        let Mode::Resume(wizard) = &mut dashboard.mode else {
+            panic!("move");
+        };
+        wizard.subagents.select_model(model_index);
+        assert!(dashboard.take_subagent_discovery().is_none());
+        assert_eq!(
+            resume_wizard(&dashboard)
+                .subagents
+                .options()
+                .unwrap()
+                .efforts[0]
+                .value,
+            effort
+        );
+    }
     let Mode::Resume(wizard) = &mut dashboard.mode else {
         panic!("move");
     };
-    wizard.subagents.select_model(1);
-    assert!(
-        dashboard.take_subagent_discovery().is_none(),
-        "revisiting a cached model reuses efforts"
-    );
+    wizard.subagents.select_policy(0);
+    wizard.subagents.select_policy(1);
+    assert!(dashboard.take_subagent_discovery().is_none());
     assert_eq!(
-        resume_wizard(&dashboard)
+        resume_wizard(&dashboard).subagents.models(),
+        ["Select model", "a", "b"]
+    );
+    assert!(
+        !resume_wizard(&dashboard)
             .subagents
-            .options()
+            .error()
             .unwrap()
-            .efforts[0]
-            .value,
-        "low"
+            .contains("Loading")
     );
 }

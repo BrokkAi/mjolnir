@@ -13,6 +13,8 @@ pub struct RemoteDashboardWorkerPoller {
     pub notices: tokio::sync::watch::Receiver<Vec<daemon::RuntimeNotice>>,
     /// What the daemon knows about quota. The daemon is the only prober.
     pub quotas: tokio::sync::watch::Receiver<mj_client::quota::QuotaSnapshot>,
+    pub profile_capabilities:
+        tokio::sync::watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
     pub config: tokio::sync::watch::Receiver<mj_core::config::Config>,
     pub health: tokio::sync::watch::Receiver<RuntimeFeedHealth>,
 }

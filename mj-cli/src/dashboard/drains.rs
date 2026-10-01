@@ -54,6 +54,9 @@ impl DashboardContext {
         self.drain_runtime_reviews();
         self.drain_runtime_notices();
         self.drain_runtime_config();
+        while let Some(capabilities) = self.profile_capabilities.next_ready() {
+            self.dashboard.set_profile_capabilities(capabilities);
+        }
         self.drain_capacity_updates();
         self.drain_aws_resource_options();
         self.drain_import_profiles();
@@ -66,6 +69,7 @@ impl DashboardContext {
         [
             pending_completed,
             self.quota.take_delivered(),
+            self.profile_capabilities.take_delivered(),
             self.worker.take_delivered(),
             self.runtime_state.take_delivered(),
             self.runtime_health.take_delivered(),
