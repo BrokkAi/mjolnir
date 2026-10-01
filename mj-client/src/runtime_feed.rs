@@ -147,26 +147,35 @@ impl SessionTail {
         limit: usize,
     ) {
         let start = materialized.transcript.len().saturating_sub(limit);
-        let kept = &materialized.transcript[start..];
-        let wanted = kept
-            .iter()
-            .map(|item| (item.position, item.stable_id.as_str()))
-            .collect::<std::collections::BTreeSet<_>>();
-        let gone = self
-            .items
-            .keys()
-            .filter(|(position, stable_id)| !wanted.contains(&(*position, stable_id.as_str())))
-            .cloned()
-            .collect::<Vec<_>>();
+        // The daemon calls this for every view it publishes, so it walks the
+        // held items and the published ones side by side in key order, and
+        // allocates only for what changed. The published transcript is
+        // already in this order but for ties, which the sort settles.
+        let mut kept = materialized.transcript[start..].iter().collect::<Vec<_>>();
+        kept.sort_by(|left, right| tail_key(left).cmp(&tail_key(right)));
+        let mut gone = Vec::new();
+        let mut changed = Vec::new();
+        let mut held = self.items.iter().peekable();
+        for item in kept {
+            let key = tail_key(item);
+            while let Some((held_key, _)) =
+                held.next_if(|(held_key, _)| (held_key.0, held_key.1.as_str()) < key)
+            {
+                gone.push(held_key.clone());
+            }
+            match held.next_if(|(held_key, _)| (held_key.0, held_key.1.as_str()) == key) {
+                // `Arc` equality compares pointers first, then contents.
+                Some((_, held_item)) if held_item == item => {}
+                _ => changed.push(item),
+            }
+        }
+        gone.extend(held.map(|(key, _)| key.clone()));
         for key in gone {
             self.items.remove(&key);
         }
-        for item in kept {
-            let key = (item.position, item.stable_id.clone());
-            // `Arc` equality compares pointers first, then contents.
-            if self.items.get(&key) != Some(item) {
-                self.items.insert(key, Arc::clone(item));
-            }
+        for item in changed {
+            self.items
+                .insert((item.position, item.stable_id.clone()), Arc::clone(item));
         }
         let header_changed = !same_header(&self.header, materialized);
         if header_changed {
@@ -229,6 +238,10 @@ impl SessionTail {
             self.window = window;
         }
     }
+}
+
+fn tail_key(item: &TranscriptItem) -> (u64, &str) {
+    (item.position, item.stable_id.as_str())
 }
 
 /// The parts of a projection a tail keeps besides its items.
