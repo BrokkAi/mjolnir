@@ -15,7 +15,6 @@ name = "mj_client"
 workspace = true
 
 [dependencies]
-chrono.workspace = true
 libc.workspace = true
 sysinfo.workspace = true
 sha2.workspace = true
