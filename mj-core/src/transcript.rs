@@ -53,7 +53,7 @@ pub struct ToolCallPresentation {
 /// The current value of one logical transcript item. ACP structures whose
 /// schemas can grow are kept as JSON values, while logical item identity and
 /// lifecycle remain controller-owned and stable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptBody {
     User {
@@ -273,7 +273,7 @@ impl TerminalOutputRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptItem {
     pub stable_id: String,

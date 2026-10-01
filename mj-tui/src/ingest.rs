@@ -1083,13 +1083,17 @@ impl DashboardState {
             detail.unread_agent_messages = prepared.unread_agent_messages;
             detail.interruption_event_ordinals = prepared.interruption_event_ordinals;
             detail.unread_interruptions = prepared.unread_interruptions;
-            detail.transcript = Some(prepared.transcript);
+            // The replaced transcript owns every converted entry and rendered
+            // line of the previous projection, so it is freed off the loop.
+            crate::retire::retire((
+                detail.transcript.replace(prepared.transcript),
+                std::mem::replace(&mut detail.projection, prepared.projection),
+            ));
             detail.transcript_hydration = TranscriptHydration::Ready;
             detail.queued_prompts = prepared.queued_prompts;
             detail.pending_elicitations = prepared.pending_elicitations;
             detail.pending_elicitations_applied_event_ordinal =
                 Some(prepared.applied_event_ordinal);
-            detail.projection = prepared.projection;
             detail.update_unread(through);
         }
         let mut title_changed = false;
@@ -1321,3 +1325,12 @@ impl DashboardState {
 
 #[cfg(test)]
 mod tests;
+
+impl DashboardState {
+    pub fn set_session_cpu(
+        &mut self,
+        cpu: mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
+    ) {
+        self.session_cpu = cpu;
+    }
+}

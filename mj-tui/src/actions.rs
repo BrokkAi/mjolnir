@@ -84,6 +84,7 @@ pub enum CommandId {
     WebViewer,
     RestartDaemon,
     NoticeLog,
+    SessionCpuReport,
     QuitDetach,
     Palette,
     CycleSpinner,
@@ -1315,6 +1316,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::SessionCpuReport,
+        label: "CPU by session",
+        description: "Show live sessions grouped by machine, with each session's CPU share over about the last hour, highest first.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::NoticeLog,
         label: "Recent messages",
         description: "Show the last notices the footer reported, newest first, including failures that replaced each other.",
@@ -1928,6 +1941,12 @@ impl DashboardState {
             CommandId::SelectWorkspaceNext => self.select_adjacent_workspace(1),
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::RestartDaemon => DashboardAction::RestartDaemon,
+            CommandId::SessionCpuReport => {
+                self.mode = crate::Mode::SessionCpuReport(
+                    crate::dialogs::SessionCpuReportDialog::default(),
+                );
+                DashboardAction::None
+            }
             CommandId::NoticeLog => {
                 self.begin_notice_log();
                 DashboardAction::None

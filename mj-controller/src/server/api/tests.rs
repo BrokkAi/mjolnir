@@ -529,6 +529,9 @@ struct FakeBackend {
     /// set this, which is the lag a configuration change has to survive.
     live_view: Option<ManagedSessionView>,
     shutdown: tokio_util::sync::CancellationToken,
+    /// This server's own upgrade admission, so a test can close it without
+    /// closing the process-wide gate every other test shares.
+    upgrade_gate: Arc<crate::upgrade::Gate>,
     event_queries: Mutex<Vec<(crate::database::ApiEventFilter, Option<u64>)>>,
     /// Sub-agent children that have handed back their reports.
     handed_back: BTreeSet<String>,
@@ -1149,6 +1152,7 @@ fn api_app_with_worker_check(
     .unwrap()
     .with_test_credentials("123456", b"01234567890123456789012345678901");
     options.shutdown = backend.shutdown.clone();
+    options.set_upgrade_gate(backend.upgrade_gate.clone());
     options.set_subagent_backend(backend);
     options.set_preferences_path(preferences_path);
     options.set_engine_probe(engine_probe);
@@ -2616,6 +2620,159 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
     let body = json_body(response).await;
     assert_eq!(body["outcome"], "timeout");
     assert_eq!(body["turn_id"], 5);
+}
+
+/// A wait in progress when the daemon shuts down answers at once. An upgrade
+/// handoff marks the answer so the client asks the next daemon; an explicit
+/// stop does not, so a stopped daemon is not started again by its waiters.
+#[tokio::test]
+async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_daemon() {
+    for handoff in [true, false] {
+        let backend = Arc::new(FakeBackend {
+            turn_states: Mutex::new(vec![Some(TurnState {
+                execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+                active_turn: Some(MaterializedTurn {
+                    command_id: "prompt-1".into(),
+                    accepted_ordinal: Some(5),
+                    turn_start_position: 6,
+                    started_at_ms: 10,
+                    steered_into: None,
+                }),
+                last_turn_outcome: None,
+            })]),
+            ..FakeBackend::default()
+        });
+        let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+        let waiting = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"turn_id":5,"timeout_secs":3600}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "the turn is still running");
+        if handoff {
+            assert!(
+                backend.upgrade_gate.try_close(),
+                "a waiting request does not hold the handoff"
+            );
+        }
+        backend.shutdown.cancel();
+        let response = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("shutdown ends the wait at once")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let marked = response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .cloned();
+        let body = json_body(response).await;
+        if handoff {
+            assert_eq!(marked.unwrap(), "pending");
+            assert_eq!(body["code"], DAEMON_HANDOFF_CODE);
+        } else {
+            assert!(marked.is_none(), "an explicit stop is not a handoff");
+            assert!(body.get("code").is_none(), "{body}");
+        }
+    }
+}
+
+/// A handoff tears the daemon down in no fixed order. When the session feed
+/// closes before the shutdown signal reaches a wait, the wait still sends its
+/// client to the next daemon; in a lab one of eight waiters failed this way.
+#[tokio::test]
+async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
+    let backend = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "prompt-1".into(),
+                accepted_ordinal: Some(5),
+                turn_start_position: 6,
+                started_at_ms: 10,
+                steered_into: None,
+            }),
+            last_turn_outcome: None,
+        })]),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let waiting = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"turn_id":5,"timeout_secs":3600}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!waiting.is_finished(), "the turn is still running");
+    assert!(backend.upgrade_gate.try_close());
+    // The feed closes first; the shutdown signal has not arrived.
+    drop(snapshot_tx);
+    let response = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("a closed feed ends the wait")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .unwrap(),
+        "pending"
+    );
+    assert_eq!(json_body(response).await["code"], DAEMON_HANDOFF_CODE);
+}
+
+/// An event stream that an upgrade handoff ends names the cursor it reached,
+/// so its client resumes on the next daemon without losing an event.
+#[tokio::test]
+async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
+    let backend = Arc::new(FakeBackend::default());
+    backend.events.lock().unwrap().push(error_event(4));
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/events?after_seq=2"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        std::str::from_utf8(frame.data_ref().unwrap())
+            .unwrap()
+            .contains("id: 4")
+    );
+    assert!(backend.upgrade_gate.try_close());
+    backend.shutdown.cancel();
+    let rest = tokio::time::timeout(Duration::from_secs(2), body.collect())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_bytes();
+    let rest = std::str::from_utf8(&rest).unwrap();
+    assert!(
+        rest.contains(&format!("event: {DAEMON_HANDOFF_CODE}")),
+        "{rest}"
+    );
+    assert!(
+        rest.contains("id: 4"),
+        "resume after the last event sent: {rest}"
+    );
 }
 
 #[tokio::test]

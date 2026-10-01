@@ -19,8 +19,8 @@ use super::readiness::{connect_started_worker_with_timeout, wait_for_native_sess
 use super::worker_binary::{
     install_staged_worker_binary, prepare_managed_harness_for_upgrade,
     replace_installed_worker_binary, replace_installed_worker_launch_config,
-    stage_worker_binary_for_upgrade, start_worker, stop_worker_after_target_recovery,
-    worker_binary_for, worker_probe_diagnosis,
+    stage_worker_binary_for_upgrade, start_worker, start_worker_durably,
+    stop_worker_after_target_recovery, worker_binary_for, worker_probe_diagnosis,
 };
 
 /// How long a restarted worker has to recover its journal, bind `control.sock`
@@ -184,107 +184,120 @@ impl Controller {
         }
         prepare_managed_harness_for_upgrade(executor, &backend, session_id, &binary, &launch)
             .context("prepare the current managed harness before replacing the worker")?;
-        stage_worker_binary_for_upgrade(executor, &backend, session_id, &binary)
+        let staging = stage_worker_binary_for_upgrade(executor, &backend, session_id, &binary)
             .context("stage the current worker while the old worker remains available")?;
-        let handle = manager
-            .wait_for_session(session_id, UPGRADE_LEASE_TIMEOUT)
-            .await?;
-        let harness = self.state.sessions[session_id].harness_kind;
-        // Reserve handoff admission before taking the worker's atomic idle
-        // reservation. A draining daemon must not take a worker connection.
-        let Ok(swap) = crate::upgrade::activity_unless_draining("worker swap") else {
-            return Ok(WorkerUpgradeOutcome::Deferred);
-        };
-        let Some(mut lease) =
-            super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+        let Some(owner) =
+            crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "worker upgrade")?
         else {
             return Ok(WorkerUpgradeOutcome::Deferred);
         };
-        if !lease.verify_for_upgrade().await? {
-            return Ok(WorkerUpgradeOutcome::Deferred);
-        }
-        // The accepted swap records its target before touching a process. Once
-        // detached startup succeeds, the next daemon can resume observation.
-        let operation_id = crate::session_manager::new_command_id("worker-restart")?;
-        let intent = crate::database::WorkerRestartIntent {
-            operation_id: operation_id.clone(),
-            target: self.state.sessions[session_id]
-                .target
-                .clone()
-                .context("worker restart has no durable target")?,
-            desired_build: installed.clone(),
-        };
-        {
-            let target_lock = crate::recovery_gate::worker_target_mutex(session_id);
-            let _target = match target_lock.try_lock() {
-                Ok(target) => target,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    // Target recovery may be slow. Do not turn its work into
-                    // a daemon handoff blocker while waiting for ownership.
+        owner
+            .scope(async {
+                let target = self.state.sessions[session_id]
+                    .target
+                    .as_ref()
+                    .context("worker upgrade has no target")?;
+                owner.verify_target(target)?;
+                let current = Controller::load()?;
+                let current_launch = current.current_worker_launch_config(session_id, &backend)?;
+                if serde_json::to_value(&current_launch)? != serde_json::to_value(&launch)? {
+                    // A Move can change the harness without changing its root.
+                    // Prepared inputs are discarded; the next attempt prepares
+                    // the launch chosen by the current durable session.
                     return Ok(WorkerUpgradeOutcome::Deferred);
                 }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    bail!("worker target ownership lock poisoned");
+                if crate::database::load_worker_restart(session_id)?.is_some() {
+                    return Ok(WorkerUpgradeOutcome::Deferred);
                 }
-            };
-            crate::database::begin_worker_restart(session_id, &intent)?;
-            install_staged_worker_binary(executor, &backend, session_id)
-                .context("install the prepared worker under its idle reservation")?;
-            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                .context("install the worker launch configuration under its idle reservation")?;
-            crate::database::advance_worker_restart(
-                session_id,
-                &operation_id,
-                crate::database::WorkerRestartPhase::Swapping,
-            )?;
-            stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
-                .context(RESTART_FOR_UPGRADE.stop)?;
-            start_worker(executor, &backend, &worker_root)
-                .context(RESTART_FOR_UPGRADE.start)
-                .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
-            crate::database::advance_worker_restart(
-                session_id,
-                &operation_id,
-                crate::database::WorkerRestartPhase::AwaitingReadiness,
-            )?;
-        }
-        // The process now owns boot/journal recovery. Waiting for its socket
-        // is resumable, and must not hold daemon replacement for minutes.
-        drop(swap);
-        let mut connection = connect_started_worker_with_timeout(
-            &reconnect,
-            session_id,
-            executor,
-            &backend,
-            &worker_root,
-            WORKER_RESTART_TIMEOUT,
-        )
-        .await
-        .context(RESTART_FOR_UPGRADE.connect)?;
-        anyhow::ensure!(
-            connection.snapshot().worker_build.as_deref() == Some(&installed),
-            "replacement worker reported an unexpected build"
-        );
-        anyhow::ensure!(
-            connection.snapshot().operational.checkpoint_only
-                == (launch.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
-            "replacement worker reported an unexpected execution mode"
-        );
-        let project_memory = match self.project_memory_sync_target(session_id) {
-            Ok(target) => Some(target),
-            Err(error) => {
-                tracing::warn!(
+                let handle = manager
+                    .wait_for_session(session_id, UPGRADE_LEASE_TIMEOUT)
+                    .await?;
+                let harness = self.state.sessions[session_id].harness_kind;
+                // Reserve handoff admission before taking the worker's atomic idle
+                // reservation. A draining daemon must not take a worker connection.
+                let Ok(swap) = crate::upgrade::activity_unless_draining("worker swap") else {
+                    return Ok(WorkerUpgradeOutcome::Deferred);
+                };
+                let Some(mut lease) =
+                    super::IdleWorkspaceLease::acquire_for_upgrade(&handle, harness).await?
+                else {
+                    return Ok(WorkerUpgradeOutcome::Deferred);
+                };
+                if !lease.verify_for_upgrade().await? {
+                    return Ok(WorkerUpgradeOutcome::Deferred);
+                }
+                // The accepted swap records its target before touching a process. Once
+                // detached startup succeeds, the next daemon can resume observation.
+                let operation_id = owner.operation_id().to_owned();
+                let intent = crate::database::WorkerRestartIntent {
+                    operation_id: operation_id.clone(),
+                    target: self.state.sessions[session_id]
+                        .target
+                        .clone()
+                        .context("worker restart has no durable target")?,
+                    desired_build: installed.clone(),
+                };
+                {
+                    crate::database::begin_worker_restart(session_id, &intent)?;
+                    install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)
+                        .context("install the prepared worker under its idle reservation")?;
+                    replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                        .context(
+                            "install the worker launch configuration under its idle reservation",
+                        )?;
+                    crate::database::advance_worker_restart(
+                        session_id,
+                        &operation_id,
+                        crate::database::WorkerRestartPhase::Swapping,
+                    )?;
+                    stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
+                        .context(RESTART_FOR_UPGRADE.stop)?;
+                    start_worker_durably(&owner, target, executor, &backend, &worker_root)
+                        .context(RESTART_FOR_UPGRADE.start)
+                        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+                }
+                // The process now owns boot/journal recovery. Waiting for its socket
+                // is resumable, and must not hold daemon replacement for minutes.
+                drop(swap);
+                let mut connection = connect_started_worker_with_timeout(
+                    &reconnect,
                     session_id,
-                    error = format!("{error:#}"),
-                    "project memory will not be synchronized after worker upgrade"
+                    executor,
+                    &backend,
+                    &worker_root,
+                    WORKER_RESTART_TIMEOUT,
+                )
+                .await
+                .context(RESTART_FOR_UPGRADE.connect)?;
+                anyhow::ensure!(
+                    connection.snapshot().worker_build.as_deref() == Some(&installed),
+                    "replacement worker reported an unexpected build"
                 );
-                None
-            }
-        };
-        connection.set_project_memory_target(project_memory);
-        crate::database::finish_worker_restart(session_id, &operation_id)?;
-        lease.finish_replacement(connection);
-        Ok(WorkerUpgradeOutcome::Upgraded { build: installed })
+                anyhow::ensure!(
+                    connection.snapshot().operational.checkpoint_only
+                        == (launch.run_mode
+                            == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
+                    "replacement worker reported an unexpected execution mode"
+                );
+                let project_memory = match self.project_memory_sync_target(session_id) {
+                    Ok(target) => Some(target),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            error = format!("{error:#}"),
+                            "project memory will not be synchronized after worker upgrade"
+                        );
+                        None
+                    }
+                };
+                connection.set_project_memory_target(project_memory);
+                wait_for_native_session(&mut connection, executor).await?;
+                wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor).await?;
+                crate::database::finish_worker_restart(session_id, &operation_id)?;
+                lease.finish_replacement(connection);
+                Ok(WorkerUpgradeOutcome::Upgraded { build: installed })
+            })
+            .await
     }
 
     /// Stop the worker, install the binary this controller would provision,
@@ -295,18 +308,54 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         restart: InstalledWorkerRestart<'_>,
     ) -> Result<StandaloneSession> {
-        // A failed stop may leave the old worker alive, so it stays outside the
-        // marker the start below applies: only steps after a successful stop
-        // can leave the session with no worker at all.
-        stop_worker_after_target_recovery(
-            executor,
-            restart.backend,
+        crate::worker_lifecycle::run(
             session_id,
-            restart.worker_root,
+            "restart worker with installed binary",
+            executor,
+            async {
+                let owner = crate::worker_lifecycle::require(session_id)?;
+                let target = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .and_then(|session| session.target.as_ref());
+                if let Some(target) = target {
+                    owner.verify_target(target)?;
+                    if crate::database::load_worker_restart(session_id)?.is_some() {
+                        let output =
+                            executor.execute(&super::worker_binary::worker_liveness_command(
+                                restart.backend,
+                                restart.worker_root,
+                            ))?;
+                        anyhow::ensure!(
+                            output.status == 0
+                                && String::from_utf8_lossy(&output.stdout).trim() == "dead",
+                            "worker replacement is still booting; reconnect before restarting it"
+                        );
+                        owner.settle_dead_restart(target)?;
+                    }
+                    owner.begin_restart(target, String::new())?;
+                    crate::database::advance_worker_restart(
+                        session_id,
+                        owner.operation_id(),
+                        crate::database::WorkerRestartPhase::Swapping,
+                    )?;
+                }
+                // A failed stop may leave the old worker alive, so it stays outside the
+                // marker the start below applies: only steps after a successful stop
+                // can leave the session with no worker at all.
+                stop_worker_after_target_recovery(
+                    executor,
+                    restart.backend,
+                    session_id,
+                    restart.worker_root,
+                )
+                .context(restart.messages.stop)?;
+                self.start_installed_worker(session_id, executor, restart)
+                    .await
+            },
         )
-        .context(restart.messages.stop)?;
-        self.start_installed_worker(session_id, executor, restart)
-            .await
+        .await
     }
 
     /// The part of a restart after its stop: install the binary unless it is
@@ -320,89 +369,140 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         restart: InstalledWorkerRestart<'_>,
     ) -> Result<StandaloneSession> {
-        let InstalledWorkerRestart {
-            backend,
-            worker_root,
-            reconnect,
-            launch,
-            prepared,
-            messages,
-        } = restart;
-        // Everything up to the first successful connection either fails with no
-        // worker running or cannot tell: the marker covers all of it.
-        let mut connection = async {
-            // Copy through hel.next and rename. scp/cp onto a still-mapped hel
-            // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
-            // and prepare_worker_files writes that path in place.
-            if !prepared {
-                let binary = worker_binary_for(backend, executor)?;
-                replace_installed_worker_binary(executor, backend, session_id, &binary)
-                    .context(messages.replace)?;
-                if let Some(launch) = launch {
-                    replace_installed_worker_launch_config(executor, backend, session_id, launch)
-                        .context("install the current Mjolnir worker launch configuration")?;
-                }
-            }
-            start_worker(executor, backend, worker_root).context(messages.start)?;
-            // Journal recovery runs before the daemon binds control.sock. A long
-            // kimi session can take well over the ordinary 30s startup window.
-            match connect_started_worker_with_timeout(
-                reconnect,
-                session_id,
-                executor,
+        crate::worker_lifecycle::run(session_id, "start installed worker", executor, async {
+            let InstalledWorkerRestart {
                 backend,
                 worker_root,
-                WORKER_RESTART_TIMEOUT,
-            )
-            .await
-            {
-                Ok(connection) => Ok(connection),
-                Err(error) => Err(
-                    worker_probe_diagnosis(executor, backend, worker_root, error)
-                        .context(messages.connect),
-                ),
+                reconnect,
+                launch,
+                prepared,
+                messages,
+            } = restart;
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            let target = self
+                .state
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.target.as_ref());
+            if let Some(target) = target {
+                owner.verify_target(target)?;
+                if let Some(intent) = crate::database::load_worker_restart(session_id)? {
+                    // The checkpoint-only fallback may retry after a proved dead
+                    // boot. Never stop or overwrite a still-live replacement.
+                    if intent.operation_id != owner.operation_id()
+                        || crate::database::worker_restart_phase(session_id)?
+                            == Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+                    {
+                        let output = executor.execute(
+                            &super::worker_binary::worker_liveness_command(backend, worker_root),
+                        )?;
+                        anyhow::ensure!(
+                            output.status == 0
+                                && String::from_utf8_lossy(&output.stdout).trim() == "dead",
+                            "worker replacement is still booting"
+                        );
+                        owner.settle_dead_restart(target)?;
+                    }
+                }
+                if crate::database::load_worker_restart(session_id)?.is_none() {
+                    owner.begin_restart(target, String::new())?;
+                    crate::database::advance_worker_restart(
+                        session_id,
+                        owner.operation_id(),
+                        crate::database::WorkerRestartPhase::Swapping,
+                    )?;
+                }
             }
-        }
-        .await
-        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
-        let project_memory = match self.project_memory_sync_target(session_id) {
-            Ok(target) => Some(target),
-            Err(error) => {
-                tracing::warn!(
+            // Everything up to the first successful connection either fails with no
+            // worker running or cannot tell: the marker covers all of it.
+            let mut connection = async {
+                // Copy through hel.next and rename. scp/cp onto a still-mapped hel
+                // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
+                // and prepare_worker_files writes that path in place.
+                if !prepared {
+                    let binary = worker_binary_for(backend, executor)?;
+                    replace_installed_worker_binary(executor, backend, session_id, &binary)
+                        .context(messages.replace)?;
+                    if let Some(launch) = launch {
+                        replace_installed_worker_launch_config(
+                            executor, backend, session_id, launch,
+                        )
+                        .context("install the current Mjolnir worker launch configuration")?;
+                    }
+                }
+                let started = match target {
+                    Some(target) => {
+                        start_worker_durably(&owner, target, executor, backend, worker_root)
+                    }
+                    None => start_worker(&owner, executor, backend, worker_root),
+                };
+                started.context(messages.start)?;
+                // Journal recovery runs before the daemon binds control.sock. A long
+                // kimi session can take well over the ordinary 30s startup window.
+                match connect_started_worker_with_timeout(
+                    reconnect,
                     session_id,
-                    error = format!("{error:#}"),
-                    "{}",
-                    messages.project_memory
-                );
-                None
-            }
-        };
-        connection.set_project_memory_target(project_memory);
-        // A worker answered, so a failure from here on only means "no worker"
-        // when the transport to it died again.
-        async {
-            let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
-            if let Some(launch) = launch {
-                anyhow::ensure!(
-                    checkpoint_only
-                        == (launch.run_mode
-                            == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
-                    "restarted worker did not enter the requested execution mode"
-                );
-            }
-            if checkpoint_only {
-                return Ok(());
-            }
-            wait_for_native_session(&mut connection, executor)
+                    executor,
+                    backend,
+                    worker_root,
+                    WORKER_RESTART_TIMEOUT,
+                )
                 .await
-                .context(messages.native_session)?;
-            wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT)
-                .await
-                .context("wait for ACP to go idle after worker restart")
-        }
+                {
+                    Ok(connection) => Ok(connection),
+                    Err(error) => {
+                        Err(
+                            worker_probe_diagnosis(executor, backend, worker_root, error)
+                                .context(messages.connect),
+                        )
+                    }
+                }
+            }
+            .await
+            .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+            let project_memory = match self.project_memory_sync_target(session_id) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "{}",
+                        messages.project_memory
+                    );
+                    None
+                }
+            };
+            connection.set_project_memory_target(project_memory);
+            // A worker answered, so a failure from here on only means "no worker"
+            // when the transport to it died again.
+            async {
+                let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
+                if let Some(launch) = launch {
+                    anyhow::ensure!(
+                        checkpoint_only
+                            == (launch.run_mode
+                                == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
+                        "restarted worker did not enter the requested execution mode"
+                    );
+                }
+                if checkpoint_only {
+                    return Ok(());
+                }
+                wait_for_native_session(&mut connection, executor)
+                    .await
+                    .context(messages.native_session)?;
+                wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor)
+                    .await
+                    .context("wait for ACP to go idle after worker restart")
+            }
+            .await
+            .map_err(mark_if_transport_died)?;
+            if target.is_some() {
+                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
+            }
+            Ok(connection)
+        })
         .await
-        .map_err(mark_if_transport_died)?;
-        Ok(connection)
     }
 }
 
@@ -414,11 +514,19 @@ impl Controller {
 /// turn the projection has not caught up with keeps the restart from being
 /// declared ready underneath it. A synchronized active goal is the one
 /// deliberate exception: the restarted worker is meant to continue it.
-async fn wait_for_idle_projection(relay: &mut StandaloneSession, timeout: Duration) -> Result<()> {
+async fn wait_for_idle_projection(
+    relay: &mut StandaloneSession,
+    timeout: Duration,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_ordinal = None;
     let mut stable_polls = 0_u8;
     loop {
+        anyhow::ensure!(
+            !executor.cancellation_requested(),
+            "worker readiness wait cancelled"
+        );
         let snapshot = relay.sync().await?;
         let ordinal = snapshot.operational.latest_ordinal;
         let goal_active =
@@ -580,6 +688,69 @@ mod tests {
             executor.executed.lock().expect("executed commands").len() > 1,
             "the restart should have failed after its stop, not during it"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_restart_waits_for_upgrade_while_recovery_defers_and_another_session_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FailingCommands(AtomicUsize);
+        impl CommandExecutor for FailingCommands {
+            fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"stop refused".to_vec(),
+                })
+            }
+        }
+        let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let upgrading = crate::worker_lifecycle::WorkerPermit::try_acquire(id, "worker upgrade")
+            .unwrap()
+            .unwrap();
+        let executor = FailingCommands(AtomicUsize::new(0));
+        let checkpoint = restart_error(id, &executor);
+        tokio::pin!(checkpoint);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut checkpoint)
+                .await
+                .is_err()
+        );
+        let recovery = crate::session_manager::WorkerRecoveryPlan {
+            source_target: mj_core::state::TargetLocator::LocalBare {
+                worker_root: "/unused".into(),
+            },
+            target: None,
+            workspace: None,
+            liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: targets::CommandPlan {
+                description: "restart".into(),
+                commands: vec![],
+            },
+        };
+        assert_eq!(
+            crate::session_manager::recover_worker_controlled(recovery, true, Some(id), &executor)
+                .unwrap(),
+            crate::session_manager::WorkerRecoveryOutcome::Suppressed
+        );
+        assert_eq!(executor.0.load(Ordering::SeqCst), 0);
+        let other = FailingCommands(AtomicUsize::new(0));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            restart_error("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &other),
+        )
+        .await
+        .unwrap();
+        assert_eq!(other.0.load(Ordering::SeqCst), 1);
+        drop(upgrading);
+        let error = tokio::time::timeout(Duration::from_secs(2), checkpoint)
+            .await
+            .unwrap();
+        assert!(!WorkerRestartLeftNoWorker::marks(&error));
+        assert_eq!(executor.0.load(Ordering::SeqCst), 1);
     }
 
     /// The three answers hello can produce, and what each means for the

@@ -50,7 +50,7 @@ pub(super) fn refresh_worker_binary_if_stale(
     }
 }
 
-pub(super) fn installed_digest_matches(
+pub(crate) fn installed_digest_matches(
     executor: &impl CommandExecutor,
     command: &CommandSpec,
     expected: &str,
@@ -107,97 +107,164 @@ pub(crate) fn recover_worker_controlled(
     session_id: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> Result<WorkerRecoveryOutcome> {
-    let target_mutex = session_id.map(crate::recovery_gate::worker_target_mutex);
-    let _target_guard = target_mutex
-        .as_ref()
-        .map(|lock| {
-            lock.lock()
-                .map_err(|_| anyhow::anyhow!("worker target ownership lock poisoned"))
-        })
+    // Background recovery never waits while its actor's control mailbox is
+    // needed by the current lifecycle owner.
+    let owner = match session_id {
+        Some(id) => match crate::worker_lifecycle::WorkerPermit::try_acquire(id, "relay recovery")?
+        {
+            Some(owner) => Some(owner),
+            None => return Ok(WorkerRecoveryOutcome::Suppressed),
+        },
+        None => {
+            #[cfg(not(test))]
+            bail!("worker recovery requires a session identity");
+            #[cfg(test)]
+            {
+                None
+            }
+        }
+    };
+    let mut work = || -> Result<WorkerRecoveryOutcome> {
+        if let Some(id) = session_id {
+            let session = crate::database::read_durable_session_record(id)
+                .context("read durable session before worker recovery")?;
+            let eligible = session.as_ref().is_some_and(|session| {
+                crate::pollers::session_target_is_pollable(session)
+                    && session.target.as_ref() == Some(&plan.source_target)
+            });
+            if !eligible || crate::controller::move_session::move_owns_session(id) {
+                return Ok(WorkerRecoveryOutcome::Suppressed);
+            }
+        }
+        // A failed Move can leave this actor with a plan from before recovery.
+        // Never overwrite the durable checkpoint-only launch with that old plan.
+        if let Some(id) = session_id
+            && let Some(operation) = crate::database::load_move_operation(id)?
+            && operation.source_checkpoint_only
+            && operation.destination_target.is_none()
+        {
+            plan = crate::controller::Controller::load()?
+                .worker_recovery_plan(id, Some(&operation))?;
+        }
+        if ensure_recovery_target_running(executor, plan.target.as_ref())
+            .context("restore relay worker target")?
+            == TargetRecoveryOutcome::Missing
+        {
+            return Ok(WorkerRecoveryOutcome::TargetMissing);
+        }
+        let output = executor
+            .execute(&plan.liveness_probe)
+            .context("probe relay worker liveness")?;
+        if output.status != 0 {
+            bail!(
+                "{} failed with status {}: {}",
+                plan.liveness_probe.purpose,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        // A replacement may still be replaying its journal after the daemon
+        // that launched it has exited. A lost handshake is not permission to kill
+        // that live process; only a liveness probe proving death permits restart.
+        let restart_pending = session_id
+            .map(crate::database::load_worker_restart)
+            .transpose()?
+            .flatten()
+            .is_some_and(|intent| intent.target == plan.source_target);
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "alive" if restart_pending => Ok(WorkerRecoveryOutcome::Starting),
+            "starting" => Ok(WorkerRecoveryOutcome::Starting),
+            "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
+            "alive" => {
+                if let Some(workspace) = plan.workspace.as_ref()
+                    && !crate::controller::path_exists_on_managed_target(
+                        executor,
+                        &workspace.target,
+                        &workspace.directory,
+                    )?
+                {
+                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                        workspace.directory.clone(),
+                    ));
+                }
+                restart_owned_worker(&plan, session_id, executor, false)?;
+                Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
+            }
+            "dead" => {
+                if let Some(workspace) = plan.workspace.as_ref()
+                    && !crate::controller::path_exists_on_managed_target(
+                        executor,
+                        &workspace.target,
+                        &workspace.directory,
+                    )?
+                {
+                    return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
+                        workspace.directory.clone(),
+                    ));
+                }
+                restart_owned_worker(&plan, session_id, executor, true)?;
+                Ok(WorkerRecoveryOutcome::RestartedDead)
+            }
+            output => bail!("worker liveness probe returned unexpected output {output:?}"),
+        }
+    };
+    match owner {
+        Some(owner) => owner.scope_blocking(work),
+        None => work(),
+    }
+}
+
+/// Preparation runs without daemon admission. Only the bounded process swap
+/// holds admission; its durable intent protects journal replay after handoff.
+fn restart_owned_worker(
+    plan: &WorkerRecoveryPlan,
+    session_id: Option<&str>,
+    executor: &impl CommandExecutor,
+    proved_dead: bool,
+) -> Result<()> {
+    let owner = session_id
+        .map(crate::worker_lifecycle::require)
         .transpose()?;
-    if let Some(id) = session_id {
-        let session = crate::database::read_durable_session_record(id)
-            .context("read durable session before worker recovery")?;
-        let eligible = session.as_ref().is_some_and(|session| {
-            crate::pollers::session_target_is_pollable(session)
-                && session.target.as_ref() == Some(&plan.source_target)
-        });
-        if !eligible || crate::controller::move_session::move_owns_session(id) {
-            return Ok(WorkerRecoveryOutcome::Suppressed);
+    if let Some(owner) = owner.as_ref() {
+        owner.verify_target(&plan.source_target)?;
+        if proved_dead {
+            owner.settle_dead_restart(&plan.source_target)?;
         }
     }
-    // A failed Move can leave this actor with a plan from before recovery.
-    // Never overwrite the durable checkpoint-only launch with that old plan.
-    if let Some(id) = session_id
-        && let Some(operation) = crate::database::load_move_operation(id)?
-        && operation.source_checkpoint_only
-        && operation.destination_target.is_none()
-    {
-        plan = crate::controller::Controller::load()?.worker_recovery_plan(id, Some(&operation))?;
-    }
-    if ensure_recovery_target_running(executor, plan.target.as_ref())
-        .context("restore relay worker target")?
-        == TargetRecoveryOutcome::Missing
-    {
-        return Ok(WorkerRecoveryOutcome::TargetMissing);
-    }
-    let output = executor
-        .execute(&plan.liveness_probe)
-        .context("probe relay worker liveness")?;
-    if output.status != 0 {
-        bail!(
-            "{} failed with status {}: {}",
-            plan.liveness_probe.purpose,
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    // A replacement may still be replaying its journal after the daemon
-    // that launched it has exited. A lost handshake is not permission to kill
-    // that live process; only a liveness probe proving death permits restart.
-    let restart_pending = session_id
-        .map(crate::database::load_worker_restart)
+    let deferred = match plan.binary_refresh.as_ref() {
+        Some(WorkerBinaryRefresh::Deferred(refresh)) => Some(refresh),
+        _ => None,
+    };
+    let staged = deferred
+        .map(|refresh| crate::controller::prepare_recovery_worker_binary(executor, refresh))
         .transpose()?
-        .flatten()
-        .is_some_and(|intent| intent.target == plan.source_target);
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "alive" if restart_pending => Ok(WorkerRecoveryOutcome::Starting),
-        "starting" => Ok(WorkerRecoveryOutcome::Starting),
-        "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
-        "alive" => {
-            if let Some(workspace) = plan.workspace.as_ref()
-                && !crate::controller::path_exists_on_managed_target(
-                    executor,
-                    &workspace.target,
-                    &workspace.directory,
-                )?
-            {
-                return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
-                    workspace.directory.clone(),
-                ));
-            }
-            refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
-            refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
-            plan.restart.execute(executor)?;
-            Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
-        }
-        "dead" => {
-            if let Some(workspace) = plan.workspace.as_ref()
-                && !crate::controller::path_exists_on_managed_target(
-                    executor,
-                    &workspace.target,
-                    &workspace.directory,
-                )?
-            {
-                return Ok(WorkerRecoveryOutcome::WorkspaceMissing(
-                    workspace.directory.clone(),
-                ));
-            }
-            refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
-            refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
-            plan.restart.execute(executor)?;
-            Ok(WorkerRecoveryOutcome::RestartedDead)
-        }
-        output => bail!("worker liveness probe returned unexpected output {output:?}"),
+        .flatten();
+    let _swap = crate::upgrade::activity_unless_draining("worker recovery swap")?;
+    if let Some(owner) = owner.as_ref() {
+        owner.begin_restart(&plan.source_target, String::new())?;
+        crate::database::advance_worker_restart(
+            owner.session_id(),
+            owner.operation_id(),
+            crate::database::WorkerRestartPhase::Swapping,
+        )?;
     }
+    if let Some(staged) = staged {
+        staged.install(
+            owner
+                .as_ref()
+                .context("prepared recovery has no worker owner")?,
+        )?;
+    } else if deferred.is_none() {
+        refresh_worker_binary_if_stale(executor, plan.binary_refresh.as_ref())?;
+    }
+    refresh_worker_launch_if_stale(executor, plan.launch_refresh.as_ref())?;
+    plan.restart.execute(executor)?;
+    if let Some(owner) = owner.as_ref() {
+        crate::database::advance_worker_restart(
+            owner.session_id(),
+            owner.operation_id(),
+            crate::database::WorkerRestartPhase::AwaitingReadiness,
+        )?;
+    }
+    Ok(())
 }

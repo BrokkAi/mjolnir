@@ -9,11 +9,21 @@ pub(crate) struct EventDecoder {
     id: Option<u64>,
     kind: String,
     frame_bytes: usize,
+    handoff: Option<u64>,
 }
 
 impl EventDecoder {
+    /// The cursor to resume from once the daemon announced that an upgrade is
+    /// replacing it. Nothing after that announcement is decoded.
+    pub(crate) fn handoff(&self) -> Option<u64> {
+        self.handoff
+    }
+
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<ApiEvent>> {
         let mut events = Vec::new();
+        if self.handoff.is_some() {
+            return Ok(events);
+        }
         for &byte in bytes {
             self.frame_bytes += 1;
             ensure!(
@@ -29,6 +39,13 @@ impl EventDecoder {
             if line.is_empty() {
                 if self.kind == "stream_error" {
                     bail!("{}", self.data.trim_end());
+                }
+                if self.kind == mj_controller::server::api::DAEMON_HANDOFF_CODE {
+                    let Some(cursor) = self.id else {
+                        bail!("the daemon handoff announcement names no event ID");
+                    };
+                    self.handoff = Some(cursor);
+                    return Ok(events);
                 }
                 if !self.data.is_empty() {
                     let event: ApiEvent = serde_json::from_str(&self.data)?;
@@ -104,5 +121,23 @@ mod tests {
             .push(b"event: stream_error\ndata: reconnect\n\n")
             .unwrap_err();
         assert!(error.to_string().contains("reconnect"));
+    }
+
+    #[test]
+    fn a_handoff_announcement_keeps_earlier_events_and_names_the_resume_cursor() {
+        let body = r#"{"seq":7,"session_id":"s","recorded_at_ms":1,"type":"session_fault","data":{"reason":"startup_failed","message":"failed","command_id":null}}"#;
+        let stream = format!(
+            "id: 7\nevent: session_fault\ndata: {body}\n\n\
+             id: 9\nevent: daemon_handoff\ndata: the daemon is being replaced\n\n\
+             id: 10\nevent: session_fault\ndata: not decoded\n\n"
+        );
+        let mut decoder = EventDecoder::default();
+        let events = decoder.push(stream.as_bytes()).unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [7]
+        );
+        assert_eq!(decoder.handoff(), Some(9));
+        assert!(decoder.push(b"id: 11\n\n").unwrap().is_empty());
     }
 }

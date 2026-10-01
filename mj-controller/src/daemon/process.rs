@@ -1,5 +1,6 @@
 use super::diagnostics::ServingPhase;
 use super::*;
+use std::time::Instant;
 
 /// PID of the process this daemon must not outlive, if one was requested.
 ///
@@ -248,6 +249,36 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     );
 
+    // CPU publication is bounded and reconstructed from workers. It holds no
+    // admission during handoff and exits with the daemon's cancellation token.
+    let cpu_publication = {
+        let mut receiver = manager.session_cpu;
+        let state = state.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let mut next_publication = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    changed = receiver.changed() => {
+                        if changed.is_err() {
+                            tracing::error!("session CPU publication channel closed");
+                            return;
+                        }
+                    }
+                }
+                // Publish the first update promptly, then coalesce other actors'
+                // updates. A separate polling phase adds a needless ten seconds.
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = tokio::time::sleep_until(next_publication) => {}
+                }
+                receiver.borrow_and_update();
+                state.publish_revision();
+                next_publication = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
+        })
+    };
     let project_catalog = tokio::spawn(state.projects().run(cancellation.child_token()));
 
     let target_refresh = spawn_manager_target_refresher(
@@ -442,6 +473,7 @@ pub(super) async fn run_daemon_runtime(
             cancellation.clone(),
             state.clone(),
             SessionManagerChannels {
+                session_cpu: remote.control.session_cpu.clone(),
                 targets: remote.targets,
                 control: remote.control,
                 updates: remote.updates,
@@ -630,12 +662,13 @@ pub(super) async fn run_daemon_runtime(
     .await;
 
     progress.phase(ServingPhase::Shutdown);
+    let mut epilogue = EpilogueClock::start();
     epilogue_started.store(true, Ordering::Release);
     spawn_shutdown_watchdog();
     // Idle exit and fallible loop exits do not arrive through the termination
     // coordinator. Stop every daemon-owned task before closing the sole writer.
     cancellation.cancel();
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join machine build cache applications",
         match cache_outcome {
@@ -649,22 +682,22 @@ pub(super) async fn run_daemon_runtime(
     // Recovery copies and worker upgrades do not hold up a handoff, so some
     // may still be running. Stop them first: the next daemon starts them again.
     // The coordinators share one gate, and dropping either cancels both.
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "shut down worker upgrade coordinator",
         worker_upgrades.shutdown().await,
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "shut down recovery coordinator",
         recovery.shutdown().await,
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join continuation service",
         update_feed.join().await,
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join delegation coordinator",
         match delegation_outcome {
@@ -676,12 +709,12 @@ pub(super) async fn run_daemon_runtime(
         },
     );
     drop(interrupted_close_tx);
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "remove daemon metadata",
         remove_daemon_metadata(&daemon_metadata_path),
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "shut down turn review host",
         state
@@ -690,30 +723,35 @@ pub(super) async fn run_daemon_runtime(
             .await
             .map_err(anyhow::Error::msg),
     );
+    epilogue.record(
+        &mut outcome,
+        "join CPU publication",
+        cpu_publication.await.map_err(anyhow::Error::from),
+    );
     record_daemon_cleanup(
         &mut outcome,
         "join project discovery",
         project_catalog.await.map_err(anyhow::Error::from),
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join controller target refresher",
         target_refresh.await.map_err(anyhow::Error::new),
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join container image refresher",
         image_refresh.await.map_err(anyhow::Error::new),
     );
     if let Some(phone_task) = phone_task {
-        record_daemon_cleanup(
+        epilogue.record(
             &mut outcome,
             "join phone server",
             phone_task.await.map_err(anyhow::Error::new),
         );
     }
     if let Some(remote_request_bridge) = remote_request_bridge {
-        record_daemon_cleanup(
+        epilogue.record(
             &mut outcome,
             "join phone session request bridge",
             remote_request_bridge.await.map_err(anyhow::Error::new),
@@ -731,47 +769,49 @@ pub(super) async fn run_daemon_runtime(
             );
         }
     }
-    record_daemon_cleanup(
+    epilogue.record(&mut outcome, "join daemon client tasks", Ok(()));
+    epilogue.record(
         &mut outcome,
         "cancel daemon lifecycle operations",
         state.cancel_and_wait_lifecycles().await,
     );
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "drain startup prompts",
         state.cancel_and_join_startup_prompts().await,
     );
     if let Some(reconciliation) = reconciliation {
-        record_daemon_cleanup(
+        epilogue.record(
             &mut outcome,
             "join interrupted lifecycle reconciliation",
             reconciliation.await.map_err(anyhow::Error::new),
         );
     }
     if let Some(tombstone_sweep) = tombstone_sweep {
-        record_daemon_cleanup(
+        epilogue.record(
             &mut outcome,
             "join lost-session discard sweep",
             tombstone_sweep.await.map_err(anyhow::Error::new),
         );
     }
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "join checkpoint leftover sweep",
         checkpoint_sweep.await.map_err(anyhow::Error::new),
     );
     for interrupted_close_task in interrupted_close_tasks {
-        record_daemon_cleanup(
+        epilogue.record(
             &mut outcome,
             "join interrupted close recovery",
             interrupted_close_task.await.map_err(anyhow::Error::new),
         );
     }
-    record_daemon_cleanup(
+    epilogue.record(
         &mut outcome,
         "shut down controller daemon session manager",
         manager_shutdown.shutdown().await,
     );
+    epilogue.finish();
     outcome
 }
 
@@ -804,6 +844,49 @@ pub(super) fn remove_daemon_metadata(path: &Path) -> Result<()> {
 /// Keep the event-loop failure as the primary result while still running and
 /// reporting every cleanup step. If the loop ended normally, the first
 /// cleanup failure becomes the daemon's result.
+/// Times the shutdown epilogue, so a slow exit, such as the end of an upgrade
+/// handoff, records which step took the time.
+struct EpilogueClock {
+    began: Instant,
+    step: Instant,
+}
+
+impl EpilogueClock {
+    /// Steps shorter than this are not logged.
+    const LOGGED_STEP: Duration = Duration::from_millis(250);
+
+    fn start() -> Self {
+        let now = Instant::now();
+        tracing::info!("daemon shutdown began");
+        Self {
+            began: now,
+            step: now,
+        }
+    }
+
+    /// Record `cleanup`, the result of the step that just finished. Steps run
+    /// one after another, so the time since the previous one is this step's.
+    fn record(&mut self, outcome: &mut Result<()>, operation: &'static str, cleanup: Result<()>) {
+        let took = self.step.elapsed();
+        if took >= Self::LOGGED_STEP {
+            tracing::info!(
+                step = operation,
+                duration_ms = took.as_millis(),
+                "daemon shutdown step finished"
+            );
+        }
+        record_daemon_cleanup(outcome, operation, cleanup);
+        self.step = Instant::now();
+    }
+
+    fn finish(self) {
+        tracing::info!(
+            duration_ms = self.began.elapsed().as_millis(),
+            "daemon shutdown finished"
+        );
+    }
+}
+
 pub(super) fn record_daemon_cleanup(
     outcome: &mut Result<()>,
     operation: &'static str,

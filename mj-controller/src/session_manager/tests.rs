@@ -59,7 +59,10 @@ async fn client_adapter_preserves_actor_replacement_and_submit_completion() {
 #[tokio::test]
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
-    let control = SessionManagerControl { commands };
+    let control = SessionManagerControl {
+        commands,
+        session_cpu: watch::channel(SessionCpuTable::new()).1,
+    };
     let request = tokio::spawn(async move {
         control
             .wait_for_session("muse", Duration::from_millis(20))
@@ -1363,6 +1366,15 @@ fn leased_relay_child_serves_stdio() {
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
             let history = match &request.request {
+                RelayRequest::CpuUsage => {
+                    let path = PathBuf::from(&root).join("cpu-usage.json");
+                    let usage = if path.exists() {
+                        Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+                    } else {
+                        None
+                    };
+                    Some(RelayResponsePayload::CpuUsage { usage })
+                }
                 RelayRequest::SubagentRequests => {
                     let path = PathBuf::from(&root).join("subagent-request.json");
                     let requests = if path.exists() {
@@ -1548,6 +1560,7 @@ async fn session_manager_shutdown_joins_a_live_relay_actor() {
     register_leased_relay_session();
     let relay_root = tempfile::tempdir().unwrap();
     let SessionManagerChannels {
+        session_cpu: _,
         targets,
         control,
         updates: _updates,
@@ -1817,20 +1830,21 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
 
     // A plan queued while Closing must read Destroying only after cleanup
     // releases ownership, rather than use the actor's old observation.
-    let mutex = crate::recovery_gate::worker_target_mutex(&record.id);
-    let guard = mutex.lock().unwrap();
-    std::thread::scope(|scope| {
-        let pending = scope
-            .spawn(|| recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor));
-        let mut destroying = record.clone();
-        destroying.state = SessionState::Destroying;
-        crate::database::save_session(&destroying).unwrap();
-        drop(guard);
-        assert_eq!(
-            pending.join().unwrap().unwrap(),
-            WorkerRecoveryOutcome::Suppressed
-        );
-    });
+    let guard = crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "test destruction")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+        WorkerRecoveryOutcome::Suppressed
+    );
+    let mut destroying = record.clone();
+    destroying.state = SessionState::Destroying;
+    crate::database::save_session(&destroying).unwrap();
+    drop(guard);
+    assert_eq!(
+        recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+        WorkerRecoveryOutcome::Suppressed
+    );
     assert!(executor.0.lock().unwrap().is_empty());
 
     // A storage failure also refuses recovery before touching the target.
@@ -3036,15 +3050,26 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: recovery_source_target(),
         desired_build: "new-build".into(),
     };
-    crate::database::begin_worker_restart(&record.id, &intent).unwrap();
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::begin_worker_restart(&record.id, &intent),
+    )
+    .unwrap();
     for phase in [
         None,
         Some(crate::database::WorkerRestartPhase::Swapping),
         Some(crate::database::WorkerRestartPhase::AwaitingReadiness),
     ] {
         if let Some(phase) = phase {
-            crate::database::advance_worker_restart(&record.id, &intent.operation_id, phase)
-                .unwrap();
+            crate::worker_lifecycle::run_blocking(
+                &record.id,
+                "test intent",
+                &crate::targets::ProcessExecutor,
+                || crate::database::advance_worker_restart(&record.id, &intent.operation_id, phase),
+            )
+            .unwrap();
         }
         let executor = ProbeExecutor {
             live: true,
@@ -3057,7 +3082,13 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         assert_eq!(*executor.commands.lock().unwrap(), vec!["probe"]);
     }
     // An old attempt cannot erase a newer replacement's ownership.
-    crate::database::finish_worker_restart(&record.id, "previous-attempt").unwrap();
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::finish_worker_restart(&record.id, "previous-attempt"),
+    )
+    .unwrap();
     assert_eq!(
         crate::database::load_worker_restart(&record.id).unwrap(),
         Some(intent.clone())
@@ -3075,8 +3106,89 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     stale.target = mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/another-worker"),
     };
-    assert!(crate::database::begin_worker_restart(&record.id, &stale).is_err());
-    crate::database::finish_worker_restart(&record.id, &intent.operation_id).unwrap();
+    assert!(
+        crate::worker_lifecycle::run_blocking(
+            &record.id,
+            "test intent",
+            &crate::targets::ProcessExecutor,
+            || { crate::database::begin_worker_restart(&record.id, &stale) }
+        )
+        .is_err()
+    );
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::finish_worker_restart(&record.id, &intent.operation_id),
+    )
+    .unwrap();
+    let replacement = crate::database::load_worker_restart(&record.id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(replacement.operation_id, intent.operation_id);
+    assert_eq!(
+        crate::database::worker_restart_phase(&record.id).unwrap(),
+        Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+    );
+    // Conditional claim cannot overwrite this boot, even on the same target.
+    assert!(
+        crate::worker_lifecycle::run_blocking(
+            &record.id,
+            "test intent",
+            &crate::targets::ProcessExecutor,
+            || { crate::database::begin_worker_restart(&record.id, &intent) }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        crate::database::load_worker_restart(&record.id).unwrap(),
+        Some(replacement)
+    );
+    // A first hello without native readiness cannot complete the handoff.
+    let mut snapshot = view_at_ordinal(0).snapshot.unwrap();
+    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+        .unwrap()
+        .unwrap();
+    crate::worker_lifecycle::observe_ready_worker(
+        &observer,
+        &record.target.clone().unwrap(),
+        &snapshot,
+    )
+    .unwrap();
+    assert!(
+        crate::database::load_worker_restart(&record.id)
+            .unwrap()
+            .is_some()
+    );
+    drop(observer);
+    snapshot.operational.checkpoint_only = true;
+    let checkpoint_owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "checkpoint")
+            .unwrap()
+            .unwrap();
+    // Even a nested observation cannot acquire an active owner's swap.
+    checkpoint_owner.scope_blocking(|| {
+        assert!(
+            crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+                .unwrap()
+                .is_none()
+        )
+    });
+    assert!(
+        crate::database::load_worker_restart(&record.id)
+            .unwrap()
+            .is_some()
+    );
+    drop(checkpoint_owner);
+    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+        .unwrap()
+        .unwrap();
+    crate::worker_lifecycle::observe_ready_worker(
+        &observer,
+        &record.target.clone().unwrap(),
+        &snapshot,
+    )
+    .unwrap();
     assert!(
         crate::database::load_worker_restart(&record.id)
             .unwrap()
@@ -3095,4 +3207,87 @@ fn a_submit_that_never_reached_the_worker_is_a_definite_failure() {
     assert!(!super::actor::submit_failure(&never_sent).unconfirmed);
     let lost_reply = anyhow::anyhow!("relay connection closed while awaiting a reply");
     assert!(super::actor::submit_failure(&lost_reply).unconfirmed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn actor_publishes_worker_cpu_and_removes_it_on_retirement() {
+    const CHILD: &str = "MJ_TEST_CPU_ACTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "actor_publishes_worker_cpu_and_removes_it_on_retirement",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let usage = mj_core::cpu_usage::SessionCpuUsage {
+        recent_permille: 230,
+        hourly_permille: 100,
+        hourly_covered_secs: 20,
+        online_cpus: 4,
+    };
+    std::fs::write(
+        root.path().join("cpu-usage.json"),
+        serde_json::to_vec(&usage).unwrap(),
+    )
+    .unwrap();
+    let manager = spawn_session_manager().unwrap();
+    manager
+        .targets
+        .send_replace(vec![leased_relay_target(root.path())]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .session_cpu
+                .borrow()
+                .contains_key(LEASED_RELAY_SESSION)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        manager.session_cpu.borrow().get(LEASED_RELAY_SESSION),
+        Some(&mj_client::runtime_feed::SessionCpuView::Measured { usage })
+    );
+    manager.targets.send_replace(Vec::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.session_cpu.borrow().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+#[test]
+fn retired_cpu_producers_cannot_erase_or_overwrite_their_replacement() {
+    let (updates, _receiver) = coalesced_update_channel();
+    let old = updates.for_actor("session");
+    old.publish_cpu(
+        "session",
+        Some(mj_client::runtime_feed::SessionCpuView::Unavailable {
+            reason: "old".into(),
+        }),
+    );
+    let current = updates.for_actor("session");
+    let expected = mj_client::runtime_feed::SessionCpuView::Unavailable {
+        reason: "current".into(),
+    };
+    current.publish_cpu("session", Some(expected.clone()));
+    old.publish_cpu("session", None);
+    drop(old);
+    assert_eq!(updates.cpu.borrow().get("session"), Some(&expected));
+    drop(current);
+    assert!(updates.cpu.borrow().is_empty());
 }

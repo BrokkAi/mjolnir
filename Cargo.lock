@@ -825,7 +825,9 @@ dependencies = [
  "qrcode",
  "ratatui",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

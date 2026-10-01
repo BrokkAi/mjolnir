@@ -24,7 +24,9 @@ chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

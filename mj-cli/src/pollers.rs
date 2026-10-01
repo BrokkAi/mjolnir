@@ -20,7 +20,8 @@ pub(crate) struct DashboardLifecycleUpdate {
 const WORKER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Applies one worker poll to the controller's records, the dashboard, and
 /// the open conversations. `persistence` is where the records it changes are
-/// saved; `None` saves nothing.
+/// saved; `None` saves nothing. Returns the poll's projection, moved out of
+/// the update rather than copied, when it carried one.
 pub(crate) fn apply_worker_poll_update(
     controller: &mut Controller,
     dashboard: &mut DashboardState,
@@ -30,7 +31,7 @@ pub(crate) fn apply_worker_poll_update(
         &tokio::sync::mpsc::UnboundedSender<DashboardIoUpdate>,
         &crate::dashboard::CriticalOperationTracker,
     )>,
-) -> Result<bool> {
+) -> Result<Option<mj_core::state::MaterializedSession>> {
     if apply_worker_record_update(controller, &update, persistence)? {
         dashboard.set_state(controller.state.clone());
         // The Sessions row now reads the new title from the record. The open
@@ -92,7 +93,7 @@ pub(crate) fn apply_worker_poll_update(
         }
         None => dashboard.report_session_reachable(&update.session_id),
     }
-    Ok(update.view.snapshot.is_some())
+    Ok(update.view.snapshot.map(|snapshot| snapshot.materialized))
 }
 
 fn apply_worker_record_update(

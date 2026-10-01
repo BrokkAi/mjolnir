@@ -11,73 +11,84 @@ impl Controller {
         operation: &mut mj_core::state::MoveOperation,
         source_relay: &mut crate::controller::move_session::MoveSourceRelay,
     ) -> Result<()> {
-        let snapshot = if source_relay.is_held() {
-            source_relay.sync(session_id).await?
-        } else {
-            *source_relay =
-                crate::controller::move_session::MoveSourceRelay::lease(manager, session_id)
+        let retained = source_relay.owner();
+        crate::worker_lifecycle::run_with_owner(
+            session_id,
+            "prepare move source checkpoint",
+            executor,
+            retained,
+            async {
+                let snapshot = if source_relay.is_held() {
+                    source_relay.sync(session_id).await?
+                } else {
+                    *source_relay = crate::controller::move_session::MoveSourceRelay::lease(
+                        manager, session_id,
+                    )
                     .await?;
-            source_relay.snapshot()
-        };
-        if snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.operational.checkpoint_only)
-        {
-            operation.source_checkpoint_only = true;
-            crate::database::save_move_operation(operation)?;
-            return Ok(());
-        }
-        if snapshot.as_ref().is_some_and(|snapshot| {
-            matches!(
-                snapshot.operational.execution,
-                RelayExecutionState::Closing | RelayExecutionState::Closed
-            )
-        }) {
-            return Ok(());
-        }
-        if !operation.source_checkpoint_only
-            && snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
-        {
-            return Ok(());
-        }
-        ensure!(
-            !executor.cancellation_requested() && !operation.cancellation_requested,
-            "Move cancelled before source recovery"
-        );
-        operation.source_checkpoint_only = true;
-        crate::database::save_move_operation(operation)?;
-        executor.notify_notice("Recovering source data without starting its old harness");
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let reconnect = targets::reconnect_plan(&backend, session_id)?
-            .commands
-            .into_iter()
-            .next()
-            .context("reconnect plan is empty")?;
-        let launch = self.current_worker_launch_config(session_id, &backend)?;
-        let connection = self
-            .restart_worker_with_installed_binary(
-                session_id,
-                executor,
-                InstalledWorkerRestart {
-                    backend: &backend,
-                    worker_root: &worker_root,
-                    reconnect: &reconnect,
-                    launch: Some(&launch),
-                    prepared: false,
-                    messages: &RESTART_FOR_CHECKPOINT,
-                },
-            )
-            .await?;
-        if source_relay.is_held() {
-            source_relay.replace_connection(connection);
-        } else {
-            adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
-                .await?
-                .release();
-        }
-        Ok(())
+                    source_relay.snapshot()
+                };
+                if snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.operational.checkpoint_only)
+                {
+                    operation.source_checkpoint_only = true;
+                    crate::database::save_move_operation(operation)?;
+                    return Ok(());
+                }
+                if snapshot.as_ref().is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.operational.execution,
+                        RelayExecutionState::Closing | RelayExecutionState::Closed
+                    )
+                }) {
+                    return Ok(());
+                }
+                if !operation.source_checkpoint_only
+                    && snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.operational.native_session_is_ready())
+                {
+                    return Ok(());
+                }
+                ensure!(
+                    !executor.cancellation_requested() && !operation.cancellation_requested,
+                    "Move cancelled before source recovery"
+                );
+                operation.source_checkpoint_only = true;
+                crate::database::save_move_operation(operation)?;
+                executor.notify_notice("Recovering source data without starting its old harness");
+                let (backend, worker_root) = self.worker_placement(session_id)?;
+                let reconnect = targets::reconnect_plan(&backend, session_id)?
+                    .commands
+                    .into_iter()
+                    .next()
+                    .context("reconnect plan is empty")?;
+                let launch = self.current_worker_launch_config(session_id, &backend)?;
+                let connection = self
+                    .restart_worker_with_installed_binary(
+                        session_id,
+                        executor,
+                        InstalledWorkerRestart {
+                            backend: &backend,
+                            worker_root: &worker_root,
+                            reconnect: &reconnect,
+                            launch: Some(&launch),
+                            prepared: false,
+                            messages: &RESTART_FOR_CHECKPOINT,
+                        },
+                    )
+                    .await?;
+                if source_relay.is_held() {
+                    source_relay.replace_connection(connection);
+                } else {
+                    adopt_restarted_checkpoint_relay(session_id, Some(manager), connection)
+                        .await?
+                        .release();
+                }
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Reach the session worker for a checkpoint, restarting it when the proxy

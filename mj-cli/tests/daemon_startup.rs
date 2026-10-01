@@ -237,11 +237,16 @@ fn old_daemon_fixture() {
                             // decode the frame: it fails the request and drops
                             // the connection. The client must fall back to the
                             // notice that names no work.
-                            if matches!(request.action, DaemonAction::UpgradeBlockers) { break; }
+                            // A current daemon names its blockers.
+                            let blockers = std::env::var("MJ_TEST_UPGRADE_BLOCKERS").ok();
+                            if matches!(request.action, DaemonAction::UpgradeBlockers) && blockers.is_none() { break; }
                             let stopping = matches!(request.action, DaemonAction::Stop)
                                 || (matches!(request.action, DaemonAction::PrepareUpgrade) && !busy);
                             let reply = match request.action {
                                 DaemonAction::Ping => DaemonReply::Pong,
+                                DaemonAction::UpgradeBlockers => DaemonReply::UpgradeBlockers(
+                                    blockers.iter().flat_map(|named| named.split('|')).map(str::to_owned).collect(),
+                                ),
                                 DaemonAction::Stop => {
                                     assert!(!busy, "automatic upgrade cancelled accepted work");
                                     DaemonReply::Done
@@ -828,4 +833,165 @@ fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains("unknown workspace \"nosuch\""), "{stderr}");
     assert!(stderr.contains("alpha"), "{stderr}");
+}
+
+/// A daemon handoff waits only for daemon-owned work. Live, a SessionWiki sync
+/// held admission while it walked every native session store, and an ordinary
+/// startup of a newer build waited minutes for it. A sync is safe to stop and
+/// every daemon runs one at startup, so the handoff must go ahead while one is
+/// parked mid-pass, and the old daemon must exit without finishing it.
+#[test]
+fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
+    use std::time::{Duration, Instant, SystemTime};
+    let storage = upgrade_storage();
+    // The web viewer's runtime is what starts the startup sync.
+    fs::write(
+        storage.path().join("config/config.toml"),
+        "version = 1\n[phone]\nenabled = true\nbind = \"127.0.0.1:0\"\ntailscale_detect = false\n",
+    )
+    .unwrap();
+    let hooks = storage.path().join("hooks");
+    // The sync walks the native stores under HOME; keep it off the real ones.
+    let home = storage.path().join("home");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    // The same build an hour older on disk: same release and commit, so only
+    // the executable time orders the two, and this test's client is newer.
+    let old_binary = storage.path().join("mj-old");
+    fs::copy(env!("CARGO_BIN_EXE_mj"), &old_binary).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&old_binary)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    let mut old_client = Command::new(&old_binary);
+    common::own_test_daemons(&mut old_client)
+        .args(["--instance", "upgrade-test"])
+        .env("MJ_DATA_DIR", storage.path().join("data"))
+        .env("MJ_CONFIG_DIR", storage.path().join("config"))
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1")
+        .env("HOME", &home)
+        .env("MJ_CHAOS_ISOLATED", "1")
+        .env("MJ_TEST_HOOK", "sessionwiki_sync_pass")
+        .env("MJ_TEST_HOOK_DIR", &hooks);
+    let (status, log) = run_client_with_deadline(&mut old_client, &storage.path().join("old.log"));
+    assert!(status.success(), "{log}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !hooks.join("sessionwiki_sync_pass.reached").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the old daemon did not start its SessionWiki sync"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let metadata_path = storage.path().join("data/daemon.json");
+    let old: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+
+    let started = Instant::now();
+    let mut new_client = upgrade_command(&storage);
+    new_client.env("HOME", &home);
+    let (status, log) = run_client_with_deadline(&mut new_client, &storage.path().join("new.log"));
+    let took = started.elapsed();
+    // Release the parked pass whatever happened, so nothing waits on it.
+    fs::write(hooks.join("sessionwiki_sync_pass.continue"), "").unwrap();
+    assert!(status.success(), "{log}");
+    assert!(
+        log.contains("replacing the daemon"),
+        "the newer client replaced the daemon: {log}"
+    );
+    assert!(
+        took < Duration::from_secs(30),
+        "the handoff waited {took:?} for a SessionWiki sync: {log}"
+    );
+    let new: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_ne!(new.pid, old.pid);
+    assert!(
+        !common::process_exists(old.pid),
+        "the old daemon exited without finishing its sync"
+    );
+}
+
+/// While a handoff waits, the client replacing the daemon and a client queued
+/// behind it both say what the old daemon is still finishing, with its age,
+/// instead of a line that names nothing.
+#[test]
+fn every_client_waiting_on_a_handoff_names_what_it_waits_for() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    current_store(&storage);
+    let busy = storage.path().join("work-in-flight");
+    fs::write(&busy, "accepted work").unwrap();
+    let mut old = OldDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.21.0")
+            .env(
+                "MJ_TEST_OLD_PROTOCOL",
+                mj_client::daemon::PROTOCOL_VERSION.to_string(),
+            )
+            .env("MJ_TEST_UPGRADE_BUSY_FILE", &busy)
+            .env("MJ_TEST_UPGRADE_BLOCKERS", "session lifecycle (1m 05s)")
+            .env("MJ_INSTANCE", "upgrade-test")
+            .env("MJ_DATA_DIR", storage.path().join("data"))
+            .env("MJ_CONFIG_DIR", storage.path().join("config"))
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !storage.path().join("data/daemon.json").exists() {
+        assert!(Instant::now() < deadline, "fixture did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let named = "session lifecycle (1m 05s)";
+    let replacing_log = storage.path().join("replacing.log");
+    let queued_log = storage.path().join("queued.log");
+    let logs = std::thread::scope(|scope| {
+        let replacing = scope
+            .spawn(|| run_client_with_deadline(&mut upgrade_command(&storage), &replacing_log));
+        while !busy.with_extension("observed").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "client did not ask for safe handoff"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let queued =
+            scope.spawn(|| run_client_with_deadline(&mut upgrade_command(&storage), &queued_log));
+        // Both print their first notice after the startup notice delay.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while ![&replacing_log, &queued_log]
+            .iter()
+            .all(|log| fs::read_to_string(log).is_ok_and(|text| text.contains(named)))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "a waiting client did not name the blocker: replacing={:?} queued={:?}",
+                fs::read_to_string(&replacing_log),
+                fs::read_to_string(&queued_log)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        fs::remove_file(&busy).unwrap();
+        [replacing.join().unwrap(), queued.join().unwrap()]
+    });
+    for (status, log) in logs {
+        assert!(status.success(), "{log}");
+    }
+    let [replacing, queued] = ["replacing.log", "queued.log"]
+        .map(|name| fs::read_to_string(storage.path().join(name)).unwrap());
+    assert!(
+        replacing.contains(&format!("Mjolnir upgrade is waiting for: {named}")),
+        "{replacing}"
+    );
+    assert!(
+        queued.contains(&format!(
+            "waiting for another client to finish the daemon handoff; the running daemon is finishing: {named}"
+        )),
+        "{queued}"
+    );
+    assert!(old.0.wait().unwrap().success());
 }

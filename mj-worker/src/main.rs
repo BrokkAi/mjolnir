@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use mj_checkpoint::archive::{EXPORT_REFUSED_EXIT_CODE, PushBranchError, SessionExportError};
 use mj_core::worker_launch::WorkerLaunchConfig;
 use mj_worker::worker_runtime::{
-    AcpSupervisorSpec, lead_process_group, prepare_managed_harness, proxy, record_startup_step,
-    run_acp_supervisor, run_daemon,
+    AcpSupervisorSpec, WorkerRootOwner, lead_process_group, prepare_managed_harness, proxy,
+    record_startup_step, run_acp_supervisor, run_daemon_owned,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -22,6 +22,9 @@ struct Cli {
     /// Internal handoff: the parent explicitly supplied the clean login snapshot.
     #[arg(long, hide = true, global = true)]
     login_environment_ready: bool,
+    /// Descriptor transferred by login-environment re-exec.
+    #[arg(long, hide = true, global = true)]
+    worker_root_lock_fd: Option<i32>,
     #[command(subcommand)]
     command: Command,
 }
@@ -242,7 +245,7 @@ fn install_stderr_logging() -> Result<()> {
 
 /// Clean the worker itself as well as its harnesses: Git and other target-side
 /// helpers must not inherit controller or build-tool variables either.
-fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
+fn bootstrap_login_environment(cli: &Cli, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if cli.login_environment_ready {
         return mj_core::login_environment::initialize_from_parent();
     }
@@ -322,15 +325,23 @@ fn bootstrap_login_environment(cli: &Cli) -> Result<()> {
         let argv0 = arguments
             .next()
             .context("worker executable argument is missing")?;
-        let error = std::process::Command::new(executable)
+        let mut command = std::process::Command::new(executable);
+        command
             // Lifecycle probes identify the installed `hel worker run --root`
             // prefix. Keep it intact across re-exec, including argv[0].
             .arg0(argv0)
             .args(arguments)
             .arg("--login-environment-ready")
             .env_clear()
-            .envs(environment)
-            .exec();
+            .envs(environment);
+        if let Some(owner) = owner {
+            let fd = owner.set_reexec_inheritance(true)?;
+            command.arg("--worker-root-lock-fd").arg(fd.to_string());
+        }
+        let error = command.exec();
+        if let Some(owner) = owner {
+            owner.set_reexec_inheritance(false)?;
+        }
         Err(error).context("start worker with target login environment")
     }
     #[cfg(not(unix))]
@@ -344,19 +355,34 @@ fn main() -> Result<()> {
     install_stderr_logging()?;
     let cli = Cli::parse();
     let Command::Worker(args) = &cli.command;
+    let root_owner = match &args.command {
+        WorkerCommand::Run { root, .. } => {
+            #[cfg(unix)]
+            let owner = match cli.worker_root_lock_fd {
+                Some(fd) => WorkerRootOwner::from_reexec(root, fd)?,
+                None => WorkerRootOwner::acquire(root)?,
+            };
+            #[cfg(not(unix))]
+            let owner = WorkerRootOwner::acquire(root)?;
+            #[cfg(unix)]
+            owner.prepare_startup(cli.login_environment_ready)?;
+            Some(owner)
+        }
+        _ => None,
+    };
     // A detached worker's only channel is its root directory, so the exit
     // record has to cover the whole of startup: a panic or an error in the
     // login-environment bootstrap or in the runtime build happens before
     // `run_command` and would otherwise leave nothing behind at all.
     let exit_root = match &args.command {
-        WorkerCommand::Run { root, .. } => Some(root.clone()),
+        WorkerCommand::Run { .. } => root_owner.as_ref().map(|owner| owner.root().to_owned()),
         _ => None,
     };
     if let Some(root) = &exit_root {
         install_worker_last_words(root);
         record_startup_step(root, "start");
     }
-    let result = run_worker(cli, exit_root.as_deref());
+    let result = run_worker(cli, exit_root.as_deref(), root_owner.as_ref());
     if let Err(error) = &result
         && let Some(refusal) = error.downcast_ref::<ExportRefused>()
     {
@@ -388,11 +414,11 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_worker(cli: Cli, exit_root: Option<&Path>) -> Result<()> {
+fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if let Some(root) = exit_root {
         record_startup_step(root, "login-environment");
     }
-    bootstrap_login_environment(&cli).context("initialize worker environment")?;
+    bootstrap_login_environment(&cli, owner).context("initialize worker environment")?;
     if let Some(root) = exit_root {
         record_startup_step(root, "runtime");
     }
@@ -400,17 +426,21 @@ fn run_worker(cli: Cli, exit_root: Option<&Path>) -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
-    runtime.block_on(run_command(cli.command))
+    runtime.block_on(run_command(cli.command, owner))
 }
 
-async fn run_command(command: Command) -> Result<()> {
+async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Result<()> {
     let Command::Worker(args) = command;
     match args.command {
-        WorkerCommand::Run { root, config } => {
+        WorkerCommand::Run { config, .. } => {
             lead_process_group();
             // `main` installed the panic hook and writes the exit record for
             // every error this returns.
-            run_daemon(root, WorkerLaunchConfig::read(&config)?).await
+            run_daemon_owned(
+                owner.context("worker run has no root ownership")?,
+                WorkerLaunchConfig::read(&config)?,
+            )
+            .await
         }
         WorkerCommand::PrepareHarness { config } => {
             prepare_managed_harness(WorkerLaunchConfig::read(&config)?).await
@@ -750,14 +780,17 @@ mod tests {
             write_stdout(&vec![b'x'; 128 * 1024]).unwrap();
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(run_command(Command::Worker(WorkerArgs {
-                    command: WorkerCommand::WriteFile {
-                        root: root.into(),
-                        path: PathBuf::from("nested/input.bin"),
-                        overwrite: false,
-                        length: 512 * 1024,
-                    },
-                })))
+                .block_on(run_command(
+                    Command::Worker(WorkerArgs {
+                        command: WorkerCommand::WriteFile {
+                            root: root.into(),
+                            path: PathBuf::from("nested/input.bin"),
+                            overwrite: false,
+                            length: 512 * 1024,
+                        },
+                    }),
+                    None,
+                ))
                 .unwrap();
             return;
         }

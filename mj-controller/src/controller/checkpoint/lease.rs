@@ -162,6 +162,8 @@ pub(in crate::controller) struct LatchedCheckpoint {
     pub(in crate::controller) barrier_command_id: String,
     pub(in crate::controller) cursor: RelayCursor,
     pub(in crate::controller) completion: CheckpointCompletion,
+    // Declared last: relay cleanup must finish before another operation enters.
+    pub(in crate::controller) _worker_owner: crate::worker_lifecycle::WorkerPermit,
 }
 
 /// A latched checkpoint owns an open relay barrier, and that barrier freezes

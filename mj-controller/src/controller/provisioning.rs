@@ -22,7 +22,7 @@ use super::backend::{
 };
 use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
-use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
+use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now};
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
@@ -116,35 +116,50 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         grant_commit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        let github_token = controller_github_token();
-        let repositories = self
-            .provision_session_target_with_failure_disposition(
-                session_id,
-                executor,
-                github_token.as_deref(),
-                ProvisioningFailureDisposition::Discard,
-            )
-            .await?;
-        let setup = execute_concurrent_lanes(
-            || execute_repository_setup(&repositories, executor),
-            || self.install_worker_payload(session_id, executor),
-        );
-        let result = match setup {
-            Ok(((), (backend, worker_root))) => {
-                self.connect_and_start_worker(session_id, executor, &backend, &worker_root, true)
-                    .await
-            }
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(native_session_id) => {
-                if let Err(error) = grant_commit() {
-                    return Err(self.rollback_failed_new_session(session_id, error)?);
+        crate::worker_lifecycle::run(
+            session_id,
+            "provision session controlled with commit",
+            executor,
+            async {
+                crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+                let github_token = controller_github_token();
+                let repositories = self
+                    .provision_session_target_with_failure_disposition(
+                        session_id,
+                        executor,
+                        github_token.as_deref(),
+                        ProvisioningFailureDisposition::Discard,
+                    )
+                    .await?;
+                let setup = execute_concurrent_lanes(
+                    || execute_repository_setup(&repositories, executor),
+                    || self.install_worker_payload(session_id, executor),
+                );
+                let result = match setup {
+                    Ok(((), (backend, worker_root))) => {
+                        self.connect_and_start_worker(
+                            session_id,
+                            executor,
+                            &backend,
+                            &worker_root,
+                            true,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(native_session_id) => {
+                        if let Err(error) = grant_commit() {
+                            return Err(self.rollback_failed_new_session(session_id, error)?);
+                        }
+                        self.mark_worker_connected(session_id, native_session_id)
+                    }
+                    Err(error) => Err(self.rollback_failed_new_session(session_id, error)?),
                 }
-                self.mark_worker_connected(session_id, native_session_id)
-            }
-            Err(error) => Err(self.rollback_failed_new_session(session_id, error)?),
-        }
+            },
+        )
+        .await
     }
 
     /// Start a child worker inside an already-provisioned parent target.
@@ -154,75 +169,85 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        // One retry, and only for a worker that provably never published a
-        // control socket. Such a worker has no relay, no durable journal and
-        // no harness, so starting another over the same root cannot duplicate
-        // or corrupt anything. A spawn is issued by a model that cannot see
-        // the target, so a transient start failure it could have retried by
-        // hand is better retried here.
-        let mut attempts: Vec<String> = Vec::new();
-        loop {
-            let (result, placement) = self.attempt_subagent_start(session_id, executor).await;
-            let error = match result {
-                Ok(native_session_id) => {
-                    return self.mark_worker_connected(session_id, native_session_id);
+        crate::worker_lifecycle::run(
+            session_id,
+            "provision subagent session controlled",
+            executor,
+            async {
+                crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+                // One retry, and only for a worker that provably never published a
+                // control socket. Such a worker has no relay, no durable journal and
+                // no harness, so starting another over the same root cannot duplicate
+                // or corrupt anything. A spawn is issued by a model that cannot see
+                // the target, so a transient start failure it could have retried by
+                // hand is better retried here.
+                let mut attempts: Vec<String> = Vec::new();
+                loop {
+                    let (result, placement) =
+                        self.attempt_subagent_start(session_id, executor).await;
+                    let error = match result {
+                        Ok(native_session_id) => {
+                            return self.mark_worker_connected(session_id, native_session_id);
+                        }
+                        Err(error) => error,
+                    };
+                    let retry = attempts.is_empty() && subagent_start_is_retryable(&error);
+                    let error = match &placement {
+                        Some((backend, _)) => super::subagent_park::explain_process_exhaustion(
+                            error, backend, session_id,
+                        ),
+                        None => error,
+                    };
+                    attempts.push(format!("{error:#}"));
+                    let error = if attempts.len() > 1 {
+                        anyhow::anyhow!(
+                            "{}",
+                            attempts
+                                .iter()
+                                .enumerate()
+                                .map(|(index, error)| format!("attempt {}: {error}", index + 1))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    } else {
+                        error
+                    };
+                    let diagnostic = note_new_session_launch_failure(session_id, &error);
+                    let previous = self
+                        .state
+                        .sessions
+                        .get(session_id)
+                        .context("failed child disappeared")?
+                        .clone();
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    record.state = SessionState::StartupCleanup;
+                    record.updated_at = now();
+                    record.last_error = Some(format!("sub-agent startup failed: {diagnostic}"));
+                    self.persist_session_transition_or_restore(
+                        session_id,
+                        &previous,
+                        "record failed startup before teardown",
+                    )?;
+                    let cleanup = super::failed_launch_cleanup_executor();
+                    if let Err(cleanup_error) =
+                        self.finish_failed_startup_controlled(session_id, &cleanup, retry)
+                    {
+                        return Err(error.context(format!(
+                            "startup cleanup remains pending: {cleanup_error:#}"
+                        )));
+                    }
+                    if !retry {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "sub-agent worker never started and was stopped; retrying once"
+                    );
                 }
-                Err(error) => error,
-            };
-            let retry = attempts.is_empty() && subagent_start_is_retryable(&error);
-            let error = match &placement {
-                Some((backend, _)) => {
-                    super::subagent_park::explain_process_exhaustion(error, backend, session_id)
-                }
-                None => error,
-            };
-            attempts.push(format!("{error:#}"));
-            let error = if attempts.len() > 1 {
-                anyhow::anyhow!(
-                    "{}",
-                    attempts
-                        .iter()
-                        .enumerate()
-                        .map(|(index, error)| format!("attempt {}: {error}", index + 1))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            } else {
-                error
-            };
-            let diagnostic = note_new_session_launch_failure(session_id, &error);
-            let previous = self
-                .state
-                .sessions
-                .get(session_id)
-                .context("failed child disappeared")?
-                .clone();
-            let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.state = SessionState::StartupCleanup;
-            record.updated_at = now();
-            record.last_error = Some(format!("sub-agent startup failed: {diagnostic}"));
-            self.persist_session_transition_or_restore(
-                session_id,
-                &previous,
-                "record failed startup before teardown",
-            )?;
-            let cleanup = super::failed_launch_cleanup_executor();
-            if let Err(cleanup_error) =
-                self.finish_failed_startup_controlled(session_id, &cleanup, retry)
-            {
-                return Err(error.context(format!(
-                    "startup cleanup remains pending: {cleanup_error:#}"
-                )));
-            }
-            if !retry {
-                return Err(error);
-            }
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "sub-agent worker never started and was stopped; retrying once"
-            );
-        }
+            },
+        )
+        .await
     }
 
     /// Finish a failed startup without reopening its relay or replaying work.
@@ -240,74 +265,87 @@ impl Controller {
         executor: &impl CommandExecutor,
         retry_after_stop: bool,
     ) -> Result<()> {
-        let previous = self
-            .state
-            .sessions
-            .get(session_id)
-            .context("cleanup session disappeared")?
-            .clone();
-        ensure!(
-            previous.state == SessionState::StartupCleanup,
-            "session is not awaiting startup cleanup"
-        );
-        let child = self.state.subagents.contains_key(session_id);
-        ensure!(
-            !retry_after_stop || child,
-            "only unaccepted child startup may retry"
-        );
-        let outcome = (|| -> Result<()> {
-            if let Some(locator) = &previous.target {
-                let backend = backend_locator(locator, &previous, &self.config)?;
-                if child {
-                    let root = targets::worker_root(&backend, session_id)?;
-                    super::worker_binary::stop_worker(executor, &backend, &root)?;
-                } else {
-                    targets::close_plan(&backend, session_id)?.execute(executor)?;
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "finish failed startup controlled",
+            executor,
+            || {
+                let previous = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .context("cleanup session disappeared")?
+                    .clone();
+                ensure!(
+                    previous.state == SessionState::StartupCleanup,
+                    "session is not awaiting startup cleanup"
+                );
+                let child = self.state.subagents.contains_key(session_id);
+                ensure!(
+                    !retry_after_stop || child,
+                    "only unaccepted child startup may retry"
+                );
+                let outcome = (|| -> Result<()> {
+                    if let Some(locator) = &previous.target {
+                        let backend = backend_locator(locator, &previous, &self.config)?;
+                        if child {
+                            let root = targets::worker_root(&backend, session_id)?;
+                            super::worker_binary::stop_worker(
+                                &crate::worker_lifecycle::require(session_id)?,
+                                executor,
+                                &backend,
+                                &root,
+                            )?;
+                        } else {
+                            targets::close_plan(&backend, session_id)?.execute(executor)?;
+                        }
+                    }
+                    if !child {
+                        self.cleanup_new_session_worktree_after_failure(session_id, executor)?;
+                    }
+                    Ok(())
+                })();
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.updated_at = now();
+                let cause = previous
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("startup failed")
+                    .split("; startup cleanup failed:")
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                match &outcome {
+                    Ok(()) => {
+                        record.state = if retry_after_stop {
+                            SessionState::Provisioning
+                        } else {
+                            SessionState::Error
+                        };
+                        record.last_error = (!retry_after_stop).then_some(cause);
+                        if !child {
+                            record.target = None;
+                        }
+                    }
+                    Err(error) => {
+                        record.last_error =
+                            Some(format!("{cause}; startup cleanup failed: {error:#}"));
+                    }
                 }
-            }
-            if !child {
-                self.cleanup_new_session_worktree_after_failure(session_id, executor)?;
-            }
-            Ok(())
-        })();
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.updated_at = now();
-        let cause = previous
-            .last_error
-            .as_deref()
-            .unwrap_or("startup failed")
-            .split("; startup cleanup failed:")
-            .next()
-            .unwrap()
-            .to_owned();
-        match &outcome {
-            Ok(()) => {
-                record.state = if retry_after_stop {
-                    SessionState::Provisioning
-                } else {
-                    SessionState::Error
-                };
-                record.last_error = (!retry_after_stop).then_some(cause);
-                if !child {
-                    record.target = None;
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                if outcome.is_ok() && child && !retry_after_stop {
+                    record.archived = true;
                 }
-            }
-            Err(error) => {
-                record.last_error = Some(format!("{cause}; startup cleanup failed: {error:#}"));
-            }
-        }
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        if outcome.is_ok() && child && !retry_after_stop {
-            record.archived = true;
-        }
-        if let Err(error) = crate::database::save_startup_cleanup_outcome(
-            record,
-            outcome.is_ok() && child && !retry_after_stop,
-        ) {
-            self.state.sessions.insert(session_id.to_owned(), previous);
-            return Err(error).context("record startup cleanup outcome");
-        }
-        outcome
+                if let Err(error) = crate::database::save_startup_cleanup_outcome(
+                    record,
+                    outcome.is_ok() && child && !retry_after_stop,
+                ) {
+                    self.state.sessions.insert(session_id.to_owned(), previous);
+                    return Err(error).context("record startup cleanup outcome");
+                }
+                outcome
+            },
+        )
     }
 
     /// One start of a child worker: place it, install its files, and wait for
@@ -464,6 +502,7 @@ impl Controller {
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
     ) -> Result<targets::CommandPlan> {
+        crate::worker_lifecycle::run(session_id, "provision session target with failure disposition", executor, async {
         let session = self
             .state
             .sessions
@@ -770,6 +809,8 @@ impl Controller {
         }
         self.persist_session_state(session_id)?;
         result
+
+        }).await
     }
 
     pub fn mark_worker_connected(
@@ -826,44 +867,58 @@ impl Controller {
         worker_root: &str,
         initialize_workspace: bool,
     ) -> Result<Option<String>> {
-        let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-        if initialize_workspace {
-            install_inherited_git_settings(executor, backend, session_id)?;
-            self.initialize_network_workspaces(session_id, backend, syncing)?;
-        }
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        let profile = self
-            .config
-            .profiles
-            .get(&session.last_profile)
-            .with_context(|| format!("unknown profile {}", session.last_profile))?;
-        let readiness_stage = bridge_readiness_stage(profile);
-        let reconnect = &targets::reconnect_plan(backend, session_id)?.commands[0];
-        let readiness = async {
-            let mut relay = {
-                let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-                start_worker(executor, backend, worker_root)?;
-                connect_started_worker(reconnect, session_id, executor, backend, worker_root)
-                    .await?
-            };
-            let native_session_id =
-                wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
-            Ok(Some(native_session_id))
-        }
-        .await;
-        match readiness {
-            Ok(native_session_id) => Ok(native_session_id),
-            Err(error) => {
-                // The diagnosis reads the worker's state, so it runs before the
-                // worker is stopped.
-                let error = worker_probe_diagnosis(executor, backend, worker_root, error);
-                Err(error)
+        crate::worker_lifecycle::run(session_id, "connect and start worker", executor, async {
+            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+            if initialize_workspace {
+                install_inherited_git_settings(executor, backend, session_id)?;
+                self.initialize_network_workspaces(session_id, backend, syncing)?;
             }
-        }
+            let session = self
+                .state
+                .sessions
+                .get(session_id)
+                .with_context(|| format!("unknown session {session_id}"))?;
+            let profile = self
+                .config
+                .profiles
+                .get(&session.last_profile)
+                .with_context(|| format!("unknown profile {}", session.last_profile))?;
+            let readiness_stage = bridge_readiness_stage(profile);
+            let reconnect = &targets::reconnect_plan(backend, session_id)?.commands[0];
+            let readiness = async {
+                let mut relay = {
+                    let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                    start_worker_durably(
+                        &crate::worker_lifecycle::require(session_id)?,
+                        self.state.sessions[session_id]
+                            .target
+                            .as_ref()
+                            .context("worker start has no durable target")?,
+                        executor,
+                        backend,
+                        worker_root,
+                    )?;
+                    connect_started_worker(reconnect, session_id, executor, backend, worker_root)
+                        .await?
+                };
+                let native_session_id =
+                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let owner = crate::worker_lifecycle::require(session_id)?;
+                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
+                Ok(Some(native_session_id))
+            }
+            .await;
+            match readiness {
+                Ok(native_session_id) => Ok(native_session_id),
+                Err(error) => {
+                    // The diagnosis reads the worker's state, so it runs before the
+                    // worker is stopped.
+                    let error = worker_probe_diagnosis(executor, backend, worker_root, error);
+                    Err(error)
+                }
+            }
+        })
+        .await
     }
 }
 
@@ -1070,7 +1125,11 @@ pub(super) fn execute_concurrent_lanes<A: Send, B: Send>(
     second: impl FnOnce() -> Result<B> + Send,
 ) -> Result<(A, B)> {
     std::thread::scope(|scope| {
-        let second = scope.spawn(second);
+        let owner = crate::worker_lifecycle::capture();
+        let second = scope.spawn(move || match owner {
+            Some(owner) => owner.scope_blocking(second),
+            None => second(),
+        });
         let first = first();
         let second = second.join().unwrap_or_else(|panic| {
             Err(anyhow::anyhow!(

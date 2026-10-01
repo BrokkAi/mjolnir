@@ -318,6 +318,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
         targets: targets_tx,
         control: SessionManagerControl {
             commands: commands_tx,
+            session_cpu: watch::channel(SessionCpuTable::new()).1,
         },
         updates: updates_rx,
         shutdown: SessionManagerShutdown {

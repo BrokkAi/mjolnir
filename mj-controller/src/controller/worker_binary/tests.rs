@@ -279,7 +279,7 @@ fn a_matching_digest_never_authorizes_a_stale_worker() {
 #[test]
 fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
     let directory = tempfile::tempdir().unwrap();
-    let session_id = "0123456789abcdef0123456789abcdef";
+    let session_id = "12121212121212121212121212121212";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir(&worker_root).unwrap();
     let installed = worker_root.join("hel");
@@ -300,9 +300,22 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
         .is_err()
     );
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    let staging =
+        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
     assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
-    install_staged_worker_binary(&executor, &locator, session_id).unwrap();
+    let abandoned =
+        stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    assert_ne!(&*staging, &*abandoned);
+    let abandoned_path = worker_root.join(&*abandoned);
+    assert!(abandoned_path.exists());
+    drop(abandoned);
+    assert!(!abandoned_path.exists());
+    assert!(worker_root.join(&*staging).exists());
+    assert_eq!(std::fs::read(&installed).unwrap(), b"running-worker");
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "test upgrade")
+        .unwrap()
+        .unwrap();
+    install_staged_worker_binary(&owner, &staging, &executor, &locator, session_id).unwrap();
     assert_eq!(
         std::fs::read(&installed).unwrap(),
         stamped_worker(b"replacement-worker")
@@ -1270,7 +1283,7 @@ fn a_probe_that_prints_something_else_is_an_error() {
 /// must clear it first, or the startup connect loop reads the previous
 /// death as this worker's and gives up on a healthy daemon.
 #[test]
-fn starting_a_worker_clears_stale_runtime_files_before_launching() {
+fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }
@@ -1288,35 +1301,43 @@ fn starting_a_worker_clears_stale_runtime_files_before_launching() {
 
     for locator in [
         targets::TargetLocator::LocalBare {
-            worker_root: "/worker/root".into(),
+            worker_root: "/worker/root/13131313131313131313131313131313".into(),
         },
         targets::TargetLocator::LocalPodman {
             borrowed_from: None,
-            container_id: "container-1".into(),
+            container_id: targets::resource_name("13131313131313131313131313131313").unwrap(),
             workspace_storage: Default::default(),
         },
     ] {
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
         };
-        start_worker(&executor, &locator, "/worker/root").unwrap();
+        start_worker(
+            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+                "13131313131313131313131313131313",
+                "test start",
+            )
+            .unwrap()
+            .unwrap(),
+            &executor,
+            &locator,
+            &targets::worker_root(&locator, "13131313131313131313131313131313").unwrap(),
+        )
+        .unwrap();
 
         let commands = executor.commands.borrow();
         let script = commands
             .iter()
             .flat_map(|command| command.args.iter())
-            .find(|argument| argument.contains("worker-exit.json"))
-            .unwrap_or_else(|| panic!("no launch script cleared the exit record: {commands:?}"));
-        let cleared = script.find("rm -f").expect("the exit record is removed");
-        let launched = script.find("worker").expect("the daemon is launched");
+            .find(|argument| argument.contains("worker-launch.XXXXXXXX"))
+            .expect("a launch has a private diagnostic log");
         assert!(
-            script.contains("control.sock"),
-            "the stale relay endpoint must be cleared before startup: {script}"
+            !script.contains("rm -f"),
+            "launchers cannot clear incumbent files: {script}"
         );
-        assert!(
-            cleared < launched,
-            "stale runtime files must be cleared before the daemon starts: {script}"
-        );
+        assert!(!script.contains("worker-exit.json"));
+        assert!(!script.contains("control.sock"));
+        assert!(!script.contains("/worker.log"));
     }
 }
 #[test]
@@ -1342,12 +1363,23 @@ fn stopping_a_worker_runs_the_daemon_stop_script() {
             destination: "user@example.test".into(),
             ssh_args: Vec::new(),
         },
-        workspace: "/workspace".into(),
+        workspace: "/workspace/14141414141414141414141414141414".into(),
     };
     let executor = RecordingExecutor {
         commands: RefCell::new(Vec::new()),
     };
-    stop_worker(&executor, &locator, "/worker/root").unwrap();
+    stop_worker(
+        &crate::worker_lifecycle::WorkerPermit::try_acquire(
+            "14141414141414141414141414141414",
+            "test stop",
+        )
+        .unwrap()
+        .unwrap(),
+        &executor,
+        &locator,
+        &targets::worker_root(&locator, "14141414141414141414141414141414").unwrap(),
+    )
+    .unwrap();
 
     let commands = executor.commands.borrow();
     assert_eq!(commands.len(), 1);
@@ -1391,7 +1423,7 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
         }
     }
 
-    let session = "0123456789abcdef0123456789abcdef";
+    let session = "17171717171717171717171717171717";
     let container_id = targets::resource_name(session).unwrap();
     let inspection = |status: &str| CommandOutput {
         status: 0,
@@ -1433,7 +1465,18 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
         workspace_storage: Default::default(),
     };
 
-    stop_worker_after_target_recovery(&executor, &locator, session, "/worker/root").unwrap();
+    crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test stop")
+        .unwrap()
+        .unwrap()
+        .scope_blocking(|| {
+            stop_worker_after_target_recovery(
+                &executor,
+                &locator,
+                session,
+                &targets::worker_root(&locator, session).unwrap(),
+            )
+        })
+        .unwrap();
 
     let commands = executor.commands.borrow();
     let purposes = commands
@@ -1930,12 +1973,19 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.ownership,
             &fixture.profile_stage,
         )?;
-        replace_installed_worker_binary(
-            &ProcessExecutor,
-            &locator,
+        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
-            &fixture.worker_binary,
-        )?;
+            "test binary replacement",
+        )?
+        .context("test worker is owned")?;
+        owner.scope_blocking(|| {
+            replace_installed_worker_binary(
+                &ProcessExecutor,
+                &locator,
+                &session,
+                &fixture.worker_binary,
+            )
+        })?;
         execute_checked(
             &ProcessExecutor,
             CommandSpec::new(
@@ -2125,7 +2175,7 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         }
     }
 
-    let session = "0123456789abcdef0123456789abcdef";
+    let session = "16161616161616161616161616161616";
     let container_id = targets::resource_name(session).unwrap();
     let locator = targets::TargetLocator::LocalPodman {
         borrowed_from: None,
@@ -2136,7 +2186,15 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         commands: RefCell::new(Vec::new()),
     };
     let fixture = podman_install_fixture();
-    replace_installed_worker_binary(&executor, &locator, session, &fixture.worker_binary).unwrap();
+    let owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(session, "test binary replacement")
+            .unwrap()
+            .unwrap();
+    owner
+        .scope_blocking(|| {
+            replace_installed_worker_binary(&executor, &locator, session, &fixture.worker_binary)
+        })
+        .unwrap();
 
     let mut lines = rendered(&executor.commands.borrow());
     let ownership = lines.remove(1);
@@ -4787,6 +4845,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         .run();
         return;
     }
+    let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let root = directory.path().join(session_id);
@@ -4833,10 +4892,13 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
             )],
         },
     };
+    let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
+    record.target = Some(plan.source_target.clone());
+    crate::database::save_session(&record).unwrap();
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
         false,
-        None,
+        Some(session_id),
         &ProcessExecutor,
     )
     .unwrap_err();
@@ -4856,7 +4918,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
         false,
-        None,
+        Some(session_id),
         &ProcessExecutor,
     )
     .unwrap_err();
@@ -4872,7 +4934,13 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         stamped_worker(b"new worker"),
     )
     .unwrap();
-    crate::session_manager::recover_worker_controlled(plan, false, None, &ProcessExecutor).unwrap();
+    crate::session_manager::recover_worker_controlled(
+        plan,
+        false,
+        Some(session_id),
+        &ProcessExecutor,
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read(binary).unwrap(),
         stamped_worker(b"new worker")

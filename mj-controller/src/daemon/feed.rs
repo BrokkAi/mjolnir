@@ -1,7 +1,7 @@
 //! Bounded cursor history over immutable owner snapshots.
 use super::*;
 use mj_client::runtime_feed::{
-    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection,
+    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection, SessionTailReply,
 };
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
@@ -84,6 +84,7 @@ impl RuntimeHistory {
             .unwrap_or_default();
         live.revision = full.revision;
         live.sessions = full.sessions.clone();
+        live.transcripts = full.transcripts.clone();
         live.metadata = full.metadata.clone();
         let mut pending = before
             .records
@@ -115,6 +116,11 @@ impl RuntimeHistory {
                 full.subagents.get(&id).filter(|_| now),
             );
             sync_key(&mut live.moves, &id, full.moves.get(&id).filter(|_| now));
+            sync_key(
+                &mut live.session_cpu,
+                &id,
+                full.session_cpu.get(&id).filter(|_| now),
+            );
             if was == now {
                 continue;
             }
@@ -148,12 +154,39 @@ impl RuntimeHistory {
                 sync_key(&mut live.native_agents, view_id, summary);
             }
         }
+        for (id, value) in before.session_cpu.changes(&full.session_cpu) {
+            sync_key(
+                &mut live.session_cpu,
+                id,
+                value.filter(|_| live.records.contains_key(id)),
+            );
+        }
         debug_assert_eq!(
             live.records.keys().cloned().collect::<BTreeSet<_>>(),
             mj_core::state::live_session_ids(&full.records, &full.subagents, operations),
             "the incremental live set must equal a full evaluation"
         );
         live
+    }
+
+    /// A session's tail as it was at `cursor`. Answering from the retained
+    /// version rather than the newest one is what makes every delta after
+    /// `cursor` apply to it.
+    fn session_tail(&self, cursor: &RuntimeCursor, session_id: &str) -> SessionTailReply {
+        if cursor.incarnation != self.incarnation {
+            return SessionTailReply::ResetRequired;
+        }
+        let Some((_, projection, _)) = self
+            .snapshots
+            .iter()
+            .find(|(sequence, _, _)| *sequence == cursor.sequence)
+        else {
+            return SessionTailReply::ResetRequired;
+        };
+        projection
+            .transcripts
+            .get(session_id)
+            .map_or(SessionTailReply::NoTail, SessionTailReply::of)
     }
 
     fn frame(&self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
@@ -254,6 +287,8 @@ impl RuntimeState {
                     records: owner.projected_records(),
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
+                    transcripts: owner.transcripts.clone(),
+                    session_cpu: self.session_manager.session_cpu.borrow().clone(),
                     moves,
                     metadata: RuntimeMetadata {
                         config: controller.config.clone(),
@@ -323,6 +358,17 @@ impl RuntimeState {
         Ok(history.cursor())
     }
 
+    pub(super) fn session_tail(
+        &self,
+        session_id: &str,
+        cursor: &RuntimeCursor,
+    ) -> SessionTailReply {
+        self.feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .session_tail(cursor, session_id)
+    }
+
     pub(super) async fn runtime_changes(
         &self,
         cursor: Option<RuntimeCursor>,
@@ -382,6 +428,72 @@ mod tests {
             RuntimeFrame::ResetRequired
         ));
         assert!(matches!(history.frame(None), RuntimeFrame::Snapshot { .. }));
+    }
+
+    /// A tail is answered as it was at the asking client's cursor, not as it
+    /// is now, so the deltas after that cursor apply to it. A cursor the
+    /// history no longer holds asks the client to start over.
+    #[test]
+    fn a_tail_is_served_at_the_requested_cursor() {
+        let item = |position: u64, text: &str| {
+            Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: format!("agent:{position}"),
+                position,
+                latest_content_event_ordinal: Some(position),
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: mj_core::transcript::TranscriptBody::Agent {
+                    chunks: vec![serde_json::json!({"content": {"type": "text", "text": text}})],
+                    streaming: true,
+                },
+            })
+        };
+        let tail_of = |items: Vec<Arc<mj_core::transcript::TranscriptItem>>| {
+            let mut materialized = mj_core::state::MaterializedSession::empty("s");
+            materialized.applied_event_ordinal = items.len() as u64;
+            materialized.transcript = items;
+            mj_client::runtime_feed::SessionTail::of(
+                &materialized,
+                &mj_core::state::ProjectionWindow::default(),
+                1_024,
+            )
+        };
+        let mut history = RuntimeHistory::default();
+        let first = tail_of(vec![item(1, "one")]);
+        let mut projection = RuntimeProjection::default();
+        projection.transcripts.insert("s".into(), first.clone());
+        history.publish(projection.clone()).unwrap();
+        let held = history.cursor();
+        projection
+            .transcripts
+            .insert("s".into(), tail_of(vec![item(1, "one, then more")]));
+        history.publish(projection).unwrap();
+
+        assert_eq!(
+            history.session_tail(&held, "s"),
+            SessionTailReply::of(&first),
+            "the tail at the held cursor, not the newer one"
+        );
+        assert_eq!(
+            history.session_tail(&held, "other"),
+            SessionTailReply::NoTail
+        );
+        let replaced = RuntimeCursor {
+            incarnation: "previous-daemon".into(),
+            sequence: held.sequence,
+        };
+        assert_eq!(
+            history.session_tail(&replaced, "s"),
+            SessionTailReply::ResetRequired
+        );
+        let pruned = RuntimeCursor {
+            sequence: 0,
+            ..held
+        };
+        assert_eq!(
+            history.session_tail(&pruned, "s"),
+            SessionTailReply::ResetRequired
+        );
     }
 
     #[test]
@@ -483,6 +595,41 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+    }
+
+    #[test]
+    fn cpu_measurements_follow_live_membership_and_replay_by_key() {
+        let mut full = RuntimeProjection::default();
+        let mut history = RuntimeHistory::default();
+        let value = mj_client::runtime_feed::SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: 230,
+                hourly_permille: 100,
+                hourly_covered_secs: 30,
+                online_cpus: 8,
+            },
+        };
+        for (id, state) in [
+            ("live", SessionState::Running),
+            ("stopped", SessionState::Stopped),
+        ] {
+            full.records.insert(id.into(), record(id, state));
+            full.session_cpu.insert(id.into(), value.clone());
+        }
+        capture(&mut history, &full, &NativeOwners::new(), &[]);
+        let mut replica = RuntimeReplica::default();
+        replica.apply(history.frame(None)).unwrap();
+        assert_eq!(replica.projection.session_cpu.len(), 1);
+        assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
+        let cursor = replica.cursor.clone();
+        full.records.get_mut("live").unwrap().state = SessionState::Stopped;
+        capture(&mut history, &full, &NativeOwners::new(), &[]);
+        replica.apply(history.frame(cursor.as_ref())).unwrap();
+        assert!(replica.projection.session_cpu.is_empty());
+        let cursor = replica.cursor.clone();
+        capture(&mut history, &full, &NativeOwners::new(), &["live"]);
+        replica.apply(history.frame(cursor.as_ref())).unwrap();
+        assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
     }
 
     fn record(id: &str, state: SessionState) -> SessionRecord {

@@ -11,6 +11,7 @@ pub(crate) fn spawn_session_manager_observed(
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
     let (mut updates_tx, updates_rx) = coalesced_update_channel();
     updates_tx.delegation = delegation;
+    let session_cpu = updates_tx.cpu.subscribe();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
@@ -110,9 +111,11 @@ pub(crate) fn spawn_session_manager_observed(
         shutdown_session_actors(&mut actors, &mut tasks).await;
     });
     Ok(SessionManagerChannels {
+        session_cpu: session_cpu.clone(),
         targets: targets_tx,
         control: SessionManagerControl {
             commands: commands_tx,
+            session_cpu,
         },
         updates: updates_rx,
         shutdown: SessionManagerShutdown {

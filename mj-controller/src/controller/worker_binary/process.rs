@@ -5,10 +5,15 @@ use super::*;
 /// The script signals the worker's process group so a wedged ACP child dies
 /// with it. Checkpoint then restarts the daemon against the same relay root.
 pub(in crate::controller) fn stop_worker(
+    owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<()> {
+    ensure!(
+        targets::worker_root(locator, owner.session_id())? == worker_root,
+        "worker owner does not cover the selected root"
+    );
     execute_checked(executor, stop_worker_command(locator, worker_root))?;
     Ok(())
 }
@@ -21,10 +26,11 @@ pub(in crate::controller) fn stop_worker_after_target_recovery(
     session_id: &str,
     worker_root: &str,
 ) -> Result<()> {
+    let owner = crate::worker_lifecycle::require(session_id)?;
     let target = targets::target_recovery_plan(locator, session_id)?;
     targets::ensure_recovery_target_running(executor, target.as_ref())
         .context("restore Mjolnir worker target")?;
-    stop_worker(executor, locator, worker_root)
+    stop_worker(&owner, executor, locator, worker_root)
 }
 
 pub(super) fn stop_worker_command(
@@ -36,7 +42,7 @@ pub(super) fn stop_worker_command(
         .purpose("stop Mjolnir worker daemon")
 }
 
-pub(super) fn worker_liveness_command(
+pub(in crate::controller) fn worker_liveness_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
@@ -46,12 +52,69 @@ pub(super) fn worker_liveness_command(
 }
 
 pub(in crate::controller) fn start_worker(
+    owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<()> {
+    ensure!(
+        targets::worker_root(locator, owner.session_id())? == worker_root,
+        "worker owner does not cover the selected root"
+    );
     execute_checked(executor, start_worker_command(locator, worker_root))?;
     Ok(())
+}
+
+/// Every accepted boot is protected by the durable replacement state machine.
+/// This includes provisioning and resume, not just automatic upgrades.
+pub(in crate::controller) fn start_worker_durably(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    target: &mj_core::state::TargetLocator,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
+    owner.verify_target(target)?;
+    let id = owner.session_id();
+    if let Some(intent) = crate::database::load_worker_restart(id)?
+        && intent.operation_id != owner.operation_id()
+    {
+        let output = executor.execute(&worker_liveness_command(locator, worker_root))?;
+        ensure!(
+            output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
+            "another worker replacement is still booting"
+        );
+        owner.settle_dead_restart(target)?;
+    }
+    if crate::database::load_worker_restart(id)?.is_none() {
+        owner.begin_restart(target, String::new())?;
+    }
+    let intent =
+        crate::database::load_worker_restart(id)?.context("worker boot intent disappeared")?;
+    ensure!(
+        intent.operation_id == owner.operation_id(),
+        "another worker replacement is still pending"
+    );
+    if crate::database::worker_restart_phase(id)?
+        == Some(crate::database::WorkerRestartPhase::Prepared)
+    {
+        crate::database::advance_worker_restart(
+            id,
+            owner.operation_id(),
+            crate::database::WorkerRestartPhase::Swapping,
+        )?;
+    }
+    ensure!(
+        crate::database::worker_restart_phase(id)?
+            == Some(crate::database::WorkerRestartPhase::Swapping),
+        "worker replacement has already launched"
+    );
+    start_worker(owner, executor, locator, worker_root)?;
+    crate::database::advance_worker_restart(
+        id,
+        owner.operation_id(),
+        crate::database::WorkerRestartPhase::AwaitingReadiness,
+    )
 }
 
 pub(super) fn start_worker_command(
@@ -60,26 +123,14 @@ pub(super) fn start_worker_command(
 ) -> CommandSpec {
     let binary = format!("{worker_root}/hel");
     let config = format!("{worker_root}/launch.json");
-    // These files describe the worker's previous life. Clear them as part of
-    // the launch, before the new daemon can be probed: a stale exit record
-    // aborts startup, a stale socket makes a recovering daemon look ready and
-    // invites the reconnect actor to kill it as unresponsive, and a stale
-    // startup record would be read as this launch's progress even if the new
-    // process never ran at all.
-    let clear_stale_runtime = format!(
-        "rm -f {} {} {}; ",
-        targets::join_remote_command(&[format!(
-            "{worker_root}/{}",
-            mj_core::relay::WORKER_EXIT_FILE
-        )]),
-        targets::join_remote_command(&[format!("{worker_root}/control.sock")]),
-        targets::join_remote_command(&[format!(
-            "{worker_root}/{}",
-            mj_core::relay::WORKER_STARTUP_FILE
-        )]),
+    // A launch attempt cannot touch the incumbent's diagnostics or socket.
+    // The worker installs worker.log only after claiming worker.lock.
+    let attempt_log = format!(
+        "hel_launch_log=$(mktemp {}/worker-launch.XXXXXXXX) || exit $?; ",
+        targets::posix_quote(worker_root),
     );
     let detached_script = format!(
-        "{clear_stale_runtime}nohup {} >{} 2>&1 </dev/null &",
+        "{attempt_log}nohup {} >\"$hel_launch_log\" 2>&1 </dev/null &",
         targets::join_remote_command(&[
             binary.clone(),
             "worker".into(),
@@ -89,12 +140,10 @@ pub(super) fn start_worker_command(
             "--config".into(),
             config.clone(),
         ]),
-        targets::join_remote_command(&[format!("{worker_root}/worker.log")]),
     );
-    // Redirect daemon output to worker.log in every launch mode; an
-    // unexplained dead worker is undebuggable without it.
+    // Even a loader failure is retained in the attempt-specific log.
     let exec_script = format!(
-        "{clear_stale_runtime}exec {} >{} 2>&1",
+        "{attempt_log}exec {} >\"$hel_launch_log\" 2>&1",
         targets::join_remote_command(&[
             binary.clone(),
             "worker".into(),
@@ -104,7 +153,6 @@ pub(super) fn start_worker_command(
             "--config".into(),
             config.clone(),
         ]),
-        targets::join_remote_command(&[format!("{worker_root}/worker.log")]),
     );
     match locator {
         targets::TargetLocator::LocalBare { .. } => {

@@ -199,12 +199,24 @@ impl RuntimeState {
                     let _upgrade_work = LifecycleAdmission(upgrade_work);
                     let operation_state = state.clone();
                     let operation_id = operation_session_id.clone();
-                    let mut result = match tokio::spawn(async move {
-                        operation(operation_state, operation_id, cancelled).await
-                    })
+                    // The operation waits synchronously for target commands,
+                    // archive copies and similar I/O. It runs on its own
+                    // blocking-pool thread so those waits never hold one of
+                    // the async workers that serve every other request. This
+                    // task keeps the admission and publishes the result; the
+                    // daemon's `blocking` helper is not used because it would
+                    // add an admission hold of its own.
+                    let mut result = match mj_core::runtime::spawn_off_async_workers(operation(
+                        operation_state,
+                        operation_id,
+                        cancelled,
+                    ))
                     .await
                     {
-                        Ok(result) => result.map_err(|error| LifecycleFailure::of(&error)),
+                        Ok(Ok(result)) => result.map_err(|error| LifecycleFailure::of(&error)),
+                        Ok(Err(shutdown)) => Err(LifecycleFailure::internal(format!(
+                            "daemon lifecycle stopped: {shutdown:#}"
+                        ))),
                         Err(error) => Err(LifecycleFailure::internal(format!(
                             "daemon lifecycle task failed: {error}"
                         ))),

@@ -1,6 +1,16 @@
 use super::*;
 
 impl RelayClient {
+    pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
+        if !RelayRequest::CpuUsage.supported_at(self.protocol_version) {
+            return Ok(None);
+        }
+        match self.call(RelayRequest::CpuUsage).await? {
+            RelayResponsePayload::CpuUsage { usage } => Ok(usage),
+            _ => bail!("relay returned an unexpected CPU usage response"),
+        }
+    }
+
     pub async fn history_requests(&mut self) -> Result<Vec<mj_core::history::HistoryRequest>> {
         if !RelayRequest::HistoryRequests.supported_at(self.protocol_version) {
             return Ok(Vec::new());

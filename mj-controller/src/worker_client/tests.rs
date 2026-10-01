@@ -255,6 +255,9 @@ async fn a_relay_proxy_that_fails_for_another_reason_is_not_retried() {
         r#"
 count=$(cat {counter} 2>/dev/null || echo 0)
 echo $((count + 1)) > {counter}
+# Read the hello before exiting so the fixture tests a lost response,
+# rather than racing the client's write and sometimes causing a broken pipe.
+IFS= read -r hello
 echo 'worker socket path is too long' >&2
 exit 1
 "#,
@@ -1365,4 +1368,25 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         result.is_empty(),
         "deferral must not report an unchanged or failed login"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cpu_usage_skips_protocol_28_without_writing_a_request() {
+    let script = format!(
+        r#"python3 -c '
+import json, sys
+req = json.loads(sys.stdin.readline())
+print(json.dumps({{"request_id":req["request_id"], "protocol_version":28, "result":"ok", "payload":{{"type":"hello", "data":{{"negotiated":28, "relay_version":"cpu-old", "session_id":{session:?}}}}}}}), flush=True)
+sys.stdin.read()
+'"#,
+        session = SESSION_ID
+    );
+    let spec = CommandSpec::new("sh", ["-c", &script]).purpose("old CPU relay fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let before = client.next_request;
+    assert_eq!(client.cpu_usage().await.unwrap(), None);
+    assert_eq!(client.next_request, before);
 }

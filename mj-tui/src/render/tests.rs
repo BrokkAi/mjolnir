@@ -38,6 +38,7 @@ fn session_metadata_text(
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
+        None,
         session_permission_badge(session, operation, config),
         None,
         120,
@@ -4925,5 +4926,136 @@ fn only_the_focused_pane_draws_the_focused_border() {
         border_style(right),
         border_style(first),
         "the focused pane's composer is drawn differently from its neighbour's"
+    );
+}
+
+#[test]
+fn session_cpu_rows_show_meaningful_load_and_stay_quiet_when_idle() {
+    let session = running_session();
+    let draw = |cpu, width| {
+        session_activity_line(
+            "",
+            &session,
+            None,
+            None,
+            false,
+            crate::AttentionLevel::Idle,
+            None,
+            0,
+            "local",
+            cpu,
+            None,
+            None,
+            width,
+            false,
+        )
+        .to_string()
+    };
+    assert!(draw(Some(230), 80).contains("23%"));
+    assert!(!draw(Some(5), 80).contains('%'));
+    assert!(!draw(Some(230), 24).contains('%'));
+    assert!(!draw(None, 80).contains('%'));
+    assert!(draw(Some(42), 80).contains("4.2%"));
+}
+
+#[test]
+fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
+    use mj_client::runtime_feed::SessionCpuView;
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.state.sessions.clear();
+    let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
+    for (id, machine, hourly) in [
+        ("slow", "machine-a", Some(100)),
+        ("fast", "machine-a", Some(300)),
+        ("other", "machine-b", Some(200)),
+        ("missing", "machine-b", None),
+        ("failed", "machine-a", None),
+    ] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.title = id.into();
+        session.acp_session_title = None;
+        session.target_template_id = machine.into();
+        dashboard.state.sessions.insert(id.into(), session);
+        if let Some(hourly) = hourly {
+            cpu.insert(
+                id.into(),
+                SessionCpuView::Measured {
+                    usage: mj_core::cpu_usage::SessionCpuUsage {
+                        recent_permille: 230,
+                        hourly_permille: hourly,
+                        hourly_covered_secs: 840,
+                        online_cpus: 8,
+                    },
+                },
+            );
+        }
+    }
+    cpu.insert(
+        "failed".into(),
+        SessionCpuView::Unavailable {
+            reason: "permission denied".into(),
+        },
+    );
+    dashboard.set_session_cpu(cpu.clone());
+    dashboard.set_deployment_capacity_targets(
+        ["machine-a", "machine-b"]
+            .into_iter()
+            .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                id: host.into(),
+                host: host.into(),
+                target_ids: vec![host.into()],
+                kind: DeploymentCapacityKind::Host,
+                local: true,
+                probes: Vec::new(),
+                probe_error: None,
+            })
+            .collect(),
+    );
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(
+        text.find("machine-a").unwrap() < text.find("machine-b").unwrap(),
+        "{text}"
+    );
+    assert!(
+        text.find("fast  [codex-1]").unwrap() < text.find("slow  [codex-1]").unwrap(),
+        "{text}"
+    );
+    assert!(
+        text.find("slow  [codex-1]").unwrap() < text.find("failed  [codex-1]").unwrap(),
+        "{text}"
+    );
+    assert!(text.contains("permission denied"));
+    assert!(text.contains("no CPU data yet"));
+    assert!(text.contains("(14m)"));
+    dashboard.acknowledge_render();
+    cpu.insert(
+        "other".into(),
+        SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: 230,
+                hourly_permille: 900,
+                hourly_covered_secs: 3600,
+                online_cpus: 8,
+            },
+        },
+    );
+    dashboard.set_session_cpu(cpu);
+    assert!(
+        dashboard.clock_changed(),
+        "an open report must be invalidated by a CPU sample"
+    );
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(
+        text.find("machine-b").unwrap() < text.find("machine-a").unwrap(),
+        "{text}"
     );
 }

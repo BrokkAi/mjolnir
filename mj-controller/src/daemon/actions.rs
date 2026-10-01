@@ -17,9 +17,14 @@ pub(super) async fn handle_action(
             }
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
-        DaemonAction::UpgradeBlockers => {
-            Ok(DaemonReply::UpgradeBlockers(crate::upgrade::active_labels()))
-        }
+        // Each blocker carries its count and age, so the waiting client can say
+        // what the upgrade waits for and for how long.
+        DaemonAction::UpgradeBlockers => Ok(DaemonReply::UpgradeBlockers(
+            crate::upgrade::blockers()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )),
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {
@@ -391,6 +396,9 @@ pub(super) async fn handle_action(
         DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
             state.runtime_changes(cursor, wait).await?,
         ))),
+        DaemonAction::SessionTail { session_id, cursor } => Ok(DaemonReply::SessionTail(Box::new(
+            state.session_tail(&session_id, &cursor),
+        ))),
         DaemonAction::ResumeCandidates => Ok(DaemonReply::ResumeCandidates(Box::new(
             state.resume_candidates(),
         ))),
@@ -713,6 +721,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
             | DaemonAction::RuntimeChanges { .. }
+            | DaemonAction::SessionTail { .. }
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }

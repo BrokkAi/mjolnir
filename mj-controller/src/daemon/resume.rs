@@ -309,6 +309,15 @@ impl RuntimeState {
             .sync_now(true)
             .await
             .context("sync SessionWiki before archiving stopped sessions")?;
+        // The sync is restartable and holds no admission; the archive changes
+        // sessions, so a handoff waits for it from here. It does not start
+        // while a handoff is waiting: the next daemon's tick runs it.
+        let Ok(_work) = crate::upgrade::activity_unless_draining("SessionWiki archive") else {
+            tracing::debug!(
+                "a daemon upgrade is waiting; the SessionWiki archive pass waits for the next daemon"
+            );
+            return Ok(0);
+        };
         // Recheck a small bounded batch of older clone checkpoints. A remote
         // that was offline during suspension may now prove its saved refs.
         let refreshable = blocking(move || {

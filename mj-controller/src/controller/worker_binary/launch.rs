@@ -17,6 +17,9 @@ impl Controller {
             .target
             .as_ref()
             .context("session target is missing")?;
+        if let Some(owner) = crate::worker_lifecycle::current(session_id) {
+            owner.verify_target(locator)?;
+        }
         let backend = backend_locator(locator, session, &self.config)?;
         let worker_root = targets::worker_root(&backend, session_id)?;
         Ok((backend, worker_root))
@@ -29,11 +32,15 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        let owner = crate::worker_lifecycle::require(session_id)?;
         let session = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        if let Some(target) = session.target.as_ref() {
+            owner.verify_target(target)?;
+        }
         let profile = self
             .config
             .profiles

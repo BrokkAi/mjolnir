@@ -33,7 +33,7 @@ use super::provisioning::{
     install_attached_resources,
 };
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
-use super::worker_binary::{bridge_readiness_stage, start_worker, worker_probe_diagnosis};
+use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
@@ -556,352 +556,376 @@ impl Controller {
         restore: RestoreIntoTarget<'_>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
-        let RestoreIntoTarget {
-            profile,
-            archive,
-            restored_archive,
-            resumed_project_directory,
-            resumed_container_workspace,
-            restore_repositories,
-            native_continuity,
-            discard_queued_prompts,
-            replay_queue,
-            utility_handoff,
-            projection_build,
-            mut resume_notices,
-            install_attached_resources: should_install_attached_resources,
-            worker_root_reset,
-            retire_after_ready,
-        } = restore;
-        let archive_manifest = &archive.manifest;
-        let canonical_session = &archive.canonical_session;
-        // Sub-agents the suspend stopped: the model hears about them on its
-        // first prompt, and the person in a conversation line. The list is
-        // kept until the relay has the note, so a resume that fails tells
-        // the next one.
-        let stopped_subagents =
-            crate::database::load_stopped_subagents(session_id).unwrap_or_else(|error| {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "could not read the sub-agents this session's suspend stopped"
-                );
-                Vec::new()
-            });
-        let stopped_subagents_context =
-            mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
-        resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
-            &stopped_subagents,
-        ));
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let harness_home = target_profile_home(&backend, session_id, profile);
-        let workspace_root = if let Some(project_directory) = &resumed_project_directory {
-            project_directory
-                .parent()
-                .context("bare project directory has no parent")?
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
-        };
-        let target_path = |path: &str| match &backend {
-            targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. }
-                if !path.starts_with('/') =>
-            {
-                PathBuf::from(format!("~/{path}"))
-            }
-            _ => PathBuf::from(path),
-        };
-        let remote_archive = format!("{worker_root}/restore.hel.zip");
-        let remote_spec = format!("{worker_root}/restore-spec.json");
-        use mj_checkpoint::checkpoint::QueueRestorePolicy;
-        let move_admission =
-            crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
-                operation.phase == mj_core::state::MovePhase::ResumingDestination
-                    && !operation.queue_admission_started
-                    && operation.queue == mj_core::state::ResumeQueueDisposition::Start
-            });
-        let queue_policy = if move_admission || (!native_continuity && replay_queue) {
-            QueueRestorePolicy::Defer
-        } else if discard_queued_prompts {
-            QueueRestorePolicy::Discard
-        } else {
-            QueueRestorePolicy::Restore
-        };
-        let restore = CheckpointRestoreSpec {
-            archive_path: restore_archive_path(
-                &backend,
+        crate::worker_lifecycle::run(session_id, "restore into target", executor, async {
+            let RestoreIntoTarget {
+                profile,
+                archive,
                 restored_archive,
-                &target_path(&remote_archive),
-            ),
-            workspace_root: target_path(&workspace_root),
-            relay_root: target_path(&worker_root),
-            harness_home: target_path(&harness_home),
-            // A local checkout converting into a workspace arrives as a
-            // fresh clone of its own remote, and the conversion archive
-            // carries the commits, dirty files, and branch that go over it.
-            // An in-place managed checkout recreated from its retained
-            // branch still needs the archive's dirty state.
-            restore_repositories,
-            restore_native: native_continuity,
-            // A session with a project directory launches its harness there,
-            // spelled exactly as recorded (the worker launch configuration's
-            // `cwd`), so the restored harness session is keyed by that same
-            // text. Rebuilding it from the archive's repository layout loses a
-            // trailing separator, which Grok Build keys by, and cannot name
-            // the checkout a move put the session on. A session in a target
-            // workspace has no project directory, and the archive's layout
-            // names its directory under `/workspace`.
-            primary_repository_root: resumed_project_directory
-                .as_ref()
-                .map(|directory| target_path(&directory.to_string_lossy())),
-            queue_policy,
-        };
-        // Prepare the worker root before the worker binary is installed:
-        // a surviving daemon still holds the old binary open, and the
-        // install would land on a running executable.
-        {
-            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-            match &worker_root_reset {
-                // A bare target keeps the closed session's worker root on
-                // the host. Stop anything still writing there and clear the
-                // leftover relay state, or the restore's seed loses to a
-                // stale snapshot whose frontier no journal can support.
-                WorkerRootReset::FreshTarget => {
-                    if let Some(command) = targets::clear_relay_state_plan(&backend, session_id)? {
-                        execute_checked(syncing, command)?;
-                    }
-                    // Both lanes below write into the worker root, so it
-                    // exists first.
-                    execute_checked(
-                        syncing,
-                        targets::command_on_locator(
-                            &backend,
-                            session_id,
-                            vec!["mkdir".into(), "-p".into(), worker_root.clone()],
-                            "create the session worker root",
-                        )?,
-                    )?;
+                resumed_project_directory,
+                resumed_container_workspace,
+                restore_repositories,
+                native_continuity,
+                discard_queued_prompts,
+                replay_queue,
+                utility_handoff,
+                projection_build,
+                mut resume_notices,
+                install_attached_resources: should_install_attached_resources,
+                worker_root_reset,
+                retire_after_ready,
+            } = restore;
+            let archive_manifest = &archive.manifest;
+            let canonical_session = &archive.canonical_session;
+            // Sub-agents the suspend stopped: the model hears about them on its
+            // first prompt, and the person in a conversation line. The list is
+            // kept until the relay has the note, so a resume that fails tells
+            // the next one.
+            let stopped_subagents = crate::database::load_stopped_subagents(session_id)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "could not read the sub-agents this session's suspend stopped"
+                    );
+                    Vec::new()
+                });
+            let stopped_subagents_context =
+                mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
+            resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
+                &stopped_subagents,
+            ));
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let harness_home = target_profile_home(&backend, session_id, profile);
+            let workspace_root = if let Some(project_directory) = &resumed_project_directory {
+                project_directory
+                    .parent()
+                    .context("bare project directory has no parent")?
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                super::network_git::workspace_root(&backend, resumed_container_workspace.as_deref())
+            };
+            let target_path = |path: &str| match &backend {
+                targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. }
+                    if !path.starts_with('/') =>
+                {
+                    PathBuf::from(format!("~/{path}"))
                 }
-                // The environment survives this restore, so the old
-                // harness has to be taken out of it: its daemon, its relay
-                // state, the installed worker files, and its profile home.
-                // The same command recreates the worker root.
-                WorkerRootReset::InPlace {
-                    previous_profile_root,
-                } => {
-                    execute_checked(
-                        syncing,
-                        targets::in_place_worker_reset_plan(
-                            &backend,
-                            session_id,
-                            previous_profile_root,
-                        )?,
-                    )?;
+                _ => PathBuf::from(path),
+            };
+            let remote_archive = format!("{worker_root}/restore.hel.zip");
+            let remote_spec = format!("{worker_root}/restore-spec.json");
+            use mj_checkpoint::checkpoint::QueueRestorePolicy;
+            let move_admission =
+                crate::database::load_move_operation(session_id)?.is_some_and(|operation| {
+                    operation.phase == mj_core::state::MovePhase::ResumingDestination
+                        && !operation.queue_admission_started
+                        && operation.queue == mj_core::state::ResumeQueueDisposition::Start
+                });
+            let queue_policy = if move_admission || (!native_continuity && replay_queue) {
+                QueueRestorePolicy::Defer
+            } else if discard_queued_prompts {
+                QueueRestorePolicy::Discard
+            } else {
+                QueueRestorePolicy::Restore
+            };
+            let restore = CheckpointRestoreSpec {
+                archive_path: restore_archive_path(
+                    &backend,
+                    restored_archive,
+                    &target_path(&remote_archive),
+                ),
+                workspace_root: target_path(&workspace_root),
+                relay_root: target_path(&worker_root),
+                harness_home: target_path(&harness_home),
+                // A local checkout converting into a workspace arrives as a
+                // fresh clone of its own remote, and the conversion archive
+                // carries the commits, dirty files, and branch that go over it.
+                // An in-place managed checkout recreated from its retained
+                // branch still needs the archive's dirty state.
+                restore_repositories,
+                restore_native: native_continuity,
+                // A session with a project directory launches its harness there,
+                // spelled exactly as recorded (the worker launch configuration's
+                // `cwd`), so the restored harness session is keyed by that same
+                // text. Rebuilding it from the archive's repository layout loses a
+                // trailing separator, which Grok Build keys by, and cannot name
+                // the checkout a move put the session on. A session in a target
+                // workspace has no project directory, and the archive's layout
+                // names its directory under `/workspace`.
+                primary_repository_root: resumed_project_directory
+                    .as_ref()
+                    .map(|directory| target_path(&directory.to_string_lossy())),
+                queue_policy,
+            };
+            // Prepare the worker root before the worker binary is installed:
+            // a surviving daemon still holds the old binary open, and the
+            // install would land on a running executable.
+            {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                match &worker_root_reset {
+                    // A bare target keeps the closed session's worker root on
+                    // the host. Stop anything still writing there and clear the
+                    // leftover relay state, or the restore's seed loses to a
+                    // stale snapshot whose frontier no journal can support.
+                    WorkerRootReset::FreshTarget => {
+                        if let Some(command) =
+                            targets::clear_relay_state_plan(&backend, session_id)?
+                        {
+                            execute_checked(syncing, command)?;
+                        }
+                        // Both lanes below write into the worker root, so it
+                        // exists first.
+                        execute_checked(
+                            syncing,
+                            targets::command_on_locator(
+                                &backend,
+                                session_id,
+                                vec!["mkdir".into(), "-p".into(), worker_root.clone()],
+                                "create the session worker root",
+                            )?,
+                        )?;
+                    }
+                    // The environment survives this restore, so the old
+                    // harness has to be taken out of it: its daemon, its relay
+                    // state, the installed worker files, and its profile home.
+                    // The same command recreates the worker root.
+                    WorkerRootReset::InPlace {
+                        previous_profile_root,
+                    } => {
+                        execute_checked(
+                            syncing,
+                            targets::in_place_worker_reset_plan(
+                                &backend,
+                                session_id,
+                                previous_profile_root,
+                            )?,
+                        )?;
+                    }
                 }
             }
-        }
-        let staging = tempfile::tempdir().context("create restore staging")?;
-        let local_spec = staging.path().join("restore-spec.json");
-        std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
-        // Two independent lanes into the target. The checkpoint transfer
-        // needs nothing from the worker install, and the worker install
-        // is independent of archive upload, so both run concurrently.
-        let controller = &*self;
-        let backend_ref = &backend;
-        let worker_root_ref = worker_root.as_str();
-        let local_spec_ref = local_spec.as_path();
-        execute_concurrent_lanes(
-            || {
-                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-                controller.prepare_worker_files(
-                    session_id,
-                    backend_ref,
-                    worker_root_ref,
-                    syncing,
-                )?;
-                super::provisioning::install_inherited_git_settings(
-                    syncing,
-                    backend_ref,
-                    session_id,
-                )?;
-                Ok(())
-            },
-            || {
-                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-                if should_upload_restore_archive(&backend) {
+            let staging = tempfile::tempdir().context("create restore staging")?;
+            let local_spec = staging.path().join("restore-spec.json");
+            std::fs::write(&local_spec, serde_json::to_vec_pretty(&restore)?)?;
+            // Two independent lanes into the target. The checkpoint transfer
+            // needs nothing from the worker install, and the worker install
+            // is independent of archive upload, so both run concurrently.
+            let controller = &*self;
+            let backend_ref = &backend;
+            let worker_root_ref = worker_root.as_str();
+            let local_spec_ref = local_spec.as_path();
+            execute_concurrent_lanes(
+                || {
+                    let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                    controller.prepare_worker_files(
+                        session_id,
+                        backend_ref,
+                        worker_root_ref,
+                        syncing,
+                    )?;
+                    super::provisioning::install_inherited_git_settings(
+                        syncing,
+                        backend_ref,
+                        session_id,
+                    )?;
+                    Ok(())
+                },
+                || {
+                    let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                    if should_upload_restore_archive(&backend) {
+                        upload_checkpoint_spec(
+                            restoring,
+                            backend_ref,
+                            session_id,
+                            restored_archive,
+                            &remote_archive,
+                        )?;
+                    }
                     upload_checkpoint_spec(
                         restoring,
                         backend_ref,
                         session_id,
-                        restored_archive,
-                        &remote_archive,
-                    )?;
-                }
-                upload_checkpoint_spec(
-                    restoring,
-                    backend_ref,
-                    session_id,
-                    local_spec_ref,
-                    &remote_spec,
-                )
-            },
-        )?;
-        {
-            let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
-            execute_checked(
-                restoring,
-                restore_command(&backend, session_id, &remote_spec)?,
-            )?;
-        }
-        if should_install_attached_resources {
-            let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
-            install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
-        }
-        match projection_build {
-            Some(build) => {
-                let mut restored_projection = build
-                    .await
-                    .context("rebuild the restored projection")?
-                    .context("rebuild the restored projection")?;
-                if discard_queued_prompts {
-                    restored_projection.queued_prompts.clear();
-                }
-                crate::database::save_materialized_session(&restored_projection)?;
-            }
-            // The stored projection already is the archived one. Only the
-            // queue can still need changing.
-            None if discard_queued_prompts => {
-                crate::database::replace_materialized_queued_prompts(session_id, &[])?;
-            }
-            None => {}
-        }
-        let readiness_stage = bridge_readiness_stage(profile);
-        let spec = self.reconnect_command(session_id)?;
-        let readiness = async {
-            let mut relay = {
-                let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
-                start_worker(executor, &backend, &worker_root)?;
-                connect_started_worker(&spec, session_id, executor, &backend, &worker_root).await?
-            };
-            // Installed before the harness is ready, so a queued prompt the
-            // restored relay starts on its own cannot claim the hidden
-            // context first. The relay hands it to one prompt only.
-            if let Some(context) = &stopped_subagents_context {
-                relay
-                    .install_prompt_context(context.clone())
-                    .await
-                    .context("tell the resumed session which sub-agents its suspend stopped")?;
-            }
-            let native_session_id =
-                wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
-            Ok::<_, anyhow::Error>((relay, native_session_id))
-        }
-        .await;
-        let (mut relay, native_session_id) = readiness
-            .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
-        if native_continuity {
-            if !restored_native_session_accepted(
-                &archive_manifest.session.native_session_id,
-                &native_session_id,
-                relay
-                    .operational()
-                    .replaced_unused_native_session_id
-                    .as_deref(),
-            ) {
-                bail!(
-                    "ACP loaded native session {native_session_id}, expected {}",
-                    archive_manifest.session.native_session_id
-                );
-            }
-        } else {
-            relay
-                .install_prompt_context(
-                    utility_handoff
-                        .clone()
-                        .context("a resume into a fresh native session has no handoff")?,
-                )
-                .await?;
-            if replay_queue {
-                for prompt in &canonical_session.queued_prompts {
-                    // A queued configuration change is replayed as itself;
-                    // rebuilding it as a prompt would send `/model x` to
-                    // the agent as text.
-                    let command = match &prompt.kind {
-                        CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
-                            prompt: prompt
-                                .content
-                                .iter()
-                                .cloned()
-                                .map(serde_json::from_value)
-                                .collect::<serde_json::Result<Vec<ContentBlock>>>()?,
-                        },
-                        CanonicalQueuedCommandKind::SetConfig { key, value } => {
-                            RelayCommand::SetConfig {
-                                key: key.clone(),
-                                value: value.clone(),
-                            }
-                        }
-                    };
-                    relay.submit(prompt.command_id.clone(), command).await?;
-                }
-            }
-        }
-        // Last, and only once the resume has otherwise succeeded: a failure
-        // before this point rolls the record back to a session whose
-        // worktree still has to be there.
-        if let Some(worktree) = retire_after_ready
-            && let Err(error) = retire_managed_worktree(executor, worktree)
-        {
-            tracing::warn!(
-                session_id,
-                worktree = %worktree.worktree_root.display(),
-                error = format!("{error:#}"),
-                "could not retire the old managed worktree after resume"
-            );
-            resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
-        }
-        for notice in &resume_notices {
-            let submitted = async {
-                let command_id = new_command_id("resume-notice")?;
-                relay
-                    .submit(
-                        command_id,
-                        RelayCommand::RecordNotice {
-                            text: notice.clone(),
-                        },
+                        local_spec_ref,
+                        &remote_spec,
                     )
-                    .await
+                },
+            )?;
+            {
+                let restoring = &StagedExecutor::new(executor, ProvisionStage::Restoring);
+                execute_checked(
+                    restoring,
+                    restore_command(&backend, session_id, &remote_spec)?,
+                )?;
+            }
+            if should_install_attached_resources {
+                let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
+                install_attached_resources(
+                    &self.state,
+                    session_id,
+                    &backend,
+                    &worker_root,
+                    syncing,
+                )?;
+            }
+            match projection_build {
+                Some(build) => {
+                    let mut restored_projection = build
+                        .await
+                        .context("rebuild the restored projection")?
+                        .context("rebuild the restored projection")?;
+                    if discard_queued_prompts {
+                        restored_projection.queued_prompts.clear();
+                    }
+                    crate::database::save_materialized_session(&restored_projection)?;
+                }
+                // The stored projection already is the archived one. Only the
+                // queue can still need changing.
+                None if discard_queued_prompts => {
+                    crate::database::replace_materialized_queued_prompts(session_id, &[])?;
+                }
+                None => {}
+            }
+            let readiness_stage = bridge_readiness_stage(profile);
+            let spec = self.reconnect_command(session_id)?;
+            let readiness = async {
+                let mut relay = {
+                    let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
+                    start_worker_durably(
+                        &crate::worker_lifecycle::require(session_id)?,
+                        self.state.sessions[session_id]
+                            .target
+                            .as_ref()
+                            .context("worker start has no durable target")?,
+                        executor,
+                        &backend,
+                        &worker_root,
+                    )?;
+                    connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
+                        .await?
+                };
+                // Installed before the harness is ready, so a queued prompt the
+                // restored relay starts on its own cannot claim the hidden
+                // context first. The relay hands it to one prompt only.
+                if let Some(context) = &stopped_subagents_context {
+                    relay
+                        .install_prompt_context(context.clone())
+                        .await
+                        .context("tell the resumed session which sub-agents its suspend stopped")?;
+                }
+                let native_session_id =
+                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let owner = crate::worker_lifecycle::require(session_id)?;
+                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
+                Ok::<_, anyhow::Error>((relay, native_session_id))
             }
             .await;
-            // The conversation line is a courtesy. A relay that refuses it
-            // has not damaged the resume, so report and carry on.
-            if let Err(error) = submitted {
+            let (mut relay, native_session_id) = readiness
+                .map_err(|error| worker_probe_diagnosis(executor, &backend, &worker_root, error))?;
+            if native_continuity {
+                if !restored_native_session_accepted(
+                    &archive_manifest.session.native_session_id,
+                    &native_session_id,
+                    relay
+                        .operational()
+                        .replaced_unused_native_session_id
+                        .as_deref(),
+                ) {
+                    bail!(
+                        "ACP loaded native session {native_session_id}, expected {}",
+                        archive_manifest.session.native_session_id
+                    );
+                }
+            } else {
+                relay
+                    .install_prompt_context(
+                        utility_handoff
+                            .clone()
+                            .context("a resume into a fresh native session has no handoff")?,
+                    )
+                    .await?;
+                if replay_queue {
+                    for prompt in &canonical_session.queued_prompts {
+                        // A queued configuration change is replayed as itself;
+                        // rebuilding it as a prompt would send `/model x` to
+                        // the agent as text.
+                        let command = match &prompt.kind {
+                            CanonicalQueuedCommandKind::Prompt => RelayCommand::Prompt {
+                                prompt: prompt
+                                    .content
+                                    .iter()
+                                    .cloned()
+                                    .map(serde_json::from_value)
+                                    .collect::<serde_json::Result<Vec<ContentBlock>>>()?,
+                            },
+                            CanonicalQueuedCommandKind::SetConfig { key, value } => {
+                                RelayCommand::SetConfig {
+                                    key: key.clone(),
+                                    value: value.clone(),
+                                }
+                            }
+                        };
+                        relay.submit(prompt.command_id.clone(), command).await?;
+                    }
+                }
+            }
+            // Last, and only once the resume has otherwise succeeded: a failure
+            // before this point rolls the record back to a session whose
+            // worktree still has to be there.
+            if let Some(worktree) = retire_after_ready
+                && let Err(error) = retire_managed_worktree(executor, worktree)
+            {
                 tracing::warn!(
                     session_id,
+                    worktree = %worktree.worktree_root.display(),
                     error = format!("{error:#}"),
-                    "could not record a resume notice in the conversation"
+                    "could not retire the old managed worktree after resume"
                 );
+                resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
             }
-        }
-        self.mark_worker_connected(session_id, Some(native_session_id))?;
-        let materialized = relay.sync().await?.materialized;
-        if !stopped_subagents.is_empty() {
-            let delivered = stopped_subagents
-                .iter()
-                .map(|child| child.child_session_id.clone())
-                .collect::<Vec<_>>();
-            // The relay owns the note now. Failing to forget the list only
-            // means a later resume tells the model again.
-            if let Err(error) = crate::database::clear_stopped_subagents(session_id, &delivered) {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{error:#}"),
-                    "could not clear the stopped sub-agents after telling the resumed session"
-                );
+            for notice in &resume_notices {
+                let submitted = async {
+                    let command_id = new_command_id("resume-notice")?;
+                    relay
+                        .submit(
+                            command_id,
+                            RelayCommand::RecordNotice {
+                                text: notice.clone(),
+                            },
+                        )
+                        .await
+                }
+                .await;
+                // The conversation line is a courtesy. A relay that refuses it
+                // has not damaged the resume, so report and carry on.
+                if let Err(error) = submitted {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "could not record a resume notice in the conversation"
+                    );
+                }
             }
-        }
-        Ok(materialized)
+            self.mark_worker_connected(session_id, Some(native_session_id))?;
+            let materialized = relay.sync().await?.materialized;
+            if !stopped_subagents.is_empty() {
+                let delivered = stopped_subagents
+                    .iter()
+                    .map(|child| child.child_session_id.clone())
+                    .collect::<Vec<_>>();
+                // The relay owns the note now. Failing to forget the list only
+                // means a later resume tells the model again.
+                if let Err(error) = crate::database::clear_stopped_subagents(session_id, &delivered)
+                {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "could not clear the stopped sub-agents after telling the resumed session"
+                    );
+                }
+            }
+            Ok(materialized)
+        })
+        .await
     }
 }
 
@@ -1318,6 +1342,8 @@ impl Controller {
         move_operation: Option<&mj_core::state::MoveOperation>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        crate::worker_lifecycle::run(session_id, "resume session with origin", executor, async {
+            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
         let transferring_workspace = move_operation.is_some();
         if let Some(operation) = crate::database::load_move_operation(session_id)? {
             ensure!(
@@ -1903,6 +1929,8 @@ impl Controller {
                 )?)
             }
         }
+
+        }).await
     }
 
     pub(super) fn rollback_failed_resume(

@@ -41,6 +41,9 @@ mj-desktop/*
 voice-worker/*
 mj-chat/src/speech.rs
 
+# Worker process-tree CPU measurement.
+mj-worker/src/cpu_usage/macos.rs
+
 # Remote Darwin deployment and resource probes.
 mj-controller/src/targets/platform.rs
 mj-controller/src/targets/bootstrap.rs
@@ -58,3 +61,6 @@ mj-controller/src/doctor.rs
 mj-controller/src/doctor/*
 mj-tui/src/setup.rs
 mj-tui/src/setup/*
+
+# Worker file locking and descriptor inheritance also protect native macOS roots.
+mj-worker/src/worker_runtime/root_owner.rs

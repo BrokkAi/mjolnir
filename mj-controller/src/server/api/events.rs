@@ -56,22 +56,28 @@ pub(super) async fn events(
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
     let shutdown = state.shutdown.clone();
+    let stream_state = state.clone();
     tokio::spawn(async move {
+        // The cursor through which events are queued to this client. A page
+        // read without a cursor starts at the frontier it read.
+        let mut delivered = after_seq.unwrap_or(first.latest_seq);
         let mut page = first;
-        loop {
+        let stopped = loop {
             let next = page.next_after_seq;
             let caught_up = next >= page.latest_seq;
             for event in page.events {
+                let seq = event.seq;
                 let encoded = Event::default()
-                    .id(event.seq.to_string())
+                    .id(seq.to_string())
                     .event(event.event.kind())
                     .json_data(&event);
                 match encoded {
                     Ok(event) => {
                         tokio::select! {
-                            () = shutdown.cancelled() => return,
+                            () = shutdown.cancelled() => break,
                             sent = tx.send(Ok(event)) => if sent.is_err() { return; },
                         }
+                        delivered = seq;
                     }
                     Err(error) => {
                         tracing::error!(%error, "encode native API event");
@@ -79,15 +85,19 @@ pub(super) async fn events(
                     }
                 }
             }
+            if shutdown.is_cancelled() {
+                break Stop::Shutdown;
+            }
+            delivered = delivered.max(next);
             if caught_up {
                 tokio::select! {
-                    () = shutdown.cancelled() => return,
+                    () = shutdown.cancelled() => break Stop::Shutdown,
                     () = tx.closed() => return,
                     () = tokio::time::sleep(Duration::from_millis(250)) => {}
                 }
             }
             let result = tokio::select! {
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => break Stop::Shutdown,
                 () = tx.closed() => return,
                 page = backend.events(filter.clone(), Some(next)) => page,
             };
@@ -95,11 +105,27 @@ pub(super) async fn events(
                 Ok(next_page) => page = next_page,
                 Err(error) => {
                     tracing::warn!(%error, "read native API event stream");
-                    tokio::select! {
-                        () = shutdown.cancelled() => {},
-                        _ = tx.send(Ok(Event::default().event("stream_error").data("event stream unavailable; reconnect from the last event ID"))) => {},
-                    }
-                    return;
+                    break Stop::Failed;
+                }
+            }
+        };
+        match stopped {
+            // The daemon is being replaced: name the cursor to resume from,
+            // so the client follows the stream onto the next daemon without
+            // losing or repeating an event. Shutdown never waits on a reader
+            // that stopped reading, so this is sent only if it fits. A read
+            // that failed during the handoff is part of the same teardown.
+            Stop::Shutdown | Stop::Failed if stream_state.handing_off() => {
+                let _ = tx.try_send(Ok(Event::default()
+                    .event(DAEMON_HANDOFF_CODE)
+                    .id(delivered.to_string())
+                    .data("the daemon is being replaced; reconnect from the last event ID")));
+            }
+            Stop::Shutdown => {}
+            Stop::Failed => {
+                tokio::select! {
+                    () = shutdown.cancelled() => {},
+                    _ = tx.send(Ok(Event::default().event("stream_error").data("event stream unavailable; reconnect from the last event ID"))) => {},
                 }
             }
         }
@@ -107,6 +133,12 @@ pub(super) async fn events(
     Ok(Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+/// Why an event stream stopped before its client went away.
+enum Stop {
+    Shutdown,
+    Failed,
 }
 
 /// The default backend reads bounded durable pages away from the async runtime.

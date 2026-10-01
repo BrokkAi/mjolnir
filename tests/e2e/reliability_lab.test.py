@@ -11,6 +11,9 @@ real ones detach, so it outlives the process that started it.
 from __future__ import annotations
 
 import json
+import socket
+import struct
+from concurrent.futures import ThreadPoolExecutor
 import os
 import pathlib
 import shutil
@@ -26,7 +29,7 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from reliability_lab import Lab  # noqa: E402
+from reliability_lab import Lab, daemon_request  # noqa: E402
 
 HEL = pathlib.Path("/bin/true")
 SLEEPER = "import time; time.sleep(300)"
@@ -181,6 +184,44 @@ class LabCleanupTest(unittest.TestCase):
         self.assertTrue(eventually(lambda: not running(sleeper.pid)))
         self.assertFalse(lab.runtime_root.exists())
         self.assertEqual((lab.root / "leaks.txt").read_text(), "")
+
+
+class DaemonReplyTests(unittest.TestCase):
+    def test_chunked_reply_reassembles_more_than_one_pipe_buffer(self):
+        expected = {"reply": "runtime_changes", "value": {"Snapshot": {"projection": {"payload": "large reply " * 20000}}}}
+        body = json.dumps(expected).encode()
+        self.assertGreater(len(body), 64 * 1024)
+        with tempfile.TemporaryDirectory() as root, socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as executor:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(5)
+            port = listener.getsockname()[1]
+            pathlib.Path(root, "daemon.json").write_text(json.dumps({"protocol_version": 1, "token": "fixture", "address": f"127.0.0.1:{port}"}))
+
+            def serve():
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(5)
+                    def receive_exact(length):
+                        result = bytearray()
+                        while len(result) < length:
+                            chunk = connection.recv(length - len(result))
+                            if not chunk:
+                                raise AssertionError("client disconnected")
+                            result.extend(chunk)
+                        return result
+                    length = struct.unpack(">I", receive_exact(4))[0]
+                    request = json.loads(receive_exact(length))
+                    self.assertEqual(request["request_id"], 99)
+                    for offset in range(0, len(body), 64 * 1024):
+                        payload = json.dumps({"protocol_version": 1, "request_id": 99, "result": {"Ok": {"reply": "reply_chunk", "value": {"bytes": list(body[offset:offset+64*1024]), "finished": offset + 64*1024 >= len(body)}}}}).encode()
+                        header = struct.pack(">I", len(payload))
+                        connection.sendall(header[:2])
+                        connection.sendall(header[2:] + payload)
+
+            future = executor.submit(serve)
+            self.assertEqual(daemon_request(pathlib.Path(root), {"action": "runtime_changes"}), expected)
+            future.result(timeout=5)
 
 
 if __name__ == "__main__":

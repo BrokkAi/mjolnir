@@ -134,37 +134,47 @@ impl Controller {
         disposition: SourceTargetDisposition,
         mut source_relay: super::move_session::MoveSourceRelay,
     ) -> Result<bool> {
-        self.prepare_move_source_checkpoint(
+        let retained = source_relay.owner();
+        crate::worker_lifecycle::run_with_owner(
             session_id,
+            "suspend session for move",
             executor,
-            manager,
-            operation,
-            &mut source_relay,
-        )
-        .await?;
-        if disposition == SourceTargetDisposition::RetainForInPlaceSwap
-            || operation.workspace_transfer.is_some()
-        {
-            self.seal_move_handoff(
-                session_id,
-                executor,
-                manager,
-                operation,
-                preparation,
-                source_relay.take(),
-            )
-            .await?;
-            return Ok(false);
-        }
-        self.suspend_session_controlled_with_manager(
-            session_id,
-            executor,
-            Some(manager),
-            Some((operation, preparation)),
-            disposition,
-            true,
-            None,
-            source_relay.take(),
+            retained,
+            async {
+                self.prepare_move_source_checkpoint(
+                    session_id,
+                    executor,
+                    manager,
+                    operation,
+                    &mut source_relay,
+                )
+                .await?;
+                if disposition == SourceTargetDisposition::RetainForInPlaceSwap
+                    || operation.workspace_transfer.is_some()
+                {
+                    self.seal_move_handoff(
+                        session_id,
+                        executor,
+                        manager,
+                        operation,
+                        preparation,
+                        source_relay.take(),
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                self.suspend_session_controlled_with_manager(
+                    session_id,
+                    executor,
+                    Some(manager),
+                    Some((operation, preparation)),
+                    disposition,
+                    true,
+                    None,
+                    source_relay.take(),
+                )
+                .await
+            },
         )
         .await
     }
@@ -184,6 +194,8 @@ impl Controller {
         before_close: Option<BeforeClose>,
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
     ) -> Result<bool> {
+        crate::worker_lifecycle::run(session_id, "suspend session controlled with manager", executor, async {
+            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
         let previous = self
             .state
             .sessions
@@ -417,6 +429,8 @@ impl Controller {
                 Err(error)
             }
         }
+
+        }).await
     }
 
     /// Resume the durable closing state after a controller restart. If the
@@ -438,6 +452,7 @@ impl Controller {
         acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
     ) -> Result<bool> {
+        crate::worker_lifecycle::run(session_id, "recover interrupted close managed", executor, async {
         let (state, verified) = {
             let session = self
                 .state
@@ -532,6 +547,8 @@ impl Controller {
             before_close.await?;
         }
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
+
+        }).await
     }
 
     /// A missing socket does not establish worker death or a safe checkpoint
@@ -778,96 +795,100 @@ impl Controller {
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
-        let target_mutex = crate::recovery_gate::worker_target_mutex(session_id);
-        let _target_guard = target_mutex.lock().map_err(|_| {
-            anyhow::anyhow!("worker target ownership lock poisoned for {session_id}")
-        })?;
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
-        ensure!(
-            matches!(
-                session.state,
-                SessionState::Closing | SessionState::Destroying
-            ),
-            "refusing to destroy session {session_id}: it is not closing or destroying"
-        );
-        ensure!(
-            session.checkpoint.as_ref() == Some(verified),
-            "refusing to destroy session {session_id}: verified checkpoint gate is stale"
-        );
-        if session.state == SessionState::Closing {
-            let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.state = SessionState::Destroying;
-            record.updated_at = now();
-            record.last_error = None;
-            persist_session_record_transition_or_restore(
-                &mut self.state,
-                session_id,
-                &session,
-                "persist destroying state before target cleanup",
-                &persist,
-            )?;
-        }
-
-        let destroying = self
-            .state
-            .sessions
-            .get(session_id)
-            .expect("destroying session disappeared")
-            .clone();
-        {
-            let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-            verify_installed_checkpoint_gate(session_id, verified)?;
-        }
-        // The reviewer's native session lives on the target that is about to
-        // go. Recording that now, before the target is torn down, is what
-        // stops a resumed session from trying to reload a conversation that no
-        // longer exists; its transcript is kept for reference either way.
-        if let Err(error) = crate::database::lose_reviewer_continuity(session_id) {
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "could not record that the second-opinion conversation ends with this target"
-            );
-        }
-        let locator = destroying
-            .target
-            .as_ref()
-            .context("session has no target")?;
-        let backend = backend_locator(locator, &destroying, &self.config)?;
-        let deferred = if self.state.subagents.contains_key(session_id) {
-            targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
-            false
-        } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
-            plan.execute(executor)?;
-            true
-        } else {
-            execute_target_cleanup(&backend, session_id, executor)?;
-            false
-        };
-        if let Some(worktree) = &destroying.managed_worktree {
-            retire_managed_worktree(executor, worktree)
-                .context("retire managed raw-session worktree after verified close")?;
-        }
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.state = SessionState::Stopped;
-        if !deferred {
-            record.target = None;
-        }
-        record.updated_at = now();
-        record.last_error = None;
-        persist_session_record_transition_or_restore(
-            &mut self.state,
+        crate::worker_lifecycle::run_blocking(
             session_id,
-            &destroying,
-            "persist stopped state after target cleanup",
-            &persist,
-        )?;
-        Ok(deferred)
+            "destroy after verified checkpoint with",
+            executor,
+            || {
+                let session = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?
+                    .clone();
+                ensure!(
+                    matches!(
+                        session.state,
+                        SessionState::Closing | SessionState::Destroying
+                    ),
+                    "refusing to destroy session {session_id}: it is not closing or destroying"
+                );
+                ensure!(
+                    session.checkpoint.as_ref() == Some(verified),
+                    "refusing to destroy session {session_id}: verified checkpoint gate is stale"
+                );
+                if session.state == SessionState::Closing {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    record.state = SessionState::Destroying;
+                    record.updated_at = now();
+                    record.last_error = None;
+                    persist_session_record_transition_or_restore(
+                        &mut self.state,
+                        session_id,
+                        &session,
+                        "persist destroying state before target cleanup",
+                        &persist,
+                    )?;
+                }
+
+                let destroying = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .expect("destroying session disappeared")
+                    .clone();
+                {
+                    let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+                    verify_installed_checkpoint_gate(session_id, verified)?;
+                }
+                // The reviewer's native session lives on the target that is about to
+                // go. Recording that now, before the target is torn down, is what
+                // stops a resumed session from trying to reload a conversation that no
+                // longer exists; its transcript is kept for reference either way.
+                if let Err(error) = crate::database::lose_reviewer_continuity(session_id) {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "could not record that the second-opinion conversation ends with this target"
+                    );
+                }
+                let locator = destroying
+                    .target
+                    .as_ref()
+                    .context("session has no target")?;
+                let backend = backend_locator(locator, &destroying, &self.config)?;
+                let deferred = if self.state.subagents.contains_key(session_id) {
+                    targets::borrowed_worker_cleanup_plan(&backend, session_id)?
+                        .execute(executor)?;
+                    false
+                } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
+                    plan.execute(executor)?;
+                    true
+                } else {
+                    execute_target_cleanup(&backend, session_id, executor)?;
+                    false
+                };
+                if let Some(worktree) = &destroying.managed_worktree {
+                    retire_managed_worktree(executor, worktree)
+                        .context("retire managed raw-session worktree after verified close")?;
+                }
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.state = SessionState::Stopped;
+                if !deferred {
+                    record.target = None;
+                }
+                record.updated_at = now();
+                record.last_error = None;
+                persist_session_record_transition_or_restore(
+                    &mut self.state,
+                    session_id,
+                    &destroying,
+                    "persist stopped state after target cleanup",
+                    &persist,
+                )?;
+                Ok(deferred)
+            },
+        )
     }
 
     /// Finish storage cleanup for a stopped Podman target retained by the
@@ -891,56 +912,59 @@ impl Controller {
         executor: &impl CommandExecutor,
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<()> {
-        let target_mutex = crate::recovery_gate::worker_target_mutex(session_id);
-        let _target_guard = target_mutex.lock().map_err(|_| {
-            anyhow::anyhow!("worker target ownership lock poisoned for {session_id}")
-        })?;
-        let previous = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
-        ensure!(
-            previous.state == SessionState::Stopped,
-            "refusing deferred cleanup for active session {session_id}"
-        );
-        let Some(locator) = previous.target.as_ref() else {
-            return Ok(());
-        };
-        let backend = backend_locator(locator, &previous, &self.config)?;
-        ensure!(
-            targets::quiesce_plan(&backend, session_id)?.is_some(),
-            "session {session_id} retained a non-Podman target after stopping"
-        );
-        if let Err(error) = execute_target_cleanup(&backend, session_id, executor) {
-            let record = self.state.sessions.get_mut(session_id).unwrap();
-            record.updated_at = now();
-            record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
-            let persisted = persist_session_record_transition_or_restore(
-                &mut self.state,
-                session_id,
-                &previous,
-                "persist deferred target cleanup failure",
-                &persist,
-            );
-            return match persisted {
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "cleanup stopped target with",
+            executor,
+            || {
+                let previous = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?
+                    .clone();
+                ensure!(
+                    previous.state == SessionState::Stopped,
+                    "refusing deferred cleanup for active session {session_id}"
+                );
+                let Some(locator) = previous.target.as_ref() else {
+                    return Ok(());
+                };
+                let backend = backend_locator(locator, &previous, &self.config)?;
+                ensure!(
+                    targets::quiesce_plan(&backend, session_id)?.is_some(),
+                    "session {session_id} retained a non-Podman target after stopping"
+                );
+                if let Err(error) = execute_target_cleanup(&backend, session_id, executor) {
+                    let record = self.state.sessions.get_mut(session_id).unwrap();
+                    record.updated_at = now();
+                    record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
+                    let persisted = persist_session_record_transition_or_restore(
+                        &mut self.state,
+                        session_id,
+                        &previous,
+                        "persist deferred target cleanup failure",
+                        &persist,
+                    );
+                    return match persisted {
                 Ok(()) => Err(error),
                 Err(persist_error) => Err(error.context(format!(
                     "also failed to persist deferred target cleanup failure: {persist_error:#}"
                 ))),
             };
-        }
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.target = None;
-        record.updated_at = now();
-        record.last_error = None;
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "persist completion of deferred Podman target cleanup",
-            &persist,
+                }
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.target = None;
+                record.updated_at = now();
+                record.last_error = None;
+                persist_session_record_transition_or_restore(
+                    &mut self.state,
+                    session_id,
+                    &previous,
+                    "persist completion of deferred Podman target cleanup",
+                    &persist,
+                )
+            },
         )
     }
 
@@ -999,41 +1023,49 @@ impl Controller {
         executor: &impl CommandExecutor,
         persist: &impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
-        let mut deferred = false;
-        if let Some(locator) = &session.target {
-            let backend = backend_locator(locator, session, &self.config)?;
-            // A sub-agent borrows its parent's target: only its own worker and
-            // private state go, as they do when a live child's close finishes.
-            // A parked child reaches this, with its worker already stopped.
-            if self.state.subagents.contains_key(session_id) {
-                targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
-            } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
-                plan.execute(executor)?;
-                deferred = true;
-            } else {
-                execute_target_cleanup(&backend, session_id, executor)?;
-            }
-        }
-        if let Some(worktree) = &session.managed_worktree {
-            retire_managed_worktree(executor, worktree)
-                .context("retire managed raw-session worktree after stopping the target")?;
-        }
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.state = SessionState::Stopped;
-        if !deferred {
-            record.target = None;
-        }
-        record.updated_at = now();
-        record.last_error = None;
-        record.last_checkpoint_error = None;
-        persist_session_record_transition_or_restore(
-            &mut self.state,
+        crate::worker_lifecycle::run_blocking(
             session_id,
-            session,
-            "persist stopped state after tearing down the current target",
-            persist,
-        )?;
-        Ok(deferred)
+            "stop target and settle",
+            executor,
+            || {
+                let mut deferred = false;
+                if let Some(locator) = &session.target {
+                    let backend = backend_locator(locator, session, &self.config)?;
+                    // A sub-agent borrows its parent's target: only its own worker and
+                    // private state go, as they do when a live child's close finishes.
+                    // A parked child reaches this, with its worker already stopped.
+                    if self.state.subagents.contains_key(session_id) {
+                        targets::borrowed_worker_cleanup_plan(&backend, session_id)?
+                            .execute(executor)?;
+                    } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
+                        plan.execute(executor)?;
+                        deferred = true;
+                    } else {
+                        execute_target_cleanup(&backend, session_id, executor)?;
+                    }
+                }
+                if let Some(worktree) = &session.managed_worktree {
+                    retire_managed_worktree(executor, worktree)
+                        .context("retire managed raw-session worktree after stopping the target")?;
+                }
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.state = SessionState::Stopped;
+                if !deferred {
+                    record.target = None;
+                }
+                record.updated_at = now();
+                record.last_error = None;
+                record.last_checkpoint_error = None;
+                persist_session_record_transition_or_restore(
+                    &mut self.state,
+                    session_id,
+                    session,
+                    "persist stopped state after tearing down the current target",
+                    persist,
+                )?;
+                Ok(deferred)
+            },
+        )
     }
 
     /// Permanently destroy an inactive session and every artifact Hel owns for it.
@@ -1205,45 +1237,54 @@ impl Controller {
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
     ) -> Result<()> {
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?
-            .clone();
-        // A session destroyed for good keeps nothing, including a broker an
-        // earlier failure left running; retiring it first also stops a live
-        // writer from recreating files under the teardown below.
-        if let Some(locator) = &session.target {
-            let backend = backend_locator(locator, &session, &self.config)?;
-            if self.state.subagents.contains_key(session_id) {
-                targets::borrowed_worker_cleanup_plan(&backend, session_id)?.execute(executor)?;
-            } else {
-                execute_target_cleanup(&backend, session_id, executor)?;
-            }
-        }
-        if let Some(worktree) = &session.managed_worktree {
-            cleanup_managed_worktree(executor, worktree, branch)
-                .context("remove managed raw-session worktree")?;
-        }
-        if let Some(checkpoint) = &session.checkpoint
-            && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(error).with_context(|| {
-                format!(
-                    "remove session recovery archive {}",
-                    checkpoint.archive_path.display()
-                )
-            });
-        }
-        mj_core::attachment::AttachmentStore::controller(session_id)?
-            .remove_session_data()
-            .context("remove session image attachments")?;
-        delete(session_id).context("force destroy session in database")?;
-        self.state.subagents.remove(session_id);
-        self.state.destroy_session_force(session_id)?;
-        Ok(())
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "force destroy session steps",
+            executor,
+            || {
+                crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+                let session = self
+                    .state
+                    .sessions
+                    .get(session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?
+                    .clone();
+                // A session destroyed for good keeps nothing, including a broker an
+                // earlier failure left running; retiring it first also stops a live
+                // writer from recreating files under the teardown below.
+                if let Some(locator) = &session.target {
+                    let backend = backend_locator(locator, &session, &self.config)?;
+                    if self.state.subagents.contains_key(session_id) {
+                        targets::borrowed_worker_cleanup_plan(&backend, session_id)?
+                            .execute(executor)?;
+                    } else {
+                        execute_target_cleanup(&backend, session_id, executor)?;
+                    }
+                }
+                if let Some(worktree) = &session.managed_worktree {
+                    cleanup_managed_worktree(executor, worktree, branch)
+                        .context("remove managed raw-session worktree")?;
+                }
+                if let Some(checkpoint) = &session.checkpoint
+                    && let Err(error) = std::fs::remove_file(&checkpoint.archive_path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "remove session recovery archive {}",
+                            checkpoint.archive_path.display()
+                        )
+                    });
+                }
+                mj_core::attachment::AttachmentStore::controller(session_id)?
+                    .remove_session_data()
+                    .context("remove session image attachments")?;
+                delete(session_id).context("force destroy session in database")?;
+                self.state.subagents.remove(session_id);
+                self.state.destroy_session_force(session_id)?;
+                Ok(())
+            },
+        )
     }
 }
 
@@ -1282,6 +1323,7 @@ fn execute_target_cleanup(
     session_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     if let Err(cleanup_error) = targets::close_plan(backend, session_id)?.execute(executor) {
         match targets::cleanup_target_is_confirmed_absent(backend, session_id, executor) {
             Ok(true) => {
@@ -1311,6 +1353,11 @@ fn execute_target_cleanup(
                 )));
             }
         }
+    }
+    // Exact teardown proved there is no process left whose boot must be
+    // preserved. Retire the intent before publishing a different placement.
+    if let Some(intent) = crate::database::load_worker_restart(session_id)? {
+        crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
     }
     Ok(())
 }

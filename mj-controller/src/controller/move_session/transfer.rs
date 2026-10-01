@@ -288,35 +288,43 @@ impl Controller {
         operation_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        let retained = crate::database::retained_move_sources(session_id)?
-            .into_iter()
-            .find(|source| source.operation_id == operation_id)
-            .context("retained Move source is missing")?;
-        let source = &retained.source;
-        ensure!(
-            !self
-                .state
-                .sessions
-                .values()
-                .any(|session| session.target.is_some() && session.target == source.target),
-            "retained source is still referenced by an active session"
-        );
-        if let Some(locator) = &source.target {
-            let backend = super::super::backend::backend_locator(locator, source, &self.config)?;
-            targets::retire_move_target_plan(&backend, session_id)?.execute(executor)?;
-        }
-        if let Some(checkout) = &source.managed_worktree {
-            ensure!(
-                !self
-                    .state
-                    .sessions
-                    .values()
-                    .any(|session| session.managed_worktree.as_ref() == Some(checkout)),
-                "retained checkout is still referenced by a session"
-            );
-            super::super::worktree::retire_managed_worktree(executor, checkout)?;
-        }
-        crate::database::forget_retained_move_source(operation_id)
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "cleanup retained move source",
+            executor,
+            || {
+                let retained = crate::database::retained_move_sources(session_id)?
+                    .into_iter()
+                    .find(|source| source.operation_id == operation_id)
+                    .context("retained Move source is missing")?;
+                let source = &retained.source;
+                ensure!(
+                    !self
+                        .state
+                        .sessions
+                        .values()
+                        .any(|session| session.target.is_some() && session.target == source.target),
+                    "retained source is still referenced by an active session"
+                );
+                if let Some(locator) = &source.target {
+                    let backend =
+                        super::super::backend::backend_locator(locator, source, &self.config)?;
+                    targets::retire_move_target_plan(&backend, session_id)?.execute(executor)?;
+                }
+                if let Some(checkout) = &source.managed_worktree {
+                    ensure!(
+                        !self
+                            .state
+                            .sessions
+                            .values()
+                            .any(|session| session.managed_worktree.as_ref() == Some(checkout)),
+                        "retained checkout is still referenced by a session"
+                    );
+                    super::super::worktree::retire_managed_worktree(executor, checkout)?;
+                }
+                crate::database::forget_retained_move_source(operation_id)
+            },
+        )
     }
 
     pub(in crate::controller) fn move_destination_bundle(
@@ -833,33 +841,41 @@ impl Controller {
         error: anyhow::Error,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
-        let transfer = operation
-            .workspace_transfer
-            .as_ref()
-            .context("Move transfer missing")?;
-        let id = &operation.selection.session_id;
-        let current = &self.state.sessions[id];
-        if current.target == transfer.source.target {
-            return self.retain_failed_in_place_move(id, &transfer.source, error);
-        }
-        if let Some(locator) = &current.target {
-            let backend = super::super::backend::backend_locator(locator, current, &self.config)?;
-            targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
-        }
-        if let Some(checkout) = &current.managed_worktree
-            && Some(checkout) != transfer.source.managed_worktree.as_ref()
-        {
-            super::super::worktree::retire_managed_worktree(executor, checkout)?;
-        }
-        let mut source = (*transfer.source).clone();
-        source.state = SessionState::Error;
-        source.last_error = Some(format!(
-            "{error:#}; source environment retained for Move retry"
-        ));
-        source.updated_at = now();
-        crate::database::save_resumed_session(&source, None)?;
-        self.state.sessions.insert(id.clone(), source);
-        Ok(error)
+        crate::worker_lifecycle::run_blocking(
+            &operation.selection.session_id,
+            "rollback move destination",
+            executor,
+            || {
+                let transfer = operation
+                    .workspace_transfer
+                    .as_ref()
+                    .context("Move transfer missing")?;
+                let id = &operation.selection.session_id;
+                let current = &self.state.sessions[id];
+                if current.target == transfer.source.target {
+                    return self.retain_failed_in_place_move(id, &transfer.source, error);
+                }
+                if let Some(locator) = &current.target {
+                    let backend =
+                        super::super::backend::backend_locator(locator, current, &self.config)?;
+                    targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
+                }
+                if let Some(checkout) = &current.managed_worktree
+                    && Some(checkout) != transfer.source.managed_worktree.as_ref()
+                {
+                    super::super::worktree::retire_managed_worktree(executor, checkout)?;
+                }
+                let mut source = (*transfer.source).clone();
+                source.state = SessionState::Error;
+                source.last_error = Some(format!(
+                    "{error:#}; source environment retained for Move retry"
+                ));
+                source.updated_at = now();
+                crate::database::save_resumed_session(&source, None)?;
+                self.state.sessions.insert(id.clone(), source);
+                Ok(error)
+            },
+        )
     }
 }
 

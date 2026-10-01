@@ -48,7 +48,27 @@ impl ApiFailure {
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
+
+    /// The answer to a long request, such as a wait or an event stream, that
+    /// an automatic upgrade handoff ended. Its client asks the next daemon.
+    pub fn handoff() -> Self {
+        Self::unavailable("the Mjolnir daemon is being replaced by an upgrade; ask again")
+            .with_code(Some(DAEMON_HANDOFF_CODE))
+    }
+
+    /// The answer to a long request that a shutdown ended: a handoff when the
+    /// daemon is being replaced, otherwise a plain refusal.
+    pub(super) fn shutdown(state: &ServerState) -> Self {
+        if state.handing_off() {
+            Self::handoff()
+        } else {
+            Self::unavailable("the server is shutting down")
+        }
+    }
 }
+
+/// The failure code of [`ApiFailure::handoff`].
+pub const DAEMON_HANDOFF_CODE: &str = "daemon_handoff";
 
 impl std::fmt::Display for ApiFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -90,7 +110,8 @@ pub(super) struct FailureBody {
 
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
-        (
+        let handoff = self.code == Some(DAEMON_HANDOFF_CODE);
+        let mut response = (
             self.status,
             Json(FailureBody {
                 error: self.message,
@@ -99,7 +120,17 @@ impl IntoResponse for ApiFailure {
                 action_limit: self.busy.map(|(_, limit)| limit),
             }),
         )
-            .into_response()
+            .into_response();
+        if handoff {
+            // The same marks the admission layer puts on a refused request.
+            let headers = response.headers_mut();
+            headers.insert("retry-after", axum::http::HeaderValue::from_static("1"));
+            headers.insert(
+                crate::server::UPGRADE_HEADER,
+                axum::http::HeaderValue::from_static("pending"),
+            );
+        }
+        response
     }
 }
 

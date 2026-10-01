@@ -23,13 +23,14 @@ pub fn spawn_remote_dashboard_worker_poller(
         let replica = Arc::new(tokio::sync::Mutex::new(
             mj_client::runtime_feed::RuntimeReplica::default(),
         ));
+        let tails = Arc::clone(&replica);
         let mut feed = spawn_runtime_feed_with(
             workspace_id,
             move |_, revision| {
                 let replica = replica.clone();
                 async move { poll_daemon_runtime(replica, revision).await }
             },
-            load_runtime_projection,
+            move |session_id| load_session_tail(Arc::clone(&tails), session_id),
         );
         let mut native = super::native_agents::NativeAgentLoader::default();
         let mut request_order = crate::session_manager::SessionRequestOrder::new();
@@ -68,6 +69,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                             publish_runtime_state(&state_tx, RuntimeStateUpdate {
                                 last_subagent_policy: metadata.last_subagent_policy,
                                 native_agents: native.views_snapshot(),
+                                session_cpu: snapshot.session_cpu,
                                 workspace_names: metadata.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,
@@ -182,6 +184,53 @@ pub(super) fn mirror_daemon_removal(
         targets.retain(|target| target.session_id != session_id);
         targets.len() != before
     });
+}
+
+/// A live session's projection, from the transcript tail the replica holds.
+///
+/// Deltas keep a held tail at the replica's cursor, so it is current. A tail
+/// not held yet is fetched from the daemon as it was at that same cursor, so
+/// the deltas that follow apply to it. Nothing here reads the store.
+pub(super) async fn load_session_tail(
+    replica: Arc<tokio::sync::Mutex<mj_client::runtime_feed::RuntimeReplica>>,
+    session_id: String,
+) -> Result<StoredProjection> {
+    let cursor = {
+        let replica = replica.lock().await;
+        if let Some(tail) = replica.projection.transcripts.get(&session_id) {
+            return Ok(Some((tail.materialized(), tail.window.clone())));
+        }
+        replica
+            .cursor
+            .clone()
+            .context("the runtime feed has no cursor to fetch a tail at")?
+    };
+    let reply = mj_client::daemon::connect_existing()
+        .await?
+        .session_tail(session_id.clone(), cursor.clone())
+        .await?;
+    let mut replica = replica.lock().await;
+    match reply {
+        mj_client::runtime_feed::SessionTailReply::Tail {
+            header,
+            window,
+            items,
+        } => {
+            let tail = mj_client::runtime_feed::SessionTail::from_parts(*header, window, items);
+            let projection = (tail.materialized(), tail.window.clone());
+            // Only a tail for the cursor the replica still holds can follow
+            // its deltas.
+            if replica.cursor.as_ref() == Some(&cursor) {
+                replica.projection.transcripts.insert(session_id, tail);
+            }
+            Ok(Some(projection))
+        }
+        mj_client::runtime_feed::SessionTailReply::NoTail => Ok(None),
+        mj_client::runtime_feed::SessionTailReply::ResetRequired => {
+            replica.cursor = None;
+            Err(anyhow::Error::new(super::runtime_feed::TailCursorExpired))
+        }
+    }
 }
 
 pub(super) async fn poll_daemon_runtime(
@@ -333,6 +382,37 @@ mod tests {
     use super::{publish_runtime_state, remote_submit_failure, send_if_changed};
     use crate::pollers::{Feed, RuntimeStateUpdate};
     use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
+
+    /// Opening a session's preview needs no query: the tail the feed follows
+    /// is already in memory, and serving it reaches neither the daemon nor
+    /// the store.
+    #[tokio::test]
+    async fn a_held_tail_is_served_without_the_daemon_or_the_store() {
+        let mut materialized = mj_core::state::MaterializedSession::empty("s");
+        materialized.applied_event_ordinal = 3;
+        let tail = mj_client::runtime_feed::SessionTail::of(
+            &materialized,
+            &mj_core::state::ProjectionWindow::default(),
+            16,
+        );
+        let mut replica = mj_client::runtime_feed::RuntimeReplica {
+            cursor: Some(mj_client::runtime_feed::RuntimeCursor {
+                incarnation: "daemon".into(),
+                sequence: 7,
+            }),
+            ..Default::default()
+        };
+        replica.projection.transcripts.insert("s".into(), tail);
+        let replica = std::sync::Arc::new(tokio::sync::Mutex::new(replica));
+        // A test binary refuses the default instance's daemon and store, so
+        // reaching either would fail this call.
+        let (served, window) = super::load_session_tail(replica, "s".into())
+            .await
+            .expect("a held tail is served")
+            .expect("the session has a tail");
+        assert_eq!(served, materialized);
+        assert_eq!(window, mj_core::state::ProjectionWindow::default());
+    }
 
     /// The daemon republishes its whole snapshot, at a new revision, whenever
     /// any session moves. A surface must not wake for the parts it already has.

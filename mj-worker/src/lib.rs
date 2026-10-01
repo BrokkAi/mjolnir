@@ -24,3 +24,5 @@ pub mod subagent_mcp;
 mod checkpoint_tests;
 #[cfg(test)]
 mod test_support;
+
+pub mod cpu_usage;

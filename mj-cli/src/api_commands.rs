@@ -43,39 +43,57 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
         (None, Some(name)) => Some(crate::resolve_store_workspace(Some(&name)).await?),
         (None, None) => None,
     };
-    let client = ApiClient::connect().await?;
+    let mut client = ApiClient::connect().await?;
     let filter = mj_controller::database::ApiEventFilter {
         session_id: args.session,
         workspace_id,
     };
-    let mut response = client.events(&filter, args.after_seq).await?;
-    let mut decoder = crate::api_client::events::EventDecoder::default();
-    let mut stdout = tokio::io::stdout();
     let mut last_seq = args.after_seq;
+    let mut stdout = tokio::io::stdout();
     loop {
-        let chunk = tokio::select! {
-            signal = tokio::signal::ctrl_c() => { signal?; return Ok(()); },
-            chunk = response.chunk() => chunk.with_context(|| format!("event stream interrupted; resume with --after-seq {}", last_seq.unwrap_or(0)))?,
+        let mut response = match client.events(&filter, last_seq).await {
+            // Reached the old daemon again while it exits: ask once more.
+            Err(error) if crate::api_client::is_daemon_handoff(&error) => {
+                client = follow_handoff(events_continuation(&filter, last_seq)).await?;
+                continue;
+            }
+            response => response?,
         };
-        let Some(chunk) = chunk else {
-            bail!(
-                "event stream ended; resume with --after-seq {}",
-                last_seq.unwrap_or(0)
-            );
+        let mut decoder = crate::api_client::events::EventDecoder::default();
+        let resume = loop {
+            let chunk = tokio::select! {
+                signal = tokio::signal::ctrl_c() => { signal?; return Ok(()); },
+                chunk = response.chunk() => chunk.with_context(|| format!("event stream interrupted; resume with --after-seq {}", last_seq.unwrap_or(0)))?,
+            };
+            let Some(chunk) = chunk else {
+                bail!(
+                    "event stream ended; resume with --after-seq {}",
+                    last_seq.unwrap_or(0)
+                );
+            };
+            let events = decoder.push(&chunk).with_context(|| {
+                format!(
+                    "decode event stream; resume with --after-seq {}",
+                    last_seq.unwrap_or(0)
+                )
+            })?;
+            for event in events {
+                let mut line = serde_json::to_vec(&event)?;
+                line.push(b'\n');
+                stdout.write_all(&line).await?;
+                stdout.flush().await?;
+                last_seq = Some(event.seq);
+            }
+            if let Some(cursor) = decoder.handoff() {
+                break cursor;
+            }
         };
-        let events = decoder.push(&chunk).with_context(|| {
-            format!(
-                "decode event stream; resume with --after-seq {}",
-                last_seq.unwrap_or(0)
-            )
-        })?;
-        for event in events {
-            let mut line = serde_json::to_vec(&event)?;
-            line.push(b'\n');
-            stdout.write_all(&line).await?;
-            stdout.flush().await?;
-            last_seq = Some(event.seq);
-        }
+        // The daemon is being replaced. It named the cursor its stream
+        // reached, so the next daemon's stream continues from there and no
+        // event is lost or printed twice.
+        eprintln!("The Mjolnir daemon is being replaced by an upgrade; following the new daemon.");
+        last_seq = Some(resume);
+        client = follow_handoff(events_continuation(&filter, last_seq)).await?;
     }
 }
 
@@ -896,32 +914,139 @@ pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
             }
         };
     }
-    let response = client
-        .wait(
-            &args.session,
-            &WaitRequest {
-                return_on_input: args.return_on_input,
-                turn_id: Some(accepted.turn_id),
-                timeout_secs: args.timeout,
-            },
-        )
-        .await?;
+    // Only the wait follows the daemon across an upgrade; the prompt was
+    // accepted once and is never sent again.
+    let response = wait_following_handoffs(
+        client,
+        &args.session,
+        WaitRequest {
+            return_on_input: args.return_on_input,
+            turn_id: Some(accepted.turn_id),
+            timeout_secs: args.timeout,
+        },
+        |request: &WaitRequest| {
+            follow_handoff(wait_continuation(&args.session, request, args.json))
+        },
+    )
+    .await?;
     report_wait(&response, args.json)
 }
 
 pub(crate) async fn wait(args: WaitArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let response = client
-        .wait(
-            &args.session,
-            &WaitRequest {
-                return_on_input: args.return_on_input,
-                turn_id: args.turn,
-                timeout_secs: args.timeout,
-            },
-        )
-        .await?;
+    let response = wait_following_handoffs(
+        client,
+        &args.session,
+        WaitRequest {
+            return_on_input: args.return_on_input,
+            turn_id: args.turn,
+            timeout_secs: args.timeout,
+        },
+        |request: &WaitRequest| {
+            follow_handoff(wait_continuation(&args.session, request, args.json))
+        },
+    )
+    .await?;
     report_wait(&response, args.json)
+}
+
+/// Connect to the daemon that replaced one being upgraded. When that daemon is
+/// a newer protocol or release, which this client cannot speak to, finish the
+/// command under the daemon's own build, as dashboards do. `continuation`
+/// names only what is left of the command, so nothing is repeated.
+async fn follow_handoff(continuation: Vec<String>) -> Result<ApiClient> {
+    let error = match ApiClient::connect_after_handoff().await {
+        Ok(client) => return Ok(client),
+        Err(error) => error,
+    };
+    let target = tokio::task::spawn_blocking(crate::daemon::upgraded_daemon_executable)
+        .await
+        .context("inspect the upgraded daemon task failed")??;
+    let Some(target) = target else {
+        return Err(error);
+    };
+    Err(crate::daemon::continue_under_upgraded_build(
+        &target,
+        &continuation,
+    ))
+}
+
+/// The rest of a wait: the same session and turn, the time left, and the
+/// same output form.
+fn wait_continuation(session: &str, request: &WaitRequest, json: bool) -> Vec<String> {
+    let mut args = vec![
+        "wait".to_owned(),
+        "--session".to_owned(),
+        session.to_owned(),
+    ];
+    if let Some(turn) = request.turn_id {
+        args.extend(["--turn".to_owned(), turn.to_string()]);
+    }
+    if let Some(timeout) = request.timeout_secs {
+        args.extend(["--timeout".to_owned(), timeout.to_string()]);
+    }
+    if request.return_on_input {
+        args.push("--return-on-input".to_owned());
+    }
+    if json {
+        args.push("--json".to_owned());
+    }
+    args
+}
+
+/// The rest of an event stream: the same filter, after the last event seen.
+fn events_continuation(
+    filter: &mj_controller::database::ApiEventFilter,
+    after_seq: Option<u64>,
+) -> Vec<String> {
+    let mut args = vec!["events".to_owned()];
+    if let Some(session) = &filter.session_id {
+        args.extend(["--session".to_owned(), session.clone()]);
+    }
+    if let Some(workspace) = &filter.workspace_id {
+        args.extend(["--workspace-id".to_owned(), workspace.clone()]);
+    }
+    if let Some(after_seq) = after_seq {
+        args.extend(["--after-seq".to_owned(), after_seq.to_string()]);
+    }
+    args
+}
+
+/// Wait on a session, following the daemon across automatic upgrades.
+///
+/// A handoff ends the wait the old daemon was serving. A wait is a read, so
+/// the next daemon is asked again for the same turn, with what is left of the
+/// time budget: the handoff neither extends the wait nor resends a prompt.
+/// Each retry follows a daemon that closed admission and is exiting, and
+/// `reconnect` waits for the daemon that replaces it.
+async fn wait_following_handoffs<Reconnect, Connecting>(
+    first: ApiClient,
+    session: &str,
+    mut request: WaitRequest,
+    mut reconnect: Reconnect,
+) -> Result<WaitResponse>
+where
+    Reconnect: FnMut(&WaitRequest) -> Connecting,
+    Connecting: std::future::Future<Output = Result<ApiClient>>,
+{
+    let started = std::time::Instant::now();
+    let budget = request
+        .timeout_secs
+        .unwrap_or(mj_controller::server::api::DEFAULT_WAIT_SECS);
+    let mut client = first;
+    loop {
+        match client.wait(session, &request).await {
+            Err(error) if crate::api_client::is_daemon_handoff(&error) => {
+                eprintln!(
+                    "The Mjolnir daemon is being replaced by an upgrade; waiting on the new daemon."
+                );
+                request.timeout_secs =
+                    Some(budget.saturating_sub(started.elapsed().as_secs()).max(1));
+                client = reconnect(&request).await?;
+            }
+            answered => return answered,
+        }
+    }
 }
 
 /// Print a wait result, and fail the process when the turn did not finish so a
@@ -1909,6 +2034,123 @@ mod tests {
             object.insert(key.clone(), value.clone());
         }
         serde_json::from_value(body).expect("wait response")
+    }
+
+    /// Serve `app` on a loopback port and return its base URL.
+    async fn serve_api(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        url
+    }
+
+    /// A daemon being replaced ends a wait with the handoff mark. The wait
+    /// asks the next daemon for the same turn, with what is left of its
+    /// budget, and reports that daemon's answer instead of failing.
+    #[tokio::test]
+    async fn a_wait_follows_the_daemon_across_an_upgrade_handoff() {
+        use axum::http::StatusCode;
+        use std::sync::{Arc, Mutex};
+        let old = serve_api(axum::Router::new().route(
+            "/api/v1/sessions/{session_id}/wait",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [
+                        (mj_controller::server::UPGRADE_HEADER, "pending"),
+                        ("retry-after", "1"),
+                    ],
+                    axum::Json(serde_json::json!({
+                        "error": "the Mjolnir daemon is being replaced by an upgrade; ask again",
+                        "code": mj_controller::server::api::DAEMON_HANDOFF_CODE,
+                    })),
+                )
+            }),
+        ))
+        .await;
+        let asked: Arc<Mutex<Vec<WaitRequest>>> = Arc::default();
+        let new = serve_api(
+            axum::Router::new()
+                .route(
+                    "/api/v1/sessions/{session_id}/wait",
+                    axum::routing::post(
+                        |axum::extract::State(asked): axum::extract::State<
+                            Arc<Mutex<Vec<WaitRequest>>>,
+                        >,
+                         axum::Json(request): axum::Json<WaitRequest>| async move {
+                            asked.lock().unwrap().push(request);
+                            (
+                                [(mj_controller::server::api::API_VERSION_HEADER, "1")],
+                                axum::Json(wait_response("finished", serde_json::json!({}))),
+                            )
+                        },
+                    ),
+                )
+                .with_state(asked.clone()),
+        )
+        .await;
+        let reconnects = Arc::new(Mutex::new(0_usize));
+        let response = wait_following_handoffs(
+            ApiClient::new(old, "token".into()).unwrap(),
+            "s1",
+            WaitRequest {
+                return_on_input: true,
+                turn_id: Some(4),
+                timeout_secs: Some(3600),
+            },
+            |_: &WaitRequest| {
+                *reconnects.lock().unwrap() += 1;
+                let new = new.clone();
+                async move { ApiClient::new(new, "token".into()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.outcome, WaitOutcome::Finished);
+        assert_eq!(*reconnects.lock().unwrap(), 1);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].return_on_input);
+        assert_eq!(asked[0].turn_id, Some(4), "the same turn, not a new prompt");
+        let remaining = asked[0].timeout_secs.unwrap();
+        assert!(
+            (3590..=3600).contains(&remaining),
+            "the next daemon gets what is left of the budget: {remaining}"
+        );
+    }
+
+    /// A command continued under the daemon's newer build must parse there as
+    /// the rest of the same command: same turn, time left, same filter.
+    #[test]
+    fn continuations_parse_as_the_rest_of_the_same_command() {
+        let request = WaitRequest {
+            return_on_input: true,
+            turn_id: Some(4),
+            timeout_secs: Some(1200),
+        };
+        let argv = std::iter::once("mj".to_owned()).chain(wait_continuation("s1", &request, true));
+        let Some(Command::Wait(wait)) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected the wait command");
+        };
+        assert_eq!(
+            (wait.session.as_str(), wait.turn, wait.timeout),
+            ("s1", Some(4), Some(1200))
+        );
+        assert!(wait.return_on_input && wait.json);
+
+        let filter = mj_controller::database::ApiEventFilter {
+            session_id: Some("s1".into()),
+            workspace_id: Some("w1".into()),
+        };
+        let argv = std::iter::once("mj".to_owned()).chain(events_continuation(&filter, Some(9)));
+        let Some(Command::Events(events)) = Cli::try_parse_from(argv).unwrap().command else {
+            panic!("expected the events command");
+        };
+        assert_eq!(events.session.as_deref(), Some("s1"));
+        assert_eq!(events.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(events.after_seq, Some(9));
     }
 
     #[test]

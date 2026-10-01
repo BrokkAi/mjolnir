@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use mj_core::config::HarnessKind;
 
+mod root_owner;
+pub use root_owner::WorkerRootOwner;
+
 pub use mj_core::relay::{
     REVIEW_UNTRACKED_FILE, WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE,
 };
@@ -388,7 +391,7 @@ fn resolve_relative_worker_root(root: PathBuf, base: &Path) -> PathBuf {
 pub use unix::{
     SESSION_SETUP_GUIDANCE, attach_session_git_environment, configure_github_cli,
     lead_process_group, prepare_managed_harness, proxy, run_acp_supervisor, run_daemon,
-    seed_container_github_token,
+    run_daemon_owned, seed_container_github_token,
 };
 
 #[cfg(all(test, unix))]
@@ -397,6 +400,14 @@ pub(crate) use unix::record_runtime_event;
 #[cfg(not(unix))]
 pub async fn run_daemon(
     _root: std::path::PathBuf,
+    _config: WorkerLaunchConfig,
+) -> anyhow::Result<()> {
+    anyhow::bail!("target workers require Unix")
+}
+
+#[cfg(not(unix))]
+pub async fn run_daemon_owned(
+    _owner: &WorkerRootOwner,
     _config: WorkerLaunchConfig,
 ) -> anyhow::Result<()> {
     anyhow::bail!("target workers require Unix")

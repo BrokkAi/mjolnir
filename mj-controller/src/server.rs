@@ -204,7 +204,16 @@ pub struct ServerOptions {
     /// engines the test host has.
     engine_checks: Arc<api::LocalEngineChecks>,
     worker_source_check: Option<WorkerSourceCheck>,
+    /// The daemon's upgrade admission. A closed gate refuses new requests, and
+    /// tells the long requests a shutdown ends that the daemon is being
+    /// replaced, so their clients follow it. Tests give the server its own.
+    upgrade_gate: Arc<crate::upgrade::Gate>,
 }
+
+/// The header, valued `pending`, that marks a 503 as "this daemon is being
+/// replaced by an automatic upgrade; ask the next one". The request was not
+/// accepted, or was a read the shutdown ended, so asking again repeats nothing.
+pub const UPGRADE_HEADER: &str = "x-mj-upgrade";
 
 /// Answers, for a target id, why no worker binary could serve a session there.
 /// It blocks (a bare SSH host is asked its platform), so callers run it off
@@ -257,7 +266,13 @@ impl ServerOptions {
             preferences_path: mj_core::go::GoPreferences::path(),
             engine_checks: Arc::new(api::LocalEngineChecks::on_this_host()),
             worker_source_check: None,
+            upgrade_gate: crate::upgrade::gate().clone(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_upgrade_gate(&mut self, gate: Arc<crate::upgrade::Gate>) {
+        self.upgrade_gate = gate;
     }
 
     pub fn viewer_code(&self) -> &str {

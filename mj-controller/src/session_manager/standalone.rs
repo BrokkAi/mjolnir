@@ -14,6 +14,12 @@ pub struct StandaloneSession {
 }
 
 impl StandaloneSession {
+    pub(super) async fn cpu_usage(
+        &mut self,
+    ) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
+        self.client.cpu_usage().await
+    }
+
     pub fn set_project_memory_target(&mut self, target: Option<ProjectMemorySyncTarget>) {
         self.project_memory = target;
     }
@@ -677,6 +683,7 @@ pub(super) fn replacement_session_test_fixture(
         submitted,
         control: SessionManagerControl {
             commands: manager_commands,
+            session_cpu: watch::channel(SessionCpuTable::new()).1,
         },
     }
 }
