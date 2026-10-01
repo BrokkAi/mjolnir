@@ -1448,7 +1448,9 @@ assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
 /// what the field holds, and accepting a row has to re-announce the edit.
 #[test]
 fn web_path_suggestions_drop_stale_answers_and_re_announce_an_accepted_row() {
-    let source = viewer_source("function attachPathSuggestions(", "\nfunction pathField(");
+    // The suggestion state outlives any one input element, so the slice starts
+    // at the map that owns it rather than at the function that reads it.
+    let source = viewer_source("const pathSuggestionOwners = new Map();", "\nfunction pathField(");
     let setup = r#"
 const PATH_SUGGESTION_DELAY_MS = 0;
 const setTimeout = run => run();
