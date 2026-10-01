@@ -145,3 +145,17 @@ Findings, with verdicts:
 - **U-1** (question for the user): any same-version build with a different executable replaces the running daemon, in either direction, so alternating two builds flips the daemon each command. 79f2ad0a intends replacement; whether an older commit may replace a newer one is unspecified.
 - **U-2** (not a defect): a first run killed after the config is saved never shows the welcome; consistent with the plan.
 - Observations: `mj daemon stop` does not stop a daemon still starting (no `daemon.json` yet); the welcome's doctor ran before repository discovery finished, so the review-leftover error for a discovered project was never shown; a "Get started" screen flashed once before the dashboard.
+
+### Track W (web viewer, fake lab 4202) — done
+
+Passed: the Move form's Subagents control is editable and the review is reachable with a single profile; a Move killed mid-way publishes its phase and guidance in the API and on the web row with no private error chain; keyed deltas for create, prompt, rename, suspend, resume, destroy with no reload; every route at 1280×800 and 390×844 without overflow, first-party 404s or console errors; login, wrong code, logout. Not exercised: `stop-task` (the fake has no background tasks; the CLI's unknown-id and `--all` replies were recorded).
+
+Findings, with verdicts:
+
+- **W-2** (wrong, product): after a daemon kill during an in-place Move's suspend or resume phase, the session is failed with "Environment and checkpoint retained" while `checkpoint_retained` is false; a retry needs the original `--allow-large-transfer` (the refusal does not say which part differs) and then fails on a missing checkpoint archive, leaving the session `suspending` for good (resume 409; a daemon restart does not clear it; destroy works). Opus, queued behind the cap.
+- **W-3** (rough, product): the web New session form does not skip a sole profile (or the Move form's sole profile), unlike the TUI. Fix wave S2.
+- **W-4** (rough, product): the unavailable single-model 422 tells web users to use CLI flags; the web review does not state the policy. Fix wave S2.
+- **W-5** (rough, product): the web Resume page for a failed Move says "Move was failed." and "This session is active now and cannot be resumed.", and offers no retry while the guidance says to retry. With W-2.
+- **W-1** (rough, product, TUI): Esc on the dashboard reopens an abandoned Settings draft. Fix wave S2.
+
+Runbook errors: the web New session form has no Subagents control since cc23c703 (the policy travels in the request only); a fake profile cannot hold a Single model default through Settings; a lab Move is always in-place; the viewer code rotates on a daemon restart.
