@@ -154,14 +154,16 @@ impl ViewerSnapshot {
             .map(|session| {
                 #[cfg(test)]
                 VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
-                let incompatible = config
+                let resume_refusals = config
                     .targets
                     .keys()
-                    .filter(|target_id| {
-                        crate::controller::resume_compatibility(session, config, target_id).is_err()
+                    .filter_map(|target_id| {
+                        crate::controller::resume_compatibility(session, config, target_id)
+                            .err()
+                            .map(|reason| (target_id.clone(), reason))
                     })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeMap<_, _>>();
+                let incompatible = resume_refusals.keys().cloned().collect::<Vec<_>>();
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 // A sub-agent child works in its parent's checkout and owns no
                 // worktree, so its project identity has to come from the
@@ -243,6 +245,7 @@ impl ViewerSnapshot {
                     conversation_available: false,
                     prompt_images_supported: false,
                     incompatible_resume_targets: incompatible.clone(),
+                    resume_refusals,
                     compatible_resume_targets: config
                         .targets
                         .keys()
@@ -475,6 +478,12 @@ pub struct ViewerSession {
     /// before that field existed keeps working through a deployment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incompatible_resume_targets: Vec<String>,
+    /// The controller's reason for each id in `incompatible_resume_targets`.
+    /// It names project paths and SSH hosts, so it is never serialized: only
+    /// in-process validation reads it, to tell the caller why a resume or move
+    /// was refused.
+    #[serde(skip)]
+    pub resume_refusals: BTreeMap<String, String>,
     /// Target ids this session can resume on, so the browser never has to
     /// subtract one set from another to find out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

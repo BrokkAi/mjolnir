@@ -136,6 +136,16 @@ pub(super) fn validate_prompt_images(images: &[ViewerPromptImage]) -> Result<(),
     Ok(())
 }
 
+/// The refusal for a resume or move onto a target the session cannot use. The
+/// controller's own reason rides along in-process; the sentence still names the
+/// target when a snapshot carries none.
+fn resume_refusal(session: &ViewerSession, target_id: &str) -> ApiError {
+    ApiError::bad_request(match session.resume_refusals.get(target_id) {
+        Some(reason) => format!("this session cannot resume on target \"{target_id}\": {reason}"),
+        None => format!("this session cannot resume on target \"{target_id}\""),
+    })
+}
+
 pub(super) const MAX_MOVE_QUEUE_ITEMS: usize = 256;
 pub(super) const MAX_MOVE_MOUNTS: usize = 32;
 
@@ -167,9 +177,7 @@ pub(super) fn validate_move_selection(
             .iter()
             .any(|id| id == target_id)
         {
-            return Err(ApiError::bad_request(
-                "this session cannot resume on that target",
-            ));
+            return Err(resume_refusal(session, target_id));
         }
     } else {
         require_session_record(snapshot, &selection.session_id)?;
@@ -478,9 +486,7 @@ fn validate_action_against(
                 .iter()
                 .any(|incompatible| incompatible == target_id)
             {
-                return Err(ApiError::bad_request(
-                    "this session cannot resume on that target",
-                ));
+                return Err(resume_refusal(session, target_id));
             }
             validate_resume_settings(additional_mounts.as_ref(), resource_allocation.as_ref())?;
         }

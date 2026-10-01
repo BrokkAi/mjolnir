@@ -3767,6 +3767,17 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    // The refusal names the target and carries the controller's reason, but
+    // the wire projection still publishes ids only.
+    let reason =
+        crate::controller::resume_compatibility(&state.sessions["session-1"], &config, "raw")
+            .unwrap_err();
+    assert!(error.message.contains("\"raw\""), "{}", error.message);
+    assert!(error.message.contains(&reason), "{}", error.message);
+    assert!(
+        !serde_json::to_string(&snapshot).unwrap().contains(&reason),
+        "the reason must not leave the process"
+    );
 }
 
 #[test]
