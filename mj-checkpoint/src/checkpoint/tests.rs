@@ -2621,6 +2621,44 @@ fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_
     assert!(seed_for(false).is_empty());
 }
 
+/// X-6: the projection stores each selector under the harness's own option
+/// id. Codex's effort option is `reasoning_effort`, so a seed that read only
+/// the key `effort` lost the effort across suspend and resume while the model
+/// (id `model`) survived.
+#[test]
+fn a_native_restore_seeds_effort_stored_under_the_harness_option_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    let configuration = &mut spec.canonical_session.session.configuration.values;
+    configuration.insert("model".into(), serde_json::json!("gpt-5.6-luna"));
+    configuration.insert("reasoning_effort".into(), serde_json::json!("low"));
+    export_checkpoint(&spec).unwrap();
+    let relay_root = temp.path().join("option-id-relay");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: relay_root.clone(),
+            harness_home: temp.path().join("option-id-harness"),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    assert_eq!(
+        restored_seed(&relay_root).accepted_config,
+        [
+            ("effort".to_owned(), "low".to_owned()),
+            ("model".to_owned(), "gpt-5.6-luna".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+}
+
 /// I2-7: an archive carries no relay journal, so the worker restored from a
 /// session suspended before any prompt could not tell its native session was
 /// never used, and refused to replace it when the harness had no record of

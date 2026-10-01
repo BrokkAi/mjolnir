@@ -94,18 +94,9 @@ pub fn restore_checkpoint_with_native_state(
         // Selector values name one harness's catalogue, so they carry over
         // only when the same native conversation continues.
         accepted_config: if spec.restore_native {
-            ["model", "effort"]
-                .into_iter()
-                .filter_map(|key| {
-                    let value = canonical_session
-                        .session
-                        .configuration
-                        .values
-                        .get(key)?
-                        .as_str()?;
-                    (!value.trim().is_empty()).then(|| (key.to_owned(), value.to_owned()))
-                })
-                .collect()
+            mj_core::acp::AcceptedSessionConfig::from_archived_values(
+                &canonical_session.session.configuration.values,
+            )
         } else {
             Default::default()
         },
