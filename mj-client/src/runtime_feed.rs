@@ -120,16 +120,7 @@ pub struct SessionTail {
     /// The session's projection without its transcript.
     pub header: MaterializedSession,
     pub window: ProjectionWindow,
-    pub items: SnapshotMap<TailKey, TailEntry>,
-}
-
-/// One item of a tail, and the projection ordinal at which the tail first
-/// held it in its current form. That ordinal is an exact update cursor for
-/// every item kind, which the item itself records only for agent messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TailEntry {
-    pub item: Arc<TranscriptItem>,
-    pub changed_ordinal: u64,
+    pub items: SnapshotMap<TailKey, Arc<TranscriptItem>>,
 }
 
 impl SessionTail {
@@ -173,14 +164,8 @@ impl SessionTail {
         for item in kept {
             let key = (item.position, item.stable_id.clone());
             // `Arc` equality compares pointers first, then contents.
-            if self.items.get(&key).map(|entry| &entry.item) != Some(item) {
-                self.items.insert(
-                    key,
-                    TailEntry {
-                        item: Arc::clone(item),
-                        changed_ordinal: materialized.applied_event_ordinal,
-                    },
-                );
+            if self.items.get(&key) != Some(item) {
+                self.items.insert(key, Arc::clone(item));
             }
         }
         let header_changed = !same_header(&self.header, materialized);
@@ -199,11 +184,7 @@ impl SessionTail {
     /// The projection this tail stands for, transcript included.
     pub fn materialized(&self) -> MaterializedSession {
         let mut materialized = self.header.clone();
-        materialized.transcript = self
-            .items
-            .values()
-            .map(|entry| Arc::clone(&entry.item))
-            .collect();
+        materialized.transcript = self.items.values().cloned().collect();
         materialized
     }
 
@@ -215,7 +196,7 @@ impl SessionTail {
         let mut removes = Vec::new();
         for (key, entry) in before.items.changes(&self.items) {
             match entry {
-                Some(entry) => upserts.push(Arc::clone(&entry.item)),
+                Some(item) => upserts.push(Arc::clone(item)),
                 None => removes.push(key.clone()),
             }
         }
@@ -240,15 +221,9 @@ impl SessionTail {
         for key in removes {
             self.items.remove(&key);
         }
-        let changed_ordinal = self.header.applied_event_ordinal;
         for item in upserts {
-            self.items.insert(
-                (item.position, item.stable_id.clone()),
-                TailEntry {
-                    item,
-                    changed_ordinal,
-                },
-            );
+            self.items
+                .insert((item.position, item.stable_id.clone()), item);
         }
         if let Some(window) = window {
             self.window = window;
@@ -323,11 +298,7 @@ impl SessionTailReply {
         Self::Tail {
             header: Box::new(tail.header.clone()),
             window: tail.window.clone(),
-            items: tail
-                .items
-                .values()
-                .map(|entry| Arc::clone(&entry.item))
-                .collect(),
+            items: tail.items.values().cloned().collect(),
         }
     }
 }
@@ -339,16 +310,9 @@ impl SessionTail {
         window: ProjectionWindow,
         items: Vec<Arc<TranscriptItem>>,
     ) -> Self {
-        let changed_ordinal = header.applied_event_ordinal;
         let mut map = SnapshotMap::new();
         for item in items {
-            map.insert(
-                (item.position, item.stable_id.clone()),
-                TailEntry {
-                    item,
-                    changed_ordinal,
-                },
-            );
+            map.insert((item.position, item.stable_id.clone()), item);
         }
         Self {
             header,
@@ -773,10 +737,10 @@ mod tests {
             assert_eq!(held.materialized(), daemon.materialized());
             for (key, now) in held.items.iter() {
                 if let Some(before) = held_before.items.get(key)
-                    && *before.item == *now.item
+                    && **before == **now
                 {
                     assert!(
-                        Arc::ptr_eq(&before.item, &now.item),
+                        Arc::ptr_eq(before, now),
                         "unchanged item {key:?} kept its pointer"
                     );
                 }
@@ -786,15 +750,10 @@ mod tests {
         let compacted = reloaded
             .items
             .values()
-            .find(|entry| entry.item.position == 20)
+            .find(|item| item.position == 20)
             .expect("position 20 is inside the bound");
-        assert_eq!(*compacted.item, *agent_item(20, "compacted"));
-        assert!(
-            reloaded
-                .items
-                .values()
-                .all(|entry| entry.item.position != 30)
-        );
+        assert_eq!(**compacted, *agent_item(20, "compacted"));
+        assert!(reloaded.items.values().all(|item| item.position != 30));
         assert_eq!(reloaded.items.len(), limit);
     }
 

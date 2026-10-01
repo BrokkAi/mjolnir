@@ -244,6 +244,13 @@ pub(crate) async fn run_server(
         // rather than a silent success.
         let mut failure: Option<anyhow::Error> = None;
         let mut cache_records = controller.state.sessions.clone();
+        // The transcript tails the browser's conversations are projected
+        // from: the same daemon-owned tails the terminal feed serves, so one
+        // owner decides what changed in every client's transcript.
+        let mut cache_transcripts = mj_core::snapshot_map::SnapshotMap::<
+            String,
+            mj_client::runtime_feed::SessionTail,
+        >::new();
         macro_rules! publish_snapshot {
             ($control:lifetime, $revision:expr) => {
                 let runtime = match daemon_runtime.runtime_publication() {
@@ -266,6 +273,14 @@ pub(crate) async fn run_server(
                     }
                 }
                 cache_records = runtime.records.clone();
+                for (id, tail) in cache_transcripts.changes(&runtime.transcripts) {
+                    if let Some(tail) = tail
+                        && runtime.records.get(id).is_some_and(|record| record.state.is_active())
+                    {
+                        conversation_projections.enqueue(tail.materialized());
+                    }
+                }
+                cache_transcripts = runtime.transcripts.clone();
                 if conversations_changed { conversation_tx.send_replace(conversations.clone()); }
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 controller.state.sessions = runtime.records;
@@ -524,7 +539,6 @@ pub(crate) async fn run_server(
                             update.session_id.clone(),
                             active_shells,
                         );
-                        conversation_projections.enqueue(materialized);
                         queued_prompts.insert(
                             update.session_id.clone(),
                             queued,

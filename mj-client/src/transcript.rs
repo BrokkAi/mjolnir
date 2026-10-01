@@ -1077,14 +1077,70 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 #[derive(Default)]
 pub struct BrowserTranscriptProjector {
     entries: Vec<ChatEntry>,
+    /// The entries this projector last published, by id.
+    published: BTreeMap<u64, BrowserTranscriptEntry>,
 }
 
 impl BrowserTranscriptProjector {
+    /// Projects `session` for the browser, with an exact update cursor on
+    /// every entry.
+    ///
+    /// An entry that looks exactly as it did in the previous projection keeps
+    /// the cursor it was published with, so a browser polling with `after_seq`
+    /// is not sent it again. A changed entry gets the new frontier. This holds
+    /// for every item kind and for changes the item itself does not record:
+    /// a tool call marked ended by a later interrupt, or lines trimmed from
+    /// the oldest entry as the window slides.
     pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
         self.entries =
             materialized_chat_entries_reusing(session, 0, std::mem::take(&mut self.entries));
-        browser_transcript(&self.entries, session.applied_event_ordinal, 0, None)
+        let mut transcript =
+            browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
+        let first = self.published.is_empty();
+        for entry in &mut transcript.entries {
+            match self.published.get(&entry.id) {
+                Some(previous) if same_rendering(previous, entry) => {
+                    entry.updated_seq = previous.updated_seq;
+                }
+                Some(_) => entry.updated_seq = transcript.latest_seq,
+                None if !first => entry.updated_seq = entry.updated_seq.max(transcript.latest_seq),
+                None => {}
+            }
+        }
+        self.published = transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.id, entry.clone()))
+            .collect();
+        transcript
     }
+}
+
+/// Whether two published entries render the same, whatever cursor they carry.
+fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEntry) -> bool {
+    let BrowserTranscriptEntry {
+        command_id,
+        id,
+        updated_seq: _,
+        role,
+        label,
+        recorded_at_ms,
+        lines,
+        glyph,
+        tone,
+        tool_status,
+        diffstats,
+    } = next;
+    previous.command_id == *command_id
+        && previous.id == *id
+        && previous.role == *role
+        && previous.label == *label
+        && previous.recorded_at_ms == *recorded_at_ms
+        && previous.lines == *lines
+        && previous.glyph == *glyph
+        && previous.tone == *tone
+        && previous.tool_status == *tool_status
+        && previous.diffstats == *diffstats
 }
 
 #[cfg(test)]
@@ -1108,11 +1164,80 @@ mod tests {
         session: &MaterializedSession,
     ) -> BrowserTranscript {
         let cached = projector.project(session);
+        // Everything but the update cursors matches a fresh projection; the
+        // cursors are what the projector carries between projections.
+        let without_cursors = |transcript: &BrowserTranscript| {
+            let mut value = serde_json::to_value(transcript).unwrap();
+            for entry in value["entries"].as_array_mut().unwrap() {
+                entry.as_object_mut().unwrap().remove("updated_seq");
+            }
+            value
+        };
         assert_eq!(
-            serde_json::to_value(&cached).unwrap(),
-            serde_json::to_value(materialized_browser_transcript(session)).unwrap()
+            without_cursors(&cached),
+            without_cursors(&materialized_browser_transcript(session))
         );
         cached
+    }
+
+    /// A browser polling with `after_seq` is sent an entry again only when
+    /// that entry changed, for every item kind: here a tool call and a thought
+    /// that did not change stay behind while a new message is sent.
+    #[test]
+    fn a_browser_is_sent_only_the_entries_that_changed() {
+        let mut session = MaterializedSession::empty("exact-cursors");
+        let mut projector = BrowserTranscriptProjector::default();
+        session.transcript.push(item(
+            1,
+            TranscriptBody::User {
+                content: vec![json!({"type":"text", "text":"first"})],
+            },
+        ));
+        session.transcript.push(item(2, TranscriptBody::Tool {
+            call: json!({"toolCallId":"tool-2", "title":"Read file", "status":"completed", "kind":"read"}),
+            terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
+        }));
+        session.transcript.push(item(
+            3,
+            TranscriptBody::Thought {
+                chunks: vec![json!({"content": {"type": "text", "text": "pondering"}})],
+                streaming: false,
+            },
+        ));
+        session.applied_event_ordinal = 3;
+        let first = assert_projection(&mut projector, &session);
+
+        session.transcript.push(item(
+            4,
+            TranscriptBody::User {
+                content: vec![json!({"type":"text", "text":"next"})],
+            },
+        ));
+        session.applied_event_ordinal = 4;
+        let second = assert_projection(&mut projector, &session);
+        let sent = second
+            .entries
+            .iter()
+            .filter(|entry| entry.updated_seq > first.latest_seq)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(sent, [4], "only the new message is sent again");
+
+        // The tool call completing again with new output is a change.
+        let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut session.transcript[1]).body
+        else {
+            unreachable!()
+        };
+        call["status"] = json!("failed");
+        session.applied_event_ordinal = 5;
+        let third = assert_projection(&mut projector, &session);
+        let sent = third
+            .entries
+            .iter()
+            .filter(|entry| entry.updated_seq > second.latest_seq)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        assert_eq!(sent, [2], "the changed tool call is sent again");
     }
 
     #[test]
