@@ -1552,6 +1552,8 @@ pub(crate) fn spawn_wiki_search(
     let guard = cancel.clone().drop_guard();
     tokio::spawn(async move {
         let answers = updates.clone();
+        let live_answers = updates.clone();
+        let live_query = query.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(follow_wiki_search(
             delay,
             Duration::from_secs(5),
@@ -1571,6 +1573,25 @@ pub(crate) fn spawn_wiki_search(
                     DashboardIoUpdate::WikiRows { request_id, result },
                 )
             },
+            move || {
+                let query = live_query.clone();
+                async move {
+                    if query.trim().is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    daemon::connect_or_start()
+                        .await?
+                        .session_text_search(query)
+                        .await
+                }
+            },
+            move |result| {
+                report(
+                    "searching live session conversations",
+                    &live_answers,
+                    DashboardIoUpdate::ResumeTextMatches { request_id, result },
+                )
+            },
         )));
         tokio::select! {
             _ = cancel.cancelled() => {},
@@ -1581,6 +1602,11 @@ pub(crate) fn spawn_wiki_search(
                             request_id,
                             result: Err(format!("session search task failed: {error}")),
                         });
+                    report("searching live session conversations", &updates,
+                        DashboardIoUpdate::ResumeTextMatches {
+                            request_id,
+                            result: Err(format!("session search task failed: {error}")),
+                        });
                 }
             }
         }
@@ -1588,24 +1614,38 @@ pub(crate) fn spawn_wiki_search(
     guard
 }
 
-async fn follow_wiki_search<F, Fut>(
+async fn follow_wiki_search<F, Fut, L, LiveFut>(
     delay: Duration,
     refresh: Duration,
     mut search: F,
     mut answer: impl FnMut(std::result::Result<mj_client::daemon::WikiSearchPage, String>),
+    mut live_search: L,
+    mut live_answer: impl FnMut(std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>),
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<mj_client::daemon::WikiSearchPage>>,
+    L: FnMut() -> LiveFut,
+    LiveFut: std::future::Future<Output = Result<Vec<mj_client::daemon::SessionTextMatch>>>,
 {
     tokio::time::sleep(delay).await;
     loop {
-        let result = search().await.map_err(|error| format!("{error:#}"));
-        let repeat = result.as_ref().is_ok_and(|page| {
-            use mj_client::daemon::WikiIndexState;
-            page.status.state == WikiIndexState::Indexing
-                || (page.status.state == WikiIndexState::Ready && page.status.topping_up)
-        });
-        answer(result);
+        // Publish each independent answer as soon as it is ready. Neither
+        // search can delay the other surface's results or hide its failure.
+        let (repeat, ()) = tokio::join!(
+            async {
+                let result = search().await.map_err(|error| format!("{error:#}"));
+                let repeat = result.as_ref().is_ok_and(|page| {
+                    use mj_client::daemon::WikiIndexState;
+                    page.status.state == WikiIndexState::Indexing
+                        || (page.status.state == WikiIndexState::Ready && page.status.topping_up)
+                });
+                answer(result);
+                repeat
+            },
+            async {
+                live_answer(live_search().await.map_err(|error| format!("{error:#}")));
+            }
+        );
         if !repeat {
             return;
         }
@@ -1799,6 +1839,8 @@ mod wiki_search_tests {
             Duration::from_secs(5),
             || std::future::ready(replies.pop_front().expect("no searches after ready")),
             |reply| answers.push((tokio::time::Instant::now() - started, reply.unwrap().status)),
+            || std::future::ready(Ok(Vec::new())),
+            |_| {},
         )
         .await;
         assert!(replies.is_empty());
@@ -1821,6 +1863,8 @@ mod wiki_search_tests {
                 Duration::from_secs(5),
                 || std::future::ready(reply.take().expect("no retry after failure or mismatch")),
                 |answer| answers.push(answer),
+                || std::future::ready(Ok(Vec::new())),
+                |_| {},
             )
             .await;
             assert_eq!(answers.len(), 1);
@@ -1835,5 +1879,50 @@ mod wiki_search_tests {
         drop(query);
         // Closure of the sender proves its supervising task and search task exit.
         assert!(replies.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_and_history_answers_arrive_independently_even_when_one_fails() {
+        for history_is_slow in [true, false] {
+            let started = tokio::time::Instant::now();
+            let mut history_at = None;
+            let mut live_at = None;
+            follow_wiki_search(
+                Duration::ZERO,
+                Duration::from_secs(5),
+                || async {
+                    if history_is_slow {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        Err(anyhow::anyhow!("history failed"))
+                    } else {
+                        Ok(page(WikiIndexState::Ready, false))
+                    }
+                },
+                |reply| {
+                    assert_eq!(reply.is_err(), history_is_slow);
+                    history_at = Some(started.elapsed());
+                },
+                || async {
+                    if history_is_slow {
+                        Ok(Vec::new())
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        Err(anyhow::anyhow!("live search failed"))
+                    }
+                },
+                |reply| {
+                    assert_eq!(reply.is_err(), !history_is_slow);
+                    live_at = Some(started.elapsed());
+                },
+            )
+            .await;
+            let (slow, fast) = if history_is_slow {
+                (history_at, live_at)
+            } else {
+                (live_at, history_at)
+            };
+            assert_eq!(slow, Some(Duration::from_secs(30)));
+            assert_eq!(fast, Some(Duration::ZERO));
+        }
     }
 }

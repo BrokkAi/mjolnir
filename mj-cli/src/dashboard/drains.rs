@@ -210,11 +210,6 @@ impl DashboardContext {
                     None
                 }
             };
-            let materialized = update
-                .view
-                .snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.materialized.clone());
             match apply_worker_poll_update(
                 &mut self.controller,
                 &mut self.dashboard,
@@ -222,21 +217,19 @@ impl DashboardContext {
                 update,
                 Some((&self.dashboard_io_tx, &self.critical_operations)),
             ) {
-                Ok(true) => {
-                    if let Some(materialized) = materialized {
-                        let viewed_through_event_ordinal = self
-                            .controller
-                            .state
-                            .sessions
-                            .get(&session_id)
-                            .map_or(0, |session| session.viewed_through_event_ordinal);
-                        self.request_materialized_projection(
-                            materialized,
-                            viewed_through_event_ordinal,
-                        );
-                    }
+                Ok(Some(materialized)) => {
+                    let viewed_through_event_ordinal = self
+                        .controller
+                        .state
+                        .sessions
+                        .get(&session_id)
+                        .map_or(0, |session| session.viewed_through_event_ordinal);
+                    self.request_materialized_projection(
+                        materialized,
+                        viewed_through_event_ordinal,
+                    );
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(error) => {
                     self.dashboard
                         .set_notice(format!("Could not save harness title: {error:#}"));

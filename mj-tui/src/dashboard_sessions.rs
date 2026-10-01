@@ -371,7 +371,7 @@ impl DashboardState {
 
     /// Whether the lower-cased `query` is in the session's name, id, project,
     /// profile, target, or branch.
-    fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {
+    pub(crate) fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {
         let source = self.project_source(session);
         let branch = session
             .managed_worktree

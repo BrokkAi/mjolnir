@@ -1532,7 +1532,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
     )
     .unwrap();
 
-    assert!(retitled);
+    assert!(retitled.is_some());
     assert_eq!(
         controller.state.sessions[session_id].listed_title(),
         "r5 suspend probe",

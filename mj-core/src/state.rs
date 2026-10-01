@@ -551,7 +551,7 @@ pub struct ManagedSessionSnapshot {
 ///
 /// A complete projection answers both by scanning what it already holds, which
 /// is what [`ProjectionWindow::of`] does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionWindow {
     /// Transcript items before the window. Zero when the projection is whole.
     pub omitted_items: usize,

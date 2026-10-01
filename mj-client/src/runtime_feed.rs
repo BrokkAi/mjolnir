@@ -1,13 +1,15 @@
 //! Keyed runtime publications. A cursor belongs to one daemon incarnation.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use mj_core::config::Config;
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
-use mj_core::state::{MoveOperation, SessionRecord};
+use mj_core::state::{MaterializedSession, MoveOperation, ProjectionWindow, SessionRecord};
 use mj_core::subagent::{SubagentPolicy, SubagentRecord};
+use mj_core::transcript::TranscriptItem;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::{RuntimeLifecycleView, RuntimeNotice, RuntimeSessionView};
@@ -29,6 +31,11 @@ pub struct RuntimeProjection {
     pub moves: SnapshotMap<String, MoveOperation>,
     pub native_agents: SnapshotMap<String, NativeAgentSummary>,
     pub metadata: RuntimeMetadata,
+    /// Each live session's transcript tail. Never part of a snapshot frame:
+    /// sixty tails can be hundreds of megabytes. A client fetches the tails it
+    /// needs at its cursor, then follows them through deltas.
+    #[serde(skip)]
+    pub transcripts: SnapshotMap<String, SessionTail>,
 }
 
 /// Configuration and bounded active-operation views are separate from history.
@@ -98,6 +105,269 @@ pub fn launch_recency(records: &SnapshotMap<String, SessionRecord>) -> Vec<Launc
         .collect()
 }
 
+/// Where an item sits in a transcript: its creating ordinal, then its stable
+/// id. The store reads transcripts in this order.
+pub type TailKey = (u64, String);
+
+/// The newest part of one session's transcript, as the daemon publishes it.
+///
+/// Items are shared with the daemon's live projection: an item that did not
+/// change keeps its `Arc` from one version to the next, so comparing two
+/// versions, applying a change, and dropping an old version all cost what
+/// changed rather than the whole tail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionTail {
+    /// The session's projection without its transcript.
+    pub header: MaterializedSession,
+    pub window: ProjectionWindow,
+    pub items: SnapshotMap<TailKey, Arc<TranscriptItem>>,
+}
+
+impl SessionTail {
+    /// The newest `limit` items of a published projection. `window` describes
+    /// what `materialized.transcript` already leaves out.
+    pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
+        let mut tail = Self {
+            header: transcript_header(materialized),
+            window: window.clone(),
+            items: SnapshotMap::new(),
+        };
+        tail.publish(materialized, window, limit);
+        tail
+    }
+
+    /// Bring this tail to a newly published projection. Items whose `Arc` is
+    /// unchanged are not touched; an item with a new `Arc` but equal content
+    /// keeps the old one, so a projection reloaded from the store reports
+    /// only the items whose content differs.
+    pub fn publish(
+        &mut self,
+        materialized: &MaterializedSession,
+        window: &ProjectionWindow,
+        limit: usize,
+    ) {
+        let start = materialized.transcript.len().saturating_sub(limit);
+        // The daemon calls this for every view it publishes, so it walks the
+        // held items and the published ones side by side in key order, and
+        // allocates only for what changed. The published transcript is
+        // already in this order but for ties, which the sort settles.
+        let mut kept = materialized.transcript[start..].iter().collect::<Vec<_>>();
+        kept.sort_by(|left, right| tail_key(left).cmp(&tail_key(right)));
+        let mut gone = Vec::new();
+        let mut changed = Vec::new();
+        let mut held = self.items.iter().peekable();
+        for item in kept {
+            let key = tail_key(item);
+            while let Some((held_key, _)) =
+                held.next_if(|(held_key, _)| (held_key.0, held_key.1.as_str()) < key)
+            {
+                gone.push(held_key.clone());
+            }
+            match held.next_if(|(held_key, _)| (held_key.0, held_key.1.as_str()) == key) {
+                // `Arc` equality compares pointers first, then contents.
+                Some((_, held_item)) if held_item == item => {}
+                _ => changed.push(item),
+            }
+        }
+        gone.extend(held.map(|(key, _)| key.clone()));
+        for key in gone {
+            self.items.remove(&key);
+        }
+        for item in changed {
+            self.items
+                .insert((item.position, item.stable_id.clone()), Arc::clone(item));
+        }
+        let header_changed = !same_header(&self.header, materialized);
+        if header_changed {
+            self.header = transcript_header(materialized);
+        }
+        let window = ProjectionWindow {
+            omitted_items: window.omitted_items + start,
+            ..window.clone()
+        };
+        if self.window != window {
+            self.window = window;
+        }
+    }
+
+    /// The projection this tail stands for, transcript included.
+    pub fn materialized(&self) -> MaterializedSession {
+        let mut materialized = self.header.clone();
+        materialized.transcript = self.items.values().cloned().collect();
+        materialized
+    }
+
+    /// What turns `before` into this tail. `None` before means the receiver
+    /// holds nothing yet, which a delta never assumes: see
+    /// [`TranscriptChange::Refetch`].
+    pub fn change_from(&self, before: &Self) -> TranscriptChange {
+        let mut upserts = Vec::new();
+        let mut removes = Vec::new();
+        for (key, entry) in before.items.changes(&self.items) {
+            match entry {
+                Some(item) => upserts.push(Arc::clone(item)),
+                None => removes.push(key.clone()),
+            }
+        }
+        TranscriptChange::Items(TranscriptItems {
+            header: (before.header != self.header).then(|| Box::new(self.header.clone())),
+            window: (before.window != self.window).then(|| self.window.clone()),
+            upserts,
+            removes,
+        })
+    }
+
+    fn apply(&mut self, change: TranscriptItems) {
+        let TranscriptItems {
+            header,
+            window,
+            upserts,
+            removes,
+        } = change;
+        if let Some(header) = header {
+            self.header = *header;
+        }
+        for key in removes {
+            self.items.remove(&key);
+        }
+        for item in upserts {
+            self.items
+                .insert((item.position, item.stable_id.clone()), item);
+        }
+        if let Some(window) = window {
+            self.window = window;
+        }
+    }
+}
+
+fn tail_key(item: &TranscriptItem) -> (u64, &str) {
+    (item.position, item.stable_id.as_str())
+}
+
+/// The parts of a projection a tail keeps besides its items.
+fn transcript_header(materialized: &MaterializedSession) -> MaterializedSession {
+    let MaterializedSession {
+        session_id,
+        applied_event_ordinal,
+        applied_event_digest,
+        last_activity_at_ms,
+        execution,
+        session_title,
+        configuration,
+        transcript: _,
+        queued_prompts,
+        pending_elicitations,
+        active_turn,
+        last_turn_outcome,
+    } = materialized;
+    MaterializedSession {
+        session_id: session_id.clone(),
+        applied_event_ordinal: *applied_event_ordinal,
+        applied_event_digest: applied_event_digest.clone(),
+        last_activity_at_ms: *last_activity_at_ms,
+        execution: *execution,
+        session_title: session_title.clone(),
+        configuration: configuration.clone(),
+        transcript: Vec::new(),
+        queued_prompts: queued_prompts.clone(),
+        pending_elicitations: pending_elicitations.clone(),
+        active_turn: active_turn.clone(),
+        last_turn_outcome: last_turn_outcome.clone(),
+    }
+}
+
+fn same_header(header: &MaterializedSession, materialized: &MaterializedSession) -> bool {
+    header.session_id == materialized.session_id
+        && header.applied_event_ordinal == materialized.applied_event_ordinal
+        && header.applied_event_digest == materialized.applied_event_digest
+        && header.last_activity_at_ms == materialized.last_activity_at_ms
+        && header.execution == materialized.execution
+        && header.session_title == materialized.session_title
+        && header.configuration == materialized.configuration
+        && header.queued_prompts == materialized.queued_prompts
+        && header.pending_elicitations == materialized.pending_elicitations
+        && header.active_turn == materialized.active_turn
+        && header.last_turn_outcome == materialized.last_turn_outcome
+}
+
+/// A session's whole tail at one feed cursor, answered on request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionTailReply {
+    Tail {
+        header: Box<MaterializedSession>,
+        window: ProjectionWindow,
+        /// Oldest first.
+        items: Vec<Arc<TranscriptItem>>,
+    },
+    /// The session has no projection at that cursor.
+    NoTail,
+    /// The daemon no longer holds that cursor; take a new snapshot first.
+    ResetRequired,
+}
+
+impl SessionTailReply {
+    pub fn of(tail: &SessionTail) -> Self {
+        Self::Tail {
+            header: Box::new(tail.header.clone()),
+            window: tail.window.clone(),
+            items: tail.items.values().cloned().collect(),
+        }
+    }
+}
+
+impl SessionTail {
+    /// A tail received whole, keeping each item's `Arc`.
+    pub fn from_parts(
+        header: MaterializedSession,
+        window: ProjectionWindow,
+        items: Vec<Arc<TranscriptItem>>,
+    ) -> Self {
+        let mut map = SnapshotMap::new();
+        for item in items {
+            map.insert((item.position, item.stable_id.clone()), item);
+        }
+        Self {
+            header,
+            window,
+            items: map,
+        }
+    }
+}
+
+/// Item changes to one session's tail between two feed versions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptItems {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Box<MaterializedSession>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<ProjectionWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upserts: Vec<Arc<TranscriptItem>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removes: Vec<TailKey>,
+}
+
+/// What a delta says about one session's transcript tail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TranscriptChange {
+    /// Apply these changes to the tail held at the delta's starting cursor.
+    Items(TranscriptItems),
+    /// The change was too large to send: drop the held tail and fetch it again.
+    Refetch,
+    /// The session no longer publishes a tail.
+    Removed,
+}
+
+impl TranscriptChange {
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Items(items)
+            if items.header.is_none() && items.window.is_none()
+                && items.upserts.is_empty() && items.removes.is_empty())
+    }
+}
+
 pub type KeyChanges<T> = Vec<(String, Option<T>)>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -109,6 +379,8 @@ pub struct RuntimeDelta {
     pub moves: KeyChanges<MoveOperation>,
     pub native_agents: KeyChanges<NativeAgentSummary>,
     pub metadata: Option<RuntimeMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcripts: Vec<(String, TranscriptChange)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +407,20 @@ impl RuntimeDelta {
             moves: changes(&before.moves, &after.moves),
             native_agents: changes(&before.native_agents, &after.native_agents),
             metadata: (before.metadata != after.metadata).then(|| after.metadata.clone()),
+            transcripts: before
+                .transcripts
+                .changes(&after.transcripts)
+                .map(|(id, tail)| {
+                    let change = match (tail, before.transcripts.get(id)) {
+                        (Some(tail), Some(held)) => tail.change_from(held),
+                        // A tail the receiver cannot hold yet is fetched, not
+                        // sent whole inside a delta.
+                        (Some(_), None) => TranscriptChange::Refetch,
+                        (None, _) => TranscriptChange::Removed,
+                    };
+                    (id.clone(), change)
+                })
+                .collect(),
         }
     }
 
@@ -146,6 +432,7 @@ impl RuntimeDelta {
             && self.moves.is_empty()
             && self.native_agents.is_empty()
             && self.metadata.is_none()
+            && self.transcripts.is_empty()
     }
 
     fn apply(self, projection: &mut RuntimeProjection) {
@@ -159,6 +446,20 @@ impl RuntimeDelta {
         apply_keys(&mut projection.native_agents, self.native_agents);
         if let Some(metadata) = self.metadata {
             projection.metadata = metadata;
+        }
+        // Only the tails this receiver holds are followed; the others are
+        // fetched when needed, at a cursor of their own.
+        for (id, change) in self.transcripts {
+            match change {
+                TranscriptChange::Items(items) => {
+                    if let Some(tail) = projection.transcripts.get_mut(&id) {
+                        tail.apply(items);
+                    }
+                }
+                TranscriptChange::Refetch | TranscriptChange::Removed => {
+                    projection.transcripts.remove(&id);
+                }
+            }
         }
     }
 }
@@ -334,5 +635,199 @@ mod tests {
             })
             .unwrap();
         assert_eq!(replica.cursor, Some(cursor("b", 1)));
+    }
+
+    fn agent_item(position: u64, text: &str) -> Arc<TranscriptItem> {
+        Arc::new(TranscriptItem {
+            stable_id: format!("agent:{position}"),
+            position,
+            latest_content_event_ordinal: Some(position),
+            created_at_ms: position as i64,
+            last_changed_at_ms: position as i64,
+            body: mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({
+                    "content": {"type": "text", "text": text},
+                })],
+                streaming: false,
+            },
+        })
+    }
+
+    fn materialized(items: Vec<Arc<TranscriptItem>>) -> MaterializedSession {
+        let mut session = MaterializedSession::empty("s");
+        session.applied_event_ordinal = items.last().map_or(0, |item| item.position);
+        session.transcript = items;
+        session
+    }
+
+    /// Sends a value through the wire encoding, as the daemon connection does.
+    fn wire<T: Serialize + serde::de::DeserializeOwned>(value: &T) -> T {
+        serde_json::from_slice(&serde_json::to_vec(value).unwrap()).unwrap()
+    }
+
+    fn projection_with(tail: &SessionTail) -> RuntimeProjection {
+        RuntimeProjection {
+            transcripts: [("s".to_owned(), tail.clone())].into(),
+            ..Default::default()
+        }
+    }
+
+    /// A client that fetched a tail at one cursor and then applies the
+    /// deltas after it holds exactly the daemon's tail, through appends,
+    /// in-place edits, removals, the tail bound, and a projection reloaded
+    /// with new pointers. Unchanged items keep their pointers on the client.
+    #[test]
+    fn a_fetched_tail_follows_its_deltas_to_the_daemons_tail() {
+        let limit = 40;
+        // 4 KiB per item: well past 64 KiB in the tail and in each step.
+        let text = |n: u64| format!("{n:04} {}", "lorem ipsum ".repeat(340));
+        let mut items = (1..=48)
+            .map(|position| agent_item(position, &text(position)))
+            .collect::<Vec<_>>();
+        let window = ProjectionWindow::default();
+        let mut daemon = SessionTail::of(&materialized(items.clone()), &window, limit);
+        assert_eq!(daemon.items.len(), limit);
+        assert_eq!(daemon.window.omitted_items, 8);
+        let mut replica = RuntimeReplica {
+            cursor: Some(cursor("a", 1)),
+            projection: RuntimeProjection::default(),
+        };
+        let SessionTailReply::Tail {
+            header,
+            window: fetched_window,
+            items: fetched,
+        } = wire(&SessionTailReply::of(&daemon))
+        else {
+            panic!("a tail was published");
+        };
+        replica.projection.transcripts.insert(
+            "s".into(),
+            SessionTail::from_parts(*header, fetched_window, fetched),
+        );
+        assert_eq!(replica.projection.transcripts["s"], daemon);
+
+        type Step = Box<dyn Fn(&mut Vec<Arc<TranscriptItem>>)>;
+        let steps: Vec<Step> = vec![
+            // A streamed message gains text: a new pointer for one item.
+            Box::new(|items| {
+                let last = items.len() - 1;
+                items[last] = agent_item(48, "grown");
+            }),
+            // New messages arrive and push the oldest out of the bound.
+            Box::new(|items| items.extend((49..=55).map(|n| agent_item(n, "new")))),
+            // A message inside the tail is removed.
+            Box::new(|items| items.retain(|item| item.position != 30)),
+            // The projection is reloaded from the store: every pointer is
+            // new, and one item's content changed (retention compaction).
+            Box::new(|items| {
+                for item in items.iter_mut() {
+                    *item = if item.position == 20 {
+                        agent_item(20, "compacted")
+                    } else {
+                        Arc::new((**item).clone())
+                    };
+                }
+            }),
+        ];
+        let mut sequence = 1;
+        for step in steps {
+            let before_daemon = daemon.clone();
+            let held_before = replica.projection.transcripts["s"].clone();
+            step(&mut items);
+            daemon.publish(&materialized(items.clone()), &window, limit);
+            let delta =
+                RuntimeDelta::between(&projection_with(&before_daemon), &projection_with(&daemon));
+            sequence += 1;
+            replica
+                .apply(RuntimeFrame::Delta {
+                    from: cursor("a", sequence - 1),
+                    cursor: cursor("a", sequence),
+                    changes: Box::new(wire(&delta)),
+                })
+                .unwrap();
+            let held = &replica.projection.transcripts["s"];
+            assert_eq!(held, &daemon, "after step {}", sequence - 1);
+            assert_eq!(held.materialized(), daemon.materialized());
+            for (key, now) in held.items.iter() {
+                if let Some(before) = held_before.items.get(key)
+                    && **before == **now
+                {
+                    assert!(
+                        Arc::ptr_eq(before, now),
+                        "unchanged item {key:?} kept its pointer"
+                    );
+                }
+            }
+        }
+        let reloaded = &replica.projection.transcripts["s"];
+        let compacted = reloaded
+            .items
+            .values()
+            .find(|item| item.position == 20)
+            .expect("position 20 is inside the bound");
+        assert_eq!(**compacted, *agent_item(20, "compacted"));
+        assert!(reloaded.items.values().all(|item| item.position != 30));
+        assert_eq!(reloaded.items.len(), limit);
+    }
+
+    /// A client follows only the tails it holds. A tail it does not hold is
+    /// fetched at a cursor of its own, a refetch marker drops the held one,
+    /// and a new snapshot drops them all.
+    #[test]
+    fn only_held_tails_are_followed_and_a_snapshot_drops_them() {
+        let tail = SessionTail::of(
+            &materialized(vec![agent_item(1, "one")]),
+            &ProjectionWindow::default(),
+            8,
+        );
+        let mut grown = tail.clone();
+        grown.publish(
+            &materialized(vec![agent_item(1, "one"), agent_item(2, "two")]),
+            &ProjectionWindow::default(),
+            8,
+        );
+        let mut replica = RuntimeReplica {
+            cursor: Some(cursor("a", 1)),
+            projection: RuntimeProjection::default(),
+        };
+        replica
+            .apply(RuntimeFrame::Delta {
+                from: cursor("a", 1),
+                cursor: cursor("a", 2),
+                changes: Box::new(RuntimeDelta::between(
+                    &projection_with(&tail),
+                    &projection_with(&grown),
+                )),
+            })
+            .unwrap();
+        assert!(
+            replica.projection.transcripts.is_empty(),
+            "a change to a tail the client never fetched is not applied"
+        );
+        replica
+            .projection
+            .transcripts
+            .insert("s".into(), grown.clone());
+        replica
+            .apply(RuntimeFrame::Delta {
+                from: cursor("a", 2),
+                cursor: cursor("a", 3),
+                changes: Box::new(RuntimeDelta {
+                    transcripts: vec![("s".into(), TranscriptChange::Refetch)],
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+        assert!(replica.projection.transcripts.is_empty());
+        replica.projection.transcripts.insert("s".into(), grown);
+        let snapshot = wire(&RuntimeFrame::Snapshot {
+            cursor: cursor("b", 1),
+            projection: Box::new(projection_with(&tail)),
+        });
+        replica.apply(snapshot).unwrap();
+        assert!(
+            replica.projection.transcripts.is_empty(),
+            "a snapshot carries no tails, so a new daemon's are fetched again"
+        );
     }
 }

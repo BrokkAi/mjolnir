@@ -568,6 +568,12 @@ pub enum DaemonAction {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     },
+    /// One live session's transcript tail as it was at `cursor`, so the
+    /// deltas after that cursor apply to it exactly.
+    SessionTail {
+        session_id: String,
+        cursor: crate::runtime_feed::RuntimeCursor,
+    },
     /// The sessions the resume dialog lists. The runtime feed carries only
     /// live sessions, so the dialog asks for these when it opens.
     ResumeCandidates,
@@ -768,6 +774,7 @@ pub enum DaemonReply {
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
+    SessionTail(Box<crate::runtime_feed::SessionTailReply>),
     ResumeCandidates(Box<ResumeCandidates>),
     GoStartupSession(Option<Box<SessionRecord>>),
     SessionRecord(Option<Box<SessionRecord>>),
@@ -802,7 +809,10 @@ impl DaemonReply {
     /// Replies that can outgrow one frame. The daemon sends them as
     /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
     pub fn is_chunked(&self) -> bool {
-        matches!(self, Self::RuntimeChanges(_) | Self::ResumeCandidates(_))
+        matches!(
+            self,
+            Self::RuntimeChanges(_) | Self::SessionTail(_) | Self::ResumeCandidates(_)
+        )
     }
 }
 
@@ -1925,6 +1935,20 @@ impl DaemonClient {
         }
     }
 
+    pub async fn session_tail(
+        &mut self,
+        session_id: String,
+        cursor: crate::runtime_feed::RuntimeCursor,
+    ) -> Result<crate::runtime_feed::SessionTailReply> {
+        match self
+            .request(DaemonAction::SessionTail { session_id, cursor })
+            .await?
+        {
+            DaemonReply::SessionTail(reply) => Ok(*reply),
+            reply => bail!("unexpected session tail reply {reply:?}"),
+        }
+    }
+
     pub async fn resume_candidates(&mut self) -> Result<ResumeCandidates> {
         match self.request(DaemonAction::ResumeCandidates).await? {
             DaemonReply::ResumeCandidates(candidates) => Ok(*candidates),
@@ -2347,7 +2371,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
     )
 }
 // Settings can warm draft profile capabilities through the daemon-owned catalog.
-pub const PROTOCOL_VERSION: u32 = 52;
+// Runtime deltas carry transcript item changes, and a client fetches a
+// session's tail from the daemon at its cursor instead of reading SQLite.
+pub const PROTOCOL_VERSION: u32 = 53;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

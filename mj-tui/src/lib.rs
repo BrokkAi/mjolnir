@@ -62,6 +62,7 @@ mod palette;
 mod render;
 mod render_changes;
 mod resume;
+mod retire;
 mod review_settings;
 mod setup;
 pub mod splash;

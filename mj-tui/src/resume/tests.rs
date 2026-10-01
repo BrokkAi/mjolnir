@@ -1659,6 +1659,188 @@ fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
     assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
 }
 
+fn type_resume_query(dashboard: &mut DashboardState, query: &str) -> u64 {
+    drawn(dashboard, 120, 40);
+    focus_resume_control(dashboard, ResumeFocus::Search);
+    for character in query.chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.resume_search_request_id().unwrap()
+}
+
+fn live_text_hit(session_id: &str) -> SessionTextMatch {
+    SessionTextMatch {
+        session_id: session_id.into(),
+        kind: mj_client::daemon::SessionTextMatchKind::User,
+    }
+}
+
+#[test]
+fn live_conversation_matches_open_and_preview_without_a_history_page_hit() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    dashboard
+        .state
+        .sessions
+        .get_mut("live-remote")
+        .unwrap()
+        .session_title_override = Some("SSCD duplicate detection with voyage 4 nano".into());
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    let request_id = type_resume_query(&mut dashboard, "rvector");
+    assert!(rows(&dashboard).is_empty());
+
+    // The limited history page can be empty or fail independently of Live.
+    apply_ready_rows(&mut dashboard, Vec::new());
+    assert!(
+        dashboard
+            .apply_resume_text_search_result(request_id, Ok(vec![live_text_hit("live-remote")]),)
+    );
+    assert_eq!(
+        titles(&rows(&dashboard)),
+        ["SSCD duplicate detection with voyage 4 nano"]
+    );
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::LoadArchivedHits {
+            wiki_id: "live-remote".into(),
+            query: "rvector".into(),
+        }
+    );
+    dashboard.apply_wiki_hits(
+        "live-remote".into(),
+        "rvector".into(),
+        Some(WikiHitTranscript {
+            blocks: vec![WikiHitBlock {
+                hits: vec![(7, 14)],
+                ..plain_block("user", "update rvector to use rq8")
+            }],
+            omitted_after: 0,
+        }),
+    );
+    let rendered = drawn(&mut dashboard, 160, 40).join("\n");
+    assert!(rendered.contains("update rvector to use rq8"), "{rendered}");
+    dashboard.apply_wiki_search_result(request_id, Err("history unavailable".into()));
+    assert_eq!(rows(&dashboard).len(), 1);
+    assert!(
+        !drawn(&mut dashboard, 160, 40)
+            .join("\n")
+            .contains("Search failed")
+    );
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("live-remote"));
+}
+
+#[test]
+fn editing_the_query_removes_old_live_matches_and_rejects_delayed_answers() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    let old = type_resume_query(&mut dashboard, "rvector");
+    dashboard.apply_resume_text_search_result(old, Ok(vec![live_text_hit("live-remote")]));
+    assert_eq!(rows(&dashboard).len(), 1);
+
+    let current = type_resume_query(&mut dashboard, "x");
+    assert!(
+        rows(&dashboard).is_empty(),
+        "old matches clear before debounce"
+    );
+    assert!(
+        !dashboard.apply_resume_text_search_result(old, Ok(vec![live_text_hit("live-remote")]))
+    );
+    assert!(!dashboard.apply_resume_text_search_result(old, Err("old failure".into())));
+    dashboard.apply_resume_text_search_result(current, Ok(Vec::new()));
+    assert!(rows(&dashboard).is_empty());
+
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        rows(&dashboard).len(),
+        3,
+        "clearing the query restores every live row"
+    );
+    assert!(
+        !dashboard.apply_resume_text_search_result(current, Ok(vec![live_text_hit("live-remote")]))
+    );
+}
+
+#[test]
+fn failed_live_search_keeps_metadata_matches_and_reports_the_failure() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    let request_id = type_resume_query(&mut dashboard, "mast");
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    dashboard.apply_resume_text_search_result(request_id, Err("index unavailable".into()));
+    apply_ready_rows(&mut dashboard, vec![wiki_row("old-session", true)]);
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    let rendered = drawn(&mut dashboard, 180, 40).join("\n");
+    assert!(
+        rendered.contains("Conversation search failed: index unavailable"),
+        "{rendered}"
+    );
+    switch_to_archive(&mut dashboard);
+    assert_eq!(titles(&rows(&dashboard)), ["archived old-session"]);
+}
+
+#[test]
+fn live_metadata_search_includes_project_branch_profile_target_and_workspace() {
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    let remote = dashboard.state.sessions.get_mut("live-remote").unwrap();
+    remote.project_directory = Some("/work/rvector-project".into());
+    remote.launch_branch = Some("rvector-branch".into());
+    remote.last_profile = "rvector-profile".into();
+    remote.target_template_id = "rvector-target".into();
+    dashboard.set_workspace_names(BTreeMap::from([(
+        "other".into(),
+        "rvector-workspace".into(),
+    )]));
+    for query in [
+        "rvector-project",
+        "rvector-branch",
+        "rvector-profile",
+        "rvector-target",
+        "rvector-workspace",
+    ] {
+        open_resume_dialog(&mut dashboard, 1, Vec::new());
+        type_resume_query(&mut dashboard, query);
+        assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"], "{query}");
+    }
+}
+
+#[test]
+fn live_conversation_matches_preserve_attention_filters_and_activity_order() {
+    let mut dashboard = dashboard_with_live_attention_mix();
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    let unfiltered_order = rows(&dashboard)
+        .into_iter()
+        .map(|row| row.key)
+        .collect::<Vec<_>>();
+    let request_id = type_resume_query(&mut dashboard, "rvector");
+    dashboard.apply_resume_text_search_result(
+        request_id,
+        Ok(vec![
+            live_text_hit("live-remote"),
+            live_text_hit("live-beta"),
+            live_text_hit("live-alpha"),
+        ]),
+    );
+    assert_eq!(
+        rows(&dashboard)
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>(),
+        unfiltered_order
+    );
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    dashboard.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    dashboard.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(titles(&rows(&dashboard)), ["Count the coins"]);
+}
+
 /// I1-16: LAST ACTIVE for a running session is its last activity, not the
 /// time its record was last written (often its creation).
 #[test]
@@ -2646,6 +2828,7 @@ fn an_empty_tab_keeps_its_answer_while_the_index_syncs() {
 fn search_errors_obey_query_identity_and_end_the_pending_state() {
     let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
     open_resume_dialog(&mut dashboard, 1, Vec::new());
+    switch_to_archive(&mut dashboard);
     replace_search(&mut dashboard, "quokka");
     let (old, _) = dashboard.next_wiki_search().unwrap();
     let (current, _) = dashboard.next_wiki_search().unwrap();
@@ -3080,6 +3263,11 @@ fn search_reply_clears_pending_for_matching_request_only() {
 
     dashboard.apply_wiki_search(request_id, ready_page(Vec::new()));
     assert!(!pending(&dashboard));
+    assert!(
+        dashboard.needs_fast_tick(),
+        "Live is still awaiting its independent answer"
+    );
+    dashboard.apply_resume_text_search_result(request_id, Ok(Vec::new()));
     assert!(!dashboard.needs_fast_tick());
 }
 

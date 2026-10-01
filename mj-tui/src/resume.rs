@@ -29,7 +29,8 @@ use ratatui::widgets::Paragraph;
 
 use mj_client::daemon::ResumeCandidate;
 use mj_client::daemon::{
-    WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
+    SessionTextMatch, WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage,
+    WikiStatus,
 };
 use mj_core::config::{Config, HarnessKind};
 use mj_core::snapshot_map::SnapshotMap;
@@ -263,6 +264,9 @@ pub(crate) struct ResumeDialog {
     /// request is stale and dropped.
     pub(crate) wiki_request_id: u64,
     pub(crate) wiki_search: WikiSearchState,
+    /// The live conversation answer for the same query generation. It is
+    /// independent of the limited history page and its failures.
+    pub(crate) live_search: LiveSearchState,
     /// Briefings already fetched, by SessionWiki id, for the dialog's life.
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
@@ -337,6 +341,19 @@ pub(crate) enum WikiSearchState {
     Pending,
     Answered(WikiStatus),
     Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiveSearchState {
+    Pending,
+    Answered(BTreeSet<String>),
+    Failed(String),
+}
+
+impl LiveSearchState {
+    fn matches(&self, session_id: &str) -> bool {
+        matches!(self, Self::Answered(matches) if matches.contains(session_id))
+    }
 }
 
 impl WikiSearchState {
@@ -960,10 +977,9 @@ fn archive_details(hit: &WikiRow) -> String {
 /// query a tab lists everything it owns, newest first. With a query it lists
 /// only the rows the index returned, in the order the index ranked them, so
 /// what the dialog shows and what SessionWiki found are the same thing. The
-/// Live tab takes the other path, [`DashboardState::live_resume_rows`], because
-/// a running session has no index rank unless a query happened to match its
-/// transcript, and dropping the unranked rows would empty the tab exactly when
-/// someone typed a session's name into the box.
+/// Live tab takes the other path, [`DashboardState::live_resume_rows`], so
+/// metadata matches appear immediately and conversation matches are not
+/// restricted to the history page.
 fn build_resume_rows(
     config: &Config,
     state: &State,
@@ -1049,6 +1065,15 @@ impl DashboardState {
                     .live_state
                     .is_none_or(|state| state.admits(self.attention_level(&session.id)))
             })
+            .filter(|session| {
+                query.is_empty()
+                    || self.session_matches_metadata(session, &query)
+                    || self
+                        .workspace_display_name(&session.workspace_id)
+                        .to_lowercase()
+                        .contains(&query)
+                    || dialog.live_search.matches(&session.id)
+            })
             .map(|session| {
                 let workspace = self.workspace_display_name(&session.workspace_id);
                 ResumeRow {
@@ -1079,21 +1104,14 @@ impl DashboardState {
                     natively_archived: false,
                     unavailable_reason: None,
                     move_recovery: None,
-                    wiki_match: None,
+                    wiki_match: dialog
+                        .live_search
+                        .matches(&session.id)
+                        .then(|| session.id.clone()),
                     wiki_rank: None,
                     wiki_profile: None,
                     wiki_target: None,
                 }
-            })
-            .filter(|row| {
-                query.is_empty()
-                    || [
-                        row.title.as_str(),
-                        row.session_id().unwrap_or_default(),
-                        row.origin.as_str(),
-                    ]
-                    .iter()
-                    .any(|field| field.to_lowercase().contains(&query))
             })
             .collect::<Vec<_>>();
         // Newest first, with the key breaking ties so the order holds still
@@ -1176,6 +1194,8 @@ impl DashboardState {
             Mode::ResumeDialog(dialog) => {
                 (dialog.is_scanning() && dialog.tab == ResumeTab::Import)
                     || dialog.wiki_search == WikiSearchState::Pending
+                    || (dialog.tab == ResumeTab::Live
+                        && dialog.live_search == LiveSearchState::Pending)
                     || dialog.history == HistoryLoad::Loading
             }
             Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
@@ -1218,6 +1238,7 @@ impl DashboardState {
             wiki: Arc::new(Vec::new()),
             wiki_request_id: self.wiki_search_generation,
             wiki_search: WikiSearchState::Pending,
+            live_search: LiveSearchState::Answered(BTreeSet::new()),
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
             hits: Arc::new(BTreeMap::new()),
@@ -1375,6 +1396,29 @@ impl DashboardState {
 
     pub fn apply_wiki_search(&mut self, request_id: u64, page: WikiSearchPage) {
         self.apply_wiki_search_result(request_id, Ok(page));
+    }
+
+    /// Both searches belong to the dialog's one query generation; a delayed
+    /// answer can never put an older query's rows or previews into the list.
+    pub fn apply_resume_text_search_result(
+        &mut self,
+        request_id: u64,
+        result: Result<Vec<SessionTextMatch>, String>,
+    ) -> bool {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
+            return false;
+        };
+        if dialog.wiki_request_id != request_id {
+            return false;
+        }
+        dialog.live_search = match result {
+            Ok(matches) => {
+                LiveSearchState::Answered(matches.into_iter().map(|hit| hit.session_id).collect())
+            }
+            Err(error) => LiveSearchState::Failed(error),
+        };
+        self.rebuild_resume_rows();
+        true
     }
 
     /// Successes and failures share one admission point, including refreshes.
@@ -1551,7 +1595,15 @@ impl DashboardState {
         self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
         dialog.wiki_request_id = self.wiki_search_generation;
         dialog.wiki_search = WikiSearchState::Pending;
-        Some((dialog.wiki_request_id, dialog.search.to_string()))
+        dialog.live_search = if dialog.search.value().trim().is_empty() {
+            LiveSearchState::Answered(BTreeSet::new())
+        } else {
+            LiveSearchState::Pending
+        };
+        dialog.wiki = Arc::new(Vec::new());
+        let request = (dialog.wiki_request_id, dialog.search.to_string());
+        self.rebuild_resume_rows();
+        Some(request)
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
@@ -1668,9 +1720,9 @@ impl DashboardState {
             return DashboardAction::None;
         };
         dialog.search.clear();
-        self.rebuild_resume_rows();
+        let action = self.wiki_search_action();
         self.select_resume_row(0);
-        self.wiki_search_action()
+        action
     }
 
     pub(crate) fn select_resume_row(&mut self, index: usize) {
@@ -1902,9 +1954,9 @@ impl DashboardState {
             Some(Interaction::Cancel | Interaction::Activate(Cancel)) => self.cancel_modal(),
             Some(Interaction::Edit(Search, edit)) => {
                 TextField::apply(&mut dialog.search, edit);
-                self.rebuild_resume_rows();
+                let action = self.wiki_search_action();
                 self.select_resume_row(0);
-                return self.wiki_search_action();
+                return action;
             }
             Some(Interaction::Select(Tabs, index)) => {
                 return self.switch_resume_tab(ResumeTab::from_index(index));
@@ -2494,8 +2546,8 @@ fn resume_tab_labels(dashboard: &DashboardState, dialog: &ResumeDialog) -> Vec<S
     .into_iter()
     .map(|(tab, name)| {
         let mut label = format!(" {name}");
-        // The counts are the index's, and the Live tab does not use the index.
-        // A zero beside it would deny the matches its own search just found.
+        // History counts belong to the limited index page. Live also has
+        // immediate metadata matches and a separate conversation answer.
         if searching && tab != ResumeTab::Live {
             label.push_str(&format!(" · {}", hits[tab.index()]));
         }
@@ -2550,6 +2602,21 @@ fn resume_list_title(
             (ResumeTab::Import, _) => Span::raw("Importable sessions · newest first"),
             (ResumeTab::Archive, _) => Span::raw("Archived sessions · newest first"),
         });
+    } else if dialog.tab == ResumeTab::Live {
+        spans.push(Span::raw(match_count(rows)));
+        match &dialog.live_search {
+            LiveSearchState::Pending => {
+                spans.push(mj_chat::spinner::compact_span(
+                    dashboard.config.spinner,
+                    dialog.opened_at.elapsed().as_millis(),
+                ));
+                spans.push(Span::raw(" Searching conversations…"));
+            }
+            LiveSearchState::Failed(error) => {
+                spans.push(Span::raw(format!(" · Conversation search failed: {error}")));
+            }
+            LiveSearchState::Answered(_) => {}
+        }
     } else {
         match &dialog.wiki_search {
             WikiSearchState::Pending => {

@@ -40,6 +40,11 @@ pub(super) struct RuntimeStateOwner {
     pub(super) close_requested: BTreeSet<String>,
     pub(super) indexes: RecordIndexes,
     pub(super) sessions: mj_core::snapshot_map::SnapshotMap<String, RuntimeSessionView>,
+    /// The transcript tail of every view in `sessions` that has a projection.
+    /// Only [`Self::publish_view`] and the removals beside `sessions` change
+    /// it, so the two never disagree about which sessions are published.
+    pub(super) transcripts:
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionTail>,
     /// Sessions the session manager is told to run a relay actor for. Only
     /// these hold a view in `sessions`: a retired actor publishes no final
     /// view, so without this a stopped session kept its last live one.
@@ -84,6 +89,7 @@ impl RuntimeStateOwner {
     pub(super) fn install_relay_sessions(&mut self, sessions: BTreeSet<String>) -> bool {
         let before = self.sessions.len();
         self.sessions.retain(|id, _| sessions.contains(id));
+        self.transcripts.retain(|id, _| sessions.contains(id));
         self.background_policies
             .retain(|id, _| sessions.contains(id));
         self.relay_sessions = sessions;
@@ -94,6 +100,37 @@ impl RuntimeStateOwner {
     /// still meant to run. A late view from a retired actor does not.
     pub(super) fn runs_relay_actor(&self, session_id: &str) -> bool {
         self.relay_sessions.contains(session_id)
+    }
+
+    /// Record the view a relay actor published, and bring the session's
+    /// transcript tail to it. A view without a projection has no tail.
+    pub(super) fn publish_view(&mut self, session_id: String, view: ManagedSessionView) {
+        match view.snapshot.as_ref() {
+            Some(snapshot) => match self.transcripts.get_mut(&session_id) {
+                Some(tail) => tail.publish(
+                    &snapshot.materialized,
+                    &snapshot.window,
+                    crate::database::PROJECTION_TAIL_ITEMS,
+                ),
+                None => {
+                    self.transcripts.insert(
+                        session_id.clone(),
+                        mj_client::runtime_feed::SessionTail::of(
+                            &snapshot.materialized,
+                            &snapshot.window,
+                            crate::database::PROJECTION_TAIL_ITEMS,
+                        ),
+                    );
+                }
+            },
+            None => {
+                self.transcripts.remove(&session_id);
+            }
+        }
+        self.sessions.insert(
+            session_id.clone(),
+            RuntimeSessionView::from_managed(session_id, view),
+        );
     }
 
     pub(super) fn install_config(&mut self, config: Config) {
@@ -118,6 +155,7 @@ impl RuntimeStateOwner {
             close_requested: BTreeSet::new(),
             indexes,
             sessions: Default::default(),
+            transcripts: Default::default(),
             relay_sessions: BTreeSet::new(),
             background_policies: BTreeMap::new(),
             completed: VecDeque::new(),
@@ -153,6 +191,7 @@ impl RuntimeStateOwner {
         for (id, record) in before.sessions.changes(&self.controller.state.sessions) {
             if record.is_none() {
                 self.sessions.remove(id);
+                self.transcripts.remove(id);
                 self.background_policies.remove(id);
             }
         }

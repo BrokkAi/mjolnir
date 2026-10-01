@@ -661,3 +661,115 @@ fn runtime_projection_view_reports_a_persistent_mismatch_after_bounded_retries()
     ));
     assert!(view.snapshot.is_none());
 }
+
+fn scripted_polls(
+    snapshots: Vec<mj_client::runtime_feed::RuntimeProjection>,
+) -> impl Fn(
+    String,
+    u64,
+) -> std::pin::Pin<
+    Box<dyn Future<Output = anyhow::Result<mj_client::runtime_feed::RuntimeProjection>> + Send>,
+> + Send
++ 'static {
+    let snapshots = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+        snapshots,
+    )));
+    move |_workspace_id, _after_revision| {
+        let next = snapshots.lock().unwrap().pop_front();
+        Box::pin(async move {
+            match next {
+                Some(snapshot) => Ok(snapshot),
+                None => std::future::pending().await,
+            }
+        })
+    }
+}
+
+async fn next_session_update(feed: &mut RuntimeFeed) -> ManagedSessionView {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), feed.updates.recv())
+            .await
+            .expect("the feed publishes the session")
+            .expect("the feed runs")
+        {
+            RuntimeFeedUpdate::Session { view, .. } => return *view,
+            RuntimeFeedUpdate::Error(error) => panic!("unexpected feed error: {error}"),
+            RuntimeFeedUpdate::Snapshot(_) | RuntimeFeedUpdate::SessionRemoved(_) => {}
+        }
+    }
+}
+
+/// A tail fetched at a cursor the daemon has already let go of is not a
+/// broken session: the feed takes a new snapshot and fetches again.
+#[tokio::test(start_paused = true)]
+async fn an_expired_tail_cursor_is_fetched_again_rather_than_reported() {
+    let poll = scripted_polls(vec![
+        snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        ),
+        snapshot(
+            1,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        ),
+    ]);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let load = move |session_id: String| {
+        let read = reads.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if read == 0 {
+                Err(anyhow::Error::new(TailCursorExpired))
+            } else {
+                Ok(Some(projection(&session_id, 1, "digest-1")))
+            }
+        }
+    };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    let view = next_session_update(&mut feed).await;
+    assert!(view.error.is_none(), "{:?}", view.error);
+    assert!(view.snapshot.is_some());
+}
+
+/// A relay actor reloaded from the store can change an item's content
+/// without moving the session's ordinal. The tail changed, so the session's
+/// view is published again.
+#[tokio::test(start_paused = true)]
+async fn a_tail_that_changed_at_the_same_ordinal_is_published_again() {
+    let tail = |text: &str| {
+        let mut materialized = MaterializedSession::empty("session-1");
+        materialized.applied_event_ordinal = 1;
+        materialized.applied_event_digest = "digest-1".into();
+        materialized.transcript = vec![Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: "agent:1".into(),
+            position: 1,
+            latest_content_event_ordinal: Some(1),
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": text}})],
+                streaming: false,
+            },
+        })];
+        mj_client::runtime_feed::SessionTail::of(&materialized, &ProjectionWindow::default(), 16)
+    };
+    let with_tail = |revision, text: &str| {
+        let mut projection = snapshot(
+            revision,
+            vec![runtime_view("session-1", 1, "digest-1")],
+            Vec::new(),
+        );
+        projection
+            .transcripts
+            .insert("session-1".into(), tail(text));
+        projection
+    };
+    let poll = scripted_polls(vec![with_tail(1, "full output"), with_tail(2, "compacted")]);
+    let load = |session_id: String| async move { Ok(Some(projection(&session_id, 1, "digest-1"))) };
+    let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
+
+    next_session_update(&mut feed).await;
+    next_session_update(&mut feed).await;
+}
