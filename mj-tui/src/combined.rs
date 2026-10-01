@@ -22,8 +22,7 @@ use crate::render::{
     capacity_table_width, minimized_pane_size_controls, minimized_quota_line,
     minimized_sessions_content_height, minimized_targets_line, pane_size_control_areas,
     pane_title_content_width, quota_table_width, render_capacity, render_footer, render_modal,
-    render_onboarding_surface, render_quotas, render_sessions, render_terminal_too_small,
-    sessions_content_height,
+    render_quotas, render_sessions, render_terminal_too_small, sessions_content_height,
 };
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
@@ -444,10 +443,6 @@ fn render_combined_themed(
         )),
         _ => None,
     };
-    if dashboard.config_is_empty() && dashboard.state.sessions.is_empty() {
-        render_onboarding_surface(frame, dashboard);
-        return Vec::new();
-    }
 
     let sidebar_width = if narrow {
         area.width
