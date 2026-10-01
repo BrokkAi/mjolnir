@@ -257,10 +257,14 @@ impl ViewerSnapshot {
                     project_label: source.short,
                     project_key: project_key(&source.key),
                     display_location: project.project_target(config, &session.target_template_id),
+                    container_cpus: session.container_cpus.clone(),
+                    container_memory: session.container_memory.clone(),
+                    additional_mounts: session.additional_mounts.clone(),
                     lifecycle,
                     transitioning: session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,
                     last_activity_at_ms: None,
+                    last_message_at_ms: None,
                     activity_details: None,
                     activity: String::new(),
                     operation: None,
@@ -291,6 +295,13 @@ impl ViewerSnapshot {
                         move_session: false,
                         set_config: false,
                         set_plan_mode: false,
+                        // All four need facts the durable record alone does
+                        // not hold -- the workspace count, runtime ownership
+                        // -- so the phone projection widens them later.
+                        change_workspace: false,
+                        container_settings: false,
+                        restart: false,
+                        interrupt_all: false,
                     },
                 }
             })
@@ -510,6 +521,18 @@ pub struct ViewerSession {
     /// same target projection the terminal uses while a session is running.
     #[serde(default)]
     pub display_location: String,
+    /// Per-session container CPU limit overriding the target template's. It
+    /// is applied the next time the session's container is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_cpus: Option<String>,
+    /// Per-session container memory limit overriding the target template's.
+    /// It is applied the next time the session's container is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_memory: Option<String>,
+    /// Extra directories attached to this session's container, in the same
+    /// persisted shape the terminal's container dialog edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_mounts: Vec<AdditionalMount>,
     pub lifecycle: ViewerLifecycleCategory,
     /// A lifecycle transition temporarily owns this session's conversation.
     /// This remains separate from the coarse lifecycle category so Move can
@@ -526,6 +549,12 @@ pub struct ViewerSession {
     /// delivered a projection for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at_ms: Option<i64>,
+    /// When the newest top-level user or agent message in the browser
+    /// transcript was recorded, in epoch milliseconds. Tool calls and status
+    /// lines do not move it. Absent when the transcript holds no such message
+    /// with a recording time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at_ms: Option<i64>,
     /// Structured live activity, absent when no operational relay snapshot is
     /// available for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1014,6 +1043,23 @@ pub struct ViewerSessionCapabilities {
     pub move_session: bool,
     pub set_config: bool,
     pub set_plan_mode: bool,
+    /// Move the session, and the sub-agents under it, to another workspace.
+    #[serde(default)]
+    pub change_workspace: bool,
+    /// Record the session's container size overrides and attached
+    /// directories. Only a session whose target runs in a container has
+    /// these, and they apply the next time its container is created.
+    #[serde(default)]
+    pub container_settings: bool,
+    /// Suspend the session if it is live and immediately resume it with the
+    /// profile, target and mounts it last ran with. A suspended session needs
+    /// a recovery copy to come back from.
+    #[serde(default)]
+    pub restart: bool,
+    /// Stop the turn of this session and of every sub-agent under it,
+    /// leaving the sessions alive.
+    #[serde(default)]
+    pub interrupt_all: bool,
 }
 
 /// The small set of states a phone reasons about, alongside the precise state.

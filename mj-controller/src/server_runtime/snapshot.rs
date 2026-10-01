@@ -172,6 +172,9 @@ pub(super) fn session_capabilities(
     operational: Option<&mj_core::relay::RelayOperationalState>,
     operation: Option<&crate::server::ViewerOperation>,
     facts: Option<&mj_core::acp::AcpSessionFacts>,
+    workspace_count: usize,
+    container_target: bool,
+    tree_turn_running: bool,
 ) -> crate::server::ViewerSessionCapabilities {
     use crate::server::ViewerLifecycleCategory;
 
@@ -247,6 +250,21 @@ pub(super) fn session_capabilities(
             && !mutation_busy
             && idle
             && facts.is_some_and(mj_core::acp::AcpSessionFacts::supports_plan_mode),
+        // Moving between workspaces is a durable-record edit, but offering it
+        // needs the one fact the record does not hold: that another workspace
+        // exists. The terminal refuses with "there is no other workspace".
+        change_workspace: workspace_count >= 2 && !mutation_busy,
+        // The container gate shares the terminal's classifier: the session's
+        // configured target template decides, never the worker's report.
+        container_settings: container_target && !mutation_busy,
+        // A live session restarts from a fresh recovery copy; a suspended one
+        // comes back from the checkpoint it already has. The terminal gates
+        // the same way, plus idle, which `mutation_busy` stands in for here.
+        restart: (session.lifecycle.is_dashboard_visible() || session.has_checkpoint)
+            && !mutation_busy,
+        // True when this session or any sub-agent under it has a turn running,
+        // which the execution arm re-checks against the live handles.
+        interrupt_all: !mutation_busy && tree_turn_running,
     }
 }
 
@@ -752,11 +770,51 @@ pub(super) fn viewer_snapshot_selected(
         session.turn_review = reviews
             .get(&session.id)
             .map(crate::server::ViewerTurnReview::from_runtime);
-        session.capabilities =
-            session_capabilities(session, live, operations.get(&session.id), facts.as_ref());
+        // Two capability inputs the session row itself does not carry: whether
+        // its configured target template runs a container, and whether any
+        // session in its sub-agent tree has a turn running. The InterruptAll
+        // execution walks the same tree this measures.
+        let container_target = controller
+            .state
+            .sessions
+            .get(&session.id)
+            .and_then(|record| controller.config.targets.get(&record.target_template_id))
+            .is_some_and(mj_core::config::is_container_target);
+        let tree_turn_running = std::iter::once(session.id.as_str())
+            .chain(
+                controller
+                    .state
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == session.id)
+                    .map(|child| child.child_session_id.as_str()),
+            )
+            .any(|id| {
+                operational.get(id).is_some_and(|state| {
+                    state.active_prompt.is_some() || state.harness_turn.is_some()
+                })
+            });
+        session.capabilities = session_capabilities(
+            session,
+            live,
+            operations.get(&session.id),
+            facts.as_ref(),
+            workspaces.len(),
+            container_target,
+            tree_turn_running,
+        );
         session.available_commands = phone_commands(session, live);
         if let Some(transcript) = conversations.get(&session.id) {
             session.conversation_available = true;
+            // The card's last-message clock moves only on top-level
+            // conversation entries, never on tool calls or status lines. It
+            // is computed even while transitioning, unlike the preview below.
+            session.last_message_at_ms = transcript
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.role, "user" | "agent"))
+                .filter_map(|entry| entry.recorded_at_ms)
+                .max();
             if !session.transitioning {
                 let mut lines = transcript
                     .entries

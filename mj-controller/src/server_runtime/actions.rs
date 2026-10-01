@@ -122,7 +122,7 @@ pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
     action: ControllerAction,
-    _executor: &(impl CommandExecutor + Sync),
+    executor: &(impl CommandExecutor + Sync),
     action_id: u64,
     started: &tokio::sync::mpsc::UnboundedSender<PhoneActionStarted>,
     control: &PhoneActionControl,
@@ -469,6 +469,128 @@ pub(super) async fn apply_phone_action(
                 .client()
                 .apply_plan_control(new_command_id("phone-plan-mode")?, control)
                 .await?;
+            Ok(())
+        }
+        ControllerAction::ChangeWorkspace {
+            session_id,
+            workspace_id,
+        } => {
+            controller.set_session_workspace(&session_id, &workspace_id)?;
+            Ok(())
+        }
+        ControllerAction::SetContainerSettings {
+            session_id,
+            cpus,
+            memory,
+            mounts,
+        } => {
+            // The dialog that edits these owns the suggestion list, so the
+            // remembered sources pass through unchanged: the update persists
+            // them again beside the new mounts.
+            let mount_history = {
+                let record = controller
+                    .state
+                    .sessions
+                    .get(&session_id)
+                    .with_context(|| format!("unknown session {session_id}"))?;
+                controller
+                    .config
+                    .targets
+                    .get(&record.target_template_id)
+                    .and_then(mj_core::config::mount_history_host)
+                    .and_then(|host| controller.state.mount_history.get(host))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            controller.update_session_container_settings(
+                &session_id,
+                cpus,
+                memory,
+                mounts,
+                mount_history,
+                executor,
+            )?;
+            Ok(())
+        }
+        ControllerAction::Restart { session_id } => {
+            // The terminal's restart: stop the live session first, then resume
+            // it with the settings its record last ran with.
+            let record = controller
+                .state
+                .sessions
+                .get(&session_id)
+                .cloned()
+                .with_context(|| format!("unknown session {session_id}"))?;
+            if record.state.is_active() {
+                services
+                    .daemon_runtime
+                    .suspend_session_with_ack(session_id.clone(), true)
+                    .await?;
+            }
+            // A cancel that landed during the stop must not run the second
+            // half and leave the session resuming after all.
+            anyhow::ensure!(
+                !control.cancelled.load(Ordering::Acquire),
+                "restart cancelled after stopping"
+            );
+            services
+                .daemon_runtime
+                .resume_session(ResumeSessionRequest {
+                    session_id,
+                    workspace_id: record.workspace_id,
+                    profile_id: record.last_profile,
+                    target_template_id: record.target_template_id,
+                    additional_mounts: Some(record.additional_mounts),
+                    resource_allocation: record.resource_allocation,
+                    discard_queue: false,
+                    repository_preflight: None,
+                })
+                .await
+                .map(|_| ())
+        }
+        ControllerAction::InterruptAll { session_id } => {
+            // The same tree the interrupt_all capability measured: this
+            // session and the sub-agents directly under it. Children are
+            // never nested.
+            let mut ids = vec![session_id.clone()];
+            ids.extend(
+                controller
+                    .state
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == session_id)
+                    .map(|child| child.child_session_id.clone()),
+            );
+            let mut failed = 0_usize;
+            for id in ids {
+                // A session the manager no longer holds has no turn to stop.
+                let Ok(handle) = services.sessions.session(&id).await else {
+                    continue;
+                };
+                let turn_running = handle.view().snapshot.is_some_and(|snapshot| {
+                    snapshot.operational.active_prompt.is_some()
+                        || snapshot.operational.harness_turn.is_some()
+                });
+                if !turn_running {
+                    continue;
+                }
+                if handle
+                    .submit(
+                        new_command_id("phone-interrupt-all")?,
+                        RelayCommand::CancelTurn,
+                    )
+                    .await
+                    .is_err()
+                {
+                    failed += 1;
+                }
+            }
+            // The successes are not rolled back, so one failure reads as a
+            // count of what could not be interrupted, not a named session.
+            anyhow::ensure!(
+                failed == 0,
+                "could not interrupt {failed} of the tree's sessions"
+            );
             Ok(())
         }
         // Refreshes are handled by the phone control loop, which owns the

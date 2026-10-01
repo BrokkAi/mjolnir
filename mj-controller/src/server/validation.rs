@@ -606,6 +606,48 @@ fn validate_action_against(
                 ));
             }
         }
+        ControllerAction::ChangeWorkspace {
+            session_id,
+            workspace_id,
+        } => {
+            validate_public_id(session_id)?;
+            validate_public_id(workspace_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            if !session.capabilities.change_workspace {
+                return Err(ApiError::bad_request(
+                    "this session cannot change workspace now",
+                ));
+            }
+            require_workspace(snapshot, workspace_id)?;
+        }
+        ControllerAction::SetContainerSettings { session_id, .. } => {
+            validate_public_id(session_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            if !session.capabilities.container_settings {
+                return Err(ApiError::bad_request(
+                    "this session cannot change container settings now",
+                ));
+            }
+        }
+        ControllerAction::Restart { session_id } => {
+            validate_public_id(session_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            if !session.capabilities.restart {
+                return Err(ApiError::bad_request(
+                    "this session cannot be restarted now",
+                ));
+            }
+        }
+        ControllerAction::InterruptAll { session_id } => {
+            validate_public_id(session_id)?;
+            let session = require_session_record(snapshot, session_id)?;
+            if !session.capabilities.interrupt_all {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "no turn is running here or in its sub-agents",
+                ));
+            }
+        }
         ControllerAction::RefreshQuota { profile_id } => {
             validate_public_id(profile_id)?;
             require_profile(snapshot, profile_id)?;

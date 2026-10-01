@@ -74,6 +74,34 @@ pub enum ControllerAction {
         session_id: String,
         active: bool,
     },
+    /// Move a session, and the sub-agents under it, to another workspace.
+    ChangeWorkspace {
+        session_id: String,
+        workspace_id: String,
+    },
+    /// Record the session's container size overrides and attached
+    /// directories. An empty or absent size clears that override, and the
+    /// mounts list replaces the whole list. Nothing changes inside a running
+    /// container: the values are read the next time it is created.
+    SetContainerSettings {
+        session_id: String,
+        #[serde(default)]
+        cpus: Option<String>,
+        #[serde(default)]
+        memory: Option<String>,
+        #[serde(default)]
+        mounts: Vec<AdditionalMount>,
+    },
+    /// Suspend the session if it is live, then resume it with the profile,
+    /// target and mounts it last ran with.
+    Restart {
+        session_id: String,
+    },
+    /// Stop the turn this session is working on and the turns of every
+    /// sub-agent under it, leaving the sessions alive.
+    InterruptAll {
+        session_id: String,
+    },
     RefreshQuota {
         profile_id: String,
     },

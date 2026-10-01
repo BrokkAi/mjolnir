@@ -689,6 +689,232 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     assert!(unknown.sessions[0].activity_details.is_none());
 }
 
+/// The session actions the viewer mirrors from the terminal are gated on the
+/// same facts the terminal checks: another workspace to move to, a container
+/// target, a session that is live or holds a recovery copy, and a turn
+/// running somewhere in the sub-agent tree.
+#[test]
+fn phone_snapshot_gates_the_terminal_session_actions() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    controller.config.targets.insert(
+        "podman".into(),
+        serde_json::from_value(serde_json::json!({
+            "kind": "local-podman",
+            "image": "image",
+        }))
+        .unwrap(),
+    );
+    for id in ["session-1", "child-1"] {
+        let mut record = phone_session(id, 0);
+        record.state = SessionState::Running;
+        controller.state.sessions.insert(id.to_owned(), record);
+    }
+    controller.state.subagents.insert(
+        "child-1".into(),
+        mj_core::subagent::SubagentRecord {
+            child_session_id: "child-1".into(),
+            parent_session_id: "session-1".into(),
+            task_name: "piece".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: String::new(),
+            request_key: "request".into(),
+            created_at: "now".into(),
+            noticed_turn: None,
+            handback_tool: false,
+        },
+    );
+    let workspace = |id: &str| mj_core::workspace::WorkspaceRecord {
+        id: id.into(),
+        name: id.into(),
+        created_at: "now".into(),
+        last_opened_at: "now".into(),
+        session_count: 1,
+    };
+    let one_workspace = vec![workspace("workspace-1")];
+    let two_workspaces = vec![workspace("workspace-1"), workspace("workspace-2")];
+    let operational_state = |session_id: &str| {
+        serde_json::from_value::<mj_core::relay::RelayOperationalState>(serde_json::json!({
+            "session_id": session_id,
+            "execution": "idle",
+            "latest_ordinal": 0,
+            "latest_digest": "",
+            "acknowledged_through": 0,
+            "acknowledged_digest": "",
+            "recovery_floor_ordinal": 0,
+            "recovery_floor_digest": "",
+            "native_session_id": null,
+            "agent_capabilities": null,
+            "agent_info": null,
+            "config_options": [],
+            "available_commands": [],
+            "config": {},
+            "active_prompt": null,
+            "queued_prompts": [],
+            "checkpoint_barrier": null,
+            "checkpoint_ready": null,
+        }))
+        .unwrap()
+    };
+    let operational = std::collections::BTreeMap::from([
+        ("session-1".to_owned(), operational_state("session-1")),
+        ("child-1".to_owned(), operational_state("child-1")),
+    ]);
+    let project = |controller: &Controller,
+                   workspaces: &[mj_core::workspace::WorkspaceRecord],
+                   operational: &std::collections::BTreeMap<
+        String,
+        mj_core::relay::RelayOperationalState,
+    >| {
+        viewer_snapshot(
+            controller,
+            workspaces,
+            &std::collections::BTreeMap::new(),
+            &PhoneSessionViews {
+                native_agents: &Default::default(),
+                conversations: &Default::default(),
+                queued_prompts: &Default::default(),
+                active_user_shells: &Default::default(),
+                pending_elicitations: &Default::default(),
+                prompt_images: &Default::default(),
+                operational,
+                materialized_activity: &Default::default(),
+                project_sources: &PhoneProjectSources::default(),
+                operations: &Default::default(),
+                move_recoveries: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    };
+
+    // A live session on a container target, with another workspace to move
+    // to, offers every action but interrupt all: no turn is running.
+    let snapshot = project(&controller, &two_workspaces, &operational);
+    let capabilities = &snapshot.sessions.0["session-1"].capabilities;
+    assert!(capabilities.change_workspace);
+    assert!(capabilities.container_settings);
+    assert!(capabilities.restart);
+    assert!(!capabilities.interrupt_all);
+
+    // One workspace leaves nothing to move to.
+    let snapshot = project(&controller, &one_workspace, &operational);
+    assert!(!snapshot.sessions.0["session-1"].capabilities.change_workspace);
+
+    // A turn running only in the child still offers interrupt all on the
+    // parent, which is the tree it reaches.
+    let mut busy = operational.clone();
+    busy.get_mut("child-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
+        started_at_ms: 1_000,
+    });
+    let snapshot = project(&controller, &two_workspaces, &busy);
+    assert!(snapshot.sessions.0["session-1"].capabilities.interrupt_all);
+    assert!(snapshot.sessions.0["child-1"].capabilities.interrupt_all);
+
+    // A bare target has no container settings to record.
+    controller
+        .config
+        .targets
+        .insert("podman".into(), TargetTemplate::LocalBare);
+    let snapshot = project(&controller, &two_workspaces, &operational);
+    assert!(!snapshot.sessions.0["session-1"].capabilities.container_settings);
+
+    // A suspended session without a recovery copy has nothing to restart
+    // from.
+    controller
+        .state
+        .sessions
+        .get_mut("session-1")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let snapshot = project(&controller, &two_workspaces, &operational);
+    assert!(!snapshot.sessions.0["session-1"].capabilities.restart);
+}
+
+/// The card's last-message clock is the newest top-level user or agent
+/// message; tool entries never move it, and entries without a recording time
+/// leave it absent.
+#[test]
+fn phone_snapshot_reports_the_last_top_level_message_time() {
+    let mut controller = controller_with_profiles(&["codex"]);
+    let mut record = phone_session("session-1", 0);
+    record.state = SessionState::Running;
+    controller.state.sessions.insert(record.id.clone(), record);
+    let entry = |id: u64, role: &'static str, recorded_at_ms: Option<i64>| {
+        crate::server::BrowserTranscriptEntry {
+            command_id: None,
+            id,
+            updated_seq: id,
+            role,
+            label: "label".into(),
+            recorded_at_ms,
+            lines: vec!["line".into()],
+            glyph: "●",
+            tone: "agent",
+            tool_status: None,
+            diffstats: Vec::new(),
+        }
+    };
+    let conversations = |entries| {
+        std::collections::BTreeMap::from([(
+            "session-1".to_owned(),
+            BrowserTranscript {
+                latest_seq: 3,
+                presentation_key: "key".into(),
+                window_start_seq: 1,
+                reset: false,
+                entries,
+            },
+        )])
+    };
+    let project = |conversations: &std::collections::BTreeMap<String, BrowserTranscript>| {
+        viewer_snapshot(
+            &controller,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &PhoneSessionViews {
+                native_agents: &Default::default(),
+                conversations,
+                queued_prompts: &Default::default(),
+                active_user_shells: &Default::default(),
+                pending_elicitations: &Default::default(),
+                prompt_images: &Default::default(),
+                operational: &Default::default(),
+                materialized_activity: &Default::default(),
+                project_sources: &PhoneProjectSources::default(),
+                operations: &Default::default(),
+                move_recoveries: &Default::default(),
+                capacity: &[],
+                launch_failures: &[],
+                reviews: &Default::default(),
+            },
+            1,
+        )
+    };
+
+    let snapshot = project(&conversations(vec![
+        entry(1, "user", Some(1_000)),
+        entry(2, "tool", Some(9_999)),
+        entry(3, "agent", Some(2_000)),
+    ]));
+    let session = &snapshot.sessions.0["session-1"];
+    assert_eq!(session.last_message_at_ms, Some(2_000));
+    assert!(session.conversation_available);
+
+    let snapshot = project(&conversations(vec![
+        entry(1, "user", None),
+        entry(2, "agent", None),
+    ]));
+    assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
+
+    let snapshot = project(&std::collections::BTreeMap::new());
+    assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
+}
+
 #[test]
 fn tailscale_listener_preserves_the_configured_port() {
     assert_eq!(

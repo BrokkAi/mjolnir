@@ -27,6 +27,10 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::InterruptTurn { session_id }
         | ControllerAction::SetConfig { session_id, .. }
         | ControllerAction::SetPlanMode { session_id, .. }
+        | ControllerAction::ChangeWorkspace { session_id, .. }
+        | ControllerAction::SetContainerSettings { session_id, .. }
+        | ControllerAction::Restart { session_id }
+        | ControllerAction::InterruptAll { session_id }
         | ControllerAction::StartReview { session_id }
         | ControllerAction::ResolveReview { session_id, .. } => Some(session_id.clone()),
         ControllerAction::Move { request } => {

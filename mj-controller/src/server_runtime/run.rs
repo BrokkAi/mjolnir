@@ -1212,7 +1212,7 @@ pub(crate) async fn run_server(
                     };
                     let notice_action = match &action {
                         ControllerAction::SetConfig { .. } => Some("Configuration change"),
-                        ControllerAction::InterruptTurn { .. } => Some("Cancellation"),
+                        ControllerAction::InterruptTurn { .. } | ControllerAction::InterruptAll { .. } => Some("Cancellation"),
                         ControllerAction::CancelShell { .. } => Some("Shell cancellation"),
                         ControllerAction::RemoveQueuedPrompt { .. } => Some("Queued prompt removal"),
                         ControllerAction::RespondElicitation { .. } => Some("Answer"),

@@ -1949,6 +1949,22 @@ async fn actions_are_refused_when_their_capability_is_false() {
             r#"{"action":"set-config","session_id":"session-1","key":"model","value":"x"}"#,
             "set_config",
         ),
+        (
+            r#"{"action":"change-workspace","session_id":"session-1","workspace_id":"workspace-2"}"#,
+            "change_workspace",
+        ),
+        (
+            r#"{"action":"set-container-settings","session_id":"session-1","cpus":"2","memory":"4g","mounts":[{"source":"/srv/data","destination":"/data","read_only":true}]}"#,
+            "container_settings",
+        ),
+        (
+            r#"{"action":"restart","session_id":"session-1"}"#,
+            "restart",
+        ),
+        (
+            r#"{"action":"interrupt-all","session_id":"session-1"}"#,
+            "interrupt_all",
+        ),
     ] {
         let (app, mut actions, _, _, _) = app();
         let response = post_action(app, cookie(), body.to_owned()).await;
@@ -3147,6 +3163,180 @@ fn image_prompts_need_text_or_an_image_and_an_agent_that_takes_them() {
     assert!(validate_action(&prompt("", Vec::new()), &snapshot).is_err());
     // A shell command is still a shell command.
     assert!(validate_action(&prompt("!ls", vec![sample_image(8)]), &snapshot).is_err());
+}
+
+/// The session actions the viewer mirrors from the terminal are refused
+/// without their published capability and accepted with it, the same gate
+/// every other session action here validates against.
+#[test]
+fn terminal_session_actions_validate_against_their_published_capabilities() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    for id in ["workspace-1", "workspace-2"] {
+        snapshot.workspaces.push(ViewerWorkspace {
+            id: id.into(),
+            name: id.into(),
+        });
+    }
+    let change_workspace = |workspace_id: &str| ControllerAction::ChangeWorkspace {
+        session_id: "session-1".into(),
+        workspace_id: workspace_id.into(),
+    };
+    let container_settings = || ControllerAction::SetContainerSettings {
+        session_id: "session-1".into(),
+        cpus: None,
+        memory: None,
+        mounts: Vec::new(),
+    };
+    let restart = || ControllerAction::Restart {
+        session_id: "session-1".into(),
+    };
+    let interrupt_all = || ControllerAction::InterruptAll {
+        session_id: "session-1".into(),
+    };
+
+    // Without the capabilities every one is refused, interrupt all with the
+    // same 409 the terminal's "nothing is running" answer maps to.
+    assert!(validate_action(&change_workspace("workspace-2"), &snapshot).is_err());
+    assert!(validate_action(&container_settings(), &snapshot).is_err());
+    assert!(validate_action(&restart(), &snapshot).is_err());
+    let error = validate_action(&interrupt_all(), &snapshot).unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+
+    let capabilities = &mut snapshot.sessions[0].capabilities;
+    capabilities.change_workspace = true;
+    capabilities.container_settings = true;
+    capabilities.restart = true;
+    capabilities.interrupt_all = true;
+    validate_action(&change_workspace("workspace-2"), &snapshot).unwrap();
+    validate_action(&container_settings(), &snapshot).unwrap();
+    validate_action(&restart(), &snapshot).unwrap();
+    validate_action(&interrupt_all(), &snapshot).unwrap();
+
+    // A workspace the snapshot does not list is refused, capability or not.
+    let error = validate_action(&change_workspace("missing"), &snapshot).unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    // An unknown session is still unknown.
+    let error = validate_action(
+        &ControllerAction::Restart {
+            session_id: "not-managed".into(),
+        },
+        &snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_FOUND);
+}
+
+/// The four actions parse from exactly the wire names the viewer posts, and
+/// the session projection carries the new fields under exactly these keys,
+/// omitted while empty. The capability flags travel even while false.
+#[test]
+fn terminal_session_actions_have_their_documented_wire_shape() {
+    let parsed: ControllerAction =
+        serde_json::from_str(r#"{"action":"change-workspace","session_id":"s","workspace_id":"w"}"#)
+            .unwrap();
+    assert_eq!(
+        parsed,
+        ControllerAction::ChangeWorkspace {
+            session_id: "s".into(),
+            workspace_id: "w".into(),
+        }
+    );
+    let parsed: ControllerAction = serde_json::from_str(
+        r#"{"action":"set-container-settings","session_id":"s","cpus":null,"memory":"4g","mounts":[{"source":"/srv/data","destination":"/data","read_only":true}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        parsed,
+        ControllerAction::SetContainerSettings {
+            session_id: "s".into(),
+            cpus: None,
+            memory: Some("4g".into()),
+            mounts: vec![AdditionalMount {
+                source: "/srv/data".into(),
+                destination: "/data".into(),
+                access: mj_core::targets::MountAccess::Ro,
+            }],
+        }
+    );
+    // Absent sizes and mounts parse as clearing, matching a caller that sends
+    // the whole form.
+    let parsed: ControllerAction =
+        serde_json::from_str(r#"{"action":"set-container-settings","session_id":"s"}"#).unwrap();
+    assert_eq!(
+        parsed,
+        ControllerAction::SetContainerSettings {
+            session_id: "s".into(),
+            cpus: None,
+            memory: None,
+            mounts: Vec::new(),
+        }
+    );
+    let parsed: ControllerAction =
+        serde_json::from_str(r#"{"action":"restart","session_id":"s"}"#).unwrap();
+    assert_eq!(
+        parsed,
+        ControllerAction::Restart {
+            session_id: "s".into()
+        }
+    );
+    let parsed: ControllerAction =
+        serde_json::from_str(r#"{"action":"interrupt-all","session_id":"s"}"#).unwrap();
+    assert_eq!(
+        parsed,
+        ControllerAction::InterruptAll {
+            session_id: "s".into()
+        }
+    );
+
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let session = serde_json::to_value(&snapshot.sessions[0]).unwrap();
+    assert!(session.get("last_message_at_ms").is_none());
+    assert!(session.get("container_cpus").is_none());
+    assert!(session.get("container_memory").is_none());
+    assert!(session.get("additional_mounts").is_none());
+    for key in [
+        "change_workspace",
+        "container_settings",
+        "restart",
+        "interrupt_all",
+    ] {
+        assert_eq!(
+            session["capabilities"][key], false,
+            "{key} travels even while false"
+        );
+    }
+
+    let session = &mut snapshot.sessions[0];
+    session.last_message_at_ms = Some(42);
+    session.container_cpus = Some("2".into());
+    session.container_memory = Some("4g".into());
+    session.additional_mounts = vec![
+        AdditionalMount {
+            source: "/srv/ro".into(),
+            destination: "/ro".into(),
+            access: mj_core::targets::MountAccess::Ro,
+        },
+        AdditionalMount {
+            source: "/srv/rw".into(),
+            destination: "/rw".into(),
+            access: mj_core::targets::MountAccess::Rw,
+        },
+    ];
+    let session = serde_json::to_value(&snapshot.sessions[0]).unwrap();
+    assert_eq!(session["last_message_at_ms"], 42);
+    assert_eq!(session["container_cpus"], "2");
+    assert_eq!(session["container_memory"], "4g");
+    // A mount keeps its persisted shape: `read_only` alone for ro and cow,
+    // `access: "rw"` added for read-write.
+    assert_eq!(
+        session["additional_mounts"],
+        serde_json::json!([
+            {"source": "/srv/ro", "destination": "/ro", "read_only": true},
+            {"source": "/srv/rw", "destination": "/rw", "read_only": false, "access": "rw"},
+        ])
+    );
 }
 
 /// The composer holds a DOM, not a string, so the text a prompt sends is
