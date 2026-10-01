@@ -79,6 +79,8 @@ pub(crate) struct SessionDetail {
     /// What the last projection derived, so the next one only rescans the
     /// transcript items that changed.
     pub(crate) projection: MaterializedProjectionCache,
+    /// The Sessions row's rendering of the message it shows.
+    pub(crate) output_preview: crate::render::OutputPreviewCache,
 }
 
 impl SessionDetail {
@@ -567,7 +569,7 @@ impl DashboardState {
     pub fn set_config(&mut self, config: Config) {
         // Background saves return a fresh snapshot even when configuration
         // did not change. They must not close a dialog opened after submission.
-        if self.config == config {
+        if *self.config == config {
             return;
         }
         self.invalidate_review_settings_choices_for_config(&config);
@@ -578,7 +580,7 @@ impl DashboardState {
         // A `[keys]` edit takes effect with the reload that carried it, so the
         // bindings are rebuilt before the configuration they came from lands.
         self.keybinds = config.keybinds();
-        self.config = config;
+        *self.config = config;
         // A background refresh must not dismiss a newer interaction. Forms
         // retain their drafts; command availability reads the current config.
         self.clamp_selections();
@@ -650,7 +652,7 @@ impl DashboardState {
             }
         }
         state.sessions = rows;
-        self.state = state;
+        *self.state = state;
         self.apply_operation_projection();
         if self.navigation.retain_sessions(|id| {
             crate::dashboard_conversation::session_belongs_in_layout(
@@ -1214,7 +1216,7 @@ impl DashboardState {
             .into_iter()
             .map(|review| (review.session_id.clone(), review))
             .collect();
-        self.session_reviews = next;
+        *self.session_reviews = next;
     }
 
     /// The authoritative review currently open for a session, if any.

@@ -1753,7 +1753,8 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
     terminal
         .draw(|frame| {
-            crate::render::render_sessions(frame, frame.area(), &dashboard);
+            let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+            crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
         })
         .unwrap();
     let rows = terminal.backend().to_string();
@@ -3645,6 +3646,73 @@ fn dashboard_with_attention_mix() -> DashboardState {
         .unwrap()
         .unread_agent_messages = 1;
     dashboard
+}
+
+/// The Sessions order and the attention levels are derived once per change
+/// of what they come from, however often a frame reads them, and each change
+/// is reflected in the next read.
+#[test]
+fn session_order_and_attention_are_derived_once_per_change_and_follow_it() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.config.advanced.session_order = mj_core::config::SessionOrder::Priority;
+    dashboard.set_active_workspace(Some("default".into()));
+    dashboard.select_active_session("done");
+    let ordered = |dashboard: &DashboardState| {
+        dashboard
+            .ordered_sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>()
+    };
+    drawn(&mut dashboard, 160, 40);
+    assert_eq!(ordered(&dashboard), ["asks", "done", "quiet"]);
+
+    let settled = dashboard.session_view_derivations();
+    for _ in 0..3 {
+        drawn(&mut dashboard, 160, 40);
+        dashboard.notification_events(0);
+    }
+    assert_eq!(
+        dashboard.session_view_derivations(),
+        settled,
+        "frames with nothing changed derive nothing"
+    );
+
+    // A question makes `quiet` waiting too. It was created first, so it now
+    // leads the sessions at that level.
+    dashboard
+        .session_details
+        .get_mut("quiet")
+        .unwrap()
+        .pending_elicitations = vec![question("quiet")];
+    drawn(&mut dashboard, 160, 40);
+    drawn(&mut dashboard, 160, 40);
+    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Waiting);
+    assert_eq!(ordered(&dashboard), ["quiet", "asks", "done"]);
+    assert_eq!(
+        dashboard.session_view_derivations(),
+        (settled.0 + 1, settled.1 + 1),
+        "one change, one derivation"
+    );
+
+    // A filter narrows the list to what matches, and says how much it hides.
+    dashboard.focus_sessions();
+    dashboard.handle_key(key(KeyCode::Char('/')));
+    for c in "done".chars() {
+        dashboard.handle_key(key(KeyCode::Char(c)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(ordered(&dashboard), ["done"]);
+    assert_eq!(dashboard.sessions_hidden_count(), 2);
+
+    // Moving the selection to a hidden session keeps that session listed.
+    dashboard.select_active_session("asks");
+    assert_eq!(ordered(&dashboard), ["asks", "done"]);
+    assert_eq!(dashboard.sessions_hidden_count(), 1);
+
+    *dashboard.sessions_filter = None;
+    assert_eq!(ordered(&dashboard), ["quiet", "asks", "done"]);
+    assert_eq!(dashboard.sessions_hidden_count(), 0);
 }
 
 #[test]
@@ -5642,7 +5710,8 @@ fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
     let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
     terminal
         .draw(|frame| {
-            crate::render::render_sessions(frame, frame.area(), &dashboard);
+            let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+            crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
         })
         .unwrap();
     let rows = terminal.backend().to_string();

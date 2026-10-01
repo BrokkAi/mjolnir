@@ -128,8 +128,8 @@ impl DashboardContext {
     ///
     /// `ratatui` compares this frame with the previous one and writes only the
     /// cells that differ, so drawing when nothing moved costs CPU time and no
-    /// terminal output. That is why the loop draws once per wakeup instead of
-    /// tracking which mutations were visible.
+    /// terminal output. That is why the loop does not track which mutations
+    /// were visible; it only paces how often background changes are drawn.
     pub(crate) fn draw(&mut self) -> Result<()> {
         if let Some(splash) = &self.splash {
             if !splash.finished() {

@@ -251,7 +251,7 @@ pub(super) fn load_subagent_report_from(
     path: &Path,
     child_session_id: &str,
 ) -> Result<mj_core::subagent::SubagentReport> {
-    Ok(load_subagent_report_with(&open_reader(path)?, child_session_id)?.unwrap_or_default())
+    Ok(load_subagent_report_with(&*open_reader(path)?, child_session_id)?.unwrap_or_default())
 }
 
 /// A child's recorded report, or `None` when nothing is recorded for it.

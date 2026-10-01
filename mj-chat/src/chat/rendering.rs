@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::ops::ControlFlow;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The microphone glyph in the symbol set in force, so a console without UTF-8
@@ -699,11 +700,41 @@ fn wrap_line(
     line: Line<'static>,
     width: usize,
     continuation_indent: usize,
-    sources: Option<&mut CellSources>,
+    mut sources: Option<&mut CellSources>,
 ) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let continuation_indent = continuation_indent.min(width.saturating_sub(1));
-    wrap_styled_graphemes(line, width, continuation_indent, sources)
+    let span_count = line.spans.len();
+    let mut rows = Vec::new();
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+        if let Some(sources) = sources.as_mut() {
+            // Style indexes past the line's spans belong to the indent.
+            sources.push(
+                row.iter()
+                    .flat_map(|grapheme| {
+                        let source = (grapheme.style < span_count).then_some(grapheme.style);
+                        std::iter::repeat_n(source, usize::from(grapheme.width))
+                    })
+                    .collect(),
+            );
+        }
+        rows.push(buffer.line(row));
+        ControlFlow::Continue(())
+    });
+    rows
+}
+
+/// Wrap `line` exactly as [`wrap_styled_line`] does, handing each row to
+/// `emit` as soon as it is complete. Wrapping stops when `emit` breaks, so a
+/// caller that needs only the first rows of a long line never segments the
+/// rest of it.
+pub(crate) fn wrap_styled_line_until(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+    mut emit: impl FnMut(Line<'static>) -> ControlFlow<()>,
+) {
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+        emit(buffer.line(row))
+    });
 }
 
 /// One grapheme of a line being wrapped, kept as a byte range into a shared
@@ -722,7 +753,8 @@ struct Grapheme {
 struct StyledBuffer {
     text: String,
     styles: Vec<Style>,
-    graphemes: Vec<Grapheme>,
+    /// Each span's byte range in `text`. A span's index is its style's.
+    spans: Vec<std::ops::Range<usize>>,
     /// The single trailing space that continuation indents point at.
     space: usize,
 }
@@ -732,23 +764,12 @@ impl StyledBuffer {
         let capacity: usize = line.spans.iter().map(|span| span.content.len()).sum();
         let mut text = String::with_capacity(capacity + 1);
         let mut styles = Vec::with_capacity(line.spans.len() + 1);
-        let mut graphemes = Vec::new();
+        let mut spans = Vec::with_capacity(line.spans.len());
         for span in &line.spans {
-            let style = styles.len();
             styles.push(line.style.patch(span.style));
             let base = text.len();
             text.push_str(span.content.as_ref());
-            for (offset, grapheme) in text[base..].grapheme_indices(true) {
-                let start = base + offset;
-                graphemes.push(Grapheme {
-                    start,
-                    end: start + grapheme.len(),
-                    style,
-                    // Graphemes render as at most two columns.
-                    width: display_width(grapheme).min(u8::MAX as usize) as u8,
-                    whitespace: grapheme.chars().all(char::is_whitespace),
-                });
-            }
+            spans.push(base..text.len());
         }
         // Continuation indents reuse one space rather than allocating their own.
         let space = text.len();
@@ -762,9 +783,32 @@ impl StyledBuffer {
         Self {
             text,
             styles,
-            graphemes,
+            spans,
             space,
         }
+    }
+
+    /// The line's graphemes in order. Segmentation is the costly part of
+    /// wrapping, so it goes only as far as the caller reads.
+    fn graphemes(&self) -> impl Iterator<Item = Grapheme> + '_ {
+        self.spans
+            .iter()
+            .enumerate()
+            .flat_map(move |(style, range)| {
+                self.text[range.clone()]
+                    .grapheme_indices(true)
+                    .map(move |(offset, grapheme)| {
+                        let start = range.start + offset;
+                        Grapheme {
+                            start,
+                            end: start + grapheme.len(),
+                            style,
+                            // Graphemes render as at most two columns.
+                            width: display_width(grapheme).min(u8::MAX as usize) as u8,
+                            whitespace: grapheme.chars().all(char::is_whitespace),
+                        }
+                    })
+            })
     }
 
     fn indent(&self) -> Grapheme {
@@ -798,91 +842,124 @@ impl StyledBuffer {
     }
 }
 
-fn wrap_styled_graphemes(
-    line: Line<'static>,
+/// The row being filled while a line wraps, and how many rows it has handed
+/// on so far.
+struct RowFill {
     width: usize,
     continuation_indent: usize,
-    sources: Option<&mut CellSources>,
-) -> Vec<Line<'static>> {
-    let buffer = StyledBuffer::new(&line);
-    let indent = buffer.indent();
+    indent: Grapheme,
+    current: Vec<Grapheme>,
+    current_width: usize,
+    emitted: usize,
+}
 
-    // Split into runs of whitespace and non-whitespace graphemes.
-    let mut tokens: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut whitespace = None;
-    for (index, grapheme) in buffer.graphemes.iter().enumerate() {
-        if whitespace == Some(grapheme.whitespace) {
-            tokens
-                .last_mut()
-                .expect("a token exists once whitespace is set")
-                .end = index + 1;
-        } else {
-            tokens.push(index..index + 1);
-            whitespace = Some(grapheme.whitespace);
-        }
+impl RowFill {
+    /// Hands the current row on and leaves it empty.
+    fn finish_row(
+        &mut self,
+        buffer: &StyledBuffer,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        self.emitted += 1;
+        let flow = emit(buffer, &self.current);
+        self.current.clear();
+        flow
     }
 
-    let mut rows: Vec<Vec<Grapheme>> = Vec::new();
-    let mut current: Vec<Grapheme> = Vec::new();
-    let mut current_width = 0;
-    for token in tokens {
-        let token = &buffer.graphemes[token];
+    fn start_continuation(&mut self) {
+        self.current.clear();
+        self.current.resize(self.continuation_indent, self.indent);
+        self.current_width = self.continuation_indent;
+    }
+
+    /// Places one run of whitespace or non-whitespace graphemes, breaking on
+    /// word boundaries and cutting a word only when it cannot fit a row on
+    /// its own.
+    fn place(
+        &mut self,
+        token: &[Grapheme],
+        buffer: &StyledBuffer,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
         let token_width: usize = token
             .iter()
             .map(|grapheme| usize::from(grapheme.width))
             .sum();
         let is_whitespace = token.first().is_some_and(|grapheme| grapheme.whitespace);
-        if current_width + token_width <= width {
-            current.extend_from_slice(token);
-            current_width += token_width;
+        if self.current_width + token_width <= self.width {
+            self.current.extend_from_slice(token);
+            self.current_width += token_width;
         } else if is_whitespace {
-            trim_trailing_whitespace(&mut current);
-            if !current.is_empty() {
-                rows.push(std::mem::take(&mut current));
+            trim_trailing_whitespace(&mut self.current);
+            if !self.current.is_empty() {
+                self.finish_row(buffer, emit)?;
             }
-            current.clear();
-            current.resize(continuation_indent, indent);
-            current_width = continuation_indent;
-        } else if token_width + continuation_indent <= width {
-            if current.len() > continuation_indent {
-                trim_trailing_whitespace(&mut current);
-                rows.push(std::mem::take(&mut current));
+            self.start_continuation();
+        } else if token_width + self.continuation_indent <= self.width {
+            if self.current.len() > self.continuation_indent {
+                trim_trailing_whitespace(&mut self.current);
+                self.finish_row(buffer, emit)?;
             }
-            current.clear();
-            current.resize(continuation_indent, indent);
-            current.extend_from_slice(token);
-            current_width = continuation_indent + token_width;
+            self.start_continuation();
+            self.current.extend_from_slice(token);
+            self.current_width += token_width;
         } else {
             for grapheme in token {
                 let grapheme_width = usize::from(grapheme.width);
-                if current_width + grapheme_width > width && !current.is_empty() {
-                    trim_trailing_whitespace(&mut current);
-                    rows.push(std::mem::take(&mut current));
-                    current.resize(continuation_indent, indent);
-                    current_width = continuation_indent;
+                if self.current_width + grapheme_width > self.width && !self.current.is_empty() {
+                    trim_trailing_whitespace(&mut self.current);
+                    self.finish_row(buffer, emit)?;
+                    self.start_continuation();
                 }
-                current.push(*grapheme);
-                current_width += grapheme_width;
+                self.current.push(*grapheme);
+                self.current_width += grapheme_width;
             }
         }
+        ControlFlow::Continue(())
     }
-    trim_trailing_whitespace(&mut current);
-    if !current.is_empty() || rows.is_empty() {
-        rows.push(current);
+}
+
+/// Wraps `line`, handing each finished row to `emit` until it breaks.
+fn wrap_graphemes(
+    line: &Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+    mut emit: impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+) {
+    let width = width.max(1);
+    let continuation_indent = continuation_indent.min(width.saturating_sub(1));
+    let buffer = StyledBuffer::new(line);
+    let mut fill = RowFill {
+        width,
+        continuation_indent,
+        indent: buffer.indent(),
+        current: Vec::new(),
+        current_width: 0,
+        emitted: 0,
+    };
+    // Rows are filled a run of whitespace or non-whitespace graphemes at a
+    // time, each run as soon as the next one begins.
+    let mut token: Vec<Grapheme> = Vec::new();
+    for grapheme in buffer.graphemes() {
+        if token
+            .first()
+            .is_some_and(|first| first.whitespace != grapheme.whitespace)
+        {
+            if fill.place(&token, &buffer, &mut emit).is_break() {
+                return;
+            }
+            token.clear();
+        }
+        token.push(grapheme);
     }
-    if let Some(sources) = sources {
-        // Style indexes past the line's spans belong to the indent.
-        let span_count = line.spans.len();
-        sources.extend(rows.iter().map(|row| {
-            row.iter()
-                .flat_map(|grapheme| {
-                    let source = (grapheme.style < span_count).then_some(grapheme.style);
-                    std::iter::repeat_n(source, usize::from(grapheme.width))
-                })
-                .collect()
-        }));
+    if !token.is_empty() && fill.place(&token, &buffer, &mut emit).is_break() {
+        return;
     }
-    rows.iter().map(|row| buffer.line(row)).collect()
+    trim_trailing_whitespace(&mut fill.current);
+    if !fill.current.is_empty() || fill.emitted == 0 {
+        // The last row; there is nothing left for a break to stop.
+        let _ = fill.finish_row(&buffer, &mut emit);
+    }
 }
 
 fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) {
@@ -993,6 +1070,44 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Stopping early gives the same first rows as wrapping the whole line,
+    /// styles and continuation indents included.
+    #[test]
+    fn wrapping_until_a_row_count_gives_the_first_rows_of_the_whole_wrap() {
+        let mut spans = Vec::new();
+        for index in 0..400 {
+            spans.push(Span::styled(
+                format!("word{index} "),
+                Style::default().fg(if index % 2 == 0 {
+                    Color::Yellow
+                } else {
+                    Color::Blue
+                }),
+            ));
+            spans.push(Span::raw("漢字 "));
+            if index % 50 == 0 {
+                spans.push(Span::raw("x".repeat(70)));
+            }
+        }
+        let line = Line::from(spans);
+        for (width, indent) in [(1, 0), (9, 2), (40, 4), (80, 0)] {
+            let whole = wrap_styled_line(line.clone(), width, indent);
+            assert!(whole.len() > 10, "the line wraps to many rows");
+            for wanted in [1, 2, 5, whole.len(), whole.len() + 3] {
+                let mut rows = Vec::new();
+                wrap_styled_line_until(line.clone(), width, indent, |row| {
+                    rows.push(row);
+                    if rows.len() >= wanted {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                });
+                assert_eq!(rows, whole[..wanted.min(whole.len())], "{width} {indent}");
+            }
+        }
     }
 
     #[test]

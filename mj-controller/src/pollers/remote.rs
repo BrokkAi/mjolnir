@@ -37,7 +37,12 @@ pub fn spawn_remote_dashboard_worker_poller(
             tokio::select! {
                 _ = state_tx.closed() => return,
                 () = native.next(), if native.has_work() => {
-                    state_tx.send_modify(|state| state.native_agents = native.views_snapshot());
+                    let views = native.views_snapshot();
+                    state_tx.send_if_modified(|state| {
+                        if state.native_agents == views { return false; }
+                        state.native_agents = views;
+                        true
+                    });
                     health_tx.send_if_modified(|health| {
                         let error = native.error();
                         if health.native_error == error { false } else { health.native_error = error; true }
@@ -51,10 +56,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             let metadata = snapshot.metadata;
-                            config_tx.send_if_modified(|config| {
-                                if *config == metadata.config { false }
-                                else { *config = metadata.config.clone(); true }
-                            });
+                            send_if_changed(&config_tx, metadata.config);
                             native.update_snapshot(snapshot.native_agents);
                             health_tx.send_if_modified(|health| {
                                 let recovered = health.refresh_error.take().is_some();
@@ -63,7 +65,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 health.native_error = native_error;
                                 recovered || changed
                             });
-                            state_tx.send_replace(RuntimeStateUpdate {
+                            publish_runtime_state(&state_tx, RuntimeStateUpdate {
                                 last_subagent_policy: metadata.last_subagent_policy,
                                 native_agents: native.views_snapshot(),
                                 workspace_names: metadata.workspace_names,
@@ -74,16 +76,10 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 subagents: snapshot.subagents,
                                 launch_recency: metadata.launch_recency,
                             });
-                            reviews_tx.send_replace(metadata.reviews);
-                            capabilities_tx.send_if_modified(|capabilities| {
-                                if *capabilities == metadata.profile_capabilities { false }
-                                else { *capabilities = metadata.profile_capabilities; true }
-                            });
-                            notices_tx.send_replace(metadata.notices);
-                            quotas_tx.send_if_modified(|quotas| {
-                                if *quotas == metadata.quotas { false }
-                                else { *quotas = metadata.quotas; true }
-                            });
+                            send_if_changed(&reviews_tx, metadata.reviews);
+                            send_if_changed(&capabilities_tx, metadata.profile_capabilities);
+                            send_if_changed(&notices_tx, metadata.notices);
+                            send_if_changed(&quotas_tx, metadata.quotas);
                         }
                         Some(RuntimeFeedUpdate::Session { session_id, view }) => {
                             if mirror_daemon_view(&targets, &publisher, session_id, *view).await.is_err() { return; }
@@ -119,6 +115,37 @@ pub fn spawn_remote_dashboard_worker_poller(
         profile_capabilities: capabilities_rx,
         config: config_rx,
         health: health_rx,
+    })
+}
+
+/// Every send on these watches wakes the dashboard loop, and the daemon
+/// republishes the whole snapshot whenever any session moves. Sending only
+/// what changed keeps a streaming session from waking the surface for
+/// reviews, notices, or quotas it already has.
+pub(super) fn send_if_changed<T: PartialEq>(tx: &tokio::sync::watch::Sender<T>, value: T) -> bool {
+    tx.send_if_modified(|current| {
+        if *current == value {
+            return false;
+        }
+        *current = value;
+        true
+    })
+}
+
+/// The same for the records snapshot, whose revision moves with every
+/// daemon publication even when nothing the surface shows did. The revision
+/// is still kept current for the next reader, without a wakeup.
+pub(super) fn publish_runtime_state(
+    tx: &tokio::sync::watch::Sender<RuntimeStateUpdate>,
+    next: RuntimeStateUpdate,
+) -> bool {
+    tx.send_if_modified(|current| {
+        current.revision = next.revision;
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
     })
 }
 
@@ -303,8 +330,63 @@ pub(super) fn queued_prompt_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::remote_submit_failure;
-    use mj_client::daemon::DaemonRefusal;
+    use super::{publish_runtime_state, remote_submit_failure, send_if_changed};
+    use crate::pollers::{Feed, RuntimeStateUpdate};
+    use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
+
+    /// The daemon republishes its whole snapshot, at a new revision, whenever
+    /// any session moves. A surface must not wake for the parts it already has.
+    #[test]
+    fn a_republished_snapshot_wakes_the_surface_only_for_what_changed() {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
+        let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::<RuntimeNotice>::new());
+        let mut state = Feed::new(state_rx);
+        let mut notices = Feed::new(notices_rx);
+        let first = RuntimeStateUpdate {
+            revision: 1,
+            workspace_names: [("w".to_owned(), "work".to_owned())].into(),
+            ..Default::default()
+        };
+        let notice = RuntimeNotice {
+            id: 1,
+            session_id: "s".into(),
+            text: "checkpoint saved".into(),
+        };
+        publish_runtime_state(&state_tx, first.clone());
+        send_if_changed(&notices_tx, vec![notice.clone()]);
+        assert_eq!(state.next_ready().map(|state| state.revision), Some(1));
+        assert_eq!(notices.next_ready(), Some(vec![notice.clone()]));
+
+        publish_runtime_state(
+            &state_tx,
+            RuntimeStateUpdate {
+                revision: 2,
+                ..first.clone()
+            },
+        );
+        send_if_changed(&notices_tx, vec![notice.clone()]);
+        assert!(
+            state.next_ready().is_none(),
+            "an equal snapshot woke the surface"
+        );
+        assert!(
+            notices.next_ready().is_none(),
+            "equal notices woke the surface"
+        );
+        assert_eq!(
+            state_tx.borrow().revision,
+            2,
+            "the revision is still current"
+        );
+
+        let mut renamed = first;
+        renamed.revision = 3;
+        renamed
+            .workspace_names
+            .insert("w".to_owned(), "renamed".to_owned());
+        publish_runtime_state(&state_tx, renamed.clone());
+        assert_eq!(state.next_ready(), Some(renamed));
+    }
 
     /// I1-12: the daemon's refusal of `/clear` reached the chat as
     /// "Delivery unconfirmed" and stayed pinned as an unconfirmed row.

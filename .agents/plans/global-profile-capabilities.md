@@ -21,7 +21,7 @@ Settings and Move must immediately reuse models and efforts after background hyd
 - [x] (2026-10-01) Commit validated implementation b39c0e69 on hel2 and merge origin/master cleanly as 64e3a1d8, preserving release 2.25.0 and the incoming workspace/session changes.
 - [x] (2026-10-01) Merged-source Clippy, formatting, JavaScript syntax, and whitespace checks pass.
 - [x] (2026-10-01) Complete the final merged-source full Cargo suite, including 2,103 controller and 926 TUI tests, isolated startup/upgrade and terminal termination checks, and the runtime teardown regression. Final all-target Clippy passes.
-- [ ] Push to origin/master (explicit user authorization).
+- [x] (2026-10-01) Integrate origin/master through 61030348; the complete latest integration suite and all-target Clippy pass. Delivery uses the explicitly authorized `git push origin HEAD:master`; its result is recorded in the final assistant response.
 
 ## Surprises & Discoveries
 
@@ -90,3 +90,7 @@ Validation update: cargo test completed successfully (exit 0) in /mnt/optane/mjo
 Integration update: b39c0e69 is the independently validated implementation checkpoint. Merge 64e3a1d8 preserves bd0c941d and its ancestors with no conflicts; automatic changes in dashboard/io.rs and tui/lib.rs were reviewed. Merged-source Clippy passes in /mnt/optane/mjolnir2-profile-cache-clippy-merged.log; merged full-suite output is /mnt/optane/mjolnir2-profile-cache-tests-merged.log. Remain on hel2 and push without force after it passes.
 
 Final validation update: the initial merged run exposed nondeterministic shutdown diagnostics when both root and child cancellation were ready. Root cancellation now has priority; the supervisor also owns a drop guard signaling its blocking job during runtime teardown. The corrected full `cargo test` completed with exit 0 in /mnt/optane/mjolnir2-profile-cache-tests-delivery.log, including the new teardown regression. Focused profile-config tests also passed (14 tests) in /mnt/optane/mjolnir2-profile-cache-teardown.log. Final `cargo clippy --all-targets -- -D warnings` completed with exit 0 in /mnt/optane/mjolnir2-profile-cache-clippy-teardown.log. Formatting, JavaScript syntax, and diff whitespace checks pass.
+
+Second integration update: committed shutdown fixes as 92901bc4. Before delivery origin/master advanced to 61030348 with six additional commits. The current merge preserves its frame pacing, store read connections, container-engine cadence and tracked session-state derivations. Resolved conflicts by pacing the capability feed with other feeds, using the shared send-if-changed helper for capability publications, and retaining global capability fields beside the tracked Config and session state. The final integration test and Clippy logs are /mnt/optane/mjolnir2-profile-cache-final-integration-tests.log and /mnt/optane/mjolnir2-profile-cache-final-integration-clippy.log.
+
+Delivery validation: both latest integration commands completed with exit 0. Full dev-profile `cargo test` includes 2,106 controller and 928 TUI tests, worker journal stress tests, CLI tests, isolated automatic-upgrade regressions and terminal termination tests. All-target Clippy, formatting, JavaScript syntax and staged diff whitespace checks pass. No further implementation work remains; commit the resolved merge and push without force on the current branch.

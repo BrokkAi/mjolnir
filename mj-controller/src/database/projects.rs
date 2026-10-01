@@ -14,7 +14,7 @@ pub(crate) struct ProjectDiscoveryChange {
 }
 
 pub(crate) fn read_project_catalog() -> Result<ProjectCatalogView> {
-    read_project_catalog_from(&open_reader(&database_path())?)
+    read_project_catalog_from(&*open_reader(&database_path())?)
 }
 
 pub(super) fn read_project_catalog_from(connection: &Connection) -> Result<ProjectCatalogView> {

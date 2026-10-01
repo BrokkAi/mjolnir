@@ -4943,7 +4943,7 @@ fn dashboard_with_raw_ssh_session(state: SessionState) -> DashboardState {
     session.target_template_id = "machine".into();
     session.project_directory = Some("/srv/project".into());
     let mut dashboard = dashboard_with_session(session);
-    dashboard.config = standard_local_targets_config();
+    *dashboard.config = standard_local_targets_config();
     dashboard
         .config
         .targets
@@ -4998,7 +4998,7 @@ fn resume_shows_the_target_step_when_two_targets_suit_the_session() {
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
     let mut dashboard = dashboard_with_session(session);
-    dashboard.config = standard_local_targets_config();
+    *dashboard.config = standard_local_targets_config();
     assert_eq!(
         dashboard.begin_resume_for("session-1"),
         DashboardAction::None
@@ -5064,7 +5064,7 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
     let mut dashboard = dashboard_with_session(session);
-    dashboard.config = standard_local_targets_config();
+    *dashboard.config = standard_local_targets_config();
     dashboard.focus_sessions();
     assert_eq!(dashboard.begin_move(), DashboardAction::None);
     answer_target_checks(&mut dashboard, &["docker"]);
@@ -5126,7 +5126,7 @@ fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
         session.target_template_id = "localhost".into();
         session.project_directory = Some("/work/project".into());
         let mut dashboard = dashboard_with_session(session);
-        dashboard.config = standard_local_targets_config();
+        *dashboard.config = standard_local_targets_config();
         dashboard
             .config
             .targets
@@ -6440,7 +6440,7 @@ fn single_profile_keeps_container_sizing_and_confirm() {
 #[test]
 fn single_profile_raw_resume_starts_checks_without_confirm() {
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config = single_raw_config();
+    *dashboard.config = single_raw_config();
     let session = dashboard.state.sessions.get_mut("session-1").unwrap();
     session.project_directory = Some("/work/project".into());
     session.target_template_id = "local".into();
@@ -6472,7 +6472,7 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
         },
     ] {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.config = single_raw_config();
+        *dashboard.config = single_raw_config();
         let session = dashboard.state.sessions.get_mut("session-1").unwrap();
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
@@ -6533,7 +6533,7 @@ fn raw_resume_fast_path_failure_waits_for_explicit_retry() {
     session.project_directory = Some("/work/project".into());
     session.target_template_id = "local".into();
     let mut dashboard = dashboard_with_session(session);
-    dashboard.config = single_raw_config();
+    *dashboard.config = single_raw_config();
     assert!(matches!(
         dashboard.begin_resume_for("session-1"),
         DashboardAction::PreflightResumeRepositories { .. }
@@ -6562,7 +6562,7 @@ fn raw_move_keeps_file_selection_and_returns_to_review_after_it() {
     session.project_directory = Some("/work/project".into());
     session.target_template_id = "local".into();
     let mut dashboard = dashboard_with_session(session);
-    dashboard.config = single_raw_config();
+    *dashboard.config = single_raw_config();
     let DashboardAction::MoveSession {
         preparation_request_id: Some(request),
         ..
@@ -6622,7 +6622,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         session.target_template_id = "local".into();
         session.subagents = Some(SubagentPolicy::AllModels);
         let mut dashboard = dashboard_with_session(session);
-        dashboard.config = single_raw_config();
+        *dashboard.config = single_raw_config();
         let DashboardAction::MoveSession {
             preparation_request_id: Some(request),
             subagents: None,

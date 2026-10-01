@@ -404,7 +404,50 @@ pub(super) fn viewer_snapshot(
     views: &PhoneSessionViews<'_>,
     revision: u64,
 ) -> ViewerSnapshot {
-    viewer_snapshot_selected(controller, workspaces, quotas, views, revision, None)
+    viewer_snapshot_selected(
+        controller,
+        workspaces,
+        quotas,
+        views,
+        revision,
+        None,
+        &mut InstalledEngines::default(),
+    )
+}
+
+/// Which local container engines' commands are on this daemon's PATH. The
+/// answer changes only when an engine is installed or removed, so it is
+/// looked up again on the capacity poller's cadence rather than for every
+/// published revision: each lookup searches every PATH directory, and the
+/// publisher runs it on its control loop.
+#[derive(Default)]
+pub(super) struct InstalledEngines {
+    checked_at: Option<Instant>,
+    path: Option<std::ffi::OsString>,
+    /// Whether each engine's command was missing at `checked_at`.
+    missing: std::collections::BTreeMap<&'static str, bool>,
+}
+
+impl InstalledEngines {
+    pub(super) fn runtime_missing(&mut self, template: &mj_core::config::TargetTemplate) -> bool {
+        let Some(engine) = crate::targets::local_engine_command(template) else {
+            return false;
+        };
+        let path = std::env::var_os("PATH");
+        if self.path != path
+            || self
+                .checked_at
+                .is_none_or(|at| at.elapsed() >= crate::pollers::CAPACITY_POLL_INTERVAL)
+        {
+            self.missing.clear();
+            self.path = path;
+            self.checked_at = Some(Instant::now());
+        }
+        // The one classifier the wizards and launch options read decides.
+        *self.missing.entry(engine).or_insert_with(|| {
+            crate::targets::runtime_missing_on_host(template, self.path.as_deref())
+        })
+    }
 }
 
 pub(super) struct ViewerRecordSelection<'a> {
@@ -419,6 +462,7 @@ pub(super) fn viewer_snapshot_selected(
     views: &PhoneSessionViews<'_>,
     revision: u64,
     selection: Option<ViewerRecordSelection<'_>>,
+    engines: &mut InstalledEngines,
 ) -> ViewerSnapshot {
     let PhoneSessionViews {
         native_agents,
@@ -452,16 +496,12 @@ pub(super) fn viewer_snapshot_selected(
     // Whether a target's runtime is installed is a fact about this host, so
     // the daemon sets it where it publishes, from the one classifier the
     // terminal wizards and the launch options also read.
-    let path = std::env::var_os("PATH");
     for target in &mut snapshot.targets {
-        target.runtime_missing =
-            controller
-                .config
-                .targets
-                .get(&target.id)
-                .is_some_and(|template| {
-                    crate::targets::runtime_missing_on_host(template, path.as_deref())
-                });
+        target.runtime_missing = controller
+            .config
+            .targets
+            .get(&target.id)
+            .is_some_and(|template| engines.runtime_missing(template));
     }
     snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces

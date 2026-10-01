@@ -116,11 +116,8 @@ impl DashboardState {
     /// A session row belongs to the current tab while the record is still
     /// active, or while an explicit operation keeps its row on screen.
     pub(crate) fn session_is_visible(&self, session_id: &str) -> bool {
-        self.ordered_sessions()
-            .into_iter()
-            .enumerate()
-            .find(|(_, session)| session.id == session_id)
-            .is_some_and(|(index, _)| self.session_row_is_visible_at(index))
+        self.ordered_session_position(session_id)
+            .is_some_and(|index| self.session_row_is_visible_at(index))
     }
 
     /// `session_row_areas` is populated by the last rendered Sessions table.

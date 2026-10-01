@@ -147,6 +147,25 @@ pub(crate) fn attention_level(
     }
 }
 
+/// The attention level of `session` from its own facts alone. Only
+/// [`crate::session_view::SessionFacts`] calls this; everything else reads
+/// the level it keeps.
+pub(crate) fn own_attention_level(
+    dashboard: &DashboardState,
+    session_id: &str,
+    session: &SessionRecord,
+) -> AttentionLevel {
+    attention_level(
+        dashboard.session_details.get(session_id),
+        dashboard.session_review(session_id),
+        session.state,
+        dashboard.unreachable_sessions.contains(session_id),
+        dashboard.session_operations.contains_key(session_id)
+            || dashboard.transition_kind(session_id).is_some(),
+        dashboard.transition_failure_kind(session_id).is_some(),
+    )
+}
+
 /// The daemon's answer to the Sessions filter's text: which sessions have it
 /// in a user or agent message. The text itself stays in [`SessionsFilter`];
 /// this holds only what a background search found for it.
@@ -192,10 +211,11 @@ impl DashboardState {
     /// The live sessions the Sessions pane is showing, as indices into
     /// [`Self::ordered_sessions`].
     pub(crate) fn visible_session_indices(&self) -> Vec<usize> {
-        self.sessions_rows()
-            .into_iter()
+        self.session_order()
+            .rows()
+            .iter()
             .filter_map(|row| match row {
-                SessionsRow::Session { index, .. } => Some(index),
+                SessionsRow::Session { index, .. } => Some(*index),
                 _ => None,
             })
             .collect()
@@ -207,11 +227,16 @@ impl DashboardState {
     /// Standard and Maximized use four-line session rows; Minimized keeps only
     /// each session's top summary line. Focus never changes the representation.
     pub(crate) fn sessions_rows(&self) -> Vec<SessionsRow> {
-        let sessions = self.ordered_sessions();
-        self.expanded_sessions_rows(&sessions)
+        self.session_order().rows().to_vec()
     }
 
-    pub(crate) fn expanded_sessions_rows(&self, sessions: &[&SessionRecord]) -> Vec<SessionsRow> {
+    /// The rows for `sessions`, in order, for [`Self::session_order`] to
+    /// keep. `numbered` says whether more than one project is listed.
+    pub(crate) fn derive_sessions_rows(
+        &self,
+        sessions: &[&SessionRecord],
+        numbered: bool,
+    ) -> Vec<SessionsRow> {
         // Two projects can share a short name, in which case both need their
         // full names to stay distinguishable.
         let mut short_names = BTreeMap::<String, BTreeSet<String>>::new();
@@ -222,7 +247,6 @@ impl DashboardState {
                 .or_default()
                 .insert(source.key);
         }
-        let numbered = self.project_keys().len() > 1;
         let grouped = self.config.advanced.session_order == SessionOrder::Project
             && !self.sessions_ranked_by_match();
         let mut rows = Vec::new();
@@ -260,10 +284,16 @@ impl DashboardState {
     /// screen.
     pub(crate) fn selected_visible_index(&self) -> Option<usize> {
         let selected = self.selected_session_id()?;
-        let sessions = self.ordered_sessions();
-        self.visible_session_indices()
-            .into_iter()
-            .position(|index| sessions.get(index).is_some_and(|s| s.id == selected))
+        let order = self.session_order();
+        let index = order.position(selected)?;
+        order
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                SessionsRow::Session { index, .. } => Some(*index),
+                _ => None,
+            })
+            .position(|visible| visible == index)
     }
 
     /// Sessions visible in the selected workspace, grouped by project and
@@ -272,6 +302,21 @@ impl DashboardState {
     /// regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
+        self.session_order()
+            .ids()
+            .iter()
+            .filter_map(|id| self.state.sessions.get(id))
+            .collect()
+    }
+
+    /// Where a session is in [`Self::ordered_sessions`], if it is listed.
+    pub(crate) fn ordered_session_position(&self, session_id: &str) -> Option<usize> {
+        self.session_order().position(session_id)
+    }
+
+    /// [`Self::ordered_sessions`] worked out from the inputs, and how many
+    /// sessions the filter holds back, for [`Self::session_order`] to keep.
+    pub(crate) fn derive_ordered_sessions(&self) -> (Vec<&SessionRecord>, usize) {
         let mut sessions = self.ordered_sessions_unfiltered();
         let selected = self.selected_session_id();
         if let Some(active) = selected.and_then(|id| self.state.sessions.get(id))
@@ -280,8 +325,9 @@ impl DashboardState {
             sessions.insert(0, active);
         }
         let Some(filter) = self.sessions_filter.as_ref() else {
-            return sessions;
+            return (sessions, 0);
         };
+        let listed = sessions.len();
         let mut kept = sessions
             .into_iter()
             .filter(|session| {
@@ -289,12 +335,13 @@ impl DashboardState {
                     || self.session_matches_filter(session, filter)
             })
             .collect::<Vec<_>>();
+        let hidden = listed - kept.len();
         let query = filter.query.value().trim().to_lowercase();
         if !query.is_empty() {
             // A stable sort keeps the list's own order inside each group.
             kept.sort_by_key(|session| self.sessions_filter_rank(session, &query));
         }
-        kept
+        (kept, hidden)
     }
 
     pub(crate) fn session_outside_filter(&self, session: &SessionRecord) -> bool {
@@ -384,7 +431,7 @@ impl DashboardState {
         }
         search.request_id = search.request_id.wrapping_add(1);
         if query.is_empty() {
-            *search = SessionsTextSearch {
+            **search = SessionsTextSearch {
                 request_id: search.request_id,
                 ..SessionsTextSearch::default()
             };
@@ -463,16 +510,7 @@ impl DashboardState {
     /// filter is in force. A shortened list that does not say it is shortened
     /// reads as the whole truth.
     pub(crate) fn sessions_hidden_count(&self) -> usize {
-        let Some(filter) = &self.sessions_filter else {
-            return 0;
-        };
-        self.ordered_sessions_unfiltered()
-            .into_iter()
-            .filter(|session| {
-                Some(session.id.as_str()) != self.selected_session_id()
-                    && !self.session_matches_filter(session, filter)
-            })
-            .count()
+        self.session_order().hidden()
     }
 
     /// Answers a key for the Sessions filter, or `None` when the filter does
@@ -492,7 +530,7 @@ impl DashboardState {
                 KeyCode::Enter => {
                     filter.editing = false;
                     if filter.query.is_empty() && filter.state.is_none() {
-                        self.sessions_filter = None;
+                        *self.sessions_filter = None;
                     }
                 }
                 KeyCode::Esc => {
@@ -501,7 +539,7 @@ impl DashboardState {
                     filter.query.clear();
                     filter.editing = false;
                     if filter.state.is_none() {
-                        self.sessions_filter = None;
+                        *self.sessions_filter = None;
                     }
                 }
                 // Everything else is line editing: the shared single-line
@@ -531,12 +569,12 @@ impl DashboardState {
                     (None, Some(filter)) => {
                         filter.state = None;
                         if filter.query.is_empty() {
-                            self.sessions_filter = None;
+                            *self.sessions_filter = None;
                         }
                     }
                     (Some(state), Some(filter)) => filter.state = Some(state),
                     (Some(state), None) => {
-                        self.sessions_filter = Some(SessionsFilter {
+                        *self.sessions_filter = Some(SessionsFilter {
                             query: mj_chat::text_input::TextInput::new(),
                             state: Some(state),
                             editing: false,
@@ -554,7 +592,7 @@ impl DashboardState {
     /// together. `Esc` on the pane and the `×` at the end of the filter's
     /// title label both come here.
     pub(crate) fn clear_sessions_filter(&mut self) {
-        self.sessions_filter = None;
+        *self.sessions_filter = None;
         self.settle_sessions_filter();
     }
 
@@ -632,49 +670,17 @@ impl DashboardState {
             .into_iter()
             .filter(|session| self.is_listed_top_level_session(session, active_workspace_id))
             .collect::<Vec<_>>();
-        let priority = self.config.advanced.session_order == SessionOrder::Priority;
-        let inputs = active
-            .iter()
-            .map(|session| {
-                let source = self.project_source(session);
-                (
-                    session.id.clone(),
-                    session.state == SessionState::Stopped,
-                    if priority {
-                        format!(
-                            "{:?}/{}",
-                            self.attention_level(&session.id),
-                            self.last_activity_ms(&session.id)
-                        )
-                    } else {
-                        session.created_at.clone()
-                    },
-                    source.key,
-                    source.short,
-                    source.full,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut cache = self.session_order_cache.borrow_mut();
-        if cache.inputs == inputs {
-            return cache
-                .ids
-                .iter()
-                .filter_map(|id| self.state.sessions.get(id))
-                .collect();
-        }
         let mut active = active;
         if self.config.advanced.session_order == SessionOrder::Priority {
+            let facts = self.session_facts();
             active.sort_by_cached_key(|session| {
                 (
                     session.state == SessionState::Stopped,
-                    std::cmp::Reverse(self.attention_level(&session.id)),
+                    std::cmp::Reverse(facts.attention_level(&session.id)),
                     std::cmp::Reverse(self.last_activity_ms(&session.id)),
                     session.creation_order_key(),
                 )
             });
-            cache.inputs = inputs;
-            cache.ids = active.iter().map(|session| session.id.clone()).collect();
             return active;
         }
         // Grouping keeps this order, so stopped sessions end each project.
@@ -697,10 +703,7 @@ impl DashboardState {
             let source = self.project_source(sessions[0]);
             (source.short.to_lowercase(), source.full, source.key)
         });
-        let ordered = groups.into_iter().flatten().collect::<Vec<_>>();
-        cache.inputs = inputs;
-        cache.ids = ordered.iter().map(|session| session.id.clone()).collect();
-        ordered
+        groups.into_iter().flatten().collect()
     }
 
     pub fn project_source(&self, session: &SessionRecord) -> ProjectSourceIdentity {
@@ -723,14 +726,7 @@ impl DashboardState {
     }
 
     pub(crate) fn project_keys(&self) -> Vec<String> {
-        let mut keys = Vec::new();
-        for session in self.ordered_sessions() {
-            let key = self.project_source(session).key;
-            if keys.last() != Some(&key) {
-                keys.push(key);
-            }
-        }
-        keys
+        self.session_order().project_keys().to_vec()
     }
 
     /// Whether this session's project draws its full four-row form. Projects
@@ -778,12 +774,7 @@ impl DashboardState {
     /// without this nothing a person normally looks at would show that the
     /// child needs them (R11-1).
     pub fn attention_level(&self, session_id: &str) -> AttentionLevel {
-        let own = self.own_attention_level(session_id);
-        if own < AttentionLevel::Waiting && self.subagent_question(session_id).is_some() {
-            AttentionLevel::Waiting
-        } else {
-            own
-        }
+        self.session_facts().attention_level(session_id)
     }
 
     /// The listed titles of this parent's Mjolnir sub-agents that are still
@@ -889,34 +880,19 @@ impl DashboardState {
         &self,
         parent_id: &str,
     ) -> Option<(&SessionRecord, &mj_core::elicitation::ElicitationRequest)> {
-        self.managed_active_child_ids(parent_id)
-            .into_iter()
-            .filter(|id| self.own_attention_level(id) == AttentionLevel::Waiting)
-            .find_map(|id| {
-                let child = self.state.sessions.get(&id)?;
-                let question = self
-                    .session_details
-                    .get(&child.id)?
-                    .pending_elicitations
-                    .first()?;
-                Some((child, question))
-            })
+        let child = self.session_facts().waiting_child(parent_id)?.to_owned();
+        let child = self.state.sessions.get(&child)?;
+        let question = self
+            .session_details
+            .get(&child.id)?
+            .pending_elicitations
+            .first()?;
+        Some((child, question))
     }
 
     /// The attention level from the session's own facts alone.
     fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
-        let Some(session) = self.state.sessions.get(session_id) else {
-            return AttentionLevel::Inactive;
-        };
-        attention_level(
-            self.session_details.get(session_id),
-            self.session_review(session_id),
-            session.state,
-            self.unreachable_sessions.contains(session_id),
-            self.session_operations.contains_key(session_id)
-                || self.transition_kind(session_id).is_some(),
-            self.transition_failure_kind(session_id).is_some(),
-        )
+        self.session_facts().own_attention_level(session_id)
     }
 
     /// Whether a live, reachable session is computing right now: the fact the
@@ -1012,10 +988,14 @@ impl DashboardState {
         &self,
         project_key: &str,
     ) -> Option<(AttentionLevel, usize)> {
+        let order = self.session_order();
         self.attention_summary(
-            self.ordered_sessions()
-                .into_iter()
-                .filter(|session| self.project_source(session).key == project_key),
+            order
+                .ids()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| order.project(*index) == Some(project_key))
+                .filter_map(|(_, id)| self.state.sessions.get(id)),
         )
     }
 
@@ -1101,7 +1081,7 @@ impl DashboardState {
             .iter()
             .any(|session| session.id == session_id)
         {
-            self.sessions_filter = None;
+            *self.sessions_filter = None;
         }
         self.select_active_session(session_id);
         self.open_selected_session()

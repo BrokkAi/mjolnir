@@ -161,7 +161,7 @@ pub(crate) fn drawn_session_rows_with_options(
         .as_secs();
     let animation_ms = mj_chat::spinner::elapsed_ms();
     let sessions = dashboard.ordered_sessions();
-    let targets = session_display_targets(dashboard, &sessions);
+    let targets = dashboard.session_order().targets().to_vec();
     let flow_rows = dashboard.sessions_rows().into_iter().map(|row| match row {
         SessionsRow::ProjectHeading { key, label, number } => SessionsRow::ProjectHeading {
             key,
@@ -420,6 +420,74 @@ fn fit_git_row_text(git: &str, free: usize) -> Option<String> {
     elided(free.saturating_sub(marker_room)).map(|name| format!("{marker} {name}"))
 }
 
+/// The output rows an expanded session row shows for its message, kept with
+/// the session's detail until that message, or what its rendering depends
+/// on, changes.
+///
+/// Rendering a reply's markdown is the costly part of a Sessions frame, and a
+/// session's message changes far less often than the pane is drawn. Each
+/// frame compares the message with the one these rows were made from and
+/// reuses them when nothing changed.
+#[derive(Debug, Default)]
+pub(crate) struct OutputPreviewCache {
+    cached: std::cell::RefCell<Option<OutputPreview>>,
+    /// How many times the rows were rendered, for tests to count.
+    #[cfg(test)]
+    pub(crate) renders: std::cell::Cell<usize>,
+}
+
+#[derive(Debug)]
+struct OutputPreview {
+    label: &'static str,
+    message: String,
+    width: usize,
+    theme: mj_core::config::UiTheme,
+    ascii: bool,
+    rows: Vec<Line<'static>>,
+}
+
+impl OutputPreviewCache {
+    /// At most two rows of `message`, after `label`, at `width` cells.
+    pub(crate) fn rows(
+        &self,
+        label: &'static str,
+        message: &str,
+        width: usize,
+    ) -> Vec<Line<'static>> {
+        let theme = theme::current();
+        let ascii = theme::ascii();
+        let mut cached = self.cached.borrow_mut();
+        if let Some(preview) = cached.as_ref()
+            && preview.label == label
+            && preview.width == width
+            && preview.theme == theme
+            && preview.ascii == ascii
+            && preview.message == message
+        {
+            return preview.rows.clone();
+        }
+        #[cfg(test)]
+        self.renders.set(self.renders.get() + 1);
+        // An agent's message is summarized as one paragraph; the user's
+        // prompt keeps its lines after the label.
+        let text = if label.is_empty() {
+            message.replace('\n', " ")
+        } else {
+            format!("{label}{message}")
+        };
+        let rows = render_agent_message_head(&text, width, 2);
+        *cached = Some(OutputPreview {
+            label,
+            message: message.to_owned(),
+            width,
+            theme,
+            ascii,
+            rows: rows.clone(),
+        });
+        rows
+    }
+}
+
 /// The four rows an expanded session draws: name, status and identity, and
 /// two wrapped rows of the current output. The output block is always two
 /// rows, even with nothing to say, so every expanded session is the same
@@ -489,15 +557,9 @@ pub(crate) fn expanded_session_lines(
     };
     let output_prefix = format!("  {}", theme::glyphs().role_gutter);
     let output_width = usize::from(width).saturating_sub(Line::raw(&output_prefix).width());
-    let mut output = message
-        .map(|message| {
-            let text = if label.is_empty() {
-                message.replace('\n', " ")
-            } else {
-                format!("{label}{message}")
-            };
-            render_agent_message_head(&text, output_width, 2)
-        })
+    let mut output = detail
+        .zip(message)
+        .map(|(detail, message)| detail.output_preview.rows(label, message, output_width))
         .unwrap_or_default();
     if output.is_empty() {
         output.push(Line::raw("No messages yet"));
@@ -909,62 +971,97 @@ pub(crate) fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
     }
 }
 
-/// The target label shown for each session, in `ordered_sessions()` order.
+/// The target label shown for each of `sessions`, given each one's project
+/// key in `projects`.
 ///
 /// A target repeated inside one project is ambiguous on its own, so repeats
-/// are numbered `[1]`, `[2]`, … in the order they appear. Every Sessions
-/// representation reads from this so labels remain consistent.
+/// are numbered `[1]`, `[2]`, … in the order they appear. The Sessions order
+/// keeps these labels for `ordered_sessions()`, and every Sessions
+/// representation reads them from there so labels remain consistent.
 pub(crate) fn session_display_targets(
     dashboard: &DashboardState,
     sessions: &[&SessionRecord],
+    projects: &[String],
 ) -> Vec<String> {
-    let mut counts = BTreeMap::<(String, String), usize>::new();
-    for session in sessions {
-        let key = (
-            dashboard.project_source(session).key,
-            session_target_label(
-                &dashboard.state,
-                session,
-                dashboard.session_operations.get(&session.id),
-                &dashboard.config,
-            ),
-        );
+    let keys = sessions
+        .iter()
+        .zip(projects)
+        .map(|(session, project)| {
+            (
+                project.clone(),
+                session_target_label(
+                    &dashboard.state,
+                    session,
+                    dashboard.session_operations.get(&session.id),
+                    &dashboard.config,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::<&(String, String), usize>::new();
+    for key in &keys {
         *counts.entry(key).or_default() += 1;
     }
-    let mut occurrences = BTreeMap::<(String, String), usize>::new();
-    sessions
-        .iter()
-        .map(|session| {
-            let base = session_target_label(
-                &dashboard.state,
-                session,
-                dashboard.session_operations.get(&session.id),
-                &dashboard.config,
-            );
-            let key = (dashboard.project_source(session).key, base.clone());
-            let occurrence = occurrences.entry(key.clone()).or_default();
+    let mut occurrences = BTreeMap::<&(String, String), usize>::new();
+    keys.iter()
+        .map(|key| {
+            let occurrence = occurrences.entry(key).or_default();
             *occurrence += 1;
-            if counts.get(&key).copied().unwrap_or_default() > 1 {
-                format!("{base} [{}]", *occurrence)
+            if counts.get(key).copied().unwrap_or_default() > 1 {
+                format!("{} [{}]", key.1, *occurrence)
             } else {
-                base
+                key.1.clone()
             }
         })
         .collect()
 }
 
-/// Content rows the Sessions pane wants, excluding its border.
-pub(crate) fn sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
-    drawn_session_rows(dashboard, width)
-        .iter()
-        .map(|row| row.content_height().saturating_add(row.spacing))
-        .fold(0, u16::saturating_add)
-        .saturating_add(SESSION_ACTIONS_HEIGHT)
+/// The Sessions pane laid out once for a frame, in both of its forms.
+///
+/// The frame's layout asks how tall each form wants to be before it decides
+/// the pane's size, and the pane then draws one of them. Both answers come
+/// from these rows, so a frame lays each row out once.
+pub(crate) struct SessionsLayout {
+    width: u16,
+    minimized: Vec<DrawnSessionRow>,
+    full: Vec<DrawnSessionRow>,
 }
 
-pub(crate) fn minimized_sessions_content_height(dashboard: &DashboardState, width: u16) -> u16 {
-    drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
-        .iter()
+impl SessionsLayout {
+    /// Lays the pane out for a content area `width` cells wide.
+    pub(crate) fn new(dashboard: &DashboardState, width: u16) -> Self {
+        Self {
+            width,
+            minimized: drawn_session_rows_with_options(
+                dashboard,
+                width,
+                SessionRowsRenderOptions::MINIMIZED,
+            ),
+            full: drawn_session_rows(dashboard, width),
+        }
+    }
+
+    /// Content rows the minimized form wants, excluding its border.
+    pub(crate) fn minimized_content_height(&self) -> u16 {
+        rows_height(&self.minimized)
+    }
+
+    /// Content rows the full form wants, excluding its border.
+    pub(crate) fn content_height(&self) -> u16 {
+        rows_height(&self.full).saturating_add(SESSION_ACTIONS_HEIGHT)
+    }
+
+    fn rows(&self, minimized: bool) -> &[DrawnSessionRow] {
+        if minimized {
+            &self.minimized
+        } else {
+            &self.full
+        }
+    }
+}
+
+fn rows_height(rows: &[DrawnSessionRow]) -> u16 {
+    rows.iter()
         .map(|row| row.content_height().saturating_add(row.spacing))
         .fold(0, u16::saturating_add)
 }
@@ -1182,11 +1279,13 @@ pub(crate) fn attention_badge(summary: Option<(AttentionLevel, usize)>) -> Optio
     ))
 }
 
-/// Draws the Sessions pane and reports the per-row mouse hitboxes.
+/// Draws the Sessions pane from the frame's layout of it, and reports the
+/// per-row mouse hitboxes. The layout must be for this area's content width.
 pub(crate) fn render_sessions(
     frame: &mut Frame,
     area: Rect,
     dashboard: &DashboardState,
+    layout: &SessionsLayout,
 ) -> SessionRowsRendered {
     let content = area.inner(Margin {
         horizontal: 1,
@@ -1208,12 +1307,11 @@ pub(crate) fn render_sessions(
         content.width,
         content.height.saturating_sub(SESSION_ACTIONS_HEIGHT),
     );
-    let width = content.width;
-    let drawn = if dashboard.sessions_minimized() {
-        drawn_session_rows_with_options(dashboard, width, SessionRowsRenderOptions::MINIMIZED)
-    } else {
-        drawn_session_rows(dashboard, width)
-    };
+    debug_assert_eq!(
+        layout.width, content.width,
+        "the Sessions layout was made for another width"
+    );
+    let drawn = layout.rows(dashboard.sessions_minimized());
     let focused = dashboard.focus() == Focus::Sessions;
     let maximize_enabled = dashboard.pane_maximize_enabled(SupportPane::Sessions);
     let filter_label = dashboard.sessions_filter_label();

@@ -2864,7 +2864,7 @@ fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
     let mut configured = config();
     configured.review.enabled = true;
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config = configured.clone();
+    *dashboard.config = configured.clone();
     dashboard.mode = Mode::Setup(SetupDialog::new(&configured));
     let row = |dashboard: &mut DashboardState| {
         drawn(dashboard, 140, 40)
@@ -3126,7 +3126,7 @@ fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
         dashboard.config.phone.bind.clone_from(bind);
         if bind == &default {
             assert!(
-                serde_json::to_value(&dashboard.config)
+                serde_json::to_value(&*dashboard.config)
                     .unwrap()
                     .get("phone")
                     .is_none()

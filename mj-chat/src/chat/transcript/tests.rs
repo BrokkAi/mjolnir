@@ -2041,6 +2041,58 @@ fn agent_preview_tail_matches_the_conversation_body_rows_without_the_gutter() {
     );
 }
 
+/// A session-list summary wraps only as far as its rows need. Those rows, and
+/// the ellipsis that says more was left out, are exactly what wrapping the
+/// whole message and keeping its first rows gives.
+#[test]
+fn agent_preview_head_matches_the_first_rows_of_the_whole_message() {
+    let findings = (0..40)
+        .map(|index| {
+            format!(
+                "### Finding {index}: `src/file_{index}.rs:{index}`\n\n- {}\n\n",
+                "the daemon publishes a revision and every waiter wakes ".repeat(4)
+            )
+        })
+        .collect::<String>();
+    let sources = [
+        "word ".repeat(4000),
+        findings.replace('\n', " "),
+        findings,
+        "漢字かな交じり文 ".repeat(600),
+        "x".repeat(9000),
+        "short".to_owned(),
+        "\n\n  \n".to_owned(),
+        "first line\n**late-corpus diagnostics,**\nthird line".to_owned(),
+    ];
+    for source in &sources {
+        for width in [1, 2, 7, 38, 80] {
+            for maximum in [1, 2, 3] {
+                let entry = ChatEntry::plain(0, ChatRole::Agent, source);
+                let mut whole = entry_body_rows(
+                    &entry,
+                    width + ROLE_GUTTER_WIDTH,
+                    TranscriptRenderMode::Rich,
+                )
+                .into_iter()
+                .filter(|line| !line_is_empty(line))
+                .map(without_role_gutter)
+                .collect::<Vec<_>>();
+                let truncated = whole.len() > maximum;
+                whole.truncate(maximum);
+                if truncated && let Some(last) = whole.last_mut() {
+                    append_trimmed_ellipsis(last, 0);
+                }
+                assert_eq!(
+                    render_agent_message_head(source, width, maximum),
+                    whole,
+                    "width {width}, {maximum} rows, source {:?}",
+                    &source[..source.len().min(40)]
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn agent_preview_head_removes_punctuation_before_its_ellipsis() {
     let lines = render_agent_message_head(

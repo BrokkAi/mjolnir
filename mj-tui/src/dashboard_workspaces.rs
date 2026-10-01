@@ -33,7 +33,7 @@ impl DashboardState {
         if !self.state.sessions.contains_key(&parent_id) {
             return;
         }
-        self.subagent_parent_id = Some(parent_id.clone());
+        *self.subagent_parent_id = Some(parent_id.clone());
         let child = self
             .managed_child_ids(&parent_id)
             .into_iter()
@@ -55,7 +55,7 @@ impl DashboardState {
         let Some(parent_id) = self.subagent_parent_id.take() else {
             return;
         };
-        self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+        *self.subagent_parent_id = self.subagent_parent_for(&parent_id);
         self.select_active_session(&parent_id);
         self.clamp_selections();
     }
@@ -151,7 +151,7 @@ impl DashboardState {
             if !in_view {
                 continue;
             }
-            self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+            *self.subagent_parent_id = self.subagent_parent_for(&parent_id);
             self.select_active_session(&parent_id);
             self.clamp_selections();
             let titles = children
@@ -206,7 +206,7 @@ impl DashboardState {
         if let Mode::WorkspaceManager(manager) = &mut self.mode {
             manager.active_workspace_id = workspace_id.clone();
         }
-        if self.active_workspace_id == workspace_id {
+        if *self.active_workspace_id == workspace_id {
             self.clamp_selections();
             return;
         }
@@ -217,8 +217,8 @@ impl DashboardState {
         }
 
         self.switch_go_workspace(workspace_id.as_deref());
-        self.sessions_filter = None;
-        self.active_workspace_id = workspace_id.clone();
+        *self.sessions_filter = None;
+        *self.active_workspace_id = workspace_id.clone();
         self.workspace_name = workspace_id
             .as_deref()
             .map(|id| self.workspace_display_name(id).to_owned())
@@ -233,7 +233,7 @@ impl DashboardState {
                 self.quota_index = view.quota_index;
                 self.pane_sizes = view.pane_sizes;
                 self.restore_conversation_layout(&view.conversation_layout);
-                self.collapsed_project_keys = view.collapsed_project_keys;
+                *self.collapsed_project_keys = view.collapsed_project_keys;
                 self.focus = view.focus;
             } else {
                 self.sessions_scroll.set(0);

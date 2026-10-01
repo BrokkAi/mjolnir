@@ -203,7 +203,7 @@ pub fn withdraw_startup_prompt(session_id: &str, text: &str) -> Result<bool> {
 /// ([`CommittedState::startup_groups`]); this store read serves a process
 /// without the writer.
 pub fn load_latest_startup_group(session_id: &str) -> Result<Vec<StartupDelivery>> {
-    load_latest_startup_group_with(&open_reader(&database_path())?, session_id)
+    load_latest_startup_group_with(&*open_reader(&database_path())?, session_id)
 }
 
 pub(super) fn load_latest_startup_group_with(
