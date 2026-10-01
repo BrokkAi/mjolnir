@@ -196,7 +196,10 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await context.setOffline(true);
     fs.writeFileSync(readyMarker, 'browser offline and ready\n');
     stage('offline-ready');
-    await expect.poll(() => fs.existsSync(changedMarker)).toBe(true);
+    // The TUI stop only reaches durable state after the session checkpoints and
+    // its target tears down, which takes materially longer than a snapshot
+    // round trip and outruns the default 15s on a loaded runner.
+    await expect.poll(() => fs.existsSync(changedMarker), { timeout: 60_000 }).toBe(true);
     await context.setOffline(false);
 
     // A stopped session leaves the dashboard: it belongs to the resume flow,
