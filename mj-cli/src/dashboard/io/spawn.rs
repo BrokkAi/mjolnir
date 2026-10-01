@@ -173,12 +173,7 @@ pub(crate) fn spawn_workspace_management_load(
 ) -> JoinHandle<()> {
     spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async {
         let mut daemon = daemon::connect_or_start().await?;
-        let revision = daemon
-            .runtime_snapshot(String::new(), 0, true)
-            .await?
-            .revision;
         Ok(WorkspaceManagementResult {
-            revision,
             entries: load_workspace_management_entries(&mut daemon).await?,
             select_workspace: None,
             deleted_workspace_id: None,
@@ -245,12 +240,7 @@ pub(crate) fn spawn_workspace_create(
         async move {
             let mut daemon = daemon::connect_or_start().await?;
             let workspace = daemon.create_workspace(name).await?;
-            let revision = daemon
-                .runtime_snapshot(String::new(), 0, true)
-                .await?
-                .revision;
             Ok(WorkspaceManagementResult {
-                revision,
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: Some(workspace.id),
                 deleted_workspace_id: None,
@@ -274,12 +264,7 @@ pub(crate) fn spawn_workspace_rename(
         async move {
             let mut daemon = daemon::connect_or_start().await?;
             daemon.rename_workspace(workspace_id, name).await?;
-            let revision = daemon
-                .runtime_snapshot(String::new(), 0, true)
-                .await?
-                .revision;
             Ok(WorkspaceManagementResult {
-                revision,
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: None,
                 deleted_workspace_id: None,
@@ -318,12 +303,7 @@ pub(crate) fn spawn_workspace_close(
         let work = tokio::spawn(async move {
             let mut daemon = daemon::connect_or_start().await?;
             daemon.close_workspace(workspace_id.clone()).await?;
-            let revision = daemon
-                .runtime_snapshot(String::new(), 0, true)
-                .await?
-                .revision;
             Ok(WorkspaceManagementResult {
-                revision,
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: None,
                 deleted_workspace_id: Some(workspace_id),
@@ -356,12 +336,7 @@ pub(crate) fn spawn_workspace_draft_recovery(
         async move {
             let mut daemon = daemon::connect_or_start().await?;
             daemon.recover_draft(draft_id).await?;
-            let revision = daemon
-                .runtime_snapshot(String::new(), 0, true)
-                .await?
-                .revision;
             Ok(WorkspaceManagementResult {
-                revision,
                 entries: load_workspace_management_entries(&mut daemon).await?,
                 select_workspace: None,
                 deleted_workspace_id: None,
