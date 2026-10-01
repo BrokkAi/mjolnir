@@ -13,7 +13,7 @@ The Sessions dialog must distinguish a pending search from a background index sy
 - [x] Implement truthful search state and one task per query; focused dialog tests passed. Final task and overlay regressions run with the full suite.
 - [x] Implement top-level discovery, transactional index cleanup, and root-only destroy indexing; 47 focused SessionWiki tests passed. The new isolated archive regression runs with the full suite.
 - [x] Complete dev-profile Cargo validation and isolated instance validation: reuse the passing full suite, corrected controller tests, and affected merge-site checks as directed by the user.
-- [ ] Commit only task-owned files on master and push to origin/master, as requested.
+- [x] Commit only task-owned files on master: implementation commit `f8069058`. Publish the completed commits to origin/master as the final delivery action authorized by the user.
 
 ## Surprises & Discoveries
 
@@ -29,7 +29,7 @@ One background task owns the sequential searches for one query. Dialog state own
 
 ## Outcomes & Retrospective
 
-Both implementation milestones and validation are complete. An earlier full suite passed; after the final ownership correction, all 2111 controller tests and 703 worker unit tests passed. After integrating upstream UI changes, the combined chat, TUI, CLI, daemon startup, and PTY tests passed, as did all-target Clippy and formatting. The user explicitly requested reusing that full-suite result and validating affected merge sites rather than repeating the full suite. The redundant rerun was stopped; commit and push remain.
+Both implementation milestones and validation are complete, and implementation commit `f8069058` is ready for publication to origin/master. An earlier full suite passed; after the final ownership correction, all 2111 controller tests and 703 worker unit tests passed. After integrating upstream UI changes, the combined chat, TUI, CLI, daemon startup, and PTY tests passed, as did all-target Clippy and formatting. The user explicitly requested reusing that full-suite result and validating affected merge sites rather than repeating the full suite. The redundant rerun was stopped. Search now retains answered results during sync, while adapter discovery and cleanup exclude positively identified children and preserve parents. SessionWiki, dependency pins, and the default daemon/store remain untouched. Deferred transcript filtering is tracked in issue #1210.
 
 ## Context and Orientation
 
@@ -88,3 +88,5 @@ Final integration revision: two concurrent UI commits advanced master to 6103034
 Validation orchestration correction: the older full-suite job passed 2111 controller and 703 worker unit tests, but its daemon startup test compared the old compiled build ID with the executable replaced by the final UI rebuild, causing one assertion failure. The final integrated daemon startup suite passed all 12 tests. A full suite is rerunning against the final consistent build; no source change was needed. All-target Clippy passed on the integrated branch in 1m17s.
 
 Final validation decision (2026-10-01): the user requested reusing the already passing full suite and checking affected merge sites instead of another full run. The combined `cargo test -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir` passed, including all 12 daemon startup and 12 PTY tests, and integrated all-target Clippy and rustfmt passed. The redundant full-suite rerun was stopped by its verified process group. No required affected-site checks remain.
+
+Completion: implementation was committed on master as `f8069058`, staging only the 17 task-owned files. This plan records the finished implementation and validation; publishing these commits to origin/master is the authorized final delivery step. No further implementation work remains.
