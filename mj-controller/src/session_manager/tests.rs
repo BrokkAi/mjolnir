@@ -2482,9 +2482,10 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
 
     assert_eq!(
         sender
-            .pending
+            .mailbox
             .lock()
             .expect("session update coalescer poisoned")
+            .pending
             .len(),
         2
     );
@@ -2494,6 +2495,98 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(updates["session-1"].detail(), "revision-999");
     assert_eq!(updates["session-2"].detail(), "other");
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn dashboard_updates_deliver_sessions_in_first_pending_order_with_the_latest_view() {
+    let (sender, mut receiver) = coalesced_update_channel();
+    for (session_id, ordinal) in [
+        ("z-first", 1),
+        ("a-second", 2),
+        ("z-first", 3),
+        ("m-third", 4),
+    ] {
+        sender.send(SessionManagerUpdate {
+            session_id: session_id.into(),
+            view: view_at_ordinal(ordinal),
+        });
+    }
+    // All publications share one wake notification, and pending views must
+    // still drain after the last sender closes.
+    drop(sender);
+    for (session_id, ordinal) in [("z-first", 3), ("a-second", 2), ("m-third", 4)] {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(update.session_id, session_id);
+        assert_eq!(update.view, view_at_ordinal(ordinal));
+    }
+    assert!(receiver.recv().await.is_none());
+}
+
+#[test]
+fn dashboard_updates_deliver_waiting_sessions_before_a_republishing_hot_session() {
+    let (sender, mut receiver) = coalesced_update_channel();
+    for session_id in ["a-hot", "z-waiting", "m-waiting"] {
+        sender.send(SessionManagerUpdate {
+            session_id: session_id.into(),
+            view: view_at_ordinal(1),
+        });
+    }
+    assert_eq!(receiver.try_recv().unwrap().session_id, "a-hot");
+    for expected in ["z-waiting", "m-waiting"] {
+        for ordinal in 2..200 {
+            sender.send(SessionManagerUpdate {
+                session_id: "a-hot".into(),
+                view: view_at_ordinal(ordinal),
+            });
+        }
+        assert_eq!(receiver.try_recv().unwrap().session_id, expected);
+    }
+    drop(sender);
+    let hot = receiver.try_recv().unwrap();
+    assert_eq!(hot.session_id, "a-hot");
+    assert_eq!(hot.view, view_at_ordinal(199));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
+fn dashboard_updates_put_a_replacement_actor_after_sessions_already_waiting() {
+    let (sender, mut receiver) = coalesced_update_channel();
+    let old = sender.for_actor("a-replaced");
+    old.send(SessionManagerUpdate {
+        session_id: "a-replaced".into(),
+        view: view_at_ordinal(1),
+    });
+    for session_id in ["z-waiting", "m-waiting"] {
+        sender.send(SessionManagerUpdate {
+            session_id: session_id.into(),
+            view: view_at_ordinal(2),
+        });
+    }
+    let current = sender.for_actor("a-replaced");
+    current.send(SessionManagerUpdate {
+        session_id: "a-replaced".into(),
+        view: view_at_ordinal(3),
+    });
+    old.send(SessionManagerUpdate {
+        session_id: "a-replaced".into(),
+        view: view_at_ordinal(4),
+    });
+    drop(old);
+    drop(current);
+    drop(sender);
+    for (session_id, ordinal) in [("z-waiting", 2), ("m-waiting", 2), ("a-replaced", 3)] {
+        let update = receiver.try_recv().unwrap();
+        assert_eq!(update.session_id, session_id);
+        assert_eq!(update.view, view_at_ordinal(ordinal));
+    }
     assert!(receiver.try_recv().is_err());
 }
 
