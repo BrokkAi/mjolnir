@@ -169,14 +169,12 @@ impl DashboardContext {
         let last_seen_event_ordinal = detach_read_frontier(
             self.chat_was_on_screen(&session_id),
             last_seen_event_ordinal,
-            self.controller
-                .state
-                .sessions
-                .get(&session_id)
+            self.chat_session_record(&session_id)
                 .map_or(0, |session| session.viewed_through_event_ordinal),
         );
         record_chat_detach_state(
             &mut self.controller,
+            self.departed_records.get(&session_id),
             &mut self.dashboard,
             DetachedChatState {
                 client_id: &self.client_id,
@@ -212,10 +210,7 @@ impl DashboardContext {
             return;
         };
         let inherited_input = self
-            .controller
-            .state
-            .sessions
-            .get(&session_id)
+            .chat_session_record(&session_id)
             .map_or_else(String::new, |session| session.draft_input.clone());
         self.composer_drafts
             .capture(&session_id, text, &inherited_input);

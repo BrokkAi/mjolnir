@@ -2200,3 +2200,59 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
     // Retiring an old operation leaves the new attachment selected and alive.
     assert!(!attachments.get_mut(&pane).unwrap().select("session"));
 }
+
+/// The runtime feed carries only live sessions, so a chat can still be
+/// detaching after its suspended session's record has left. Its last record
+/// says where the draft and read position belong; nothing reports the
+/// session as unknown.
+#[tokio::test]
+async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft() {
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State::default(),
+    };
+    let mut dashboard = DashboardState::new(Config::default(), State::default(), BTreeMap::new());
+    let departed = live_session("session-1", "2026-09-19T00:00:00Z");
+    let (updates, _received) = tokio::sync::mpsc::unbounded_channel();
+    let (tracker, _changed) = CriticalOperationTracker::new();
+    let detached = || DetachedChatState {
+        client_id: "client",
+        session_id: "session-1",
+        event_ordinal: 4,
+        draft: DetachedSessionDraft {
+            text: "unsent".into(),
+            inherited_input: None,
+        },
+    };
+
+    let saved = record_chat_detach_state(
+        &mut controller,
+        Some(&departed),
+        &mut dashboard,
+        detached(),
+        &updates,
+        tracker.clone(),
+    )
+    .expect("the draft is saved");
+    // The current-thread runtime has not polled the save; it never reaches a
+    // daemon.
+    saved.abort();
+    assert_eq!(dashboard.notice(), None);
+
+    assert!(
+        record_chat_detach_state(
+            &mut controller,
+            None,
+            &mut dashboard,
+            detached(),
+            &updates,
+            tracker,
+        )
+        .is_none()
+    );
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("unknown session"))
+    );
+}

@@ -86,12 +86,31 @@ impl DashboardState {
                     .sessions
                     .get(&relation.child_session_id)
                     .filter(|child| child.state.is_active())?;
-                let parent = next.sessions.get(&relation.parent_session_id)?;
-                let suspending = matches!(
-                    parent.state,
-                    SessionState::Closing | SessionState::Destroying | SessionState::Stopped
-                ) || self.session_operation_kind(&parent.id)
+                let parent_id = &relation.parent_session_id;
+                let parent_suspending = self.session_operation_kind(parent_id)
                     == Some(SessionOperationKind::Suspending);
+                let suspending = match next.sessions.get(parent_id) {
+                    Some(parent) => {
+                        parent_suspending
+                            || matches!(
+                                parent.state,
+                                SessionState::Closing
+                                    | SessionState::Destroying
+                                    | SessionState::Stopped
+                            )
+                    }
+                    // The feed carries only live sessions, so a parent that
+                    // finished its suspend can leave in the same frame.
+                    None => {
+                        parent_suspending
+                            || self.state.sessions.get(parent_id).is_some_and(|parent| {
+                                matches!(
+                                    parent.state,
+                                    SessionState::Closing | SessionState::Destroying
+                                )
+                            })
+                    }
+                };
                 let shown = [
                     self.subagent_parent_id.as_deref(),
                     self.selected_session_id(),
@@ -102,7 +121,7 @@ impl DashboardState {
                 .any(|id| id == child.id);
                 suspending.then(|| SubagentStoppedBySuspend {
                     session_id: child.id.clone(),
-                    parent_id: parent.id.clone(),
+                    parent_id: parent_id.clone(),
                     title: child.listed_title().to_owned(),
                     shown,
                 })
@@ -145,7 +164,11 @@ impl DashboardState {
             } else {
                 format!("Sub-agents {named} were stopped by the suspend")
             });
-            self.stopped_by_suspend.reopen = Some(parent_id);
+            // A parent that left the feed has stopped; there is nothing to
+            // reopen.
+            if self.state.sessions.contains_key(&parent_id) {
+                self.stopped_by_suspend.reopen = Some(parent_id);
+            }
         }
         self.stopped_by_suspend
             .sessions

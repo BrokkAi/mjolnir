@@ -470,6 +470,18 @@ impl DashboardContext {
         {
             return;
         }
+        for (id, record) in self.controller.state.sessions.changes(&sessions) {
+            match (record, self.controller.state.sessions.get(id)) {
+                (None, Some(last)) if self.chats.contains_key(id) => {
+                    self.departed_records.insert(id.clone(), last.clone());
+                }
+                _ => {
+                    self.departed_records.remove(id);
+                }
+            }
+        }
+        let chats = &self.chats;
+        self.departed_records.retain(|id, _| chats.contains_key(id));
         self.controller.state.sessions = sessions;
         self.controller.state.subagents = subagents;
         self.controller.state.last_subagent_policy = last_subagent_policy;

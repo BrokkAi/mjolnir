@@ -609,6 +609,20 @@ impl DashboardState {
                 (id, record)
             })
             .collect::<Vec<_>>();
+        // A suspended session leaves the feed, which carries only live
+        // sessions. A pinned pane that showed it says why it emptied, named
+        // while the record is still here to name it.
+        let unpinned_by_suspend = changed
+            .iter()
+            .filter(|(id, record)| {
+                record.is_none()
+                    && self.session_operation_kind(id) == Some(SessionOperationKind::Suspending)
+                    && self
+                        .pane_for_session(id)
+                        .is_some_and(|pane| pane != self.browse_pane())
+            })
+            .map(|(id, _)| self.session_notice_name(id))
+            .collect::<Vec<_>>();
         self.durable_records = state.sessions.clone();
         let mut rows = self.state.sessions.clone();
         for (id, record) in &changed {
@@ -648,6 +662,9 @@ impl DashboardState {
         }) {
             self.reconcile_pins();
             self.mark_layout_modified();
+        }
+        for name in unpinned_by_suspend {
+            self.say_suspended_session_was_unpinned(&name);
         }
         for (id, record) in changed {
             self.release_finished_conversation(&id);

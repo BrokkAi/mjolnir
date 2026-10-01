@@ -278,6 +278,10 @@ impl DashboardState {
     pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
         self.set_pane_session(pane, None);
         let name = self.session_notice_name(session_id);
+        self.say_suspended_session_was_unpinned(&name);
+    }
+
+    pub(crate) fn say_suspended_session_was_unpinned(&mut self, name: &str) {
         let resume = self
             .first_key_label(crate::CommandId::ResumeDialog)
             .map(|key| format!(" {key} finds it to resume."))

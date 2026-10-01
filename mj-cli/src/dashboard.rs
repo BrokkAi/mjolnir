@@ -273,6 +273,11 @@ pub(crate) struct DashboardContext {
     /// conversation stays current whether or not it is the one with the
     /// keyboard, and moving between panes is a redraw rather than a rebuild.
     pub(crate) chats: BTreeMap<String, mj_chat::chat::ActiveChat>,
+    /// The last record of each session that left the runtime feed while a
+    /// chat still showed it. The feed carries only live sessions, but the
+    /// chat still detaches, and this says where its draft and read position
+    /// belong. Kept only while the chat exists.
+    pub(crate) departed_records: BTreeMap<String, SessionRecord>,
     /// In-memory form drafts for sessions that are not currently attached.
     /// Each value retains its complete request identity (and may contain one
     /// primary and one deferred reviewer form), so an id reused by a changed
@@ -1328,6 +1333,16 @@ impl DashboardContext {
         self.reconcile_conversation_attachments();
     }
 
+    /// The record a chat's bookkeeping reads: the live one, or the last one
+    /// of a session that has just left the feed.
+    pub(crate) fn chat_session_record(&self, session_id: &str) -> Option<&SessionRecord> {
+        self.controller
+            .state
+            .sessions
+            .get(session_id)
+            .or_else(|| self.departed_records.get(session_id))
+    }
+
     pub(crate) fn session_in_active_workspace(&self, session_id: &str) -> bool {
         self.dashboard
             .session_record(session_id)
@@ -1595,6 +1610,7 @@ impl DashboardContext {
             events: Some(events),
             splash: None,
             chats: BTreeMap::new(),
+            departed_records: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),
             composer_drafts: ComposerDraftCache::default(),
@@ -1872,23 +1888,30 @@ struct DetachedChatState<'a> {
 
 fn record_chat_detach_state(
     controller: &mut Controller,
+    departed: Option<&SessionRecord>,
     dashboard: &mut DashboardState,
     detached: DetachedChatState<'_>,
     updates: &UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let Some(session) = controller.state.sessions.get_mut(detached.session_id) else {
+    let workspace_id = if let Some(session) = controller.state.sessions.get_mut(detached.session_id)
+    {
+        session.viewed_through_event_ordinal = session
+            .viewed_through_event_ordinal
+            .max(detached.event_ordinal);
+        let workspace_id = session.workspace_id.clone();
+        dashboard.set_state(controller.state.clone());
+        workspace_id
+    } else if let Some(session) = departed {
+        // The session left the feed; only the store needs the update.
+        session.workspace_id.clone()
+    } else {
         dashboard.set_notice(format!(
             "Could not save draft and read status for {}: unknown session",
             short_id(detached.session_id)
         ));
         return None;
     };
-    session.viewed_through_event_ordinal = session
-        .viewed_through_event_ordinal
-        .max(detached.event_ordinal);
-    let workspace_id = session.workspace_id.clone();
-    dashboard.set_state(controller.state.clone());
     dashboard.clear_notice();
     Some(io::spawn_detached_session_state_persist(
         detached.client_id.to_owned(),

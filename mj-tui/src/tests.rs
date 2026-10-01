@@ -5671,6 +5671,84 @@ fn the_host_learns_which_conversations_a_suspend_took_away() {
     );
 }
 
+/// The feed carries only live sessions, so a parent whose suspend finished
+/// can leave in the same frame as the sub-agent it stopped. That is still the
+/// suspend's doing, and there is no parent conversation left to reopen.
+#[test]
+fn a_parent_and_sub_agent_leaving_together_after_a_suspend_is_still_reported() {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    dashboard.open_subagent_workspace(parent.clone());
+    dashboard.set_current_session(Some("child-session"));
+    let mut closing = dashboard.state.clone();
+    closing.sessions.get_mut(&parent).unwrap().state = SessionState::Closing;
+    dashboard.set_state(closing);
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend::default()
+    );
+
+    let mut gone = dashboard.state.clone();
+    gone.sessions.remove(&parent);
+    gone.sessions.remove("child-session");
+    gone.subagents.remove("child-session");
+    dashboard.set_state(gone);
+
+    assert_eq!(
+        dashboard.take_stopped_by_suspend(),
+        StoppedBySuspend {
+            sessions: vec!["child-session".into()],
+            reopen: None,
+        }
+    );
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("was stopped by the suspend")),
+        "{:?}",
+        dashboard.notice()
+    );
+}
+
+/// A suspended session leaves the feed instead of staying as a stopped
+/// record. A pinned pane that showed it still says why it emptied.
+#[test]
+fn a_pinned_session_that_leaves_the_feed_by_suspending_says_why_its_pane_emptied() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut pinned = running_session();
+    pinned.id = "session-2".into();
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(pinned.id.clone(), pinned);
+    dashboard.set_state(state);
+    let pane = dashboard.browse_pane();
+    dashboard
+        .split_focused_pane(ratatui::layout::Direction::Horizontal, None)
+        .unwrap();
+    dashboard.set_pane_session(pane, Some("session-2"));
+    assert_ne!(pane, dashboard.browse_pane());
+    dashboard.begin_session_operation_at_with_id(
+        "session-2".into(),
+        SessionOperationKind::Suspending,
+        None,
+        0,
+        None,
+        false,
+    );
+
+    let mut next = dashboard.state.clone();
+    next.sessions.remove("session-2");
+    dashboard.set_state(next);
+    dashboard.finish_session_operation("session-2");
+
+    assert_eq!(dashboard.pane_session(pane), None);
+    assert!(
+        dashboard
+            .notice()
+            .is_some_and(|notice| notice.contains("is suspended, so it was unpinned from its pane")),
+        "{:?}",
+        dashboard.notice()
+    );
+}
+
 /// A sub-agent that leaves while its parent runs on, as a destroy removes
 /// one, was not stopped by a suspend: the view and the footer stay as they
 /// were.
