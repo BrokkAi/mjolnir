@@ -842,6 +842,51 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     }
 }
 
+#[tokio::test]
+async fn session_detail_keeps_the_setter_configuration_while_the_snapshot_lags() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["max", "high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.set_config = true;
+        snapshot.sessions[0].config_options = crate::server::session_config_view(
+            mj_core::config::HarnessKind::Codex,
+            &live_view("slow", &["high"]).snapshot.unwrap().operational,
+        );
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"effort","value":"max"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied = json_body(response).await;
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = json_body(response).await;
+    let options = detail["config_options"].as_array().unwrap();
+    for (key, current) in [("model", "flash"), ("effort", "max")] {
+        let option = options.iter().find(|option| option["key"] == key).unwrap();
+        assert_eq!(option["current"], current);
+    }
+    assert_eq!(detail["config_options"], applied["config_options"]);
+}
+
 /// A model change replaces the effort catalogue at once, while the controller
 /// snapshot still carries the previous model's choices for a while. Validating
 /// the next change against the snapshot refused an effort the session does

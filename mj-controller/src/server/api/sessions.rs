@@ -50,11 +50,19 @@ pub(super) async fn get_session(
         }
         if let Some(handle) = backend.session_handle(session_id).await? {
             let view = handle.view();
-            if view.connected
-                && let Some(snapshot) = view.snapshot
-            {
-                session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
-                session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
+            if let Some(snapshot) = view.snapshot {
+                // Use the setter's live configuration source; the dashboard can lag.
+                let options = crate::server::session_config_view(
+                    session.harness_kind.parse()?,
+                    &snapshot.operational,
+                );
+                if !options.is_empty() {
+                    session.config_options = options;
+                }
+                if view.connected {
+                    session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+                    session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
+                }
             }
         }
     }
