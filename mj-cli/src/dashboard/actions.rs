@@ -137,6 +137,8 @@ pub(crate) async fn apply_dashboard_action(
             context.request_shutdown();
         }
         DashboardAction::SelectWorkspace { workspace_id } => {
+            // An explicit choice outranks opening a workspace created earlier.
+            context.pending_workspace_selection = None;
             if context.dashboard.active_workspace_id() != Some(workspace_id.as_str()) {
                 context.select_workspace(Some(workspace_id));
             }

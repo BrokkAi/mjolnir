@@ -398,7 +398,6 @@ pub(crate) struct ActiveLifecycleOperation {
 }
 
 pub(crate) struct WorkspaceManagementResult {
-    revision: u64,
     pub(crate) entries: Vec<WorkspaceManagementEntry>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
@@ -645,26 +644,20 @@ impl DashboardContext {
             DashboardIoUpdate::WorkspaceManagement { generation, result } => match result {
                 Ok(result) => {
                     let WorkspaceManagementResult {
-                        revision,
                         entries,
                         select_workspace,
                         deleted_workspace_id,
                     } = result;
-                    // A management response may precede an already queued
-                    // runtime feed message. Do not let that older message
-                    // remove a newly created tab or resurrect a deleted one.
-                    let names_are_current = revision >= self.runtime_state_revision;
-                    self.runtime_state_revision = self.runtime_state_revision.max(revision);
-                    let names: BTreeMap<String, String> = entries
-                        .iter()
-                        .map(|entry| (entry.workspace.id.clone(), entry.workspace.name.clone()))
-                        .collect();
-                    if let Some(deleted_workspace_id) = deleted_workspace_id.as_ref() {
+                    // The runtime feed alone owns tab names, layouts and the
+                    // active tab. A deletion owns only the composers, because
+                    // the feed also hides an empty default it cannot tell
+                    // apart from a deleted one.
+                    if let Some(deleted_workspace_id) = deleted_workspace_id.as_deref() {
                         self.discard_workspace_composers(deleted_workspace_id);
-                        self.pane_size_persistence.forget(deleted_workspace_id);
-                        self.layout_persistence.forget(deleted_workspace_id);
-                        self.workspace_layouts.remove(deleted_workspace_id);
-                        self.known_workspace_layouts.remove(deleted_workspace_id);
+                        if self.pending_workspace_selection.as_deref() == Some(deleted_workspace_id)
+                        {
+                            self.pending_workspace_selection = None;
+                        }
                     }
                     // The TUI owns the modal generation guard. It returns
                     // whether this result still belongs to the visible
@@ -672,24 +665,14 @@ impl DashboardContext {
                     let foreground = self
                         .dashboard
                         .finish_workspace_management(generation, Ok(entries));
-                    let next_workspace = deleted_workspace_id
-                        .as_ref()
-                        .and_then(|deleted_id| names.keys().find(|id| *id != deleted_id).cloned());
-                    if names_are_current {
-                        self.dashboard.set_workspace_names(names);
-                    }
-                    if foreground
-                        && let Some(workspace_id) = select_workspace
-                        && (names_are_current
-                            || self.known_workspace_layouts.contains(&workspace_id))
-                    {
+                    if foreground && let Some(workspace_id) = select_workspace {
                         self.dashboard.cancel_modal();
-                        self.select_workspace(Some(workspace_id));
-                    } else if let Some(deleted_workspace_id) = deleted_workspace_id
-                        && self.dashboard.active_workspace_id()
-                            == Some(deleted_workspace_id.as_str())
-                    {
-                        self.select_workspace(next_workspace);
+                        if self.known_workspace_layouts.contains(&workspace_id) {
+                            self.select_workspace(Some(workspace_id));
+                        } else {
+                            // The tab opens with the feed frame that adds it.
+                            self.pending_workspace_selection = Some(workspace_id);
+                        }
                     }
                 }
                 Err(error) => {

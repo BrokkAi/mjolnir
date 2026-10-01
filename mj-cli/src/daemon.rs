@@ -679,43 +679,10 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         }
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
             let mut client = DaemonClient::connect(metadata.clone()).await?;
-            if daemon_admission_ignores_workers(metadata) {
-                match client.request(DaemonAction::PrepareUpgrade).await? {
-                    DaemonReply::Done => Ok(true),
-                    DaemonReply::UpgradePending
-                        if daemon_admission_counts_open_requests(metadata) =>
-                    {
-                        // The refusal may be only open HTTP requests, which
-                        // this daemon wrongly counts as its own work. Hand off
-                        // when they are all that remain, after the same
-                        // observed lifecycle check as older daemons. This is
-                        // an observed check, not atomic admission.
-                        let Some(blockers) = upgrade_blockers(metadata).await else {
-                            return Ok(false);
-                        };
-                        if !blockers.iter().all(|label| is_open_request_label(label)) {
-                            return Ok(false);
-                        }
-                        let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
-                        if !legacy_snapshot_is_idle(&snapshot) {
-                            return Ok(false);
-                        }
-                        client.stop().await?;
-                        Ok(true)
-                    }
-                    DaemonReply::UpgradePending => Ok(false),
-                    reply => bail!("unexpected upgrade admission reply {reply:?}"),
-                }
-            } else {
-                // These daemons cannot give a trustworthy atomic admission.
-                // Inspect their own activity without opening or migrating
-                // their store; this is an observed idle check only.
-                let snapshot = client.runtime_snapshot(String::new(), 0, true).await?;
-                if !legacy_snapshot_is_idle(&snapshot) {
-                    return Ok(false);
-                }
-                client.stop().await?;
-                Ok(true)
+            match client.request(DaemonAction::PrepareUpgrade).await? {
+                DaemonReply::Done => Ok(true),
+                DaemonReply::UpgradePending => Ok(false),
+                reply => bail!("unexpected upgrade admission reply {reply:?}"),
             }
         })
         .await;
@@ -736,74 +703,22 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             Ok(Ok(false)) => {}
         }
         if Instant::now() >= notice_at {
-            startup_notice(upgrade_wait_notice(
-                metadata,
-                upgrade_blockers(metadata).await,
-            ));
+            startup_notice(upgrade_wait_notice(upgrade_blockers(metadata).await));
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// Whether the daemon's `PrepareUpgrade` answer can be trusted.
-///
-/// Protocol 33 added atomic admission, but 2.17.0 shipped it with a gate that
-/// also counted worker turns, reviews, and every session without a snapshot,
-/// so one unreachable worker refuses the handoff forever. 2.18.0 narrowed the
-/// gate to daemon-owned work without changing the protocol, so the build
-/// version is the only way to tell them apart.
-fn daemon_admission_ignores_workers(metadata: &DaemonMetadata) -> bool {
-    metadata.protocol_version >= 33
-        && semver::Version::parse(&metadata.build_version)
-            .is_ok_and(|version| version >= semver::Version::new(2, 18, 0))
-}
-
-/// Whether the daemon counts every open HTTP request as upgrade work.
-///
-/// Through 2.20.0 the HTTP layer held an upgrade permit for each request and
-/// response body, so a long `mj wait` or event read refused `PrepareUpgrade`
-/// until it ended. Later daemons count only the operations those requests
-/// start. The protocol did not change, so only the build version tells.
-fn daemon_admission_counts_open_requests(metadata: &DaemonMetadata) -> bool {
-    semver::Version::parse(&metadata.build_version)
-        .is_ok_and(|version| version < semver::Version::new(2, 21, 0))
-}
-
-/// The label such a daemon gives its open HTTP requests, with or without a
-/// count (`HTTP request x3`).
-fn is_open_request_label(label: &str) -> bool {
-    label == "HTTP request" || label.starts_with("HTTP request x")
-}
-
 /// The line shown while an automatic upgrade waits for the old daemon.
-fn upgrade_wait_notice(metadata: &DaemonMetadata, blockers: Option<Vec<String>>) -> String {
-    let mut blockers = blockers.unwrap_or_default();
-    let mut open_requests = false;
-    if daemon_admission_counts_open_requests(metadata) {
-        blockers.retain(|label| {
-            let request = is_open_request_label(label);
-            open_requests |= request;
-            !request
-        });
-    }
-    let waiting = if blockers.is_empty() {
-        "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
-            .to_owned()
-    } else {
-        format!(
+fn upgrade_wait_notice(blockers: Option<Vec<String>>) -> String {
+    match blockers {
+        Some(blockers) => format!(
             "Mjolnir upgrade is waiting for: {}; existing sessions remain available.",
             blockers.join(", ")
-        )
-    };
-    if open_requests {
-        format!(
-            "{waiting} It does not wait for open HTTP requests: daemon {} counts them as work, \
-             but they end when it stops and do not need to finish first.",
-            metadata.build_version
-        )
-    } else {
-        waiting
+        ),
+        None => "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
+            .to_owned(),
     }
 }
 
@@ -822,27 +737,6 @@ async fn upgrade_blockers(metadata: &DaemonMetadata) -> Option<Vec<String>> {
     .await
     .ok()??;
     (!labels.is_empty()).then_some(labels)
-}
-
-/// Whether a daemon without trustworthy admission can be replaced now.
-///
-/// The daemon is the control plane, so only its own lifecycle work blocks a
-/// handoff: a lifecycle operation in flight, or a record that is provisioning,
-/// checkpointing, closing, or being destroyed. Running and Disconnected
-/// sessions live in workers that outlive the daemon, and reviews are agent
-/// sessions in those same workers, so neither blocks.
-fn legacy_snapshot_is_idle(snapshot: &RuntimeSnapshot) -> bool {
-    use mj_core::state::SessionState;
-    snapshot.lifecycles.is_empty()
-        && !snapshot.records.iter().any(|record| {
-            matches!(
-                record.state,
-                SessionState::Provisioning
-                    | SessionState::Checkpointing
-                    | SessionState::Closing
-                    | SessionState::Destroying
-            )
-        })
 }
 
 async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
@@ -1025,129 +919,6 @@ fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
-
-    fn legacy_record(id: &str, state: mj_core::state::SessionState) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "title": id,
-            "harness_kind": "codex",
-            "last_profile": "codex",
-            "bundle_id": "project",
-            "target_template_id": "podman",
-            "state": state,
-            "created_at": "2026-09-22T00:00:00Z",
-            "updated_at": "2026-09-22T00:00:00Z",
-        })
-    }
-
-    fn legacy_snapshot(records: Vec<serde_json::Value>) -> RuntimeSnapshot {
-        serde_json::from_value(serde_json::json!({
-            "revision": 1,
-            "config": mj_core::config::Config::default(),
-            "records": records,
-            "sessions": [],
-            "lifecycles": [],
-        }))
-        .expect("legacy snapshot fixture")
-    }
-
-    /// 2.17.0 answers `PrepareUpgrade` but its gate never releases while a
-    /// worker is unreachable, so only later builds get the atomic handshake.
-    #[test]
-    fn only_daemons_with_the_narrowed_gate_use_atomic_admission() {
-        let metadata = |protocol_version, build_version: &str| DaemonMetadata {
-            protocol_version,
-            pid: 1,
-            address: "127.0.0.1:1".parse().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: build_version.into(),
-        };
-        assert!(!daemon_admission_ignores_workers(&metadata(32, "2.16.0")));
-        assert!(!daemon_admission_ignores_workers(&metadata(33, "2.17.0")));
-        assert!(daemon_admission_ignores_workers(&metadata(33, "2.18.0")));
-        assert!(daemon_admission_ignores_workers(&metadata(33, "2.19.0")));
-    }
-
-    #[test]
-    fn only_daemons_before_2_21_count_open_requests_as_upgrade_work() {
-        let metadata = |build_version: &str| DaemonMetadata {
-            protocol_version: 33,
-            pid: 1,
-            address: "127.0.0.1:1".parse().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: build_version.into(),
-        };
-        assert!(daemon_admission_counts_open_requests(&metadata("2.19.0")));
-        assert!(daemon_admission_counts_open_requests(&metadata("2.20.0")));
-        assert!(!daemon_admission_counts_open_requests(&metadata("2.21.0")));
-        assert!(is_open_request_label("HTTP request"));
-        assert!(is_open_request_label("HTTP request x4"));
-        assert!(!is_open_request_label("session lifecycle"));
-    }
-
-    #[test]
-    fn the_wait_notice_names_lifecycle_work_and_says_why_requests_do_not_count() {
-        let metadata = |build_version: &str| DaemonMetadata {
-            protocol_version: 33,
-            pid: 1,
-            address: "127.0.0.1:1".parse().unwrap(),
-            token: "test".into(),
-            started_at: "test".into(),
-            build_version: build_version.into(),
-        };
-        let labels = |labels: &[&str]| Some(labels.iter().map(|l| (*l).to_owned()).collect());
-        assert_eq!(
-            upgrade_wait_notice(
-                &metadata("2.19.0"),
-                labels(&["HTTP request x2", "session lifecycle"])
-            ),
-            "Mjolnir upgrade is waiting for: session lifecycle; existing sessions remain available. \
-             It does not wait for open HTTP requests: daemon 2.19.0 counts them as work, \
-             but they end when it stops and do not need to finish first."
-        );
-        assert_eq!(
-            upgrade_wait_notice(&metadata("2.21.0"), labels(&["session lifecycle"])),
-            "Mjolnir upgrade is waiting for: session lifecycle; existing sessions remain available."
-        );
-        assert_eq!(
-            upgrade_wait_notice(&metadata("2.21.0"), None),
-            "Mjolnir upgrade is waiting for ongoing work; existing sessions remain available."
-        );
-    }
-
-    /// A pre-33 daemon is replaceable while workers are busy: only its own
-    /// lifecycle work blocks the handoff.
-    #[test]
-    fn legacy_idle_ignores_worker_state_and_reviews() {
-        use mj_core::state::SessionState;
-        // A Running record with no session view at all is the busiest case the
-        // old check could see: it could not confirm the worker was idle.
-        let mut busy = legacy_snapshot(vec![
-            legacy_record("running", SessionState::Running),
-            legacy_record("gone", SessionState::Disconnected),
-        ]);
-        busy.reviews.push(mj_client::review::RuntimeReviewView {
-            session_id: "running".into(),
-            questions: Vec::new(),
-            tier: mj_core::review::lanes::ReviewTier::Quick,
-            phase: mj_core::review::driver::TurnReviewPhase::CapturingDelta,
-            roles: Vec::new(),
-            status: "reviewing".into(),
-            verdict: None,
-        });
-        assert!(
-            legacy_snapshot_is_idle(&busy),
-            "worker turns and reviews survive a daemon handoff"
-        );
-
-        let closing = legacy_snapshot(vec![legacy_record("closing", SessionState::Closing)]);
-        assert!(
-            !legacy_snapshot_is_idle(&closing),
-            "a daemon-owned lifecycle state still blocks the handoff"
-        );
-    }
 
     async fn viewer_fixture(
         statuses: Vec<WebViewerStatus>,
