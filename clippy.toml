@@ -10,6 +10,8 @@
 #   * `theme::rgb` — defines matching foreground/background pairs.
 #   * `spinner::ink_color` — derives the scan gradient over painted surfaces.
 #   * `docs_screenshots::color_hex` — reproduces captured colors in SVG.
+#   * `splash::canvas::color` — the startup splash paints every cell's
+#     foreground and background itself.
 disallowed-methods = [
     { path = "ratatui::style::Color::Rgb", reason = "Use mj_chat::theme colors with their matching painted background; raw RGB over an unknown terminal background can be unreadable." },
     { path = "ratatui::style::Color::Indexed", reason = "Use mj_chat::theme colors, or justify a scoped allowance for a captured or derived color." },

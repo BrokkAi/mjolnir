@@ -62,6 +62,7 @@ mod render_changes;
 mod resume;
 mod review_settings;
 mod setup;
+pub mod splash;
 mod surface_controls;
 pub mod tile_layout;
 mod welcome;

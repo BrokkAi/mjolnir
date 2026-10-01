@@ -25,6 +25,48 @@ const START_NOTICE_DELAY: Duration = Duration::from_secs(8);
 /// Large stores can take more than a minute to rebuild a table during an
 /// upgrade. Keep startup bounded while allowing those migrations to finish.
 const START_TIMEOUT: Duration = Duration::from_secs(300);
+/// Where slow-startup notices go while a splash owns the terminal. `None`
+/// means stderr, as for every command that has no splash.
+static STARTUP_NOTICES: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Reports startup that is taking a while. A splash on the alternate screen
+/// shows the message itself, since stderr would scribble over its frame.
+fn startup_notice(message: String) {
+    let route = STARTUP_NOTICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let undelivered = match route.as_ref() {
+        Some(splash) => splash.send(message).err().map(|error| error.0),
+        None => Some(message),
+    };
+    if let Some(message) = undelivered {
+        eprintln!("{message}");
+    }
+}
+
+/// Sends startup notices to the returned receiver until the route drops.
+pub(crate) struct StartupNoticeRoute(());
+
+impl StartupNoticeRoute {
+    pub(crate) fn open() -> (Self, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *STARTUP_NOTICES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+        (Self(()), receiver)
+    }
+}
+
+impl Drop for StartupNoticeRoute {
+    fn drop(&mut self) {
+        STARTUP_NOTICES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
 #[derive(Debug)]
 struct DaemonStartGuard(fs::File);
 
@@ -66,7 +108,9 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
             return Ok(guard);
         }
         if Instant::now() >= notice_at {
-            eprintln!("Mjolnir is waiting for another client to finish the daemon handoff.");
+            startup_notice(
+                "Mjolnir is waiting for another client to finish the daemon handoff.".to_owned(),
+            );
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(RETRY_DELAY).await;
@@ -162,11 +206,11 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
             Ok(client)
         },
         |waited| {
-            eprintln!(
+            startup_notice(format!(
                 "Mjolnir daemon {} has been starting for {}s; still waiting.",
                 launched.pid,
                 waited.as_secs()
-            );
+            ));
         },
     )
     .await;
@@ -293,10 +337,10 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
             .await
             .context("inspect daemon executable task failed")??;
         if same_build == Some(false) {
-            eprintln!(
+            startup_notice(format!(
                 "Mjolnir daemon {} is running a different build of {}; replacing it.",
                 metadata.pid, metadata.build_version
-            );
+            ));
             replace_daemon(&metadata).await?;
             return Ok(None);
         }
@@ -598,10 +642,10 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
             if !stale {
                 return Ok(());
             }
-            eprintln!(
+            startup_notice(format!(
                 "Mjolnir daemon {} is using an older development build; restarting it.",
                 metadata.pid
-            );
+            ));
             replace_daemon(&metadata).await
         })
         .await?;
@@ -692,10 +736,10 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
             Ok(Ok(false)) => {}
         }
         if Instant::now() >= notice_at {
-            eprintln!(
-                "{}",
-                upgrade_wait_notice(metadata, upgrade_blockers(metadata).await)
-            );
+            startup_notice(upgrade_wait_notice(
+                metadata,
+                upgrade_blockers(metadata).await,
+            ));
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;

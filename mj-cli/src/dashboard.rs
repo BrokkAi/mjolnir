@@ -498,33 +498,19 @@ fn launch_repository_top_level() -> Option<std::path::PathBuf> {
 }
 
 pub(crate) async fn run_dashboard_for_workspace(
-    workspace_id: &str,
-    client_id: &str,
+    loaded: LoadedDashboard,
+    screen: DashboardScreen,
     open_workspace_manager: bool,
     go: Option<(mj_tui::GoMode, bool)>,
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
     resume: Option<UpgradeResume>,
 ) -> Result<DashboardExit> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin())
-        || !std::io::IsTerminal::is_terminal(&std::io::stdout())
-    {
-        println!("Welcome to Mjolnir");
-        println!("Run `mj doctor` for non-interactive validation.");
-        return Ok(DashboardExit::Normal);
-    }
-
-    let workspaces = crate::daemon::connect_or_start()
-        .await?
-        .list_workspaces()
-        .await?
-        .into_iter()
-        .map(|listing| listing.workspace)
-        .collect();
-    let Some(mut context) =
-        DashboardContext::open(workspace_id, client_id, daemon_presence, workspaces)?
-    else {
-        return Ok(DashboardExit::Normal);
-    };
+    let DashboardScreen {
+        terminal,
+        events,
+        termination,
+    } = screen;
+    let mut context = DashboardContext::open(loaded, terminal, events, daemon_presence)?;
     let automatic_setup = resume.is_none() && go.is_none() && !open_workspace_manager;
     if let Some(resume) = resume {
         context.restore_upgrade(resume).await;
@@ -588,7 +574,6 @@ pub(crate) async fn run_dashboard_for_workspace(
         crate::hints::Hint::PrefixKeys,
         format!("Press {prefix} ? for every key and {prefix} : for every command."),
     );
-    let termination = mj_controller::termination::Coordinator::install().token();
     // `interval_at` so the first tick is a period away rather than immediate,
     // and `Delay` so a tick that was gated off does not fire a burst to catch
     // up when it comes back.
@@ -1461,35 +1446,27 @@ impl DashboardContext {
         }
     }
 
-    /// Loads state, takes the terminal, and starts every background feed.
-    /// `Ok(None)` means first-run setup was cancelled and there is nothing to
-    /// run.
+    /// Takes the terminal and starts every background feed over the state
+    /// loaded before it.
     fn open(
-        workspace_id: &str,
-        client_id: &str,
+        loaded: LoadedDashboard,
+        terminal: TerminalGuard,
+        events: event::EventStream,
         daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
-        workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
-    ) -> Result<Option<Self>> {
-        let mut controller = Controller::load()?;
-        retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
+    ) -> Result<Self> {
+        let LoadedDashboard {
+            workspace_id,
+            client_id,
+            controller,
+            workspaces,
+            layouts,
+            conversation_layouts,
+            queued_prompts,
+        } = loaded;
         let workspace_names = workspaces
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.name.clone()))
             .collect();
-        let layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_pane_sizes(&workspace.id)
-                    .map(|sizes| (workspace.id.clone(), sizes))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let conversation_layouts = workspaces
-            .iter()
-            .map(|workspace| {
-                mj_controller::database::load_workspace_layout(&workspace.id)
-                    .map(|layout| (workspace.id.clone(), layout))
-            })
-            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
         let mut dashboard = DashboardState::new(
             controller.config.clone(),
             controller.state.clone(),
@@ -1514,15 +1491,14 @@ impl DashboardContext {
         for (id, layout) in &conversation_layouts {
             dashboard.cache_workspace_layout(id, layout.clone());
         }
-        dashboard.set_active_workspace(Some(workspace_id.to_owned()));
+        dashboard.set_active_workspace(Some(workspace_id.clone()));
         let notices = mj_chat::chat::Notices::default();
         dashboard.share_notices(notices.clone());
-        for (session_id, queued) in projected_queued_prompts(&controller)? {
+        for (session_id, queued) in queued_prompts {
             dashboard.apply_queued_prompts(&session_id, queued);
         }
-        let terminal = TerminalGuard::enter()?;
 
-        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.to_owned())?;
+        let remote_worker = spawn_remote_dashboard_worker_poller(workspace_id.clone())?;
         let worker_updates_rx = remote_worker.updates;
         let worker_commands_tx = remote_worker.control;
         let worker_shutdown = remote_worker.shutdown;
@@ -1580,8 +1556,8 @@ impl DashboardContext {
         let mut context = Self {
             terminal,
             controller,
-            workspace_id: workspace_id.to_owned(),
-            client_id: client_id.to_owned(),
+            workspace_id,
+            client_id,
             dashboard,
             pane_size_persistence,
             layout_persistence,
@@ -1589,7 +1565,7 @@ impl DashboardContext {
             workspace_layouts: conversation_layouts,
             notices,
             daemon_running_again_since: None,
-            events: Some(event::EventStream::new()),
+            events: Some(events),
             chats: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),
@@ -1676,7 +1652,78 @@ impl DashboardContext {
         };
         context.resolve_project_sources();
         context.hydrate_stored_session_summaries();
-        Ok(Some(context))
+        Ok(context)
+    }
+}
+
+/// Everything the dashboard reads from the store before it takes the
+/// terminal. Loading touches the database, so it runs off the render loop.
+pub(crate) struct LoadedDashboard {
+    workspace_id: String,
+    client_id: String,
+    controller: Controller,
+    workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
+    layouts: BTreeMap<String, PaneSizes>,
+    conversation_layouts: BTreeMap<String, ConversationLayout>,
+    queued_prompts: BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+}
+
+impl LoadedDashboard {
+    pub(crate) fn load(
+        workspace_id: &str,
+        client_id: &str,
+        workspaces: Vec<mj_core::workspace::WorkspaceRecord>,
+    ) -> Result<Self> {
+        let mut controller = Controller::load()?;
+        retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
+        let layouts = workspaces
+            .iter()
+            .map(|workspace| {
+                mj_controller::database::load_workspace_pane_sizes(&workspace.id)
+                    .map(|sizes| (workspace.id.clone(), sizes))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let conversation_layouts = workspaces
+            .iter()
+            .map(|workspace| {
+                mj_controller::database::load_workspace_layout(&workspace.id)
+                    .map(|layout| (workspace.id.clone(), layout))
+            })
+            .collect::<Result<BTreeMap<String, ConversationLayout>>>()?;
+        let queued_prompts = projected_queued_prompts(&controller)?;
+        Ok(Self {
+            workspace_id: workspace_id.to_owned(),
+            client_id: client_id.to_owned(),
+            controller,
+            workspaces,
+            layouts,
+            conversation_layouts,
+            queued_prompts,
+        })
+    }
+
+    /// The color the dashboard's first frame paints behind everything.
+    pub(crate) fn background(&self) -> ratatui::style::Color {
+        let theme = mj_chat::theme::effective_theme(self.controller.config.theme);
+        mj_chat::theme::with_theme(theme, || mj_chat::theme::palette().background)
+    }
+}
+
+/// The interactive terminal and what reads it: raw mode and the alternate
+/// screen, its input, and the signals that ask it to close.
+pub(crate) struct DashboardScreen {
+    pub(crate) terminal: TerminalGuard,
+    pub(crate) events: event::EventStream,
+    pub(crate) termination: tokio_util::sync::CancellationToken,
+}
+
+impl DashboardScreen {
+    pub(crate) fn enter() -> Result<Self> {
+        Ok(Self {
+            terminal: TerminalGuard::enter()?,
+            events: event::EventStream::new(),
+            termination: mj_controller::termination::Coordinator::install().token(),
+        })
     }
 }
 

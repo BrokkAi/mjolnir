@@ -17,6 +17,7 @@ mod import;
 mod logging;
 mod pollers;
 mod session_presentation;
+mod splash;
 
 #[cfg(test)]
 mod test_support;
@@ -1137,40 +1138,8 @@ async fn run_workspace_dashboard(
     if resume.is_some() {
         go = None;
     }
-    let mut daemon = daemon::connect_or_start().await?;
-    let workspaces = daemon.list_workspaces().await?;
-    let selected = if let Some(resume) = &resume
-        && workspaces
-            .iter()
-            .any(|workspace| workspace.workspace.id == resume.workspace_id)
-    {
-        resume.workspace_id.clone()
-    } else if let Some((mode, _)) = &mut go {
-        go::resolve_workspace(&mut daemon, mode).await?
-    } else if let Some(requested) = requested_workspace.filter(|_| resume.is_none()) {
-        workspaces
-            .iter()
-            .find(|candidate| {
-                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
-            })
-            .map(|candidate| candidate.workspace.id.clone())
-            .ok_or_else(|| {
-                unknown_workspace(
-                    requested,
-                    workspaces.iter().map(|candidate| &candidate.workspace),
-                )
-            })?
-    } else if let Some(workspace) = workspaces.first() {
-        // The database orders workspaces by most recent opening.
-        workspace.workspace.id.clone()
-    } else {
-        daemon
-            .create_workspace(suggested_workspace_name(&workspaces)?)
-            .await?
-            .id
-    };
-    daemon.touch_workspace(selected.clone()).await?;
-
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
     let client_id = if let Some(resume) = &resume {
         resume.client_id.clone()
     } else {
@@ -1180,6 +1149,49 @@ async fn run_workspace_dashboard(
             mj_core::workspace::new_workspace_id()?
         )
     };
+    let (go_mode, go_setup) = go.map_or((None, false), |(mode, setup)| (Some(mode), setup));
+    let startup = tokio::spawn(start_dashboard(
+        resume.as_ref().map(|resume| resume.workspace_id.clone()),
+        requested_workspace
+            .filter(|_| resume.is_none())
+            .map(str::to_owned),
+        go_mode,
+        client_id.clone(),
+        interactive,
+    ));
+    // The splash takes the terminal first and plays while startup runs. A
+    // terminal resuming after an upgrade goes straight back to work.
+    let (startup, screen) = if interactive && resume.is_none() && splash::wanted() {
+        let mut screen = dashboard::DashboardScreen::enter()?;
+        let outcome = splash::play_while(&mut screen, startup, |startup: &DashboardStartup| {
+            startup
+                .loaded
+                .as_ref()
+                .map_or(ratatui::style::Color::Reset, |loaded| loaded.background())
+        })
+        .await?;
+        match outcome {
+            splash::SplashOutcome::Ready(startup) => (startup, Some(screen)),
+            // Dropping the screen first puts the error in the normal scrollback.
+            splash::SplashOutcome::Failed(error) => {
+                drop(screen);
+                return Err(error);
+            }
+            splash::SplashOutcome::Cancelled => return Ok(DashboardExit::Interrupted),
+        }
+    } else {
+        let startup = startup.await.context("dashboard startup task failed")??;
+        (startup, None)
+    };
+    let DashboardStartup {
+        mut daemon,
+        go: go_mode,
+        loaded,
+    } = startup;
+    let go = go_mode.map(|mode| (mode, go_setup));
+
+    // Attach only once the dashboard is certain to run, so a startup that
+    // fails or is cancelled never leaves an attachment behind.
     daemon.attach(client_id.clone(), std::process::id()).await?;
     let attachment_cancellation = tokio_util::sync::CancellationToken::new();
     let attachment = daemon::maintain_attachment(
@@ -1187,15 +1199,33 @@ async fn run_workspace_dashboard(
         std::process::id(),
         attachment_cancellation.clone(),
     );
-    let result = run_dashboard_for_workspace(
-        &selected,
-        &client_id,
-        open_workspace_manager,
-        go,
-        attachment.presence,
-        resume,
-    )
-    .await;
+    let result = match loaded {
+        Some(loaded) => {
+            let screen = match screen {
+                Some(screen) => Ok(screen),
+                None => dashboard::DashboardScreen::enter(),
+            };
+            match screen {
+                Ok(screen) => {
+                    run_dashboard_for_workspace(
+                        loaded,
+                        screen,
+                        open_workspace_manager,
+                        go,
+                        attachment.presence,
+                        resume,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        None => {
+            println!("Welcome to Mjolnir");
+            println!("Run `mj doctor` for non-interactive validation.");
+            Ok(DashboardExit::Normal)
+        }
+    };
     attachment_cancellation.cancel();
     if let Err(error) = attachment.task.await {
         tracing::warn!(%error, "workspace attachment task failed");
@@ -1209,6 +1239,77 @@ async fn run_workspace_dashboard(
         Err(error) => tracing::warn!(%error, "daemon unavailable while dashboard detached"),
     }
     result
+}
+
+/// What the dashboard needs before it can draw.
+struct DashboardStartup {
+    daemon: daemon::DaemonClient,
+    go: Option<mj_tui::GoMode>,
+    /// The store as the dashboard first shows it; absent without a terminal.
+    loaded: Option<dashboard::LoadedDashboard>,
+}
+
+/// Connects to the daemon, chooses the workspace, and loads the store. It
+/// runs as its own task so the splash can animate meanwhile.
+async fn start_dashboard(
+    resumed_workspace: Option<String>,
+    requested_workspace: Option<String>,
+    mut go: Option<mj_tui::GoMode>,
+    client_id: String,
+    interactive: bool,
+) -> Result<DashboardStartup> {
+    let mut daemon = daemon::connect_or_start().await?;
+    let workspaces = daemon.list_workspaces().await?;
+    let selected = if let Some(resumed) = resumed_workspace.filter(|resumed| {
+        workspaces
+            .iter()
+            .any(|workspace| workspace.workspace.id == *resumed)
+    }) {
+        resumed
+    } else if let Some(mode) = &mut go {
+        go::resolve_workspace(&mut daemon, mode).await?
+    } else if let Some(requested) = requested_workspace {
+        workspaces
+            .iter()
+            .find(|candidate| {
+                candidate.workspace.name.to_lowercase() == requested.trim().to_lowercase()
+            })
+            .map(|candidate| candidate.workspace.id.clone())
+            .ok_or_else(|| {
+                unknown_workspace(
+                    &requested,
+                    workspaces.iter().map(|candidate| &candidate.workspace),
+                )
+            })?
+    } else if let Some(workspace) = workspaces.first() {
+        // The database orders workspaces by most recent opening.
+        workspace.workspace.id.clone()
+    } else {
+        daemon
+            .create_workspace(suggested_workspace_name(&workspaces)?)
+            .await?
+            .id
+    };
+    daemon.touch_workspace(selected.clone()).await?;
+    let loaded = if interactive {
+        // Listed again: choosing may have created a workspace.
+        let workspaces = daemon
+            .list_workspaces()
+            .await?
+            .into_iter()
+            .map(|listing| listing.workspace)
+            .collect();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                dashboard::LoadedDashboard::load(&selected, &client_id, workspaces)
+            })
+            .await
+            .context("load dashboard state task failed")??,
+        )
+    } else {
+        None
+    };
+    Ok(DashboardStartup { daemon, go, loaded })
 }
 
 async fn resolve_store_workspace(requested: Option<&str>) -> Result<String> {
