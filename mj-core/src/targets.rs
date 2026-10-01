@@ -692,10 +692,16 @@ impl ProcessExecutor {
     }
 }
 
+// Both process executors wait for their child, and for SSH admission before
+// it, through `off_async_worker`: a caller several calls below an `async fn`
+// must not hold one of the runtime's async worker threads for the length of a
+// target command.
 impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let _running = BlockingOperation::command(command);
-        with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            with_ssh_admission(command, self, &|| false, |command| self.run_once(command))
+        })
     }
 
     fn execute_with_stdin(
@@ -703,19 +709,21 @@ impl CommandExecutor for ProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        let _running = BlockingOperation::command(command);
-        // A caller's stream cannot be replayed, so this path takes a session
-        // and a permit but never retries.
-        let session = command.open_ssh_session(self)?;
-        let _permit = command
-            .ssh_destination
-            .as_deref()
-            .map(SshAdmission::acquire);
-        let command = session.command();
-        let process = cancellable_command(command);
-        // Plain process execution is not cancellable, so the transfer only
-        // ends when the child does.
-        stream_command_with_stdin(process, command, input, &|| false)
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            // A caller's stream cannot be replayed, so this path takes a
+            // session and a permit but never retries.
+            let session = command.open_ssh_session(self)?;
+            let _permit = command
+                .ssh_destination
+                .as_deref()
+                .map(SshAdmission::acquire);
+            let command = session.command();
+            let process = cancellable_command(command);
+            // Plain process execution is not cancellable, so the transfer only
+            // ends when the child does.
+            stream_command_with_stdin(process, command, input, &|| false)
+        })
     }
 }
 
@@ -1154,9 +1162,11 @@ impl CommandExecutor for CancellableProcessExecutor {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let _running = BlockingOperation::command(command);
-        with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
-            self.run_once(command)
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            with_ssh_admission(command, self, &|| self.is_cancelled(), |command| {
+                self.run_once(command)
+            })
         })
     }
 
@@ -1165,20 +1175,25 @@ impl CommandExecutor for CancellableProcessExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
-        let _running = BlockingOperation::command(command);
-        // A caller's stream cannot be replayed, so this path takes a session
-        // and a permit but never retries.
-        let session = command.open_ssh_session(self)?;
-        let _permit = command
-            .ssh_destination
-            .as_deref()
-            .map(|destination| SshAdmission::acquire_unless(destination, &|| self.is_cancelled()))
-            .transpose()?;
-        let command = session.command();
-        // The child runs in its own process group so cancellation can kill the
-        // whole group, which is what releases a writer blocked on a full pipe.
-        stream_command_with_stdin(cancellable_command(command), command, input, &|| {
-            self.is_cancelled()
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            // A caller's stream cannot be replayed, so this path takes a
+            // session and a permit but never retries.
+            let session = command.open_ssh_session(self)?;
+            let _permit = command
+                .ssh_destination
+                .as_deref()
+                .map(|destination| {
+                    SshAdmission::acquire_unless(destination, &|| self.is_cancelled())
+                })
+                .transpose()?;
+            let command = session.command();
+            // The child runs in its own process group so cancellation can kill
+            // the whole group, which is what releases a writer blocked on a
+            // full pipe.
+            stream_command_with_stdin(cancellable_command(command), command, input, &|| {
+                self.is_cancelled()
+            })
         })
     }
 }

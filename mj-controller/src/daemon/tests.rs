@@ -3578,6 +3578,279 @@ async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive
     assert!(matches!(reply, DaemonReply::Pong));
 }
 
+/// Whether `pid` names a live process. A zombie has already died; only its
+/// parent has not collected it yet.
+#[cfg(target_os = "linux")]
+fn process_is_running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // The state follows the parenthesised command name, which may itself
+        // contain spaces or parentheses.
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z" && state != "X")
+    })
+}
+
+/// Every process id the held stand-in has recorded in `directory`.
+#[cfg(target_os = "linux")]
+fn held_command_pids(directory: &Path) -> Vec<u32> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+/// Session launches whose target commands hang must leave the daemon serving
+/// other requests, and stopping them must end those commands.
+///
+/// The runtime has two async worker threads and four launches hang in their
+/// harness preflight, a real child process that waits for a file. A daemon
+/// that waits for target commands on its async workers stops answering once
+/// two of them hang. A watchdog thread releases the commands if the daemon
+/// stalls, so that implementation fails the timing assertions instead of
+/// hanging the suite.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() {
+    const NAME: &str = "hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled";
+    const CHILD: &str = "MJ_TEST_HUNG_LAUNCH_COMMANDS";
+    const BOUND: Duration = Duration::from_secs(5);
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "hung-launch-commands")
+        .env(
+            "MJ_WORKER_BINARY",
+            mj_core::test_hooks::fake_worker_dispatcher(),
+        )
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let root = tempfile::tempdir().unwrap();
+    let tools = root.path().join("tools");
+    let held = root.path().join("held");
+    let release = root.path().join("release");
+    let project = root.path().join("project");
+    let home = root.path().join("codex-home");
+    for directory in [&tools, &held, &project, &home] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    mj_core::test_hooks::install_fake_command(&tools, "node", "#!/bin/sh\nexit 0\n");
+    // Every launch's preflight runs npm, which records its process id and
+    // waits for the release file.
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "npm",
+        &format!(
+            "#!/bin/sh\necho > '{}/'$$\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 0\n",
+            held.display(),
+            release.display()
+        ),
+    );
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+    let _release = Release(release.clone());
+    let (finished, watchdog_finished) = std::sync::mpsc::channel::<()>();
+    let watchdog = {
+        let release = release.clone();
+        std::thread::spawn(move || {
+            if watchdog_finished
+                .recv_timeout(Duration::from_secs(30))
+                .is_err()
+            {
+                let _ = std::fs::write(release, b"");
+            }
+        })
+    };
+
+    let mut config = Config::default();
+    let mut environment = std::collections::BTreeMap::new();
+    environment.insert("PATH".to_owned(), tools.to_string_lossy().into_owned());
+    config.profiles.insert(
+        "codex".into(),
+        mj_core::config::HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home,
+            environment: environment.into_iter().collect(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            subagents: mj_core::subagent::SubagentPolicy::Native,
+        },
+    );
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    config.save().unwrap();
+    let workspace = crate::database::create_workspace("Hung launches").unwrap();
+    let project = project.canonicalize().unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let shutdown = CancellationToken::new();
+    let create = |title: &str| {
+        DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
+            create_managed_worktree: Some(false),
+            at: None,
+            branch: None,
+            base: None,
+            subagents: None,
+            initial_prompt: None,
+            workspace_id: workspace.id.clone(),
+            profile_id: "codex".into(),
+            bundle_id: "project".into(),
+            project_directory: Some(project.clone()),
+            target_template_id: "localhost".into(),
+            additional_mounts: Vec::new(),
+            resource_allocation: None,
+            title: title.into(),
+            session_title_override: None,
+        })
+    };
+    let registered = |reply: DaemonReply| match reply {
+        DaemonReply::RegisteredSession(registered) => registered.session.id,
+        other => panic!("expected a registered session, got {other:?}"),
+    };
+    let wait_for_held = |count: usize| {
+        let held = held.clone();
+        async move {
+            let deadline = std::time::Instant::now() + BOUND;
+            while held_command_pids(&held).len() < count {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "only {} of {count} launches reached their preflight",
+                    held_command_pids(&held).len()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let mut sessions = Vec::new();
+    for title in ["first", "second", "third"] {
+        sessions.push(registered(
+            handle_action(create(title), &metadata, &state, &shutdown)
+                .await
+                .unwrap(),
+        ));
+    }
+    wait_for_held(3).await;
+    // Three commands hang on a runtime with two async workers. An unrelated
+    // request and another launch are still answered.
+    assert!(matches!(
+        handle_action(DaemonAction::Ping, &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+        DaemonReply::Pong
+    ));
+    sessions.push(registered(
+        handle_action(create("fourth"), &metadata, &state, &shutdown)
+            .await
+            .unwrap(),
+    ));
+    wait_for_held(4).await;
+    assert!(
+        started.elapsed() < BOUND,
+        "the daemon stalled behind hung launch commands for {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !release.exists(),
+        "the watchdog had to release the hung commands"
+    );
+
+    // Cancelling one launch kills its command, and that launch reports the
+    // cancellation while the others keep waiting.
+    let before = held_command_pids(&held)
+        .into_iter()
+        .filter(|pid| process_is_running(*pid))
+        .count();
+    assert_eq!(before, 4);
+    let cancelled = std::time::Instant::now();
+    handle_action(
+        DaemonAction::CancelLifecycle {
+            session_id: sessions[0].clone(),
+        },
+        &metadata,
+        &state,
+        &shutdown,
+    )
+    .await
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        BOUND,
+        handle_action(
+            DaemonAction::WaitCreateSession {
+                session_id: sessions[0].clone(),
+            },
+            &metadata,
+            &state,
+            &shutdown,
+        ),
+    )
+    .await
+    .expect("a cancelled launch finishes promptly");
+    assert!(outcome.is_err(), "a cancelled launch must not succeed");
+    let running = || {
+        held_command_pids(&held)
+            .into_iter()
+            .filter(|pid| process_is_running(*pid))
+            .count()
+    };
+    while running() > 3 {
+        assert!(
+            cancelled.elapsed() < BOUND,
+            "the cancelled launch left its command running"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        running(),
+        3,
+        "cancelling one launch ends exactly its command"
+    );
+
+    // Stopping the daemon cancels the rest the same way.
+    let stopping = std::time::Instant::now();
+    state.cancel_and_wait_lifecycles().await.unwrap();
+    assert!(
+        stopping.elapsed() < BOUND,
+        "stopping waited {:?} for hung commands",
+        stopping.elapsed()
+    );
+    let deadline = std::time::Instant::now() + BOUND;
+    loop {
+        let survivors = held_command_pids(&held)
+            .into_iter()
+            .filter(|pid| process_is_running(*pid))
+            .collect::<Vec<_>>();
+        if survivors.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stopping left hung commands running: {survivors:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !release.exists(),
+        "cancellation, not the release, ended them"
+    );
+    finished.send(()).unwrap();
+    watchdog.join().unwrap();
+}
+
 /// The startup sweep picks up tombstones an older build left behind and any
 /// discard a daemon stop interrupted, and nothing else.
 #[test]

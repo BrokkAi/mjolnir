@@ -25,7 +25,7 @@ const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const PTY_ROWS: usize = 24;
 const PTY_COLUMNS: usize = 80;
-/// A local-target fixture's first launch waits in the daemon until this file
+/// A local-target fixture's launches wait in the daemon until this file
 /// exists.
 const LAUNCH_RELEASE: &str = "release-launch";
 /// A first-run fixture's prerequisite checks wait until this file exists.
@@ -639,18 +639,16 @@ image = "ubuntu:24.04"
         fs::create_dir_all(&tools).unwrap();
         mj_core::test_hooks::install_fake_command(&tools, "node", "#!/bin/sh\nexit 0\n");
         // The daemon's launch preflight runs npm after registering the
-        // session. The first launch to get there waits until the test
-        // releases it, so it is still in progress whatever the load. Only one
-        // waits: the daemon runs provisioning commands on its async workers,
-        // and this fixture gives it two.
-        let held = storage.path().join("held-launch");
+        // session. Every launch waits there until the test releases it, so
+        // each is still in progress whatever the load. The daemon waits for
+        // these commands on its blocking pool, so holding both launches
+        // leaves the fixture's two async workers serving the dashboard.
         let release = storage.path().join(LAUNCH_RELEASE);
         mj_core::test_hooks::install_fake_command(
             &tools,
             "npm",
             &format!(
-                "#!/bin/sh\nif /bin/mkdir '{}' 2>/dev/null; then\n  while [ ! -e '{}' ]; do /bin/sleep 0.05; done\nfi\nexit 0\n",
-                held.display(),
+                "#!/bin/sh\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 0\n",
                 release.display()
             ),
         );
@@ -902,7 +900,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
         ..
     } = spawn_dashboard_pty_with_local_target(false, false, true);
     // Declared after the fixture so that it drops first: the daemon's held
-    // launch must finish before teardown stops it, even when this fails.
+    // launches must finish before teardown stops it, even when this fails.
     let held_launch = ReleaseOnDrop(storage.path().join(LAUNCH_RELEASE));
     let database = storage.path().join("data/hel/mj.sqlite3");
     let mut output = PtyOutput::new();
@@ -1048,9 +1046,9 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
 
     wait_for_wizard_close(&mut master, &mut output);
 
-    // The first launch is still running in the daemon, which owns it from
+    // Both launches are still running in the daemon, which owns them from
     // registration on. Quitting must release the terminal without waiting
-    // for it.
+    // for them.
     master.write_all(QUIT_KEY).unwrap();
     assert!(wait_for_exit(child.child_mut(), &mut master, &mut output, "startup quit").success());
     drop(held_launch);

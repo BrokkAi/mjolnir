@@ -162,6 +162,59 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     SHUTDOWN.block_on_with(future)
 }
 
+/// Run blocking work, such as waiting for a child process, without holding
+/// one of the runtime's async worker threads.
+///
+/// Synchronous code that waits on a subprocess is often reached from an
+/// `async fn`, several calls down. On a worker thread such a wait takes the
+/// thread away from every other task: with as many slow commands as worker
+/// threads, nothing else in the process runs, including the code that would
+/// cancel them. Here the worker first hands its other tasks to a replacement
+/// thread from the blocking pool, so the wait occupies a blocking-pool thread
+/// and the async workers keep serving. Cancelling the work is still the
+/// caller's job; this only decides which thread waits.
+///
+/// Outside a runtime, on a blocking-pool thread, or inside
+/// [`tokio::runtime::Handle::block_on`] the work simply runs. On a
+/// current-thread runtime there is no other thread to hand tasks to, so the
+/// work runs in place there too; the daemon uses the multi-thread runtime.
+pub fn off_async_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
+/// Spawn `future`, whose synchronous waits must not hold an async worker
+/// thread, onto its own blocking-pool thread.
+///
+/// This is [`off_async_worker`] for a whole future: work that mixes `.await`s
+/// with long synchronous waits (a session lifecycle runs target commands,
+/// copies archives and polls locks between its awaits) runs through
+/// [`block_on`] on a blocking-pool thread. The future is boxed first, as
+/// `tokio::spawn` would box it, because `block_on` keeps its future on the
+/// calling thread's stack. The result is an error when the runtime begins
+/// shutting down before the future finishes.
+///
+/// On a current-thread runtime there is no worker thread to free, and
+/// `Handle::block_on` on another thread cannot drive that runtime's timers or
+/// I/O, so the future is spawned as an ordinary task there.
+pub fn spawn_off_async_workers<F>(future: F) -> tokio::task::JoinHandle<Result<F::Output>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if tokio::runtime::Handle::current().runtime_flavor()
+        == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        tokio::task::spawn_blocking(move || block_on(Box::pin(future)))
+    } else {
+        tokio::spawn(async move { Ok(future.await) })
+    }
+}
+
 /// Shut the process's runtime down in the order that keeps [`block_on`]
 /// callers safe: raise the shutdown signal, wait up to `grace` for every
 /// in-flight `block_on` to return, then shut the runtime down.
@@ -225,6 +278,65 @@ mod tests {
             .expect_err("shutting down");
         assert!(error.to_string().contains("runtime is shutting down"));
         assert!(!polled.load(Ordering::SeqCst), "the future should not run");
+    }
+
+    /// Two worker threads, each blocked in a wait that only a third task can
+    /// end. Without the hand-off the third task never runs and the waits never
+    /// finish; the watchdog then ends them and the timing assertion fails.
+    #[test]
+    fn blocking_waits_leave_the_async_workers_serving() {
+        let runtime = runtime();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let watchdog_release = release_tx.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if finished_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                watchdog_release.send_replace(true);
+            }
+        });
+        let started = Instant::now();
+        runtime.block_on(async move {
+            let waits = (0..3)
+                .map(|_| {
+                    let mut release = release_rx.clone();
+                    tokio::spawn(async move {
+                        off_async_worker(|| {
+                            while !*release.borrow_and_update() {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        });
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Let every wait start before the releasing task is spawned.
+            std::thread::sleep(Duration::from_millis(100));
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                release_tx.send_replace(true);
+            })
+            .await
+            .unwrap();
+            for wait in waits {
+                wait.await.unwrap();
+            }
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "blocking waits held every async worker for {:?}",
+            started.elapsed()
+        );
+        finished_tx.send(()).unwrap();
+        watchdog.join().unwrap();
+    }
+
+    #[test]
+    fn off_async_worker_runs_in_place_on_a_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(runtime.block_on(async { off_async_worker(|| 7) }), 7);
+        assert_eq!(off_async_worker(|| 8), 8);
     }
 
     #[test]
