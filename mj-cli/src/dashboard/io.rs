@@ -249,6 +249,10 @@ pub(crate) enum DashboardIoUpdate {
         request_id: u64,
         result: std::result::Result<mj_client::daemon::WikiSearchPage, String>,
     },
+    ResumeTextMatches {
+        request_id: u64,
+        result: std::result::Result<Vec<mj_client::daemon::SessionTextMatch>, String>,
+    },
     /// The daemon's answer to a Sessions filter search of conversation text.
     /// The request id is the dashboard's; an answer for an older one is
     /// dropped there.
@@ -1225,15 +1229,15 @@ impl DashboardContext {
             }
             DashboardIoUpdate::WikiRows { request_id, result } => {
                 if self.dashboard.apply_wiki_search_result(request_id, result) {
-                    match self.dashboard.next_wiki_preview() {
-                        DashboardAction::LoadArchivedBrief { wiki_id } => {
-                            spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
-                        }
-                        DashboardAction::LoadArchivedHits { wiki_id, query } => {
-                            spawn_wiki_hits(wiki_id, query, self.dashboard_io_tx.clone());
-                        }
-                        _ => {}
-                    }
+                    self.load_resume_preview();
+                }
+            }
+            DashboardIoUpdate::ResumeTextMatches { request_id, result } => {
+                if self
+                    .dashboard
+                    .apply_resume_text_search_result(request_id, result)
+                {
+                    self.load_resume_preview();
                 }
             }
             DashboardIoUpdate::SessionTextMatches { request_id, result } => {
@@ -1635,6 +1639,18 @@ impl DashboardContext {
             } => self
                 .dashboard
                 .apply_resolved_project_directory(&context, &directory, result),
+        }
+    }
+
+    fn load_resume_preview(&mut self) {
+        match self.dashboard.next_wiki_preview() {
+            DashboardAction::LoadArchivedBrief { wiki_id } => {
+                spawn_wiki_brief(wiki_id, self.dashboard_io_tx.clone());
+            }
+            DashboardAction::LoadArchivedHits { wiki_id, query } => {
+                spawn_wiki_hits(wiki_id, query, self.dashboard_io_tx.clone());
+            }
+            _ => {}
         }
     }
 
