@@ -943,7 +943,7 @@ pub(super) fn validate_resource_allocation(
         )
         | (TargetTemplate::AwsEc2 { .. }, Some(SessionResourceAllocation::AwsEc2 { .. })) => Ok(()),
         (TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }, Some(_)) => {
-            bail!("bare targets have fixed host resources")
+            bail!(mj_core::state::BARE_TARGET_FIXED_RESOURCES)
         }
         _ => bail!("resource allocation does not match the selected target kind"),
     }

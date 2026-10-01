@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Refusal for a resource allocation aimed at a bare target. Callers match on
+/// it to add their own remedy (a flag, a checkbox).
+pub const BARE_TARGET_FIXED_RESOURCES: &str = "bare targets have fixed host resources";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResumeQueueDisposition {

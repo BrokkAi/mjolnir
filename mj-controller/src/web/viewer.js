@@ -3689,7 +3689,8 @@ async function prepareMove() {
         session_id: draft.sessionId,
         profile_id: draft.profileId || null,
         target_template_id: draft.targetId || null,
-        clear_resource_allocation: draft.clearResourceAllocation,
+        // A bare target has fixed host resources, so inherited sizing must go.
+        clear_resource_allocation: draft.clearResourceAllocation || targetIsBare(draft.targetId),
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
         subagents: moveSubagentChange(draft),
