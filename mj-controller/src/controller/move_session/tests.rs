@@ -2756,15 +2756,24 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
     }
 }
 
-/// Where the daemon died in W-2: while the source was being sealed
-/// (`suspending`), or while the destination harness was being installed
-/// (`starting`).
+/// Where the daemon died in W-2: right after the source was sealed
+/// (`suspending`), after the Move recorded the destination phase but before
+/// the swap changed the record (still `suspending`), or while the destination
+/// harness was being installed (`starting`).
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum DaemonKill {
     Suspending,
+    SealedBeforeSwap,
     Starting,
 }
+
+#[cfg(unix)]
+const DAEMON_KILLS: [DaemonKill; 3] = [
+    DaemonKill::Suspending,
+    DaemonKill::SealedBeforeSwap,
+    DaemonKill::Starting,
+];
 
 /// One daemon lifetime that seals an in-place Move's source and then dies at
 /// `kill`, leaving exactly the durable state the killed daemon left. The
@@ -2820,13 +2829,16 @@ fn in_place_move_killed_at(
             .archive_path
             .starts_with(mj_core::config::sessions_dir())
     );
-    if let DaemonKill::Starting = kill {
-        // What `execute_move` and `restore_session_in_place` persisted before
-        // the kill: the destination phase, the sealed source identity, and the
-        // record's swap to the destination profile.
+    if let DaemonKill::SealedBeforeSwap | DaemonKill::Starting = kill {
+        // What `execute_move` persisted before the swap: the destination
+        // phase and the sealed source identity.
         operation.phase = MovePhase::ResumingDestination;
         operation.recovery_session = Some(controller.state.sessions[LATCH_RELAY_SESSION].clone());
         crate::database::save_move_operation(&operation).unwrap();
+    }
+    if let DaemonKill::Starting = kill {
+        // What `restore_session_in_place` persisted before the kill: the
+        // record's swap to the destination profile.
         let record = controller
             .state
             .sessions
@@ -2841,11 +2853,13 @@ fn in_place_move_killed_at(
 
 /// The next daemon's startup for a killed Move: the archive sweep it runs
 /// before anything else, then recovery of the Move from the durable record.
+///
+/// The new daemon's session manager has no actor for the sealed source, as in
+/// the campaign, where its actor had already gone ("session manager stopped").
+/// The seal is a durable fact of the Move, so recovery must not need the
+/// sealed relay to answer again.
 #[cfg(unix)]
-fn restart_daemon_and_recover_move(
-    controller: &mut Controller,
-    source_relay: &Path,
-) -> mj_core::state::MoveOutcome {
+fn restart_daemon_and_recover_move(controller: &mut Controller) -> mj_core::state::MoveOutcome {
     crate::controller::reconcile_managed_checkpoint_archives().unwrap();
     let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
         .unwrap()
@@ -2855,7 +2869,7 @@ fn restart_daemon_and_recover_move(
         .build()
         .unwrap();
     runtime.block_on(async {
-        let channels = start_source_relay_manager(source_relay);
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
         let outcome = controller
             .recover_move_managed_controlled(
                 operation,
@@ -2889,13 +2903,13 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    for kill in [DaemonKill::Suspending, DaemonKill::Starting] {
+    for kill in DAEMON_KILLS {
         let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
         let source_relay = seed_source_relay(&fixture.worker_root);
         let killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
         let handoff = killed.handoff.clone().unwrap();
 
-        let outcome = restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+        let outcome = restart_daemon_and_recover_move(&mut fixture.controller);
         assert_eq!(outcome.outcome, "failed", "{kill:?}");
         assert!(
             handoff.archive_path.exists(),
@@ -2993,13 +3007,13 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    for kill in [DaemonKill::Suspending, DaemonKill::Starting] {
+    for kill in DAEMON_KILLS {
         let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
         let source_relay = seed_source_relay(&fixture.worker_root);
         let killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
         fs::remove_file(&killed.handoff.as_ref().unwrap().archive_path).unwrap();
 
-        let outcome = restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+        let outcome = restart_daemon_and_recover_move(&mut fixture.controller);
         assert_eq!(outcome.outcome, "failed", "{kill:?}");
         assert!(
             !outcome.recovery.as_deref().unwrap().contains("Retry Move"),
@@ -3068,7 +3082,7 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
     let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
     let source_relay = seed_source_relay(&fixture.worker_root);
     in_place_move_killed_at(DaemonKill::Suspending, &mut fixture, &source_relay);
-    restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+    restart_daemon_and_recover_move(&mut fixture.controller);
     let mut operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();

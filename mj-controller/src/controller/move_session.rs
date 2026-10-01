@@ -1289,7 +1289,15 @@ impl Controller {
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
-                Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
+                // An in-place Move writes `recovery_session` only after its
+                // relay reported Closed, so the seal is a durable fact of the
+                // Move. Asking the sealed relay again cannot change it and
+                // fails when its actor is gone, which left the record
+                // `Closing` (suspending) with nothing to finish it.
+                let sealed = operation.in_place && operation.recovery_session.is_some() && session.state == SessionState::Closing;
+                if !sealed {
+                    Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
+                }
                 // A Move that keeps the environment restores only from the
                 // handoff its seal recorded. Taking the source's older full
                 // checkpoint here would make a lost handoff look retained.
