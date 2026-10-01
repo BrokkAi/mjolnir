@@ -159,3 +159,13 @@ Findings, with verdicts:
 - **W-1** (rough, product, TUI): Esc on the dashboard reopens an abandoned Settings draft. Fix wave S2.
 
 Runbook errors: the web New session form has no Subagents control since cc23c703 (the policy travels in the request only); a fake profile cannot hold a Single model default through Settings; a lab Move is always in-place; the viewer code rotates on a daemon restart.
+
+### Track P (containers, `claude2`) — done
+
+Passed: the musl worker is selected ("development musl worker"); `gh auth status` reports logged in during the first turn on local podman and on morannon-podman (#1194); 2 CPU / 4 GiB from the wizard reach the container and survive suspend/resume; Esc mid-turn, checkpoint, suspend (the container is removed), resume (a new container), destroy; over ten minutes with three container sessions and a dashboard attached, no `podman exec … cgroup`, `inspect --size` or `stats` ran (5a7ec3f3); one relay `hello` per session and no "still waiting" warnings (a6ec3266); a podman-to-localhost Move keeps HEAD and status; container sessions get no localhost mj-skill configuration guidance; the Build cache page shows the one shared budget (the copied `max_size`/`target_max_size` are dropped without a warning).
+
+Findings, with verdicts:
+
+- **P-1** (rough, product): moving a sized container session to a bare target fails with "bare targets have fixed host resources" and does not name `--clear-resources`. Sonnet fix.
+
+Runbook errors: `--model claude-sonnet-5-5` is refused; use `sonnet`. Container targets need a configured bundle (no `--project-directory`), and the project needs a network `origin` whose default branch exists locally. The wizard's project picker lists the user's real projects from discovery (see M-1).
