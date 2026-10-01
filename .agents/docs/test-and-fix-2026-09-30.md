@@ -120,3 +120,28 @@ Findings, with verdicts:
 - **M-1** (wrong, product): a fresh named instance's first dashboard launch wrote four `[bundles.*]` blocks pointing at the user's real projects (`mjolnir3`, `brokkbench26`, `autocull`, `bifrost-dev`) into its `config.toml`, although the config already had profiles. Opus fix agent dispatched to find the writer; if it is intended design it comes back to the user.
 
 Runbook errors: `--model claude-sonnet-5-5` is refused (400); the profile offers the alias `sonnet` (Sonnet 5.5). A fixture project needs a network `origin` and its default branch ref present locally, or `mj new` refuses (422, then "origin default branch … is not in the source repository; fetch it"). The worker root on an SSH host is `~/.local/share/hel/workers/<session>` and profile data `~/.local/share/hel/profiles/<session>` regardless of `workspace_prefix`, so the card's isolation and cleanup by prefix does not apply to worker roots; match the session id. Cleanup complete, 0 leftovers.
+
+### Track T (dashboard, fake lab 4201) — done
+
+Passed: the splash plays about 2.3 s; input during it does not reach the dashboard; Ctrl+C restores the terminal; it is skipped under `NO_COLOR`, `LC_ALL=C` and below 60 columns; a stopped daemon holds the last scene with the startup notice; no welcome on a lab with profiles; wizard skips (profile and sole target) once podman is unavailable; CPU/MEM fields underlined, focusable, pasteable, clickable, invalid values refused not clamped; startup preview row never disappears; a Settings save on a named instance keeps its default or explicit web port; help, palette, all fourteen Settings pages, Change Workspace, filter, 80/100 columns.
+
+Findings, with verdicts:
+
+- **T-1** (rough, product): a configured `symbols = "ascii"` does not skip the splash (`mj-cli/src/splash.rs` `wanted()` guesses from the terminal). Fix wave S1.
+- **T-2** (rough, product): "MEM exceeds this host's 98.2026519775390625 GiB." Fix wave S1.
+- **T-3** (rough, product): the profile Sub-agents hint is cut off mid-sentence. Fix wave S1.
+- **T-4** (rough, product): "Choose a name for the new entry." outlives its page in Settings (A-1's family). Fix wave S1, as status ownership.
+- **T-5** (possible defect): an idle daemon with no clients does a relay history/attach/projection/subagent round trip every ~150 ms over an idle session. Opus investigation.
+- **T-6** (rough, product): a configured project with a missing directory is offered without a marker and fails with raw `fatal:` text. Fix wave S1: an "(unavailable)" row as for configured targets, and a plain message.
+
+Runbook errors: the splash is skipped below 60 columns, not at 60; a configured ASCII set cannot be known before config loads (T-1); the lab always has a usable `podman` target, so the target-skip mission needs podman off `PATH`; a fake profile cannot save Single model (no models). The worker once ran a read-only `mj sessions` with the installed binary against the default instance; it hung and was killed by PID; the default daemon was checked afterwards and answers normally.
+
+### Track U (upgrade, first run) — done in part
+
+The upgrade half was not exercised: `~/.cargo/bin/mj` was a 6a2a0713 build, and was reinstalled from master tip during the run, so no migration ran. Rerun as **U2** with the official v2.24.0 release (`$MJ_CAMPAIGN/release-2.24.0/`). Passed: same-version different-build replacement, including mid-turn (one reply); startup failure names the daemon log and the cause; first interactive startup on a fresh instance (splash, welcome with five agents and the GitHub repository, no session created, no welcome on relaunch, `mj setup` additive with no questions or duplicates); the viewer took a free port, not 3765.
+
+Findings, with verdicts:
+
+- **U-1** (question for the user): any same-version build with a different executable replaces the running daemon, in either direction, so alternating two builds flips the daemon each command. 79f2ad0a intends replacement; whether an older commit may replace a newer one is unspecified.
+- **U-2** (not a defect): a first run killed after the config is saved never shows the welcome; consistent with the plan.
+- Observations: `mj daemon stop` does not stop a daemon still starting (no `daemon.json` yet); the welcome's doctor ran before repository discovery finished, so the review-leftover error for a discovered project was never shown; a "Get started" screen flashed once before the dashboard.
