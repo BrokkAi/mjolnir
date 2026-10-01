@@ -3835,3 +3835,24 @@ fn a_status_line_does_not_outlive_the_prompt_that_set_it() {
     let page = drawn(&mut dashboard, 140, 40).join("\n");
     assert!(!page.contains("Choose a name"), "{page}");
 }
+
+/// The Sub-agents page explains both modes in full at any width. Finding T-3.
+#[test]
+fn the_profile_subagents_page_shows_its_whole_hint() {
+    for (width, height) in [(140, 40), (80, 30)] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section("profiles", Some("codex-1"));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.path.push("subagents".into());
+        dialog.prepare();
+        let page = drawn(&mut dashboard, width, height)
+            .iter()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            page.contains("selected model and effort."),
+            "{width}x{height}: hint cut off: {page}"
+        );
+    }
+}

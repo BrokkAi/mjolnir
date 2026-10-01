@@ -3065,13 +3065,16 @@ pub(crate) fn render_setup(
         );
     }
     let help_y = inner.y + u16::from(nested);
-    frame.render_widget(
-        Paragraph::new(schema::page_help(path, &dialog.draft))
-            .wrap(Wrap { trim: false })
-            .style(theme::muted()),
-        Rect::new(inner.x, help_y, inner.width, 2),
-    );
-    let body_y = help_y + 3;
+    // The hint wraps in full; two rows is the least it keeps, so pages with
+    // short hints do not move.
+    let help = Paragraph::new(schema::page_help(path, &dialog.draft))
+        .wrap(Wrap { trim: false })
+        .style(theme::muted());
+    let help_rows = u16::try_from(help.line_count(inner.width))
+        .unwrap_or(u16::MAX)
+        .clamp(2, (inner.height / 3).max(2));
+    frame.render_widget(help, Rect::new(inner.x, help_y, inner.width, help_rows));
+    let body_y = help_y + help_rows + 1;
     // Back and the commit share the dialog's bottom row; the page's own
     // actions stack in a column beside the body.
     let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
@@ -3090,7 +3093,7 @@ pub(crate) fn render_setup(
         inner.width,
         inner
             .height
-            .saturating_sub(4 + notice_rows + u16::from(nested))
+            .saturating_sub(2 + help_rows + notice_rows + u16::from(nested))
             .max(1),
     );
     // The three rows a notice would occupy belong to the page while no notice
