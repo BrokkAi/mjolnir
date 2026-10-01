@@ -30,6 +30,7 @@ pub mod move_workspace;
 pub mod native_agent;
 pub mod path_completion;
 pub mod path_input;
+pub mod program_path;
 pub mod project_catalog;
 pub mod project_memory;
 pub mod project_picker;
