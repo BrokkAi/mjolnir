@@ -292,10 +292,7 @@ impl RuntimeState {
             } else {
                 owner.background_policies.remove(&session_id);
             }
-            owner.sessions.insert(
-                session_id.clone(),
-                RuntimeSessionView::from_managed(session_id, view),
-            );
+            owner.publish_view(session_id, view);
         }
         reach_test_hook("relay_projection_before_revision_publication").await?;
         self.publish_revision();

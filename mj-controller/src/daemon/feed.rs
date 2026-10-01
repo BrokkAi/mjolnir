@@ -1,7 +1,7 @@
 //! Bounded cursor history over immutable owner snapshots.
 use super::*;
 use mj_client::runtime_feed::{
-    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection,
+    RuntimeCursor, RuntimeDelta, RuntimeFrame, RuntimeMetadata, RuntimeProjection, SessionTailReply,
 };
 use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
@@ -84,6 +84,7 @@ impl RuntimeHistory {
             .unwrap_or_default();
         live.revision = full.revision;
         live.sessions = full.sessions.clone();
+        live.transcripts = full.transcripts.clone();
         live.metadata = full.metadata.clone();
         let mut pending = before
             .records
@@ -154,6 +155,26 @@ impl RuntimeHistory {
             "the incremental live set must equal a full evaluation"
         );
         live
+    }
+
+    /// A session's tail as it was at `cursor`. Answering from the retained
+    /// version rather than the newest one is what makes every delta after
+    /// `cursor` apply to it.
+    fn session_tail(&self, cursor: &RuntimeCursor, session_id: &str) -> SessionTailReply {
+        if cursor.incarnation != self.incarnation {
+            return SessionTailReply::ResetRequired;
+        }
+        let Some((_, projection, _)) = self
+            .snapshots
+            .iter()
+            .find(|(sequence, _, _)| *sequence == cursor.sequence)
+        else {
+            return SessionTailReply::ResetRequired;
+        };
+        projection
+            .transcripts
+            .get(session_id)
+            .map_or(SessionTailReply::NoTail, SessionTailReply::of)
     }
 
     fn frame(&self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
@@ -254,6 +275,7 @@ impl RuntimeState {
                     records: owner.projected_records(),
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
+                    transcripts: owner.transcripts.clone(),
                     moves,
                     metadata: RuntimeMetadata {
                         config: controller.config.clone(),
@@ -323,6 +345,17 @@ impl RuntimeState {
         Ok(history.cursor())
     }
 
+    pub(super) fn session_tail(
+        &self,
+        session_id: &str,
+        cursor: &RuntimeCursor,
+    ) -> SessionTailReply {
+        self.feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .session_tail(cursor, session_id)
+    }
+
     pub(super) async fn runtime_changes(
         &self,
         cursor: Option<RuntimeCursor>,
@@ -382,6 +415,72 @@ mod tests {
             RuntimeFrame::ResetRequired
         ));
         assert!(matches!(history.frame(None), RuntimeFrame::Snapshot { .. }));
+    }
+
+    /// A tail is answered as it was at the asking client's cursor, not as it
+    /// is now, so the deltas after that cursor apply to it. A cursor the
+    /// history no longer holds asks the client to start over.
+    #[test]
+    fn a_tail_is_served_at_the_requested_cursor() {
+        let item = |position: u64, text: &str| {
+            Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: format!("agent:{position}"),
+                position,
+                latest_content_event_ordinal: Some(position),
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: mj_core::transcript::TranscriptBody::Agent {
+                    chunks: vec![serde_json::json!({"content": {"type": "text", "text": text}})],
+                    streaming: true,
+                },
+            })
+        };
+        let tail_of = |items: Vec<Arc<mj_core::transcript::TranscriptItem>>| {
+            let mut materialized = mj_core::state::MaterializedSession::empty("s");
+            materialized.applied_event_ordinal = items.len() as u64;
+            materialized.transcript = items;
+            mj_client::runtime_feed::SessionTail::of(
+                &materialized,
+                &mj_core::state::ProjectionWindow::default(),
+                1_024,
+            )
+        };
+        let mut history = RuntimeHistory::default();
+        let first = tail_of(vec![item(1, "one")]);
+        let mut projection = RuntimeProjection::default();
+        projection.transcripts.insert("s".into(), first.clone());
+        history.publish(projection.clone()).unwrap();
+        let held = history.cursor();
+        projection
+            .transcripts
+            .insert("s".into(), tail_of(vec![item(1, "one, then more")]));
+        history.publish(projection).unwrap();
+
+        assert_eq!(
+            history.session_tail(&held, "s"),
+            SessionTailReply::of(&first),
+            "the tail at the held cursor, not the newer one"
+        );
+        assert_eq!(
+            history.session_tail(&held, "other"),
+            SessionTailReply::NoTail
+        );
+        let replaced = RuntimeCursor {
+            incarnation: "previous-daemon".into(),
+            sequence: held.sequence,
+        };
+        assert_eq!(
+            history.session_tail(&replaced, "s"),
+            SessionTailReply::ResetRequired
+        );
+        let pruned = RuntimeCursor {
+            sequence: 0,
+            ..held
+        };
+        assert_eq!(
+            history.session_tail(&pruned, "s"),
+            SessionTailReply::ResetRequired
+        );
     }
 
     #[test]

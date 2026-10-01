@@ -6552,3 +6552,96 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     );
     assert!(repository.path().join(".git").exists());
 }
+
+/// What a relay actor publishes reaches a terminal client as item changes:
+/// a client that fetched the tail at its cursor and applies the frames after
+/// it holds the tail the daemon serves at the newest cursor, and a session
+/// whose actor retires takes its tail out of the feed.
+#[tokio::test]
+async fn published_transcripts_reach_a_client_as_item_changes() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(
+            "session-1".into(),
+            runtime_test_session("session-1", "workspace", SessionState::Running),
+        );
+    });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+    let item = |position: u64, text: &str| {
+        Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: format!("agent:{position}"),
+            position,
+            latest_content_event_ordinal: Some(position),
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: mj_core::transcript::TranscriptBody::Agent {
+                chunks: vec![serde_json::json!({"content": {"type": "text", "text": text}})],
+                streaming: true,
+            },
+        })
+    };
+    let view = |items: Vec<Arc<mj_core::transcript::TranscriptItem>>| {
+        let mut view = ready_startup_view();
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.materialized.applied_event_ordinal = items.len() as u64;
+        snapshot.materialized.transcript = items;
+        snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
+        view
+    };
+    let first = item(1, "first");
+    state
+        .publish_session("session-1".into(), view(vec![Arc::clone(&first)]))
+        .await
+        .unwrap();
+    let mut replica = mj_client::runtime_feed::RuntimeReplica::default();
+    replica
+        .apply(state.runtime_changes(None, false).await.unwrap())
+        .unwrap();
+    let cursor = replica.cursor.clone().unwrap();
+    let mj_client::runtime_feed::SessionTailReply::Tail {
+        header,
+        window,
+        items,
+    } = state.session_tail("session-1", &cursor)
+    else {
+        panic!("a published projection has a tail");
+    };
+    replica.projection.transcripts.insert(
+        "session-1".into(),
+        mj_client::runtime_feed::SessionTail::from_parts(*header, window, items),
+    );
+
+    state
+        .publish_session(
+            "session-1".into(),
+            view(vec![first, item(2, "second, streaming")]),
+        )
+        .await
+        .unwrap();
+    let frame = state.runtime_changes(Some(cursor), false).await.unwrap();
+    let mj_client::runtime_feed::RuntimeFrame::Delta { changes, .. } = &frame else {
+        panic!("a held cursor gets a delta, not {frame:?}");
+    };
+    assert!(
+        matches!(&changes.transcripts[..],
+            [(id, mj_client::runtime_feed::TranscriptChange::Items(items))]
+                if id == "session-1" && items.upserts.len() == 1 && items.removes.is_empty()),
+        "only the new item travels: {:?}",
+        changes.transcripts
+    );
+    replica.apply(frame).unwrap();
+    let newest = replica.cursor.clone().unwrap();
+    assert_eq!(
+        mj_client::runtime_feed::SessionTailReply::of(&replica.projection.transcripts["session-1"]),
+        state.session_tail("session-1", &newest),
+    );
+
+    state.owner().install_relay_sessions(BTreeSet::new());
+    state.publish_revision();
+    replica
+        .apply(state.runtime_changes(Some(newest), false).await.unwrap())
+        .unwrap();
+    assert!(replica.projection.transcripts.is_empty());
+}

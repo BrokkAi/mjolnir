@@ -138,28 +138,18 @@ pub(super) type StoredProjection = Option<(MaterializedSession, mj_core::state::
 pub(super) static PROJECTION_READERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
-pub(super) async fn load_runtime_projection(session_id: String) -> Result<StoredProjection> {
-    let permit = Arc::clone(&PROJECTION_READERS)
-        .acquire_owned()
-        .await
-        .context("projection readers stopped")?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let started = Instant::now();
-        let result = crate::database::load_materialized_projection_tail(
-            &session_id,
-            crate::database::PROJECTION_TAIL_ITEMS,
-        );
-        tracing::debug!(target: "mj_controller::latency", %session_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "terminal projection loaded");
-        // A blocking SQLite read can outlive cancellation of its subscriber.
-        if let Err(error) = &result {
-            tracing::warn!(%session_id, %error, "could not load runtime projection");
-        }
-        result
-    })
-    .await
-    .context("projection load task failed")?
+/// A tail fetched at a cursor the daemon no longer holds. The feed takes a
+/// new snapshot and fetches again; nothing about the session is wrong.
+#[derive(Debug)]
+pub(super) struct TailCursorExpired;
+
+impl std::fmt::Display for TailCursorExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the daemon no longer holds this runtime cursor")
+    }
 }
+
+impl std::error::Error for TailCursorExpired {}
 
 pub(super) fn spawn_runtime_feed_with<P, PF, L, LF, S>(
     workspace_id: String,
@@ -211,6 +201,7 @@ where
     let mut convergence = ProjectionConvergence::default();
     let mut published = std::collections::BTreeMap::<String, PublishedView>::new();
     let mut previous_sessions = SnapshotMap::new();
+    let mut previous_transcripts = SnapshotMap::new();
     let mut pending_ids = std::collections::BTreeSet::new();
     loop {
         let mut snapshot = match poll(workspace_id.clone(), revision).await {
@@ -245,6 +236,15 @@ where
             }
         }
         previous_sessions = sessions.clone();
+        // A tail can change without its session's ordinal moving: a relay
+        // actor reloaded from the store reports compacted content this way.
+        for (id, tail) in previous_transcripts.changes(&snapshot.transcripts) {
+            if tail.is_some() && sessions.contains_key(id) {
+                published.remove(id);
+                pending_ids.insert(id.clone());
+            }
+        }
+        previous_transcripts = snapshot.transcripts.clone();
         if tx
             .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
             .await
@@ -377,7 +377,8 @@ pub(super) fn runtime_projection_view(
                 )
             }
         }
-        Ok(None) => "daemon published a session with no durable projection".into(),
+        Ok(None) => "daemon published a session with no transcript tail".into(),
+        Err(error) if error.is::<TailCursorExpired>() => return None,
         Err(error) => format!("load daemon-owned projection: {error:#}"),
     };
     Some(ManagedSessionView {
