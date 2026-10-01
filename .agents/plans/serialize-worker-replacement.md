@@ -17,7 +17,8 @@ A checkpoint and an automatic upgrade must never replace the same session's work
 - [x] Centralize durable replacement reconciliation and conditional admission, including cold starts and resumes.
 - [x] Add deterministic concurrency, cancellation, process, and handoff regressions; the quiet-worker handoff regression passed.
 - [x] Commit the validated implementation checkpoint as `a6ad3cc3`; integrate seven upstream commits without conflicts as `b08de7e6`.
-- [x] Complete dev-profile workspace validation, remaining integration tests, documentation tests, Clippy, and formatting on the merged implementation; prepare the validated commits for the authorized `origin/master` push.
+- [x] Complete dev-profile workspace validation, remaining integration tests, documentation tests, Clippy, and formatting on the implementation integrated at `b08de7e6`; commit the diagnostic test correction as `60c41854`.
+- [x] Revalidate the affected ownership, upgrade, daemon, API, and Settings paths after integrating two concurrent upstream commits in `531d7927`; prepare the validated result for the authorized push.
 
 ## Surprises & Discoveries
 
@@ -37,6 +38,8 @@ Use one instance-and-session ownership service with opaque permits, acquired bef
 Worker replacement is now decided by one owner per instance and session. Foreground lifecycle calls wait cancellably; background recovery defers. Returned checkpoint and Move leases retain their admission, nested calls borrow it, and executing blocking work keeps it after its waiter disappears. Conditional durable claims preserve a live detached boot across daemon handoff. Every new worker holds an exclusive stable-root lock before shared diagnostics or journal writes, through login re-exec and exit reporting. Private preparation and launch files cannot clobber the incumbent.
 
 The implementation checkpoint is `a6ad3cc3`, integrated with seven upstream commits in `b08de7e6`. Final dev-profile validation covered 5,744 passing unit and integration tests, with 30 existing ignored tests, through the full workspace run and its integration followups. The controller suite passed 2,135 tests; the worker library passed 709; all four native-session recovery tests, the remaining worker environment and proxy tests, and the CLI's 12 real-terminal tests passed. Isolated automatic-upgrade, admission-draining, Move handoff, and terminal re-exec checks passed. Workspace documentation tests, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all -- --check` passed. The original full run stopped at two integration assertions that expected captured stderr; they now verify the owning worker's persistent log, and the focused rerun passed.
+
+The first push was rejected because two concurrent upstream commits had arrived. They were integrated without conflicts in `531d7927`. The affected ownership, replacement, daemon handoff, API, and Settings paths then passed 498 selected tests across the workspace, including isolated upgrade integration checks. All-target Clippy and workspace formatting passed again on this final merge.
 
 Validation used normal mbx settings and the existing target layout throughout. Earlier test artifacts embedded a stable cache OUT_DIR whose generated fake-worker tree was gone, even though Cargo's own generated fixture remained. This is a runtime path lifetime mismatch in the existing test helper and shared output cache; cache eviction is an inference, not a proved deletion history. Rebuilding after the required implementation commit regenerated the fixture and those tests passed. The proposed temporary output-sharing override was never used, and no cache setting or target layout was changed. The original damaged production session remains outside the prevention-only scope.
 
