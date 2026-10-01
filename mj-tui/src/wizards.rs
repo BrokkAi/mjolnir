@@ -17,6 +17,8 @@ use mj_chat::path_input::PathInput;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+
+use mj_client::runtime_feed::LaunchRecency;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -33,8 +35,7 @@ use mj_core::config::{
 };
 use mj_core::state::{
     MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
-    SessionRecord, SessionResourceAllocation, SessionState, State, allocation_cpus,
-    allocation_memory,
+    SessionResourceAllocation, SessionState, allocation_cpus, allocation_memory,
 };
 
 use mj_chat::components::PathField;
@@ -686,46 +687,49 @@ impl NewWizard {
 
 impl ResumeWizard {}
 
-fn nth_bundle_key(config: &Config, state: &State, index: usize) -> String {
-    bundle_ids_by_recent_creation(config, state)
+fn nth_bundle_key(config: &Config, recency: &[LaunchRecency], index: usize) -> String {
+    bundle_ids_by_recent_creation(config, recency)
         .get(index)
         .expect("wizard is only opened for non-empty configuration")
         .to_string()
 }
 
+/// The newest launch whose profile, project and target are all still
+/// configured. New-session defaults start from it.
 fn most_recent_configured_session<'a>(
     config: &Config,
-    state: &'a State,
-) -> Option<&'a SessionRecord> {
-    state
-        .sessions
-        .values()
-        .filter(|session| {
-            config.enabled_profile(&session.last_profile).is_some()
-                && config.bundles.contains_key(&session.bundle_id)
-                && config.targets.contains_key(&session.target_template_id)
+    recency: &'a [LaunchRecency],
+) -> Option<&'a LaunchRecency> {
+    recency
+        .iter()
+        .filter(|launch| {
+            config.enabled_profile(&launch.last_profile).is_some()
+                && config.bundles.contains_key(&launch.bundle_id)
+                && config.targets.contains_key(&launch.target_template_id)
         })
-        .max_by_key(|session| {
-            chrono::DateTime::parse_from_rfc3339(&session.created_at)
-                .ok()
-                .map(|timestamp| timestamp.timestamp_millis())
-        })
+        .max_by_key(|launch| created_at_ms(&launch.newest_created_at))
 }
 
-fn bundle_ids_by_recent_creation<'a>(config: &'a Config, state: &State) -> Vec<&'a str> {
+fn created_at_ms(created_at: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn bundle_ids_by_recent_creation<'a>(
+    config: &'a Config,
+    recency: &[LaunchRecency],
+) -> Vec<&'a str> {
     let mut latest_created_at = BTreeMap::<&str, i64>::new();
-    for session in state.sessions.values() {
-        if !config.bundles.contains_key(&session.bundle_id) {
+    for launch in recency {
+        if !config.bundles.contains_key(&launch.bundle_id) {
             continue;
         }
-        let Some(created_at) = chrono::DateTime::parse_from_rfc3339(&session.created_at)
-            .ok()
-            .map(|timestamp| timestamp.timestamp_millis())
-        else {
+        let Some(created_at) = created_at_ms(&launch.newest_created_at) else {
             continue;
         };
         latest_created_at
-            .entry(&session.bundle_id)
+            .entry(&launch.bundle_id)
             .and_modify(|latest| *latest = (*latest).max(created_at))
             .or_insert(created_at);
     }

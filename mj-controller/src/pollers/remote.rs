@@ -71,6 +71,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                                 lifecycles: metadata.lifecycles,
                                 moves: snapshot.moves,
                                 subagents: snapshot.subagents,
+                                launch_recency: metadata.launch_recency,
                             });
                             reviews_tx.send_replace(metadata.reviews);
                             notices_tx.send_replace(metadata.notices);

@@ -31,6 +31,9 @@ pub struct RuntimeStateUpdate {
     /// keep a daemon-created child out of the real workspace without a full
     /// state reload.
     pub subagents: SnapshotMap<String, SubagentRecord>,
+    /// What new-session defaults are chosen from; see
+    /// [`mj_client::runtime_feed::LaunchRecency`].
+    pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
 }
 
 /// What a session looked like the last time a view was published for it.

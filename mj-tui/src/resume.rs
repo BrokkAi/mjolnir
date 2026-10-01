@@ -1242,6 +1242,11 @@ impl DashboardState {
             .or_else(|| self.stopped_records.get(session_id))
     }
 
+    /// Replace what new-session defaults are chosen from.
+    pub fn set_launch_recency(&mut self, recency: Vec<mj_client::runtime_feed::LaunchRecency>) {
+        self.launch_recency = recency;
+    }
+
     /// The stopped records loaded on demand, for work that follows them such
     /// as reading checkpoint sizes.
     pub fn stopped_records(&self) -> &SnapshotMap<String, SessionRecord> {

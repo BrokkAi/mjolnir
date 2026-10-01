@@ -43,6 +43,57 @@ pub struct RuntimeMetadata {
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
     pub quotas: crate::quota::QuotaSnapshot,
+    /// What new-session defaults are chosen from. The feed carries only live
+    /// sessions, but the defaults follow every session, stopped ones too.
+    #[serde(default)]
+    pub launch_recency: Vec<LaunchRecency>,
+}
+
+/// The newest creation time among the sessions launched with one project,
+/// profile and target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRecency {
+    pub bundle_id: String,
+    pub last_profile: String,
+    pub target_template_id: String,
+    pub newest_created_at: String,
+}
+
+/// One [`LaunchRecency`] per project, profile and target that any session
+/// used. A creation time that does not parse ranks below every other.
+pub fn launch_recency(records: &SnapshotMap<String, SessionRecord>) -> Vec<LaunchRecency> {
+    let created = |record: &SessionRecord| {
+        chrono::DateTime::parse_from_rfc3339(&record.created_at)
+            .ok()
+            .map(|timestamp| timestamp.timestamp_millis())
+    };
+    let mut newest = BTreeMap::<(&str, &str, &str), &SessionRecord>::new();
+    for record in records.values() {
+        let key = (
+            record.bundle_id.as_str(),
+            record.last_profile.as_str(),
+            record.target_template_id.as_str(),
+        );
+        newest
+            .entry(key)
+            .and_modify(|held| {
+                if created(record) > created(held) {
+                    *held = record;
+                }
+            })
+            .or_insert(record);
+    }
+    newest
+        .into_iter()
+        .map(
+            |((bundle_id, last_profile, target_template_id), record)| LaunchRecency {
+                bundle_id: bundle_id.to_owned(),
+                last_profile: last_profile.to_owned(),
+                target_template_id: target_template_id.to_owned(),
+                newest_created_at: record.created_at.clone(),
+            },
+        )
+        .collect()
 }
 
 pub type KeyChanges<T> = Vec<(String, Option<T>)>;

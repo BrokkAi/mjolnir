@@ -202,7 +202,7 @@ pub(crate) fn render_new_wizard(
             step_counter(4, 4, target_hidden, wizard)
         );
         let bundle_id = (!raw_project)
-            .then(|| nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle));
+            .then(|| nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle));
         render_review_wizard(
             frame,
             area,
@@ -463,7 +463,8 @@ pub(crate) fn render_new_wizard(
                 step_counter(3, 4, target_hidden, wizard)
             ),
             {
-                let ids = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state);
+                let ids =
+                    bundle_ids_by_recent_creation(&dashboard.config, &dashboard.launch_recency);
                 if let Some(id) = ids.get(wizard.bundle) {
                     step_help = bundle_details(id, &dashboard.config.bundles[*id]);
                 }

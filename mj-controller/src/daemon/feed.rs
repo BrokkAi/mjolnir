@@ -7,7 +7,11 @@ use mj_core::native_agent::NativeAgentSummary;
 use mj_core::snapshot_map::SnapshotMap;
 
 type NativeOwners = SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>;
+type Children = SnapshotMap<String, SnapshotMap<String, ()>>;
 
+/// The terminal feed's history holds live projections: only the sessions
+/// [`mj_core::state::session_is_live`] keeps. `full` is the newest projection
+/// of every session from the same capture, for the in-process web server.
 #[derive(Default)]
 pub(super) struct RuntimeHistory {
     incarnation: String,
@@ -15,6 +19,10 @@ pub(super) struct RuntimeHistory {
     snapshots: VecDeque<(u64, RuntimeProjection, usize)>,
     bytes: usize,
     native_owners: NativeOwners,
+    full: RuntimeProjection,
+    /// Sessions with a visible lifecycle operation or an active move in the
+    /// newest capture. A stopped session stays live while it has one.
+    operations: BTreeSet<String>,
 }
 
 impl RuntimeHistory {
@@ -57,6 +65,97 @@ impl RuntimeHistory {
         Ok(())
     }
 
+    /// The live projection for `full`, derived from the previous one by what
+    /// changed since the previous capture, so a publication costs what
+    /// changed rather than every session ever created, and unchanged
+    /// branches stay shared with history.
+    fn live_projection(
+        &self,
+        full: &RuntimeProjection,
+        native_owners: &NativeOwners,
+        children: &Children,
+        operations: &BTreeSet<String>,
+    ) -> RuntimeProjection {
+        let before = &self.full;
+        let mut live = self
+            .snapshots
+            .back()
+            .map(|(_, projection, _)| projection.clone())
+            .unwrap_or_default();
+        live.revision = full.revision;
+        live.sessions = full.sessions.clone();
+        live.metadata = full.metadata.clone();
+        let mut pending = before
+            .records
+            .changes(&full.records)
+            .map(|(id, _)| id.clone())
+            .chain(
+                before
+                    .subagents
+                    .changes(&full.subagents)
+                    .map(|(id, _)| id.clone()),
+            )
+            .chain(before.moves.changes(&full.moves).map(|(id, _)| id.clone()))
+            .chain(self.operations.symmetric_difference(operations).cloned())
+            .collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            let was = live.records.contains_key(&id);
+            let record = full.records.get(&id);
+            let now = record.is_some_and(|record| {
+                let parent_live = full
+                    .subagents
+                    .get(&id)
+                    .is_some_and(|relation| live.records.contains_key(&relation.parent_session_id));
+                mj_core::state::session_is_live(record, operations.contains(&id), parent_live)
+            });
+            sync_key(&mut live.records, &id, record.filter(|_| now));
+            sync_key(
+                &mut live.subagents,
+                &id,
+                full.subagents.get(&id).filter(|_| now),
+            );
+            sync_key(&mut live.moves, &id, full.moves.get(&id).filter(|_| now));
+            if was == now {
+                continue;
+            }
+            // Membership moved, so the session's native agents follow it,
+            // and so do its stopped sub-agents.
+            for summary in native_owners
+                .get(&id)
+                .into_iter()
+                .flat_map(SnapshotMap::values)
+            {
+                let view_id = summary.agent.view_id();
+                sync_key(
+                    &mut live.native_agents,
+                    &view_id,
+                    Some(summary).filter(|_| now),
+                );
+            }
+            pending.extend(
+                children
+                    .get(&id)
+                    .into_iter()
+                    .flat_map(SnapshotMap::keys)
+                    .cloned(),
+            );
+        }
+        for (view_id, summary) in before.native_agents.changes(&full.native_agents) {
+            let owner = summary
+                .or_else(|| before.native_agents.get(view_id))
+                .map(|summary| summary.agent.owner_session_id.as_str());
+            if owner.is_some_and(|owner| live.records.contains_key(owner)) {
+                sync_key(&mut live.native_agents, view_id, summary);
+            }
+        }
+        debug_assert_eq!(
+            live.records.keys().cloned().collect::<BTreeSet<_>>(),
+            mj_core::state::live_session_ids(&full.records, &full.subagents, operations),
+            "the incremental live set must equal a full evaluation"
+        );
+        live
+    }
+
     fn frame(&self, requested: Option<&RuntimeCursor>) -> RuntimeFrame {
         let (_, current, _) = self.snapshots.back().expect("captured projection");
         let Some(requested) = requested else {
@@ -81,17 +180,48 @@ impl RuntimeHistory {
     }
 }
 
+/// Whether a record was added, removed, or changed in what
+/// [`mj_client::runtime_feed::launch_recency`] reads. Most publications change
+/// neither, and the summary reads every record.
+fn launch_inputs_changed(before: &RuntimeProjection, after: &RuntimeProjection) -> bool {
+    let inputs = |record: &SessionRecord| {
+        (
+            record.bundle_id.clone(),
+            record.last_profile.clone(),
+            record.target_template_id.clone(),
+            record.created_at.clone(),
+        )
+    };
+    before
+        .records
+        .changes(&after.records)
+        .any(|(id, record)| before.records.get(id).map(inputs) != record.map(inputs))
+}
+
+/// Make `map[id]` equal `value`, leaving an equal entry and its sharing alone.
+fn sync_key<V: Clone + PartialEq>(map: &mut SnapshotMap<String, V>, id: &str, value: Option<&V>) {
+    match value {
+        Some(value) if map.get(id) != Some(value) => {
+            map.insert(id.to_owned(), value.clone());
+        }
+        Some(_) => {}
+        None => {
+            map.remove(id);
+        }
+    }
+}
+
 impl RuntimeState {
+    /// Every session, stopped ones included, for the in-process web server.
+    /// Terminal clients receive the live projection through
+    /// [`Self::runtime_changes`].
     pub(crate) fn runtime_publication(&self) -> Result<RuntimeProjection> {
         self.capture_runtime()?;
         Ok(self
             .feed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .snapshots
-            .back()
-            .expect("captured projection")
-            .1
+            .full
             .clone())
     }
 
@@ -99,24 +229,36 @@ impl RuntimeState {
         // History serialization never holds the operational owner. Only immutable
         // roots and the bounded active-operation projection cross that lock.
         let mut history = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
-        let (mut next, native_owners) = {
+        let (mut full, native_owners, children, operations) = {
             let owner = self.owner();
             owner.ensure_available()?;
             let controller = owner.controller();
+            let moves = owner
+                .committed()
+                .map(|state| state.moves.clone())
+                .unwrap_or_default();
+            let lifecycles = Self::active_lifecycles_with(&owner);
+            let operations = lifecycles
+                .iter()
+                .map(|lifecycle| lifecycle.session_id.clone())
+                .chain(
+                    moves
+                        .iter()
+                        .filter(|(_, operation)| operation.is_active())
+                        .map(|(id, _)| id.clone()),
+                )
+                .collect::<BTreeSet<_>>();
             (
                 RuntimeProjection {
                     revision: self.revisions.current(),
                     records: owner.projected_records(),
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
-                    moves: owner
-                        .committed()
-                        .map(|state| state.moves.clone())
-                        .unwrap_or_default(),
+                    moves,
                     metadata: RuntimeMetadata {
                         config: controller.config.clone(),
                         last_subagent_policy: controller.state.last_subagent_policy.clone(),
-                        lifecycles: Self::active_lifecycles_with(&owner),
+                        lifecycles,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -125,48 +267,54 @@ impl RuntimeState {
                     .committed()
                     .map(|state| state.native_agents.clone())
                     .unwrap_or_default(),
+                owner.indexes.children.clone(),
+                operations,
             )
         };
-        next.native_agents = history
-            .snapshots
-            .back()
-            .map(|(_, current, _)| current.native_agents.clone())
-            .unwrap_or_default();
+        full.native_agents = history.full.native_agents.clone();
         for (owner, children) in history.native_owners.changes(&native_owners) {
             let empty = SnapshotMap::new();
             let before = history.native_owners.get(owner).unwrap_or(&empty);
             for (child, value) in before.changes(children.unwrap_or(&empty)) {
                 if let Some(old) = before.get(child) {
-                    next.native_agents.remove(&old.agent.view_id());
+                    full.native_agents.remove(&old.agent.view_id());
                 }
                 if let Some(value) = value {
-                    next.native_agents
+                    full.native_agents
                         .insert(value.agent.view_id(), value.clone());
                 }
             }
         }
-        next.metadata.workspace_names = self
+        full.metadata.workspace_names = self
             .workspaces()
             .borrow()
             .iter()
             .map(|w| (w.id.clone(), w.name.clone()))
             .collect();
-        next.metadata.reviews = self.review_host.views();
-        next.metadata.notices = self
+        full.metadata.reviews = self.review_host.views();
+        full.metadata.notices = self
             .notices
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .cloned()
             .collect();
-        next.metadata.quotas = self
+        full.metadata.quotas = self
             .quota
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
-        history.publish(next)?;
+        full.metadata.launch_recency = if launch_inputs_changed(&history.full, &full) {
+            mj_client::runtime_feed::launch_recency(&full.records)
+        } else {
+            history.full.metadata.launch_recency.clone()
+        };
+        let live = history.live_projection(&full, &native_owners, &children, &operations);
+        history.publish(live)?;
         history.native_owners = native_owners;
+        history.full = full;
+        history.operations = operations;
         Ok(history.cursor())
     }
 
@@ -264,7 +412,7 @@ mod tests {
                 super::super::tests::runtime_test_session(
                     "new",
                     "workspace",
-                    SessionState::Stopped,
+                    SessionState::Running,
                 ),
             );
         });
@@ -276,5 +424,143 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+    }
+
+    fn record(id: &str, state: SessionState) -> SessionRecord {
+        super::super::tests::runtime_test_session(id, "workspace", state)
+    }
+
+    /// One capture as `capture_runtime` makes it: derive the live projection,
+    /// publish it, and remember its inputs. Returns the live session ids.
+    fn capture(
+        history: &mut RuntimeHistory,
+        full: &RuntimeProjection,
+        native_owners: &NativeOwners,
+        operations: &[&str],
+    ) -> Vec<String> {
+        let mut children = Children::new();
+        for (child, relation) in &full.subagents {
+            let mut members = children
+                .get(&relation.parent_session_id)
+                .cloned()
+                .unwrap_or_default();
+            members.insert(child.clone(), ());
+            children.insert(relation.parent_session_id.clone(), members);
+        }
+        let operations = operations.iter().map(|id| (*id).to_owned()).collect();
+        let live = history.live_projection(full, native_owners, &children, &operations);
+        history.publish(live).unwrap();
+        history.full = full.clone();
+        history.native_owners = native_owners.clone();
+        history.operations = operations;
+        history
+            .snapshots
+            .back()
+            .unwrap()
+            .1
+            .records
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Terminal clients follow live sessions only. A stopped session stays
+    /// while an operation holds it, a stopped sub-agent follows its live
+    /// parent, a native agent follows its owner, and a session that stops
+    /// leaves by a delta. Each capture also checks the incremental set
+    /// against a full evaluation (the `debug_assert` in `live_projection`).
+    #[test]
+    fn the_terminal_feed_follows_live_sessions_and_drops_stopped_ones() {
+        let mut full = RuntimeProjection::default();
+        for (id, state) in [
+            ("parent", SessionState::Running),
+            ("stopped", SessionState::Stopped),
+            ("lost", SessionState::Lost),
+            ("child", SessionState::Stopped),
+        ] {
+            full.records.insert(id.into(), record(id, state));
+        }
+        full.subagents.insert(
+            "child".into(),
+            super::super::tests::runtime_test_subagent("child", "parent"),
+        );
+        let agent = mj_core::native_agent::NativeAgent {
+            owner_session_id: "stopped".into(),
+            session_id: "explore".into(),
+            parent_session_id: None,
+            name: "Explore".into(),
+            task: "Map the code".into(),
+            capabilities: Default::default(),
+            state: mj_core::native_agent::NativeAgentState::Completed,
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
+        };
+        let view_id = agent.view_id();
+        let summary = NativeAgentSummary {
+            generation_ordinal: 1,
+            agent,
+            projection_ordinal: 0,
+            projection_digest: String::new(),
+        };
+        full.native_agents.insert(view_id.clone(), summary.clone());
+        let mut native_owners = NativeOwners::new();
+        native_owners.insert(
+            "stopped".into(),
+            SnapshotMap::from([(view_id.clone(), summary)]),
+        );
+        let mut history = RuntimeHistory::default();
+
+        assert_eq!(
+            capture(&mut history, &full, &native_owners, &[]),
+            ["child", "lost", "parent"]
+        );
+        let first = history.cursor();
+        let current = &history.snapshots.back().unwrap().1;
+        assert!(current.native_agents.is_empty());
+        assert!(current.subagents.contains_key("child"));
+
+        // A resume runs on a stopped record until it provisions.
+        assert_eq!(
+            capture(&mut history, &full, &native_owners, &["stopped"]),
+            ["child", "lost", "parent", "stopped"]
+        );
+        assert!(
+            history
+                .snapshots
+                .back()
+                .unwrap()
+                .1
+                .native_agents
+                .contains_key(&view_id)
+        );
+
+        // The parent stops; its stopped sub-agent leaves with it.
+        full.records
+            .insert("parent".into(), record("parent", SessionState::Stopped));
+        assert_eq!(
+            capture(&mut history, &full, &native_owners, &["stopped"]),
+            ["lost", "stopped"]
+        );
+        assert_eq!(capture(&mut history, &full, &native_owners, &[]), ["lost"]);
+        let current = &history.snapshots.back().unwrap().1;
+        assert!(current.native_agents.is_empty());
+        assert!(current.subagents.is_empty());
+
+        let RuntimeFrame::Delta { changes, .. } = history.frame(Some(&first)) else {
+            panic!("expected a delta from the first capture");
+        };
+        let removed = changes
+            .records
+            .iter()
+            .filter(|(_, record)| record.is_none())
+            .map(|(id, _)| id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(removed, BTreeSet::from(["child", "parent"]));
+        assert_eq!(
+            history.full.records.len(),
+            4,
+            "the web server keeps every record"
+        );
     }
 }

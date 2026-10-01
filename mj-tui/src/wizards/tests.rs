@@ -580,7 +580,7 @@ fn dashboard_at_saved_projects(state: State) -> DashboardState {
 }
 
 fn select_saved_project(dashboard: &mut DashboardState, bundle_id: &str) {
-    let index = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.state)
+    let index = bundle_ids_by_recent_creation(&dashboard.config, &dashboard.launch_recency)
         .iter()
         .position(|id| *id == bundle_id)
         .unwrap();
@@ -674,7 +674,7 @@ fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selecti
     assert!(!wizard.bundle_removal_in_flight);
     assert_eq!(wizard.step, WizardStep::Bundle);
     assert_eq!(
-        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
         "hel"
     );
     assert_eq!(
@@ -706,7 +706,7 @@ fn project_picker_url_enter_creates_one_repository_and_advances_to_review() {
     assert_eq!(wizard.step, WizardStep::Review);
     assert!(!wizard.bundle_creation_in_flight);
     assert_eq!(
-        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
         id
     );
 }
@@ -1896,7 +1896,10 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         container_sizes: BTreeMap::new(),
     };
     assert_eq!(
-        bundle_ids_by_recent_creation(&config, &state),
+        bundle_ids_by_recent_creation(
+            &config,
+            &mj_client::runtime_feed::launch_recency(&state.sessions)
+        ),
         vec!["zebra-recent", "hel", "alpha-unused"]
     );
 
@@ -1959,7 +1962,7 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
         "codex-1"
     );
     assert_eq!(
-        nth_bundle_key(&dashboard.config, &dashboard.state, wizard.bundle),
+        nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
         "recent-project"
     );
     assert_eq!(

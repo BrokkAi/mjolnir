@@ -18,7 +18,7 @@ impl DashboardState {
             self.begin_settings_section("profiles", None);
             return DashboardAction::None;
         }
-        let recent = most_recent_configured_session(&self.config, &self.state);
+        let recent = most_recent_configured_session(&self.config, &self.launch_recency);
         let profile = recent
             .and_then(|session| {
                 self.config
@@ -28,7 +28,7 @@ impl DashboardState {
             .unwrap_or(0);
         let bundle = recent
             .and_then(|session| {
-                bundle_ids_by_recent_creation(&self.config, &self.state)
+                bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
                     .iter()
                     .position(|id| *id == session.bundle_id)
             })

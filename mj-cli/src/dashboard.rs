@@ -1504,6 +1504,7 @@ impl DashboardContext {
             layouts,
             conversation_layouts,
             queued_prompts,
+            launch_recency,
         } = loaded;
         let workspace_names = workspaces
             .iter()
@@ -1515,6 +1516,7 @@ impl DashboardContext {
             BTreeMap::new(),
         );
         dashboard.set_workspace_names(workspace_names);
+        dashboard.set_launch_recency(launch_recency);
         // Tabs follow creation order, which a restart does not change; the
         // listing itself leads with the most recently opened workspace.
         let mut by_creation = workspaces.iter().collect::<Vec<_>>();
@@ -1711,6 +1713,9 @@ pub(crate) struct LoadedDashboard {
     layouts: BTreeMap<String, PaneSizes>,
     conversation_layouts: BTreeMap<String, ConversationLayout>,
     queued_prompts: BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
+    /// New-session defaults, taken from every session before the stopped
+    /// ones were set aside.
+    launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
 }
 
 impl LoadedDashboard {
@@ -1721,6 +1726,23 @@ impl LoadedDashboard {
     ) -> Result<Self> {
         let mut controller = Controller::load()?;
         retain_workspace_sessions(&mut controller, workspace_id, client_id)?;
+        let launch_recency = mj_client::runtime_feed::launch_recency(&controller.state.sessions);
+        // Start from what the runtime feed will send, which is live sessions
+        // only; the resume dialog asks for the stopped ones. No lifecycle
+        // operation is known yet, so only a durable move keeps a stopped
+        // session live here.
+        let moving = mj_controller::database::load_move_operations()?
+            .into_iter()
+            .filter(|operation| operation.is_active())
+            .map(|operation| operation.selection.session_id)
+            .collect();
+        let live = mj_core::state::live_session_ids(
+            &controller.state.sessions,
+            &controller.state.subagents,
+            &moving,
+        );
+        controller.state.sessions.retain(|id, _| live.contains(id));
+        controller.state.subagents.retain(|id, _| live.contains(id));
         let layouts = workspaces
             .iter()
             .map(|workspace| {
@@ -1744,6 +1766,7 @@ impl LoadedDashboard {
             layouts,
             conversation_layouts,
             queued_prompts,
+            launch_recency,
         })
     }
 

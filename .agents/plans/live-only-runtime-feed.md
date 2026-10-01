@@ -21,9 +21,9 @@ The web viewer and the HTTP API (`/api/v1/...`, used by `mj sessions` and `mj re
 - [x] (2026-10-01) Milestone 3 (done before Milestone 2, see Decision Log): `DaemonAction::ResumeCandidates` and `DaemonAction::GoStartupSession`, `DaemonReply::is_chunked` deciding chunked replies for both ends (`ReplyChunk` replaces `RuntimeChunk`), `PROTOCOL_VERSION` 50. Daemon tests: `resume_candidates_are_inactive_top_level_sessions_with_every_adopted_native_session`, `go_starts_in_the_remembered_session_or_the_newest_eligible_one`, `resume_candidates_larger_than_a_frame_arrive_whole`.
 - [x] (2026-10-01) Milestone 4: the resume dialog requests candidates on open (`spawn_resume_candidates`, `DashboardIoUpdate::ResumeCandidates`, `DashboardState::apply_resume_candidates`), shows "Loading suspended sessions…" and withholds Mjolnir and Import rows until the answer arrives; `DashboardState::session_record` serves live then loaded stopped records to the resume wizard, Hel-row Destroy, confirmations and operation placeholders; import completion no longer waits for the feed to show the stopped record; `mj go` asks the daemon (`begin_go` takes the chosen record); checkpoint sizes follow the loaded stopped records. Test `the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks`. Full suite passed.
 - [x] (2026-10-01) Milestone 5, part 1: a pinned pane whose session leaves the feed during a Suspending operation keeps its "is suspended, so it was unpinned" notice; a parent that leaves in the same frame as the sub-agent its suspend stopped is still recognized (no reopen); the CLI keeps the last record of a session that leaves while its chat exists (`DashboardContext::departed_records`, `chat_session_record`) so drafts and read positions save to the right workspace. Tests `a_pinned_session_that_leaves_the_feed_by_suspending_says_why_its_pane_emptied`, `a_parent_and_sub_agent_leaving_together_after_a_suspend_is_still_reported`, `a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft`.
-- [ ] Milestone 5, part 2 (with the filter, because both need the shared predicate and feed metadata): live-filtered startup state; `launch_recency` for new-session defaults.
-- [ ] Milestone 2 (last): define the live set once and filter the terminal feed by it; keep the web server's full record set.
-- [ ] Milestone 6: measure on a copy of a large store in a named instance; full validation; commit and push.
+- [x] (2026-10-01) Milestone 2 with Milestone 5, part 2: `mj_core::state::session_is_live` and `live_session_ids` define the live set once. `RuntimeState::capture_runtime` builds the full projection as before, keeps it in `RuntimeHistory::full` for `runtime_publication` (the web server), and publishes `RuntimeHistory::live_projection`, derived from the previous live projection by what changed, with a `debug_assert` against a full evaluation. `RuntimeMetadata.launch_recency` (`mj_client::runtime_feed::launch_recency`) feeds new-session defaults; it is recomputed only when a record's launch inputs change. The dashboard's startup state is filtered with `live_session_ids` (durable active moves as the operations) and starts with the launch summary of every record. Test `the_terminal_feed_follows_live_sessions_and_drops_stopped_ones`.
+- [x] (2026-10-01) Milestone 6, measurement and checks: on a slim copy of the 1,232-session store, the feed's records went from 5,868,093 bytes (1,143 records) to 1,036,436 bytes (104 live records); the resume dialog's on-demand list is 2,581,689 bytes (813 records), sent in chunks. Full dev-profile `cargo test`: one failure, `daemon::tests::cancelled_api_startup_is_not_submitted_after_daemon_reconstruction`, which passed alone three times and in three reruns of the daemon test module (likely a timing flake in startup-prompt cancellation, unrelated to the feed; not confirmed). clippy and fmt passed.
+- [ ] Milestone 6, remaining: exercise suspend, resume, import and `mj go` by hand in a named instance with a fresh store; push when the user asks.
 
 
 ## Surprises & Discoveries
@@ -49,6 +49,9 @@ The web viewer and the HTTP API (`/api/v1/...`, used by `mj sessions` and `mj re
 
 - Observation: the web viewer, `/api/v1/sessions`, `GET /api/v1/sessions/{id}`, `POST .../resume`, `POST .../wait`, and web actions all resolve sessions from the projection that `RuntimeState::runtime_publication` returns. Filtering the shared projection would remove stopped sessions from all of them.
   Evidence: `mj-controller/src/server_runtime/run.rs` lines 34 and 247-301 (`controller.state.sessions = runtime.records`); `mj-controller/src/server/validation.rs` `require_session_record` (around 720).
+
+- Observation: a daemon must never be started on a copy of a live store, even in a named instance. At startup it reattaches to the workers of the copy's live sessions, which belong to the real daemon, and runs deferred cleanup for stopped sessions that still name a target, which can remove real containers and worktrees. The live store is also 7.5 GB, so a full copy is impractical.
+  Evidence: `mj-controller/src/daemon/close.rs` around 582-603 (startup cleanup of stopped records with a target); `ls -la ~/.local/share/mjolnir/mj.sqlite3` reports 7,501,807,616 bytes.
 
 - Observation: the full set of stopped records in the measured store serializes to about 3.3-3.7 MB, dominated by `acp_session_title` (average 1.6 KB, maximum 76 KB). That fits one 8 MiB frame today with only about 2x headroom.
   Evidence: read-only measurement of `~/.local/share/mjolnir/mj.sqlite3` during the survey.
@@ -109,7 +112,7 @@ The web viewer and the HTTP API (`/api/v1/...`, used by `mj sessions` and `mj re
 ## Outcomes & Retrospective
 
 
-Not started. Known follow-up outside this plan: the web viewer's own `/api/snapshot` and change stream still send every session to the browser, and `/api/v1/sessions` lists every session without paging.
+Terminal dashboards now receive only live sessions: in the measured store the feed's records shrank by about 82%, and the size no longer grows with history. Stopped sessions reach the terminal only when the resume dialog opens, through a chunked reply with no frame limit. The setting "Show suspended sessions" is gone. Not yet done: a manual run of the dashboard in a named instance. Known follow-up outside this plan: the web viewer's own `/api/snapshot` and change stream still send every session to the browser, and `/api/v1/sessions` lists every session without paging.
 
 
 ## Context and Orientation
@@ -147,7 +150,7 @@ Milestone 4 moves the terminal consumers. When the resume dialog opens (`start_r
 
 Milestone 5 handles sessions leaving the live set. In `apply_runtime_records`, compute removed ids with their last records before replacing the map, and use those records for detach bookkeeping so drafts and read positions are saved with the right workspace instead of failing with "unknown session". Show the pane-release notice when a pinned pane's session leaves the feed, worded so it is true for a stopped or destroyed session. Change `subagents_stopped_by_suspend` so a child that leaves with its parent in the same frame is still recognized as stopped by the parent's suspend. Build the dashboard's startup state with `live_session_ids`. Point the new-session default helpers at `launch_recency`. Number untitled `mj go` sessions among live sessions.
 
-Milestone 6 validates. Copy the large store into an isolated data directory used by a named instance (never the default instance), start the new build with `--instance`, and record the first feed frame's size before and after. Exercise suspend, resume, import, `mj go`, stopped sub-agents, destroy of a stopped session, and the web viewer's resume list. Run the full checks.
+Milestone 6 validates. Measure the feed on a slim copy of the large store: the full schema with only the session tables (no transcripts or events), loaded with `mj_controller::database::load_state_from` in a temporary test, without starting a daemon on it (see Surprises & Discoveries). Exercise suspend, resume and the resume dialog in a named instance with its own fresh store. Exercise suspend, resume, import, `mj go`, stopped sub-agents, destroy of a stopped session, and the web viewer's resume list. Run the full checks.
 
 
 ## Concrete Steps
@@ -161,14 +164,7 @@ Work from `/home/jonathan/Projects/mjolnir2`. After each milestone run, outside 
 
 Do not stage `mj-controller/src/controller/move_session.rs` or `mj-controller/src/daemon/session_move.rs` unless the change needs them; they hold unrelated work in progress. Commit each milestone separately once its checks pass.
 
-For Milestone 6, with `<instance>` a new name such as `live-feed-test`:
-
-    mkdir -p <scratch>/live-feed/data <scratch>/live-feed/config
-    sqlite3 ~/.local/share/mjolnir/mj.sqlite3 ".backup <scratch>/live-feed/data/mj.sqlite3"
-    MJ_DATA_DIR=<scratch>/live-feed/data MJ_CONFIG_DIR=<scratch>/live-feed/config target/debug/mj --instance <instance>
-
-Copy the user's config into the isolated config directory first. Expected: the dashboard opens, the Sessions pane matches the default instance's, and the resume dialog lists all stopped sessions.
-
+For Milestone 6, never start a daemon on a copy of a live store (see Surprises & Discoveries). Build a slim copy instead, with Python's `sqlite3` module: open the live store read-only (`file:<path>?mode=ro`), create every table in a new file, copy the rows of every table except the transcript and event tables (`api_events`, `materialized_transcript_items`, `native_agent_transcript`, `native_agent_replay`, `prompt_history`, `api_idempotency`, `session_turn_usage`, `session_provider_cost`, `project_discovery_changes`, `mount_history`), then create the indexes and triggers and copy `PRAGMA user_version`. Load it with `load_state_from` in a temporary ignored test and compare the serialized sizes of the full and live projections.
 
 ## Validation and Acceptance
 

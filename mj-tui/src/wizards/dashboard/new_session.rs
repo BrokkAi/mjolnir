@@ -336,7 +336,7 @@ impl DashboardState {
             bundle_id: if raw_project {
                 raw_project_context_id(&wizard.project_directory)
             } else {
-                nth_bundle_key(&self.config, &self.state, wizard.bundle)
+                nth_bundle_key(&self.config, &self.launch_recency, wizard.bundle)
             },
             project_directory: raw_project
                 .then(|| std::path::PathBuf::from(wizard.project_directory.trim())),
@@ -359,7 +359,7 @@ impl DashboardState {
             return DashboardAction::None;
         }
         wizard.bundle_creation_in_flight = false;
-        let Some(index) = bundle_ids_by_recent_creation(&self.config, &self.state)
+        let Some(index) = bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
             .iter()
             .position(|id| *id == bundle_id)
         else {
@@ -382,7 +382,7 @@ impl DashboardState {
         &mut self,
         mut wizard: NewWizard,
     ) -> DashboardAction {
-        let Some(bundle_id) = bundle_ids_by_recent_creation(&self.config, &self.state)
+        let Some(bundle_id) = bundle_ids_by_recent_creation(&self.config, &self.launch_recency)
             .get(wizard.bundle)
             .map(|id| (*id).to_owned())
         else {

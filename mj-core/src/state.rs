@@ -1973,6 +1973,47 @@ impl Default for State {
     }
 }
 
+/// Whether a terminal dashboard follows `record` live through the runtime
+/// feed. Stopped is the one settled state that accumulates, so a stopped
+/// session is left to the resume dialog unless something still holds it:
+/// a lifecycle operation or move in flight (`in_operation`), or a live
+/// parent whose Sub-agents view shows it (`parent_live`). Lost and
+/// data-loss sessions stay live: they are unsettled failures that need
+/// attention.
+pub fn session_is_live(record: &SessionRecord, in_operation: bool, parent_live: bool) -> bool {
+    record.state != SessionState::Stopped || in_operation || parent_live
+}
+
+/// Every session [`session_is_live`] keeps, given the ids that have an
+/// operation in flight. A stopped sub-agent follows its parent, so
+/// membership settles parent before child.
+pub fn live_session_ids(
+    sessions: &SnapshotMap<String, SessionRecord>,
+    subagents: &SnapshotMap<String, SubagentRecord>,
+    operations: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut live = sessions
+        .iter()
+        .filter(|(id, record)| session_is_live(record, operations.contains(*id), false))
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let joined = subagents
+            .iter()
+            .filter(|(child, relation)| {
+                !live.contains(*child)
+                    && sessions.contains_key(*child)
+                    && live.contains(&relation.parent_session_id)
+            })
+            .map(|(child, _)| child.clone())
+            .collect::<Vec<_>>();
+        if joined.is_empty() {
+            return live;
+        }
+        live.extend(joined);
+    }
+}
+
 impl State {
     /// How a notice names a session: the title the session list shows
     /// (`listed_title`, which includes the title it was created with), or its

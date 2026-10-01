@@ -826,6 +826,9 @@ pub struct DashboardState {
     /// and after an import. The runtime feed carries only live sessions; read
     /// both through [`DashboardState::session_record`].
     pub(crate) stopped_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    /// What new-session defaults are chosen from. The feed carries only live
+    /// sessions, so this summary of every session arrives beside them.
+    pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
     pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
@@ -1082,6 +1085,7 @@ impl DashboardState {
     }
 
     pub fn new(config: Config, state: State, quotas: BTreeMap<String, ProfileQuota>) -> Self {
+        let launch_recency = mj_client::runtime_feed::launch_recency(&state.sessions);
         let mut dashboard = Self {
             #[cfg(test)]
             reconciliation_visits: Cell::new(0),
@@ -1107,6 +1111,7 @@ impl DashboardState {
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
+            launch_recency,
             go: None,
             launch_project_directory: None,
             go_workspaces: BTreeMap::new(),
