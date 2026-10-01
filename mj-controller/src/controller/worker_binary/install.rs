@@ -22,6 +22,50 @@ pub(super) fn append_hel_target_environment(
     append_staged_instructions(harness, destination, &environment)
 }
 
+pub(super) fn append_container_storage_guidance(
+    harness: HarnessKind,
+    destination: &Path,
+    target: &targets::TargetLocator,
+    workspace: Option<&Path>,
+    native_temporary_storage: bool,
+) -> Result<()> {
+    let podman_workspace = match target {
+        targets::TargetLocator::LocalPodman {
+            workspace_storage, ..
+        }
+        | targets::TargetLocator::SshPodman {
+            workspace_storage, ..
+        } => Some(workspace_storage),
+        targets::TargetLocator::LocalDocker { .. } | targets::TargetLocator::SshDocker { .. } => {
+            None
+        }
+        _ => return Ok(()),
+    };
+    let heading = "## Mjolnir container storage\n\n";
+    let mut guidance = String::from(heading);
+    if native_temporary_storage {
+        guidance.push_str("`/tmp` is a private disk-backed volume outside the container's writable overlay. Use it for disposable temporary files. Its contents are excluded from checkpoints and are lost when the session stops or restarts.\n\n");
+    }
+    if podman_workspace
+        .is_some_and(|storage| !matches!(storage, targets::PodmanWorkspaceLocator::ContainerLayer))
+    {
+        let workspace = targets::container_workspace_root(workspace);
+        guidance.push_str(&format!(
+            "The workspace storage is mounted at `{workspace}`. "
+        ));
+        if workspace != targets::CONTAINER_WORKSPACE {
+            guidance.push_str(
+                "The parent `/workspace` directory itself is on the container's writable overlay. ",
+            );
+        }
+        guidance.push_str("Keep durable results inside the project repository directories; arbitrary files elsewhere on the workspace volume are not checkpointed.\n");
+    }
+    if guidance == heading {
+        return Ok(());
+    }
+    append_staged_instructions(harness, destination, &guidance)
+}
+
 pub(super) fn append_subagent_policy(
     harness: mj_core::config::HarnessKind,
     destination: &Path,

@@ -75,6 +75,10 @@ fn close_plan_scoped(
         TargetLocator::SshDocker { .. } => unreachable!("handled above"),
         TargetLocator::LocalDocker { container_id, .. } => {
             let script = r#"status=0
+engine=docker
+session=$2
+container=$1
+temporary_volume=$4
 helper="$1-mount-init"
 if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.attachment-helper"}}|{{index .Config.Labels "dev.mj.session"}}' "$helper" 2>/dev/null); then
     if [ "$identity" = "true|$2" ]; then
@@ -97,6 +101,9 @@ if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.
 elif ! docker info >/dev/null 2>&1; then
     echo 'could not determine whether the Docker session container exists' >&2
     status=1
+fi
+if [ "$status" -eq 0 ]; then
+    remove_temporary_volume || status=$?
 fi
 if [ "$status" -eq 0 ]; then
     volumes=$(docker volume ls --quiet --filter "label=dev.mj.managed=true" --filter "label=dev.mj.session=$2" --filter "name=^$1-mount-") || status=$?
@@ -125,15 +132,18 @@ if [ "$status" -eq 0 ]; then
     fi
 fi
 exit "$status""#;
+            let script = format!("{TEMPORARY_VOLUME_FUNCTIONS}\n{script}");
+            let temporary_volume = container_temporary_volume_name(container_id);
             CommandSpec::new(
                 "sh",
                 [
                     "-c",
-                    script,
+                    script.as_str(),
                     "mj-close",
                     container_id,
                     session_id,
                     if remove_shared_cache { "true" } else { "false" },
+                    &temporary_volume,
                 ],
             )
             .purpose("remove local Docker session container, overlay volumes, and cache state")
@@ -408,6 +418,22 @@ esac
             );
         }
     }
+    let temporary_volume = container_temporary_volume_name(container_id);
+    let temporary_cleanup = format!(
+        "set -eu\nengine=podman\ntemporary_volume=$1\nsession=$2\n{TEMPORARY_VOLUME_FUNCTIONS}\nremove_temporary_volume\n"
+    );
+    commands.push(
+        at_host(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            temporary_cleanup,
+            "mj-remove-temporary-volume".to_owned(),
+            temporary_volume,
+            session_id.to_owned(),
+        ])
+        .purpose("remove exact Podman session temporary volume")
+        .stage(ProvisionStage::RemovingStorage),
+    );
     commands.push(
         at_host(vec![
             "rm".to_owned(),
@@ -545,6 +571,12 @@ case $? in
     1) ;;
     *) exit 2 ;;
 esac
+podman volume exists "$4"
+case $? in
+    0) exit 1 ;;
+    1) ;;
+    *) exit 2 ;;
+esac
 {storage_check}"#
     );
     let storage = match workspace_storage {
@@ -560,6 +592,7 @@ esac
         container_id.to_owned(),
         session_id.to_owned(),
         storage.to_owned(),
+        container_temporary_volume_name(container_id),
     ];
     match ssh {
         Some(ssh) => ssh_command_owned(ssh, args),

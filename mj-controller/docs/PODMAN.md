@@ -39,14 +39,22 @@ shows that Podman is not rootful and not using a remote connection.
 
 For a session, Mjolnir starts a detached, labeled container from the configured
 image, uses `podman exec` for the worker, Git, harness, and clone commands, and
-mounts a dedicated named volume at `/workspace`. Each session gets a different
+mounts a dedicated named volume at `/workspace/<session id>` and a separate
+private disk-backed temporary volume at `/tmp`. The parent `/workspace`
+directory remains on the container's writable overlay; legacy sessions whose
+recorded workspace is `/workspace` keep that mount location. `/tmp` has mode
+1777 and its contents are excluded from checkpoints. Each session gets a different
 volume, so concurrent builds never share a Cargo target directory. On stop,
 Mjolnir first takes and verifies the checkpoint, stops the exact container, and
-marks the session stopped. It then removes the container, workspace volume, and
+marks the session stopped. It then removes the container, workspace and temporary volumes, and
 Git-cache snapshot in a supervised background operation. A slow storage removal
 therefore does not keep the session logically running, and its current cleanup
 stage remains visible. No extra host service or privileged helper is required
 for this default.
+
+After upgrading Mjolnir, Restart session provisions the temporary mount for an
+existing session while restoring its checkpoint. Temporary files do not survive
+the restart. An explicit attachment at `/tmp` keeps its configured behavior.
 
 `workspace_storage` can override that policy on a Podman target:
 
@@ -54,11 +62,12 @@ for this default.
 # Default; this line can be omitted.
 workspace_storage = { kind = "podman-volume" }
 
-# Legacy behavior: keep /workspace in the container writable layer.
+# Legacy workspace behavior: keep the workspace in the container writable layer.
 workspace_storage = { kind = "container-layer" }
 ```
 
-The container-layer mode exists for compatibility. It makes `podman rm` delete
+The container-layer mode exists for compatibility; `/tmp` still gets native
+temporary storage. It makes `podman rm` delete
 the whole workspace tree and can therefore make cleanup slow after large
 builds.
 
@@ -80,7 +89,9 @@ Mjolnir invokes `HELPER create RESOURCE`, `HELPER status RESOURCE`, and
 `HELPER destroy RESOURCE`. The example validates the deterministic resource
 name and confines all operations beneath fixed roots; it is an example rather
 than an installed component. The helper-created directory is mounted as the
-session's complete `/workspace`, not as a shared Cargo cache.
+session's complete workspace at its recorded path, not as a shared Cargo cache.
+Temporary storage remains a separate Podman-managed volume and does not require
+any changes to the helper.
 
 The default `pull_policy = "auto"` starts a session from the image the host
 already has, and pulls only when the host has no copy at all. Instead of pulling

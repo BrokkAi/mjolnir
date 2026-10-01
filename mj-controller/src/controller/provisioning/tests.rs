@@ -1697,13 +1697,10 @@ fn a_target_whose_creation_failed_is_never_torn_down() {
 
         let reported = format!("{error:#}");
         assert!(!reported.contains("cleanup"), "{reported}");
-        assert!(
-            !executor
-                .commands()
-                .iter()
-                .any(|argv| argv.join(" ").contains("rm --force")),
-            "{:?}",
-            executor.commands()
+        assert_eq!(
+            executor.commands().len(),
+            creation.commands.len(),
+            "a failed creation must not run a separate controller cleanup command"
         );
     }
 }

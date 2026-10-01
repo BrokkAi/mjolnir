@@ -43,6 +43,27 @@ except what the recovery archive captured and whatever you pushed to a
 remote. Mjolnir may retain read-only Git objects in the host clone cache described
 below.
 
+Podman and Docker sessions, local or over SSH, mount a separate private
+disk-backed volume at `/tmp`. Temporary files use the host filesystem directly
+instead of the container's writable overlay, without consuming a tmpfs memory
+allocation. The directory has the usual `1777` permissions and works with
+nonroot image users. An explicitly attached directory at `/tmp` keeps its
+configured behavior.
+
+Temporary files are excluded from checkpoints. Mjolnir removes the temporary
+volume after removing the container; stopping or restarting the session loses
+its contents. After upgrading Mjolnir, **Restart session** applies this mount to
+an existing Podman or Docker session by checkpointing it and restoring it into
+a newly provisioned container. A daemon or worker process restart alone does
+not change an existing container's mounts.
+
+For Podman sessions using a workspace volume or host-managed workspace storage,
+the mount covers `/workspace/<session id>`; the parent `/workspace` directory
+itself remains on the container's writable overlay. Legacy sessions whose
+recorded workspace is `/workspace` keep that mount location. Keep durable
+results inside project repository directories: arbitrary files elsewhere on
+the workspace volume are not checkpointed.
+
 ## Prerequisites
 
 Install each runtime you want to use as a target:

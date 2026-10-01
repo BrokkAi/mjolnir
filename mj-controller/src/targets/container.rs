@@ -1,5 +1,112 @@
 use super::*;
 
+pub(crate) fn container_temporary_volume_name(container: &str) -> String {
+    format!("{container}-tmp")
+}
+
+pub(crate) fn has_managed_temporary_volume(
+    locator: &TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let (engine, container, ssh) = match locator {
+        TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        TargetLocator::SshPodman {
+            container_id, ssh, ..
+        } => ("podman", container_id, Some(ssh)),
+        TargetLocator::SshDocker {
+            container_id, ssh, ..
+        } => ("docker", container_id, Some(ssh)),
+        _ => return Ok(false),
+    };
+    let command = CommandSpec::new(
+        engine,
+        [
+            "container",
+            "inspect",
+            "--format",
+            "{{range .Mounts}}{{if eq .Destination \"/tmp\"}}{{.Name}}{{end}}{{end}}",
+            container,
+        ],
+    )
+    .purpose("inspect session temporary storage");
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(command, ssh),
+        None => command,
+    };
+    let output = executor.execute(&command)?;
+    ensure!(
+        output.status == 0,
+        "inspect session temporary storage failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)
+        .context("decode session temporary volume")?
+        .trim()
+        == container_temporary_volume_name(container))
+}
+
+// Shared by all Podman workspace policies and Docker attachment launches.
+// Storage is released only after its owning container has been removed.
+pub(super) const TEMPORARY_VOLUME_FUNCTIONS: &str = r#"
+prepare_temporary_volume() {
+    [ -n "$temporary_volume" ] || return 0
+    if ! "$engine" volume inspect "$temporary_volume" >/dev/null 2>&1; then
+        "$engine" info >/dev/null
+        "$engine" volume create --driver local --label "dev.mj.managed=true" --label "dev.mj.session=$session" "$temporary_volume" >/dev/null
+    fi
+    identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume")
+    [ "$identity" = "true|$session" ] || {
+        echo "refusing foreign $engine temporary volume $temporary_volume" >&2
+        return 1
+    }
+}
+remove_temporary_volume() {
+    [ -n "$temporary_volume" ] || return 0
+    if identity=$("$engine" volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$temporary_volume" 2>/dev/null); then
+        [ "$identity" = "true|$session" ] || {
+            echo "refusing to remove foreign $engine temporary volume $temporary_volume" >&2
+            return 1
+        }
+        "$engine" volume rm --force "$temporary_volume" >/dev/null
+    else
+        "$engine" info >/dev/null
+    fi
+}
+remove_failed_container() {
+    if identity=$("$engine" container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
+        [ "$identity" = "true|$session" ] || {
+            echo "refusing to remove foreign $engine container $container" >&2
+            return 1
+        }
+        "$engine" rm --force "$container" >/dev/null
+    else
+        "$engine" info >/dev/null
+    fi
+}
+start_container() {
+    "$@"
+    if [ -n "$temporary_volume" ]; then
+        "$engine" exec --user 0 "$container" sh -c 'set -eu; chown 0:0 /tmp; chmod 1777 /tmp'
+    fi
+}
+"#;
+
+fn container_launch_script(engine: &str, script: &str) -> String {
+    format!("set -eu\nengine={engine}\n{TEMPORARY_VOLUME_FUNCTIONS}\n{script}")
+}
+
+fn temporary_volume_argument(name: &str, mounts: &[AdditionalMount]) -> String {
+    if mounts
+        .iter()
+        .any(|mount| mount.destination == Path::new("/tmp"))
+    {
+        String::new()
+    } else {
+        container_temporary_volume_name(name)
+    }
+}
+
 pub(super) fn container_run(
     engine: &str,
     template: &ContainerTemplate,
@@ -30,23 +137,30 @@ pub(super) const PODMAN_VOLUME_RUN_SCRIPT: &str = r#"set -eu
 session=$1
 container=$2
 volume=$3
-shift 3
+temporary_volume=$4
+shift 4
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$status" -ne 0 ]; then
-        if identity=$(podman container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
-            podman rm --force "$container" >/dev/null 2>&1 || true
-        fi
-        if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
-            podman volume rm --force "$volume" >/dev/null 2>&1 || true
+        if remove_failed_container; then
+            remove_temporary_volume || echo "Podman temporary storage cleanup failed for session $session" >&2
+            if [ -n "$volume" ] && identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
+                podman volume rm --force "$volume" >/dev/null || echo "Podman workspace cleanup failed for session $session" >&2
+            fi
+        else
+            echo "Podman container cleanup failed; retained storage for session $session" >&2
         fi
     fi
     exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
-if identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null); then
+prepare_temporary_volume
+if [ -z "$volume" ]; then
+    start_container "$@"
+    exit 0
+elif identity=$(podman volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$volume" 2>/dev/null); then
     [ "$identity" = "true|$session" ] || {
         echo "refusing foreign Podman volume $volume" >&2
         exit 1
@@ -60,7 +174,7 @@ else
         exit 1
     }
 fi
-"$@"
+start_container "$@"
 "#;
 
 pub(super) fn podman_host_helper_run_script(helper: &[String]) -> String {
@@ -70,20 +184,24 @@ pub(super) fn podman_host_helper_run_script(helper: &[String]) -> String {
 session=$1
 container=$2
 resource=$3
-shift 3
+temporary_volume=$4
+shift 4
 cleanup() {{
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$status" -ne 0 ]; then
-        if identity=$(podman container inspect --format '{{{{index .Config.Labels "dev.mj.managed"}}}}|{{{{index .Config.Labels "dev.mj.session"}}}}' "$container" 2>/dev/null) && [ "$identity" = "true|$session" ]; then
-            podman rm --force "$container" >/dev/null 2>&1 || true
+        if remove_failed_container; then
+            remove_temporary_volume || echo "Podman temporary storage cleanup failed for session $session" >&2
+            {helper} destroy "$resource" >/dev/null || echo "Podman workspace cleanup failed for session $session" >&2
+        else
+            echo "Podman container cleanup failed; retained storage for session $session" >&2
         fi
-        {helper} destroy "$resource" >/dev/null 2>&1 || true
     fi
     exit "$status"
 }}
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+prepare_temporary_volume
 state=$({helper} status "$resource")
 case $state in
     absent) {helper} create "$resource" ;;
@@ -94,7 +212,7 @@ esac
     echo "workspace helper did not create $resource" >&2
     exit 1
 }}
-"$@"
+start_container "$@"
 "#
     )
 }
@@ -120,20 +238,20 @@ pub(super) fn podman_container_run(
         workspace_root,
     )?;
     let mut wrapped = match &workspace {
-        PodmanWorkspaceLocator::ContainerLayer => {
-            let mut command = vec!["podman".to_owned()];
-            command.extend(run_args);
-            command
-        }
-        PodmanWorkspaceLocator::Volume { name: volume } => {
+        PodmanWorkspaceLocator::ContainerLayer | PodmanWorkspaceLocator::Volume { .. } => {
+            let volume = match &workspace {
+                PodmanWorkspaceLocator::Volume { name } => name.clone(),
+                _ => String::new(),
+            };
             let mut command = vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                PODMAN_VOLUME_RUN_SCRIPT.to_owned(),
+                container_launch_script("podman", PODMAN_VOLUME_RUN_SCRIPT),
                 "mj-podman-run".to_owned(),
                 session_id.to_owned(),
                 name.to_owned(),
-                volume.clone(),
+                volume,
+                temporary_volume_argument(name, additional_mounts),
                 "podman".to_owned(),
             ];
             command.extend(run_args);
@@ -145,11 +263,12 @@ pub(super) fn podman_container_run(
             let mut command = vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
-                podman_host_helper_run_script(helper),
+                container_launch_script("podman", &podman_host_helper_run_script(helper)),
                 "mj-podman-run".to_owned(),
                 session_id.to_owned(),
                 name.to_owned(),
                 resource.clone(),
+                temporary_volume_argument(name, additional_mounts),
                 "podman".to_owned(),
             ];
             command.extend(run_args);
@@ -180,7 +299,8 @@ session=$1
 container=$2
 image=$3
 pull=$4
-shift 4
+temporary_volume=$5
+shift 5
 helper="$container-mount-init"
 volumes=
 backings=
@@ -201,14 +321,9 @@ cleanup() {
     if [ "$status" -ne 0 ]; then
         released=true
         remove_helper || released=false
-        if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
-            if [ "$identity" = "true|$session" ]; then
-                docker rm --force "$container" >/dev/null || released=false
-            else
-                released=false
-            fi
-        elif ! docker info >/dev/null 2>&1; then
-            released=false
+        remove_failed_container || released=false
+        if [ "$released" = true ]; then
+            remove_temporary_volume || released=false
         fi
         if [ "$released" = true ]; then
             for volume in $volumes; do
@@ -228,6 +343,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+prepare_temporary_volume
 owned_volume() {
     identity=$(docker volume inspect --format '{{index .Labels "dev.mj.managed"}}|{{index .Labels "dev.mj.session"}}' "$1")
     [ "$identity" = "true|$session" ] || {
@@ -283,7 +399,7 @@ while [ "$1" != -- ]; do
     volumes="$volumes $volume"
 done
 shift
-"$@"
+start_container "$@"
 "#;
 
 pub(super) fn docker_overlay_volume_name(container_name: &str, ordinal: usize) -> String {
@@ -321,24 +437,15 @@ pub(super) fn docker_container_run(
         .enumerate()
         .filter(|(_, mount)| mount.access == MountAccess::Cow)
         .collect::<Vec<_>>();
-    if overlaid.is_empty() {
-        return container_run(
-            "docker",
-            template,
-            name,
-            session_id,
-            additional_mounts,
-            workspace_root,
-        );
-    }
     let mut args = vec![
         "-c".to_owned(),
-        DOCKER_OVERLAY_RUN_SCRIPT.to_owned(),
+        container_launch_script("docker", DOCKER_OVERLAY_RUN_SCRIPT),
         "hel-docker-run".to_owned(),
         session_id.to_owned(),
         name.to_owned(),
         template.image.clone(),
         docker_pull_policy(template).to_owned(),
+        temporary_volume_argument(name, additional_mounts),
     ];
     for (ordinal, mount) in overlaid {
         args.extend([
@@ -349,8 +456,16 @@ pub(super) fn docker_container_run(
     }
     args.extend(["--".to_owned(), "docker".to_owned()]);
     args.extend(run_args);
+    let purpose = if additional_mounts
+        .iter()
+        .any(|mount| mount.access == MountAccess::Cow)
+    {
+        "start Docker session container with isolated attachments"
+    } else {
+        "start session container"
+    };
     Ok(CommandSpec::new("sh", args)
-        .purpose("start Docker session container with isolated attachments")
+        .purpose(purpose)
         .stage(ProvisionStage::Provisioning)
         .creates_target())
 }
@@ -437,6 +552,20 @@ pub(super) fn container_run_args(
         session_id,
     ));
     args.extend(template.extra_run_args.clone());
+    let temporary_volume = temporary_volume_argument(name, additional_mounts);
+    if !temporary_volume.is_empty() {
+        match engine {
+            "podman" => args.extend([
+                "--volume".to_owned(),
+                format!("{temporary_volume}:/tmp:rw,nocopy"),
+            ]),
+            "docker" => args.extend([
+                "--mount".to_owned(),
+                format!("type=volume,source={temporary_volume},target=/tmp,volume-nocopy"),
+            ]),
+            _ => {}
+        }
+    }
     if engine == "podman" {
         match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
             PodmanWorkspaceLocator::ContainerLayer => {}

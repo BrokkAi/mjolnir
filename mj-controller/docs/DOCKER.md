@@ -53,6 +53,18 @@ For each session Mjolnir starts one detached, labeled container, uses `docker ex
 and `docker cp` for the worker and its files, and removes that exact container
 only after checkpointing succeeds.
 
+Every session also mounts a private disk-backed Docker volume at `/tmp`, with
+mode 1777 so nonroot image users can create temporary files. Temporary writes
+go directly to the daemon host's filesystem rather than the container's
+writable overlay. This volume is excluded from checkpoints and removed after
+the container, so its contents are lost on stop or restart. An explicit
+attachment at `/tmp` keeps its configured behavior.
+
+After upgrading Mjolnir, **Restart session** applies the temporary mount to an
+existing session: it checkpoints the session and restores it into a newly
+provisioned container. Restarting just the daemon or worker does not change an
+existing container's mounts.
+
 The default `pull_policy = "auto"` launches with `docker run --pull=missing`, so
 a session starts from the cached image. The daemon keeps remote `:latest` images
 current instead: once an hour it runs `docker pull` and then

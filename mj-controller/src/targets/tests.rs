@@ -741,7 +741,7 @@ fn setup_smoke_plan_wraps_every_ssh_podman_command_in_ssh() {
     for command in &plan.commands {
         assert_eq!(command.program, "ssh");
         assert!(command.args.contains(&"dev@example.test".to_owned()));
-        assert!(command.args.last().unwrap().starts_with("'podman'"));
+        assert!(command.args.last().unwrap().contains("podman"));
     }
     assert!(
         plan.commands[0]
@@ -756,7 +756,7 @@ fn setup_smoke_plan_wraps_every_ssh_podman_command_in_ssh() {
             .args
             .last()
             .unwrap()
-            .contains("'rm' '--force'")
+            .contains("podman rm --force --ignore")
     );
     assert_eq!(
         plan.commands[2].purpose,
@@ -1032,7 +1032,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
     )
     .unwrap();
     let name = resource_name(SESSION).unwrap();
-    assert_eq!(plan.commands[0].program, "podman");
+    assert_eq!(plan.commands[0].program, "sh");
     assert!(
         plan.commands[0]
             .args
@@ -1448,8 +1448,12 @@ fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
         None,
     )
     .unwrap();
-    assert_eq!(podman.commands[0].args[0], "run");
-    assert_eq!(podman.commands[0].args[1], "--init");
+    assert!(
+        podman.commands[0]
+            .args
+            .windows(2)
+            .any(|args| args == ["run", "--init"])
+    );
 
     let remote = provision_plan(
         &TargetTemplate::SshPodman {
@@ -2062,7 +2066,7 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
         ]
     );
     assert_eq!(
-        &create.args[7..separator],
+        &create.args[8..separator],
         ["0", "/host/cache", volume.as_str()]
     );
     assert!(create.args.contains(&"--pull=missing".to_owned()));
@@ -2407,10 +2411,10 @@ fn setup_smoke_plan_uses_the_configured_local_runtime_and_cleans_up() {
         "smoke test Mjolnir setup target setup-123"
     );
     assert_eq!(plan.commands.len(), 3);
-    assert_eq!(plan.commands[0].program, "podman");
+    assert_eq!(plan.commands[0].program, "sh");
     assert!(plan.commands[0].args.contains(&"ubuntu:24.04".to_owned()));
     assert_eq!(plan.commands[1].args.last().unwrap(), "true");
-    assert_eq!(plan.commands[2].args[0], "rm");
+    assert!(command_text(&plan.commands[2]).contains("podman rm --force"));
     assert_eq!(
         plan.commands[2].purpose,
         "remove disposable setup container"
@@ -3579,10 +3583,10 @@ fn podman_cleanup_ignores_an_already_absent_container() {
     assert!(local_script.contains("podman rm --force --ignore"));
     assert_eq!(local.commands[0].args.last().unwrap(), SESSION);
     assert_eq!(
-        local.commands[1].purpose,
+        local.commands[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert_eq!(local.commands[1].stage, Some(ProvisionStage::CleaningCache));
+    assert_eq!(local.commands[2].stage, Some(ProvisionStage::CleaningCache));
 
     let remote = close_plan(
         &TargetLocator::SshPodman {
@@ -3602,10 +3606,10 @@ fn podman_cleanup_ignores_an_already_absent_container() {
             .contains("podman rm --force --ignore")
     );
     assert_eq!(
-        remote.commands[1].purpose,
+        remote.commands[2].purpose,
         "remove Podman session Git cache snapshot"
     );
-    assert!(remote.commands[1].args.last().unwrap().contains(SESSION));
+    assert!(remote.commands[2].args.last().unwrap().contains(SESSION));
 }
 
 #[test]
@@ -3624,7 +3628,7 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
     )
     .unwrap();
 
-    assert_eq!(plan.commands.len(), 3);
+    assert_eq!(plan.commands.len(), 4);
     assert_eq!(
         plan.commands[0].stage,
         Some(ProvisionStage::RemovingContainer)
@@ -3633,7 +3637,11 @@ fn podman_cleanup_removes_container_before_workspace_storage() {
         plan.commands[1].stage,
         Some(ProvisionStage::RemovingStorage)
     );
-    assert_eq!(plan.commands[2].stage, Some(ProvisionStage::CleaningCache));
+    assert_eq!(
+        plan.commands[2].stage,
+        Some(ProvisionStage::RemovingStorage)
+    );
+    assert_eq!(plan.commands[3].stage, Some(ProvisionStage::CleaningCache));
     assert!(plan.commands[1].args.contains(&volume));
     assert!(plan.commands[1].args[1].contains("dev.mj.session"));
 }
@@ -3704,11 +3712,16 @@ mkdir -p "$state"
 printf '%s\n' "$*" >>"$state/invocations"
 case "${1-}" in
 container)
-    [ "${2-}" = inspect ] || exit 2
+    case ${2-} in inspect|exists) ;; *) exit 2 ;; esac
     for argument do name=$argument; done
     case $name in *-mount-init) labels=helper-labels ;; *) labels=container-labels ;; esac
     [ -f "$state/$labels" ] || exit 1
     cat "$state/$labels"
+    ;;
+exec)
+    [ "${FAKE_DOCKER_FAIL_EXEC:-0}" = 1 ] && exit 45
+    [ "${2-}" = --user ] && [ "${3-}" = 0 ]
+    touch "$state/tmp-initialized"
     ;;
 info)
     exit 0
@@ -3744,6 +3757,10 @@ run)
     ;;
 volume)
     case "${2-}" in
+    exists)
+        [ -f "$state/volumes" ] || exit 1
+        grep -Fx "$3" "$state/volumes" >/dev/null
+        ;;
     ls)
         [ -f "$state/volumes" ] && cat "$state/volumes" || true
         ;;
@@ -3769,7 +3786,13 @@ volume)
             case $format in
             *Mountpoint*) printf '/daemon/volumes/%s/_data\n' "$volume" ;;
             *attachment-backing*) case $volume in *-backing) echo true ;; *) echo '<no value>' ;; esac ;;
-            *) printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}" ;;
+            *)
+                if [ "$volume" = "${FAKE_DOCKER_FOREIGN_VOLUME:-}" ]; then
+                    echo 'true|someone-else'
+                else
+                    printf 'true|%s\n' "${FAKE_DOCKER_SESSION:-}"
+                fi
+                ;;
             esac
         fi
         ;;
@@ -3824,6 +3847,352 @@ fn execute_with_fake_docker(
         command.env.insert(key.to_owned(), value.to_owned());
     }
     ProcessExecutor.execute(&command).unwrap()
+}
+
+#[cfg(unix)]
+fn fake_temporary_storage_environment() -> tempfile::TempDir {
+    let environment = fake_docker_environment();
+    mj_core::test_hooks::install_fake_command(
+        &environment.path().join("bin"),
+        "podman",
+        "#!/bin/sh\nexec docker \"$@\"\n",
+    );
+    environment
+}
+
+#[cfg(unix)]
+fn temporary_storage_launch(engine: &str, name: &str, mounts: &[AdditionalMount]) -> CommandSpec {
+    let template = ContainerTemplate {
+        image: "fake:image".to_owned(),
+        pull_policy: ImagePullPolicy::Never,
+        extra_run_args: Vec::new(),
+        workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
+        build_cache: None,
+    };
+    match engine {
+        "podman" => {
+            podman_container_run(&template, name, SESSION, mounts, None, None, "/workspace")
+        }
+        "docker" => docker_container_run(&template, name, SESSION, mounts, "/workspace"),
+        _ => unreachable!(),
+    }
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn temporary_storage_locator(engine: &str, name: &str) -> TargetLocator {
+    match engine {
+        "podman" => TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: name.to_owned(),
+            workspace_storage: PodmanWorkspaceLocator::Volume {
+                name: format!("{name}-workspace"),
+            },
+        },
+        "docker" => TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: name.to_owned(),
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_temporary_storage_is_initialized_and_cleanup_is_repeatable() {
+    for engine in ["podman", "docker"] {
+        let environment = fake_temporary_storage_environment();
+        let name = resource_name(SESSION).unwrap();
+        let command = temporary_storage_launch(engine, &name, &[]);
+        let state = environment.path().join("home/fake-docker");
+        let env = [("FAKE_DOCKER_SESSION", SESSION)];
+        let output = execute_with_fake_docker(&environment, &command, &env);
+        assert_eq!(
+            output.status,
+            0,
+            "{engine}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(state.join("tmp-initialized").exists());
+        assert!(
+            std::fs::read_to_string(state.join("volumes"))
+                .unwrap()
+                .lines()
+                .any(|volume| volume == format!("{name}-tmp"))
+        );
+
+        let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
+        for _ in 0..2 {
+            for command in &close.commands {
+                let output = execute_with_fake_docker(&environment, command, &env);
+                assert_eq!(
+                    output.status,
+                    0,
+                    "{engine}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        assert!(!state.join("container-labels").exists());
+        assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
+        let invocations = std::fs::read_to_string(state.join("invocations")).unwrap();
+        assert!(invocations.contains("chown 0:0 /tmp; chmod 1777 /tmp"));
+        assert!(
+            invocations.find("rm --force").unwrap()
+                < invocations.find("volume rm --force").unwrap()
+        );
+    }
+}
+
+#[test]
+fn temporary_storage_guidance_uses_the_actual_container_mount() {
+    let name = resource_name(SESSION).unwrap();
+    let locator = TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: name.clone(),
+        workspace_storage: Default::default(),
+    };
+    for (mount, expected) in [
+        (format!("{name}-tmp\n"), true),
+        (String::new(), false),
+        ("custom-volume\n".to_owned(), false),
+    ] {
+        let executor = PodmanPreflightExecutor::with_outputs([podman_output(&mount)]);
+        assert_eq!(
+            has_managed_temporary_volume(&locator, &executor).unwrap(),
+            expected
+        );
+    }
+    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
+        status: 1,
+        stdout: Vec::new(),
+        stderr: b"container unavailable".to_vec(),
+    }]);
+    assert!(
+        has_managed_temporary_volume(&locator, &executor)
+            .unwrap_err()
+            .to_string()
+            .contains("container unavailable")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_launch_removes_temporary_storage_only_after_container_removal() {
+    for engine in ["podman", "docker"] {
+        for (failure, status) in [("FAKE_DOCKER_FAIL_RUN", 125), ("FAKE_DOCKER_FAIL_EXEC", 45)] {
+            for retain_container in [false, true] {
+                let environment = fake_temporary_storage_environment();
+                let name = resource_name(SESSION).unwrap();
+                let command = temporary_storage_launch(engine, &name, &[]);
+                let output = execute_with_fake_docker(
+                    &environment,
+                    &command,
+                    &[
+                        ("FAKE_DOCKER_SESSION", SESSION),
+                        (failure, "1"),
+                        (
+                            "FAKE_DOCKER_FAIL_RM",
+                            if retain_container { "1" } else { "0" },
+                        ),
+                    ],
+                );
+                assert_eq!(
+                    output.status,
+                    status,
+                    "{engine}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let state = environment.path().join("home/fake-docker");
+                assert_eq!(state.join("container-labels").exists(), retain_container);
+                let volumes = std::fs::read_to_string(state.join("volumes")).unwrap();
+                assert_eq!(
+                    volumes
+                        .lines()
+                        .any(|volume| volume == format!("{name}-tmp")),
+                    retain_container
+                );
+                if retain_container {
+                    assert!(String::from_utf8_lossy(&output.stderr).contains("retained"));
+                    assert!(
+                        !std::fs::read_to_string(state.join("invocations"))
+                            .unwrap()
+                            .contains("volume rm")
+                    );
+                } else {
+                    assert!(volumes.is_empty(), "{engine}: {volumes}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn temporary_storage_refuses_foreign_volumes_during_launch_and_cleanup() {
+    for engine in ["podman", "docker"] {
+        let environment = fake_temporary_storage_environment();
+        let name = resource_name(SESSION).unwrap();
+        let volume = format!("{name}-tmp");
+        let state = environment.path().join("home/fake-docker");
+        std::fs::write(state.join("volumes"), format!("{volume}\n")).unwrap();
+        let env = [
+            ("FAKE_DOCKER_SESSION", SESSION),
+            ("FAKE_DOCKER_FOREIGN_VOLUME", volume.as_str()),
+        ];
+        let output = execute_with_fake_docker(
+            &environment,
+            &temporary_storage_launch(engine, &name, &[]),
+            &env,
+        );
+        assert_ne!(output.status, 0);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("foreign"));
+        assert!(!state.join("container-labels").exists());
+        assert!(
+            !std::fs::read_to_string(state.join("invocations"))
+                .unwrap()
+                .lines()
+                .any(|line| line.starts_with("run "))
+        );
+        let close = close_plan(&temporary_storage_locator(engine, &name), SESSION).unwrap();
+        let failure = close
+            .commands
+            .iter()
+            .map(|command| execute_with_fake_docker(&environment, command, &env))
+            .find(|output| output.status != 0)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&failure.stderr).contains("foreign"));
+        assert_eq!(
+            std::fs::read_to_string(state.join("volumes")).unwrap(),
+            format!("{volume}\n")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_explicit_tmp_attachment_is_not_replaced_or_reinitialized() {
+    for engine in ["podman", "docker"] {
+        let environment = fake_temporary_storage_environment();
+        let name = resource_name(SESSION).unwrap();
+        let mount = AdditionalMount {
+            source: "/host/scratch".into(),
+            destination: "/tmp".into(),
+            access: MountAccess::Ro,
+        };
+        let output = execute_with_fake_docker(
+            &environment,
+            &temporary_storage_launch(engine, &name, &[mount]),
+            &[("FAKE_DOCKER_SESSION", SESSION)],
+        );
+        assert_eq!(
+            output.status,
+            0,
+            "{engine}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = environment.path().join("home/fake-docker");
+        assert!(!state.join("tmp-initialized").exists());
+        let volumes = std::fs::read_to_string(state.join("volumes")).unwrap_or_default();
+        assert!(!volumes.contains(&format!("{name}-tmp")));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
+    let environment = fake_temporary_storage_environment();
+    let name = resource_name(SESSION).unwrap();
+    let destination = move_resource_name(SESSION, "tmp-destination").unwrap();
+    let state = environment.path().join("home/fake-docker");
+    let env = [("FAKE_DOCKER_SESSION", SESSION)];
+    let output = execute_with_fake_docker(
+        &environment,
+        &temporary_storage_launch("podman", &name, &[]),
+        &env,
+    );
+    assert_eq!(output.status, 0);
+    let destination_volume = format!("{destination}-tmp");
+    let mut volumes = std::fs::read_to_string(state.join("volumes")).unwrap();
+    volumes.push_str(&format!("{destination_volume}\n"));
+    std::fs::write(state.join("volumes"), volumes).unwrap();
+    let close =
+        retire_move_target_plan(&temporary_storage_locator("podman", &name), SESSION).unwrap();
+    for command in &close.commands {
+        let output = execute_with_fake_docker(&environment, command, &env);
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(state.join("volumes")).unwrap(),
+        format!("{destination_volume}\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires rootless Podman, a cached agent-dev image, and MJ_INSTANCE=tmp1212"]
+fn podman_temporary_volume_is_native_and_writable_by_root_and_nonroot_images() {
+    assert_eq!(mj_core::config::instance_name().as_deref(), Some("tmp1212"));
+    for uid in [0, 1000] {
+        for storage in [
+            PodmanWorkspaceStorage::ContainerLayer,
+            PodmanWorkspaceStorage::PodmanVolume,
+        ] {
+            let session = mj_core::state::new_session_id().unwrap();
+            let name = resource_name(&session).unwrap();
+            let template = ContainerTemplate {
+                image: "ghcr.io/brokkai/mjolnir/agent-dev:latest".to_owned(),
+                pull_policy: ImagePullPolicy::Never,
+                extra_run_args: vec![format!("--user={uid}:{uid}")],
+                workspace_storage: storage,
+                build_cache: None,
+            };
+            let locator = TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: name.clone(),
+                workspace_storage: podman_workspace_locator_named(&template, &name).unwrap(),
+            };
+            let result = (|| -> Result<()> {
+                execute_checked(
+                    &ProcessExecutor,
+                    &podman_container_run(
+                        &template,
+                        &name,
+                        &session,
+                        &[],
+                        Some(ImageUser { uid, gid: uid }),
+                        None,
+                        "/workspace",
+                    )?,
+                )?;
+                let script = format!(
+                    "set -eu; test \"$(id -u)\" = {uid}; test \"$(stat -c %a /tmp)\" = 1777; test \"$(stat -c %u /tmp)\" = 0; test \"$(stat -f -c %T /tmp)\" != overlayfs; awk '$5 == \"/tmp\" {{ print; found=1 }} END {{ exit !found }}' /proc/self/mountinfo; dd if=/dev/zero of=/tmp/payload bs=131072 count=2 status=none; test \"$(stat -c %s /tmp/payload)\" = 262144"
+                );
+                execute_checked(
+                    &ProcessExecutor,
+                    &container_exec("podman", &name, ["sh", "-c", &script]),
+                )?;
+                ensure!(
+                    has_managed_temporary_volume(&locator, &ProcessExecutor)?,
+                    "managed temporary mount is missing"
+                );
+                Ok(())
+            })();
+            let cleanup = close_plan(&locator, &session).unwrap();
+            for command in &cleanup.commands {
+                execute_checked(&ProcessExecutor, command).unwrap();
+            }
+            result.unwrap();
+            assert!(
+                cleanup_target_is_confirmed_absent(&locator, &session, &ProcessExecutor).unwrap()
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

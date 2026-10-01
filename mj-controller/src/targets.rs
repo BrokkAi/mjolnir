@@ -51,6 +51,7 @@ pub use cleanup::*;
 mod bootstrap;
 pub use bootstrap::*;
 mod container;
+pub(crate) use container::has_managed_temporary_volume;
 use container::*;
 mod process_limit;
 pub use process_limit::*;

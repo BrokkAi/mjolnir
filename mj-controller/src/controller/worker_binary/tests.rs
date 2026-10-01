@@ -4303,6 +4303,60 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
 }
 
 #[test]
+fn container_storage_guidance_names_the_mounted_workspace_and_disposable_tmp() {
+    let target = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "container".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::Volume {
+            name: "workspace-volume".into(),
+        },
+    };
+    for workspace in [None, Some(Path::new("/workspace/session-1"))] {
+        let staged = tempfile::tempdir().unwrap();
+        append_container_storage_guidance(
+            HarnessKind::Codex,
+            staged.path(),
+            &target,
+            workspace,
+            true,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(staged.path().join("AGENTS.md")).unwrap();
+        assert!(text.contains("`/tmp` is a private disk-backed volume"));
+        assert!(text.contains("excluded from checkpoints"));
+        assert!(text.contains(&format!(
+            "mounted at `{}`",
+            targets::container_workspace_root(workspace)
+        )));
+        assert_eq!(
+            text.contains("parent `/workspace` directory itself"),
+            workspace.is_some()
+        );
+    }
+    let staged = tempfile::tempdir().unwrap();
+    append_container_storage_guidance(HarnessKind::Codex, staged.path(), &target, None, false)
+        .unwrap();
+    assert!(
+        !std::fs::read_to_string(staged.path().join("AGENTS.md"))
+            .unwrap()
+            .contains("private disk-backed volume")
+    );
+    let apple = tempfile::tempdir().unwrap();
+    append_container_storage_guidance(
+        HarnessKind::Codex,
+        apple.path(),
+        &targets::TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: "container".into(),
+        },
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(!apple.path().join("AGENTS.md").exists());
+}
+
+#[test]
 fn ec2_guidance_names_its_real_workspace_and_ssh_bare_gets_none() {
     let ec2 = tempfile::tempdir().unwrap();
     append_hel_target_environment(

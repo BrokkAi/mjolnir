@@ -282,17 +282,38 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
     };
     validate_container_template(container)?;
 
-    let mut run = vec![engine.to_owned()];
-    run.extend(container_run_args(
-        engine,
-        container,
-        &name,
-        smoke_id,
-        &[],
-        None,
-        None,
-        CONTAINER_WORKSPACE,
-    )?);
+    let (run, locator) = match engine {
+        "podman" => (
+            podman_container_run(
+                container,
+                &name,
+                smoke_id,
+                &[],
+                None,
+                None,
+                CONTAINER_WORKSPACE,
+            )?,
+            TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: name.clone(),
+                workspace_storage: podman_workspace_locator_named(container, &name)?,
+            },
+        ),
+        "docker" => (
+            docker_container_run(container, &name, smoke_id, &[], CONTAINER_WORKSPACE)?,
+            TargetLocator::LocalDocker {
+                borrowed_from: None,
+                container_id: name.clone(),
+            },
+        ),
+        _ => (
+            container_run(engine, container, &name, smoke_id, &[], CONTAINER_WORKSPACE)?,
+            TargetLocator::AppleContainer {
+                borrowed_from: None,
+                container_id: name.clone(),
+            },
+        ),
+    };
     let exec = vec![
         engine.to_owned(),
         "exec".to_owned(),
@@ -300,17 +321,34 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
         name.clone(),
         "true".to_owned(),
     ];
-    let remove = vec![
-        engine.to_owned(),
-        "rm".to_owned(),
-        "--force".to_owned(),
-        name,
-    ];
+    let cleanup = retire_move_target_plan(&locator, smoke_id)?;
+    let mut script = String::from("set -eu\n");
+    for command in cleanup.commands {
+        let argv: Vec<_> = std::iter::once(command.program)
+            .chain(command.args)
+            .collect();
+        script.push_str(&join_remote_command(&argv));
+        script.push('\n');
+    }
+    let remove = if engine == "container" {
+        vec![
+            engine.to_owned(),
+            "rm".to_owned(),
+            "--force".to_owned(),
+            name,
+        ]
+    } else {
+        vec!["sh".to_owned(), "-c".to_owned(), script]
+    };
+    let run = match boundary {
+        ExecutionBoundary::Ssh(ssh) => command_over_ssh(run, ssh),
+        _ => run,
+    };
 
     Ok(CommandPlan {
         description: format!("smoke test Mjolnir setup target {smoke_id}"),
         commands: vec![
-            at_boundary(boundary, run).purpose("create disposable setup container"),
+            run.purpose("create disposable setup container"),
             at_boundary(boundary, exec).purpose("execute setup smoke command"),
             at_boundary(boundary, remove).purpose("remove disposable setup container"),
         ],

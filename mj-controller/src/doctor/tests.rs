@@ -599,10 +599,17 @@ fn podman_image_check_smoke_runs_a_disposable_container() {
     assert_eq!(check.status, CheckStatus::Ready);
     let commands = executor.commands.borrow();
     assert_eq!(commands.len(), 3);
-    assert!(commands.iter().all(|command| command.program == "podman"));
-    assert_eq!(commands[0].args[0], "run");
+    assert_eq!(commands[0].program, "sh");
+    assert!(
+        commands[0]
+            .args
+            .windows(2)
+            .any(|args| args == ["podman", "run"])
+    );
+    assert_eq!(commands[1].program, "podman");
     assert_eq!(commands[1].args[0], "exec");
-    assert_eq!(commands[2].args[0], "rm");
+    assert_eq!(commands[2].program, "sh");
+    assert!(commands[2].args[1].contains("podman rm --force --ignore"));
 }
 
 #[test]
@@ -964,11 +971,12 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
             .contains("read-only attachment smoke test passed")
     );
     let commands = executor.commands.borrow();
-    assert!(
-        commands
+    assert!(commands.iter().all(|command| {
+        !command
+            .args
             .iter()
-            .all(|command| !command.args.join(" ").contains("type=overlay"))
-    );
+            .any(|arg| arg.starts_with("type=overlay"))
+    }));
     let probe = commands
         .iter()
         .find(|command| command.args.first().map(String::as_str) == Some("exec"))
@@ -1118,7 +1126,13 @@ fn ssh_podman_check_smoke_runs_an_ssh_wrapped_disposable_container() {
     }
     assert!(commands[2].args.last().unwrap().contains("'run' '--init'"));
     assert!(commands[3].args.last().unwrap().ends_with("'true'"));
-    assert!(commands[4].args.last().unwrap().contains("'rm' '--force'"));
+    assert!(
+        commands[4]
+            .args
+            .last()
+            .unwrap()
+            .contains("podman rm --force --ignore")
+    );
 }
 
 /// Everything the limits script can print, as one host would report it.

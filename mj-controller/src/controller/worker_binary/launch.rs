@@ -90,6 +90,13 @@ impl Controller {
             &SharedCatalogCache,
         )?;
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
+        append_container_storage_guidance(
+            profile.kind,
+            &profile_stage,
+            backend,
+            session.container_workspace.as_deref(),
+            targets::has_managed_temporary_volume(backend, executor)?,
+        )?;
         append_subagent_policy(
             profile.kind,
             &profile_stage,
