@@ -247,13 +247,20 @@ pub fn resolve_directory(
     .purpose("resolve project repository and checkout");
     command.env.insert("LC_ALL".into(), "C".into());
     let output = executor.execute(&command)?;
-    if output.status != 0
-        && host.is_none()
-        && String::from_utf8_lossy(&output.stderr)
-            .trim_start()
-            .starts_with("fatal: not a git repository")
-    {
-        return Err(RepositoryUnavailable::NotRepository(path.to_owned()).into());
+    if output.status == 128 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diagnostic = stderr.trim();
+        if diagnostic.starts_with("fatal: not a git repository") {
+            return Err(RepositoryUnavailable::NotRepository(path.to_owned()).into());
+        }
+        // Remote paths cannot be inspected on the controller. Git's explicit
+        // absence diagnosis is distinct from SSH or filesystem access errors.
+        if diagnostic.starts_with("fatal: cannot change to '")
+            && (diagnostic.ends_with("': No such file or directory")
+                || diagnostic.ends_with("': Not a directory"))
+        {
+            return Err(RepositoryUnavailable::Directory(path.to_owned()).into());
+        }
     }
     anyhow::ensure!(
         output.status == 0,
@@ -346,6 +353,73 @@ mod tests {
         let refused = resolve_directory(directory.path(), None, &RefusedGit).unwrap_err();
         assert!(refused.downcast_ref::<RepositoryUnavailable>().is_none());
         assert!(refused.to_string().contains("dubious ownership"));
+    }
+
+    #[test]
+    fn unavailable_remote_history_preserves_transport_and_access_failures() {
+        struct FailedGit {
+            status: i32,
+            diagnostic: &'static str,
+        }
+        impl CommandExecutor for FailedGit {
+            fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
+                assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
+                Ok(crate::targets::CommandOutput {
+                    status: self.status,
+                    stdout: Vec::new(),
+                    stderr: self.diagnostic.as_bytes().to_vec(),
+                })
+            }
+        }
+        for (status, diagnostic, unavailable) in [
+            (
+                128,
+                "fatal: cannot change to '/projects/deleted': No such file or directory",
+                true,
+            ),
+            (
+                128,
+                "fatal: cannot change to '/projects/file/child': Not a directory",
+                true,
+            ),
+            (
+                128,
+                "fatal: not a git repository (or any of the parent directories): .git",
+                true,
+            ),
+            (
+                128,
+                "fatal: cannot change to '/projects/private': Permission denied",
+                false,
+            ),
+            (
+                128,
+                "fatal: detected dubious ownership in repository",
+                false,
+            ),
+            (
+                255,
+                "ssh: connect to host remote port 22: No route to host",
+                false,
+            ),
+            (
+                255,
+                "fatal: cannot change to '/projects/deleted': No such file or directory",
+                false,
+            ),
+        ] {
+            let error = resolve_directory(
+                Path::new("/projects/checkout"),
+                Some("remote"),
+                &FailedGit { status, diagnostic },
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<RepositoryUnavailable>().is_some(),
+                unavailable,
+                "{status}: {diagnostic}"
+            );
+        }
     }
 
     struct OldGit {

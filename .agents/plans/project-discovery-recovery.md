@@ -16,13 +16,17 @@ Opening Add in the project picker should discover usable projects without report
 - [x] Focused isolated regressions pass for automatic retry, memory preservation, raw/configured separation, and genuine errors.
 - [x] Validate focused regressions, full dev-profile Cargo tests, Clippy, formatting, and git diff --check.
 - [x] Remove the obsolete bifrost2 replay source under the existing config lock; preserve all other configuration and save a backup.
-- [ ] Install validated code using the normal installation script, then reconcile recorded local failures through the updated daemon.
+- [x] Build committed merged tree using the normal install script; isolated named-instance smoke test and normal live handoff succeed.
+- [x] Extend unavailable-path classification to remote Git absence; complete core tests and workspace Clippy pass.
+- [ ] Install the remote correction and reconcile the three remaining failure records.
 - [ ] Commit only owned files and push to origin/master.
 
 ## Surprises & Discoveries
 
 
 The healthy bifrost5 checkout resolves to brokkai/bifrost-dev while its old configured ID is bifrost. The healthy sm-watch checkout belongs to jbellis/sm-watch while its old saved ID is anvil. Raw sessions were incorrectly included in configured-project reconciliation and also received their namesake configured bundle during checkout backfill. That both caused ID lookup failures and could mix unrelated memory. Migration also constructed a Bundle memory key for single-repository projects, unlike the launch helper which collapses that case to Repository.
+
+The first live reconciliation exposed three SSH history records for /home/jonathan/Projects/bifrost2 and /home/jonathan/Projects/tree-sitter-kotlin. Git exits 128 with an explicit missing-directory diagnosis; remote paths cannot be checked with controller filesystem calls. Extend the shared classification using that diagnosis and Git exit status, preserving SSH exit 255 and permission failures.
 
 Unavailable history errors are durable and included in every refresh. Native history is seeded once, so missing paths from completed test sessions keep poisoning catalog status. The local config still includes a deleted Claude replay scratch directory under bifrost2.
 
@@ -39,7 +43,7 @@ Unavailable history errors are durable and included in every refresh. Native his
 ## Outcomes & Retrospective
 
 
-Focused resolver and catalog regressions, full dev-profile cargo test, workspace Clippy with warnings denied, formatting, and diff checks pass. Local config cleanup removed only the confirmed-deleted replay repository, using config.toml.lock and an atomic rename; the backup is config.toml.before-discovery-cleanup-20260930. Normal installation, daemon reconciliation, and publication remain. Host load exceeded 300 during validation; the worker journal stress test remained active and eventually passed.
+Focused resolver and catalog regressions, full dev-profile cargo test, workspace Clippy with warnings denied, formatting, and diff checks pass. Local config cleanup removed only the confirmed-deleted replay repository, using config.toml.lock and an atomic rename; the backup is config.toml.before-discovery-cleanup-20260930. The merged workspace passed cargo test, Clippy, and 70 web unit tests. The committed merged build ed8e5a11 was staged from merged-src with scripts/install.sh, tested using --instance discovery-recovery-20260930, then installed atomically with previous binaries saved under /mnt/optane/mj-discovery-recovery-20260930/previous-bin. The normal daemon restart succeeded (PID 3877688). Live reconciliation cleared all 21 seed failures and 17 of 20 discovery failures. Three discovery records (two distinct paths) remain because they belong to SSH sessions on precision-3260, where Git explicitly reports deleted directories. The remote resolver must classify these as unavailable too; SSH transport and access errors must remain visible. Final remote validation, installation, reconciliation, and publication remain. Host load exceeded 300 during validation; the worker journal stress test remained active and eventually passed.
 
 ## Context and Orientation
 
@@ -77,3 +81,7 @@ Use anyhow downcasting for a typed RepositoryUnavailable error without new depen
 Plan created for the authorized fix and cleanup; no schema or wire changes are planned.
 
 Updated after focused validation: raw sessions must be excluded from configured-project reconciliation, and both launch and migration now share legacy session identity. Live config cleanup is complete; normal installation and daemon reconciliation are required to clear the previously persisted errors without violating database ownership.
+
+Updated after merged-build validation and live handoff: local cleanup reduced 41 records to three remote records. Complete remote classification through the same shared resolver, without changing or deleting session history.
+
+Remote correction validation: cargo test -p brokk-mj-core and cargo clippy --all-targets -- -D warnings both pass. The resolver regression distinguishes Git absence/non-repository responses (exit 128) from permission, ownership, and SSH transport failures (including exit 255). The prior full merged workspace and web validation remain valid for unchanged components.
