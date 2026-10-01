@@ -979,9 +979,11 @@ impl Controller {
         let checked = {
             let _checking_destination =
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-            let mut checked = self
-                .prepare_move_session_controlled(prepared.selection.clone(), executor)
-                .await?;
+            let mut checked = {
+                let _timing = MovePhaseTimer::new(&id, "preflight destination checks");
+                self.prepare_move_session_controlled(prepared.selection.clone(), executor)
+                    .await?
+            };
             // Destination checks can outlast a turn. Confirm against the relay
             // immediately before interruption, and hold its connection from
             // here until the checkpoint seals the source, so nothing reaches
@@ -991,7 +993,10 @@ impl Controller {
                 SessionState::Running | SessionState::Disconnected
             ) {
                 let source_harness = self.state.sessions[&id].harness_kind;
-                source_relay = MoveSourceRelay::lease(manager, &id).await?;
+                source_relay = {
+                    let _timing = MovePhaseTimer::new(&id, "preflight source lease");
+                    MoveSourceRelay::lease(manager, &id).await?
+                };
                 let snapshot = source_relay.snapshot();
                 let (active, queue, fingerprint) =
                     self.move_confirmation(&checked.selection, checked.conversion.as_deref())?;
@@ -1007,6 +1012,7 @@ impl Controller {
                         !operational.safe_to_replace(source_harness)
                     });
                 if let Some(snapshot) = &snapshot {
+                    let _timing = MovePhaseTimer::new(&id, "preflight destination configuration");
                     self.validate_move_destination_configuration(
                         &checked.selection,
                         source_harness,
