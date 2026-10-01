@@ -136,12 +136,19 @@ impl ResourceEditor {
             if memory_bytes > max_memory {
                 return Err(format!(
                     "MEM exceeds this host's {} GiB.",
-                    memory_gib_text(max_memory)
+                    host_limit_gib_text(max_memory)
                 ));
             }
         }
         Ok(SessionResourceAllocation::Container { cpus, memory_bytes })
     }
+}
+
+/// A host limit for a message: rounded down to one decimal, so the number
+/// shown is itself accepted when typed back.
+fn host_limit_gib_text(bytes: u64) -> String {
+    let tenths = (u128::from(bytes) * 10 / u128::from(GIB)) as u64;
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// Exact decimal GiB: even a host limit ending in a partial GiB round-trips.
@@ -197,6 +204,18 @@ mod tests {
         for text in ["", "-1", "NaN", "1GiB", "1.2.3", "18446744073709551615"] {
             assert_eq!(parse_memory_gib(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn host_memory_limit_message_is_readable() {
+        let editor = ResourceEditor {
+            cpu: "1".into(),
+            memory: "999".into(),
+            ..ResourceEditor::default()
+        };
+        let limit = 98 * GIB + GIB / 5 + 12345;
+        let message = editor.allocation(Some((8, limit))).unwrap_err();
+        assert_eq!(message, "MEM exceeds this host's 98.2 GiB.");
     }
 
     #[test]
