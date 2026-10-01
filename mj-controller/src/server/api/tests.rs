@@ -1653,6 +1653,31 @@ async fn start_accepts_native_and_none_and_returns_the_multi_model_refusal() {
     assert_eq!(backend.followups.lock().unwrap().len(), 2);
 }
 
+/// The unavailable-model refusal reaches the client with its code, so each
+/// client can add the remedy that fits it.
+#[tokio::test]
+async fn start_answers_an_unavailable_subagent_model_with_a_code() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let body = start_body(r#","subagents":{"mode":"single_model","model":"fake-model"}"#);
+    let response = tokio::spawn(app.oneshot(start_request(body)));
+    let request = actions.recv().await.unwrap();
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::unusable(
+                "Selected subagent model \"fake-model\" is unavailable.",
+            )
+            .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+        ))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error = json_body(response).await;
+    assert_eq!(error["code"], mj_core::subagent::CHOICE_UNAVAILABLE_CODE);
+    assert!(error["error"].as_str().unwrap().contains("fake-model"));
+}
+
 #[tokio::test]
 async fn start_forwards_the_base_to_the_controller() {
     let backend = Arc::new(FakeBackend::default());

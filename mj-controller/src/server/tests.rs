@@ -4132,6 +4132,16 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "no target named laptop",
         ),
+        (
+            ActionOutcome::Refused(
+                mj_core::refusal::Refusal::unusable(
+                    "Selected subagent model \"x\" is unavailable.",
+                )
+                .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "is unavailable",
+        ),
     ] {
         let (app, mut actions, _, _, _) = app();
         let cookie = login_cookie(&app).await;
@@ -4161,6 +4171,12 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
         } else {
             assert!(body.get("running_actions").is_none(), "{body}");
         }
+        // A refusal's code reaches the viewer, so it can add its own remedy.
+        let expected_code = match &outcome {
+            ActionOutcome::Refused(refusal) => refusal.code(),
+            _ => None,
+        };
+        assert_eq!(body["code"].as_str(), expected_code, "{body}");
     }
 }
 

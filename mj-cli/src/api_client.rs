@@ -214,10 +214,14 @@ impl ApiClient {
                 let count = |key: &str| body.get(key)?.as_u64()?.try_into().ok();
                 Some((count("running_actions")?, count("action_limit")?))
             });
+        let code = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body.get("code")?.as_str().map(str::to_owned));
         Ok(Err(ApiError {
             status,
             message,
             busy,
+            code,
         }))
     }
 
@@ -687,13 +691,26 @@ struct ApiError {
     message: String,
     /// `(running, limit)` when the daemon says how full its action pool is.
     busy: Option<(usize, usize)>,
+    /// The daemon's name for the reason, when it gave one. The message stays
+    /// free of instructions for one surface; this client adds its own.
+    code: Option<String>,
 }
 
 impl ApiError {
     fn into_error(self) -> anyhow::Error {
+        let remedy = match self.code.as_deref() {
+            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
+                " To change it for one session, pass --subagent-model and --subagent-effort to `mj new`; to change the profile's default, use Settings → Agent Profiles → the profile → Sub-agents."
+            }
+            _ => "",
+        };
         match self.message.is_empty() {
             true => anyhow!("the Mjolnir API answered {}", self.status),
-            false => anyhow!("the Mjolnir API answered {}: {}", self.status, self.message),
+            false => anyhow!(
+                "the Mjolnir API answered {}: {}{remedy}",
+                self.status,
+                self.message
+            ),
         }
     }
 }
@@ -884,6 +901,23 @@ mod tests {
         let older: mj_checkpoint::archive::SessionDiff =
             serde_json::from_str(r#"{"diff":"+task work\n","base":"aaaa","head":"cccc"}"#).unwrap();
         assert_eq!(older.head_descends_from_base, None);
+    }
+
+    #[test]
+    fn an_unavailable_subagent_choice_gets_the_command_line_remedy() {
+        let failure = |code: Option<&str>| ApiError {
+            status: reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            message: "Selected subagent model \"x\" is unavailable.".to_owned(),
+            busy: None,
+            code: code.map(str::to_owned),
+        };
+        let coded = format!(
+            "{:#}",
+            failure(Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)).into_error()
+        );
+        assert!(coded.contains("--subagent-model"), "{coded}");
+        let plain = format!("{:#}", failure(None).into_error());
+        assert!(!plain.contains("--subagent-model"), "{plain}");
     }
 
     #[tokio::test]

@@ -170,6 +170,8 @@ async function request(url, options = {}) {
     // Callers that treat one status specially, such as SessionWiki being
     // switched off, need the code and not only the sentence.
     failure.status = response.status;
+    // The daemon names some refusals so each surface can add its own remedy.
+    failure.code = body.code;
     throw failure;
   }
   if (response.status === 202 || response.status === 204) {
@@ -1561,6 +1563,23 @@ function profileSubagents(profileId) {
   return snapshot?.profiles.find(profile => profile.id === profileId)?.subagents || { mode: 'native' };
 }
 
+// What the review says about delegation: the policy the new session will get.
+function subagentPolicyLabel(policy) {
+  if (policy?.mode === 'single_model') {
+    return `Single model: ${policy.model || 'none chosen'}${policy.effort ? ` · ${policy.effort}` : ''}`;
+  }
+  return SUBAGENT_MODES.find(([value]) => value === policy?.mode)?.[1] || 'Native';
+}
+
+// The daemon's refusal names the problem and no surface. A browser user can
+// only change the profile's default, so that is the remedy added here.
+function newSessionFailure(err, profileId) {
+  if (err.code === 'subagent_choice_unavailable') {
+    return `${err.message} Change the default in Settings → Agent Profiles → ${profileId} → Sub-agents, or choose another account.`;
+  }
+  return err.message;
+}
+
 function targetIsBare(targetId) {
   return (
     snapshot?.targets.find(target => target.id === targetId)?.requires_project_directory === true
@@ -1727,6 +1746,7 @@ function renderNewForm() {
       const review = el('dl', 'review');
       const rows = [
         ['Account', newDraft.profileId],
+        ...(subagentChoiceApplies(newDraft) ? [['Subagents', subagentPolicyLabel(profileSubagents(newDraft.profileId))]] : []),
         ['Where to run', newDraft.targetId],
         targetIsBare(newDraft.targetId)
           ? ['Project files', newDraft.projectDirectory]
@@ -2503,7 +2523,7 @@ async function commitNew() {
     if (newDraft !== draft) return;
     navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
   } catch (err) {
-    if (newDraft === draft) newError.textContent = err.message;
+    if (newDraft === draft) newError.textContent = newSessionFailure(err, draft.profileId);
   } finally {
     draft.committing = false;
     if (newDraft === draft) renderNewForm();

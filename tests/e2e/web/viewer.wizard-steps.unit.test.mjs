@@ -57,3 +57,30 @@ test('skipped steps still give the draft their only answer', () => {
   assert.equal(context.draft.targetId, 'localhost');
   assert.equal(context.draft.projectDirectory, '/work/a');
 });
+
+function delegationContext() {
+  const context = vm.createContext({ snapshot: { profiles: [] } });
+  vm.runInContext(sourceBetween('const SUBAGENT_MODES', '\nfunction subagentDiscoveryKey'), context);
+  vm.runInContext(sourceBetween('// What the review says about delegation', '\nfunction targetIsBare'), context);
+  return context;
+}
+
+test('the review names the delegation policy the session will get', () => {
+  const context = delegationContext();
+  const label = policy => vm.runInContext(`subagentPolicyLabel(${JSON.stringify(policy)})`, context);
+  assert.equal(label({ mode: 'native' }), 'Native');
+  assert.equal(label({ mode: 'none' }), 'None');
+  assert.equal(label({ mode: 'single_model', model: 'haiku', effort: 'low' }), 'Single model: haiku · low');
+  assert.equal(label({ mode: 'single_model', model: 'haiku', effort: null }), 'Single model: haiku');
+});
+
+test('an unavailable subagent model tells a browser user to change the profile default, not to pass flags', () => {
+  const context = delegationContext();
+  context.err = Object.assign(new Error('Selected subagent model "fake-model" is unavailable.'), { code: 'subagent_choice_unavailable' });
+  const message = vm.runInContext("newSessionFailure(err, 'fake2')", context);
+  assert.match(message, /"fake-model" is unavailable/);
+  assert.match(message, /Settings → Agent Profiles → fake2 → Sub-agents/);
+  assert.doesNotMatch(message, /--subagent/);
+  context.other = new Error('boom');
+  assert.equal(vm.runInContext("newSessionFailure(other, 'fake2')", context), 'boom');
+});

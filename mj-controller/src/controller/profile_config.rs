@@ -109,9 +109,12 @@ fn refuse_unavailable_choice(
     options: &mj_core::subagent::SubagentOptions,
     policy: &mj_core::subagent::SubagentPolicy,
 ) -> Result<()> {
-    options
-        .validate(policy)
-        .map_err(|message| anyhow::Error::new(mj_core::refusal::Refusal::unusable(message)))
+    options.validate(policy).map_err(|message| {
+        anyhow::Error::new(
+            mj_core::refusal::Refusal::unusable(message)
+                .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+        )
+    })
 }
 
 pub(crate) async fn subagent_options_with<F, Fut>(
@@ -648,6 +651,11 @@ mod tests {
         assert!(
             message.contains("\"fake-child-model\" is unavailable"),
             "{message}"
+        );
+        // Clients choose the remedy from the code, not from the sentence.
+        assert_eq!(
+            Refusal::of(&error).and_then(|refusal| refusal.code()),
+            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
         );
 
         // A model that is offered but a missing effort is refused the same way.
