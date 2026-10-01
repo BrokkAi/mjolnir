@@ -41,6 +41,27 @@ pub async fn subagent_options_for(
     .await
 }
 
+pub(crate) async fn discover_for(
+    config: Config,
+    id: String,
+    model: Option<String>,
+) -> Result<ProfileConfig> {
+    serialized(id.clone(), move |cancelled| {
+        discover_from_config(&config, &id, model, false, cancelled)
+    })
+    .await
+}
+
+pub(crate) fn discovery_fingerprint(id: &str, profile: &HarnessProfile) -> Result<String> {
+    let mut environment = profile.environment.resolved().clone();
+    super::worker_binary::apply_claude_setup_token(
+        &mut environment,
+        profile.kind,
+        &mj_core::credentials::claude_oauth_token_path(id),
+    );
+    fingerprint(profile, &environment)
+}
+
 /// Validates a newly selected top-level policy, not a recorded resume policy.
 /// Multi-model is retired for new selections. Only Claude and
 /// Codex take Mjolnir's delegation tools, and a single-model policy must name
@@ -93,7 +114,7 @@ fn refuse_unavailable_choice(
         .map_err(|message| anyhow::Error::new(mj_core::refusal::Refusal::unusable(message)))
 }
 
-async fn subagent_options_with<F, Fut>(
+pub(crate) async fn subagent_options_with<F, Fut>(
     config: &Config,
     parent: &str,
     model: Option<String>,
@@ -292,8 +313,8 @@ const HOME_CATALOG_INPUTS: [&str; 3] = ["config.toml", "models.json", "settings.
 
 fn fingerprint(profile: &HarnessProfile, environment: &BTreeMap<String, String>) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"profile-config-v4\0");
-    hash.update(serde_json::to_vec(profile)?);
+    hash.update(b"profile-config-v5\0");
+    hash.update(serde_json::to_vec(&profile.discovery_inputs())?);
     hash.update(serde_json::to_vec(environment)?);
     hash.update(
         mj_core::harness_runtime::pin(profile.kind)
@@ -808,6 +829,34 @@ mod tests {
             key(),
             "a catalog override changes the models a session offers"
         );
+    }
+
+    #[test]
+    fn discovery_fingerprint_ignores_creation_defaults_and_unrelated_profile_preferences() {
+        let home = tempfile::tempdir().unwrap();
+        let mut profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Codex,
+            home: home.path().into(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        let original = fingerprint(&profile, &BTreeMap::new()).unwrap();
+        for effort in ["low", "high"] {
+            profile.subagents = SubagentPolicy::SingleModel {
+                model: "chosen".into(),
+                effort: Some(effort.into()),
+            };
+            profile.context_window_bytes = Some(42);
+            profile.guardian_review_model = Some("session".into());
+            assert_eq!(fingerprint(&profile, &BTreeMap::new()).unwrap(), original);
+        }
+        profile.environment = [("PROVIDER".into(), "different".into())]
+            .into_iter()
+            .collect();
+        assert_ne!(fingerprint(&profile, &BTreeMap::new()).unwrap(), original);
     }
 
     #[test]

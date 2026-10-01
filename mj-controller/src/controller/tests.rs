@@ -2210,9 +2210,57 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
         controller.state.sessions[&disabled].subagents,
         Some(SubagentPolicy::None)
     );
-    assert_eq!(controller.config.profiles["codex"].subagents, fixed);
+    assert_eq!(controller.config.profiles["codex"].subagents, fixed.clone());
     assert_eq!(
         crate::database::load_state().unwrap().sessions[&native].subagents,
         Some(SubagentPolicy::Native)
+    );
+    let mut after = controller.config.clone();
+    after.profiles.get_mut("codex").unwrap().subagents = SubagentPolicy::SingleModel {
+        model: "next-default".into(),
+        effort: Some("low".into()),
+    };
+    controller
+        .state
+        .validate_setup_update(&controller.config, &after)
+        .unwrap();
+    after.save().unwrap();
+    controller.reload().unwrap();
+    assert_eq!(
+        controller.state.sessions[&native].subagents,
+        Some(SubagentPolicy::Native)
+    );
+    assert_eq!(controller.state.sessions[&single].subagents, Some(fixed));
+    assert_eq!(
+        controller.state.sessions[&disabled].subagents,
+        Some(SubagentPolicy::None)
+    );
+    let new_session = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "podman",
+            "new default",
+            launch_options(Vec::new()),
+        )
+        .unwrap();
+    assert_eq!(
+        controller.state.sessions[&new_session].subagents,
+        Some(after.profiles["codex"].subagents.clone())
+    );
+    let mut legacy = controller.state.sessions[&native].clone();
+    legacy.subagents = Some(SubagentPolicy::AllModels);
+    crate::database::save_resumed_session(&legacy, None).unwrap();
+    let restarted = Controller::load().unwrap();
+    assert_eq!(
+        restarted.state.sessions[&native].subagents,
+        Some(SubagentPolicy::AllModels)
+    );
+    assert_eq!(
+        restarted.state.sessions[&single].subagents,
+        Some(SubagentPolicy::SingleModel {
+            model: "chosen".into(),
+            effort: Some("high".into())
+        })
     );
 }

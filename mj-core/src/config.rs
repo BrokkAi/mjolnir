@@ -358,6 +358,29 @@ impl JevConfig {
 }
 
 impl Config {
+    /// An opaque identity safe to send to control surfaces without exposing
+    /// profile environments. Policies and unrelated preferences are absent.
+    pub fn subagent_discovery_key(&self, parent: &str, model: Option<&str>) -> String {
+        use sha2::{Digest, Sha256};
+        let inputs = serde_json::to_vec(&(parent, model, self.subagent_discovery_inputs(parent)))
+            .expect("discovery inputs serialize");
+        crate::hex::lower_hex(Sha256::digest(inputs))
+    }
+
+    /// The eligible installations that determine a parent's delegation choices.
+    pub fn subagent_discovery_inputs(
+        &self,
+        parent: &str,
+    ) -> BTreeMap<String, ProfileDiscoveryInputs> {
+        self.profiles
+            .iter()
+            .filter(|(id, profile)| {
+                profile.enabled && self.subagents.profile_is_eligible(parent, id)
+            })
+            .map(|(id, profile)| (id.clone(), profile.discovery_inputs()))
+            .collect()
+    }
+
     /// Automatic continuation asks Jev whether a finished turn left work
     /// undone, so it runs only while `[continuation]` and `[jev]` are both on.
     #[must_use]

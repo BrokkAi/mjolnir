@@ -6384,45 +6384,70 @@ fn single_profile_raw_resume_starts_checks_without_confirm() {
 }
 
 #[test]
-fn raw_move_fast_path_submits_once_after_preparation_and_uses_profile_policy() {
+fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_skipped() {
     use mj_core::subagent::SubagentPolicy;
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.config = single_raw_config();
-    let session = dashboard.state.sessions.get_mut("session-1").unwrap();
-    session.project_directory = Some("/work/project".into());
-    session.target_template_id = "local".into();
-
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
-    dashboard
-        .config
-        .profiles
-        .get_mut("claude-1")
-        .unwrap()
-        .subagents = fixed.clone();
-    let action = dashboard.begin_move();
-    let DashboardAction::MoveSession {
-        preparation_request_id: Some(request_id),
-        subagents: Some(policy),
-        ..
-    } = action
-    else {
-        panic!("{action:?}")
-    };
-    assert_eq!(policy, fixed);
-    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Launching);
-    assert!(dashboard.take_prerequisite_check().is_none());
-    let mut preparation = move_preparation();
-    preparation.selection.profile_id = Some("claude-1".into());
-    preparation.selection.target_template_id = Some("local".into());
-    preparation.selection.subagents = Some(fixed.clone());
-    assert!(dashboard.apply_move_preparation(request_id, preparation));
-    assert!(
-        matches!(dashboard.take_prerequisite_check(), Some(DashboardAction::MoveSession { preparation_request_id: None, subagents: Some(policy), .. }) if policy == fixed)
-    );
-    assert!(dashboard.take_prerequisite_check().is_none());
+    for stored in [
+        SubagentPolicy::Native,
+        SubagentPolicy::AllModels,
+        SubagentPolicy::SingleModel {
+            model: "recorded".into(),
+            effort: Some("low".into()),
+        },
+    ] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.config = single_raw_config();
+        let session = dashboard.state.sessions.get_mut("session-1").unwrap();
+        session.project_directory = Some("/work/project".into());
+        session.target_template_id = "local".into();
+        session.subagents = Some(stored.clone());
+        dashboard
+            .config
+            .profiles
+            .get_mut("claude-1")
+            .unwrap()
+            .subagents = SubagentPolicy::SingleModel {
+            model: "creation-default".into(),
+            effort: Some("high".into()),
+        };
+        let DashboardAction::MoveSession {
+            preparation_request_id: Some(request),
+            subagents: None,
+            ..
+        } = dashboard.begin_move()
+        else {
+            panic!("prepare retains session policy");
+        };
+        assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+        assert_eq!(resume_wizard(&dashboard).subagents.policy, stored);
+        let mut preparation = move_preparation();
+        preparation.active = false;
+        preparation.selection.profile_id = Some("claude-1".into());
+        preparation.selection.target_template_id = Some("local".into());
+        assert!(dashboard.apply_move_preparation(request, preparation));
+        assert!(!matches!(
+            dashboard.take_prerequisite_check(),
+            Some(DashboardAction::MoveSession {
+                preparation_request_id: None,
+                ..
+            })
+        ));
+        drawn(&mut dashboard, 100, 30);
+        assert!(matches!(
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::MoveSession {
+                preparation_request_id: None,
+                subagents: None,
+                ..
+            }
+        ));
+        assert!(!matches!(
+            dashboard.take_prerequisite_check(),
+            Some(DashboardAction::MoveSession {
+                preparation_request_id: None,
+                ..
+            })
+        ));
+    }
 }
 
 #[test]
@@ -6454,7 +6479,7 @@ fn raw_resume_fast_path_failure_waits_for_explicit_retry() {
 }
 
 #[test]
-fn raw_move_fast_path_keeps_file_selection_and_launches_after_it() {
+fn raw_move_keeps_file_selection_and_returns_to_review_after_it() {
     use mj_core::move_workspace::*;
     let mut session = running_session();
     session.project_directory = Some("/work/project".into());
@@ -6485,8 +6510,8 @@ fn raw_move_fast_path_keeps_file_selection_and_launches_after_it() {
     assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
     assert!(dashboard.take_prerequisite_check().is_none());
     let screen = drawn(&mut dashboard, 100, 30).join("\n");
-    assert!(screen.contains("Cancel"), "{screen}");
-    assert!(!screen.contains("Back"), "{screen}");
+    assert!(screen.contains("× Move"), "{screen}");
+    assert!(screen.contains("Back"), "{screen}");
     let DashboardAction::MoveSession {
         preparation_request_id: Some(next),
         ..
@@ -6498,13 +6523,179 @@ fn raw_move_fast_path_keeps_file_selection_and_launches_after_it() {
     preparation.selection.workspace = resume_wizard(&dashboard).files.selection.clone();
     assert!(preparation.selection.workspace.acknowledge_large_transfer);
     assert!(dashboard.apply_move_preparation(next, preparation));
-    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Launching);
+    assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
+    assert!(dashboard.take_prerequisite_check().is_none());
     assert!(matches!(
-        dashboard.take_prerequisite_check(),
-        Some(DashboardAction::MoveSession {
+        ready_key(&mut dashboard, key(KeyCode::Enter)),
+        DashboardAction::MoveSession {
             preparation_request_id: None,
             ..
-        })
+        }
     ));
     assert!(dashboard.take_prerequisite_check().is_none());
+}
+
+#[test]
+fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_reprepares() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use mj_core::subagent::SubagentPolicy;
+    for (width, height) in [(120, 40), (80, 32), (60, 24)] {
+        let mut session = running_session();
+        session.project_directory = Some("/work/project".into());
+        session.target_template_id = "local".into();
+        session.subagents = Some(SubagentPolicy::AllModels);
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.config = single_raw_config();
+        let DashboardAction::MoveSession {
+            preparation_request_id: Some(request),
+            subagents: None,
+            ..
+        } = dashboard.begin_move()
+        else {
+            panic!("prepare");
+        };
+        let mut preparation = move_preparation();
+        preparation.selection.profile_id = Some("claude-1".into());
+        preparation.selection.target_template_id = Some("local".into());
+        dashboard.apply_move_preparation(request, preparation);
+        let Mode::Resume(wizard) = &mut dashboard.mode else {
+            panic!("move");
+        };
+        wizard.form.get_mut().focus(WizardControl::Subagents);
+        let lines = drawn(&mut dashboard, width, height);
+        let (label_x, y) = point(&lines, "Subagents");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(mouse_at(kind, (label_x + 12, y)));
+            drawn(&mut dashboard, width, height);
+        }
+        assert!(
+            resume_wizard(&dashboard)
+                .subagents
+                .combo
+                .is_open(WizardControl::Subagents),
+            "{width}: {lines:#?}"
+        );
+        dashboard.handle_key(key(KeyCode::Up));
+        drawn(&mut dashboard, width, height);
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            resume_wizard(&dashboard).subagents.policy,
+            SubagentPolicy::AllModels
+        );
+        assert!(
+            resume_wizard(&dashboard).preparation.is_some(),
+            "dismissing preview keeps preparation"
+        );
+        let lines = drawn(&mut dashboard, width, height);
+        let (label_x, y) = point(&lines, "Subagents");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(mouse_at(kind, (label_x + 12, y)));
+            drawn(&mut dashboard, width, height);
+        }
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "None");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(mouse_at(kind, (x + 1, y)));
+            drawn(&mut dashboard, width, height);
+        }
+        assert_eq!(
+            resume_wizard(&dashboard).subagents.policy,
+            SubagentPolicy::None
+        );
+        assert!(resume_wizard(&dashboard).preparation.is_none());
+        assert_eq!(
+            dashboard.state.sessions["session-1"].subagents,
+            Some(SubagentPolicy::AllModels),
+            "draft does not change recorded policy"
+        );
+        assert!(matches!(
+            dashboard.take_prerequisite_check(),
+            Some(DashboardAction::MoveSession {
+                subagents: Some(SubagentPolicy::None),
+                preparation_request_id: Some(_),
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn move_model_discovery_preserves_model_list_and_rejects_retired_replies() {
+    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
+    let mut dashboard = dashboard_with_session(running_session());
+    let request = open_move_review(&mut dashboard);
+    dashboard.apply_move_preparation(request, move_preparation());
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("move");
+    };
+    wizard.subagents.policy = SubagentPolicy::SingleModel {
+        model: "a".into(),
+        effort: Some("low".into()),
+    };
+    let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("discovery");
+    };
+    assert_eq!(
+        resume_wizard(&dashboard).subagents.models(),
+        ["Select model", "a (unverified)"]
+    );
+    assert_eq!(
+        resume_wizard(&dashboard).subagents.efforts(),
+        ["Loading efforts…", "low (unverified)"]
+    );
+    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    };
+    let options = SubagentOptions {
+        models: vec![choice("a"), choice("b")],
+        efforts: vec![choice("low")],
+        ..Default::default()
+    };
+    dashboard.apply_subagent_options(id, Ok(options.clone()));
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("move");
+    };
+    wizard.subagents.select_model(2);
+    let Some(DashboardAction::DiscoverSubagentOptions { id: next, .. }) =
+        dashboard.take_prerequisite_check()
+    else {
+        panic!("model efforts");
+    };
+    assert_eq!(
+        resume_wizard(&dashboard).subagents.models(),
+        ["Select model", "a", "b"]
+    );
+    dashboard.apply_subagent_options(id, Ok(SubagentOptions::default()));
+    assert!(resume_wizard(&dashboard).subagents.options().is_none());
+    dashboard.apply_subagent_options(next, Ok(options));
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("move");
+    };
+    wizard.subagents.select_model(1);
+    assert!(
+        dashboard.take_subagent_discovery().is_none(),
+        "revisiting a cached model reuses efforts"
+    );
+    assert_eq!(
+        resume_wizard(&dashboard)
+            .subagents
+            .options()
+            .unwrap()
+            .efforts[0]
+            .value,
+        "low"
+    );
 }

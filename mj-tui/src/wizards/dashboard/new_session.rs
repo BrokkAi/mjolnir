@@ -187,6 +187,9 @@ impl DashboardState {
     /// review never waits on a check that nothing started, whichever path
     /// opened it.
     pub fn take_prerequisite_check(&mut self) -> Option<DashboardAction> {
+        if let Some(action) = self.take_subagent_discovery() {
+            return Some(action);
+        }
         if let Some(action) = self.take_setup_subagent_choices() {
             return Some(action);
         }

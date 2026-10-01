@@ -296,6 +296,7 @@ impl ViewerSnapshot {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
                 subagents: profile.subagents.clone(),
+                subagent_discovery_key: config.subagent_discovery_key(id, None),
                 quota: None,
             })
             .collect();
@@ -809,6 +810,8 @@ pub struct ViewerBackgroundTask {
 #[serde(deny_unknown_fields)]
 pub struct ViewerProfile {
     pub id: String,
+    #[serde(default)]
+    pub subagent_discovery_key: String,
     pub harness_kind: String,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,

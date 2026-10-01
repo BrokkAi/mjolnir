@@ -5,11 +5,13 @@ use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
 mod resources;
+mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
 use resources::{
     ResourceEditor, ResourcePicker, declare_resource_controls, memory_gib_text, target_resources,
 };
+pub(crate) use subagents::next_subagent_discovery_id;
 
 use mj_chat::path_input::PathInput;
 
@@ -101,6 +103,9 @@ pub(crate) enum WizardControl {
     MountDestination,
     MountAccess,
     ReviewAttachments,
+    Subagents,
+    SubagentModel,
+    SubagentEffort,
     CreateManagedWorktree,
     DiscardQueue,
     ChooseMoveFiles,
@@ -410,6 +415,7 @@ pub(crate) enum ResumeSource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeWizard {
+    pub(crate) subagents: Box<subagents::SubagentDraft>,
     pub(crate) files: move_files::MoveFilePicker,
     /// The Mjolnir session being resumed or moved, or, for an archive, the
     /// SessionWiki id being restored. `source` says which.
@@ -454,7 +460,8 @@ pub(crate) struct ResumeWizard {
 
 impl PartialEq for ResumeWizard {
     fn eq(&self, other: &Self) -> bool {
-        self.session_id == other.session_id
+        self.subagents == other.subagents
+            && self.session_id == other.session_id
             && self.files == other.files
             && self.source == other.source
             && self.title == other.title

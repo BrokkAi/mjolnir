@@ -255,6 +255,7 @@ pub(crate) fn render_new_wizard(
                 in_place_move: false,
                 source_unavailable: false,
                 stopped_subagents: 0,
+                subagents: None,
                 clear_resource_allocation: false,
                 queue: None,
                 queued_entries: &[],
@@ -654,6 +655,7 @@ pub(crate) struct ReviewWizardView<'a> {
     /// Sub-agents the Move stops that had not handed back; idle ones are
     /// stopped without a word, as a suspend stops them.
     stopped_subagents: usize,
+    subagents: Option<&'a subagents::SubagentDraft>,
     clear_resource_allocation: bool,
     queue: Option<(usize, bool)>,
     queued_entries: &'a [mj_core::relay::QueuedPrompt],
@@ -694,6 +696,7 @@ pub(crate) fn render_review_wizard(
         in_place_move,
         source_unavailable,
         stopped_subagents,
+        subagents,
         clear_resource_allocation,
         queue,
         queued_entries,
@@ -894,7 +897,56 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::raw(""));
     }
 
-    let last_control_row = worktree_row.map_or(0, |row| usize::from(row) + 1);
+    let mut subagent_model_row = None;
+    let mut subagent_effort_row = None;
+    let subagent_row = subagents.map(|wizard| {
+        lines.push(Line::raw(""));
+        let row = lines.len() as u16;
+        lines.push(Line::raw(""));
+        if matches!(
+            wizard.policy,
+            mj_core::subagent::SubagentPolicy::SingleModel { .. }
+        ) {
+            lines.push(Line::raw(""));
+            let height = 1;
+            subagent_model_row = Some((lines.len() as u16, height));
+            for _ in 0..height {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::raw(""));
+            let height = 1;
+            subagent_effort_row = Some((lines.len() as u16, height));
+            for _ in 0..height {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "Configure profiles in Settings → Profiles; additional eligible profiles in Settings → Sub-agents. Your own profile is always eligible.",
+                theme::muted(),
+            ));
+
+            if let Some(error) = wizard.error() {
+                lines.push(Line::raw(error));
+            }
+            if let Some(options) = wizard.options() {
+                for error in &options.unavailable {
+                    lines.push(Line::raw(error.clone()));
+                }
+            }
+        }
+        row
+    });
+    let last_control_row = [
+        worktree_row,
+        subagent_row,
+        subagent_model_row.map(|(row, _)| row),
+        subagent_effort_row.map(|(row, _)| row),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|row| usize::from(row) + 1)
+    .max()
+    .unwrap_or(0);
     if mounts.mounts.is_empty() || !can_attach {
         while lines.len() > last_control_row && lines.last().is_some_and(|line| line.width() == 0) {
             lines.pop();
@@ -910,6 +962,9 @@ pub(crate) fn render_review_wizard(
     let lines = wrapped;
     let map_row = |row: u16| offsets[usize::from(row)];
     let worktree_row = worktree_row.map(map_row);
+    let subagent_row = subagent_row.map(map_row);
+    let subagent_model_row = subagent_model_row.map(|(row, height)| (map_row(row), height));
+    let subagent_effort_row = subagent_effort_row.map(|(row, height)| (map_row(row), height));
     let summary_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let list_height = if can_attach {
         u16::try_from(mounts.mounts.len()).unwrap_or(u16::MAX)
@@ -934,6 +989,9 @@ pub(crate) fn render_review_wizard(
     let body = DialogShell::layout(inner, 1).body;
     let focused_row = match form.focused() {
         Some(WizardControl::CreateManagedWorktree) => worktree_row,
+        Some(WizardControl::Subagents) => subagent_row,
+        Some(WizardControl::SubagentModel) => subagent_model_row.map(|(row, _)| row),
+        Some(WizardControl::SubagentEffort) => subagent_effort_row.map(|(row, _)| row),
         Some(WizardControl::ReviewAttachments) => Some(
             summary_height.saturating_add(
                 mounts
@@ -961,6 +1019,71 @@ pub(crate) fn render_review_wizard(
             form,
             WizardControl::CreateManagedWorktree,
         );
+    }
+    let mut expanded_subagent_combo = None;
+    if let Some((wizard, row)) = subagents.zip(subagent_row) {
+        let mut selectors = vec![(
+            WizardControl::Subagents,
+            "Subagents",
+            row,
+            wizard.policies(),
+            wizard.policy_index(),
+            true,
+        )];
+        if let Some((row, _)) = subagent_model_row {
+            selectors.push((
+                WizardControl::SubagentModel,
+                "Model",
+                row,
+                wizard.models(),
+                wizard.model_index(),
+                wizard.models_ready(),
+            ));
+        }
+        if let Some((row, _)) = subagent_effort_row {
+            selectors.push((
+                WizardControl::SubagentEffort,
+                "Effort",
+                row,
+                wizard.efforts(),
+                wizard.effort_index(),
+                wizard.options().is_some(),
+            ));
+        }
+        for (id, label, row, values, committed, enabled) in selectors {
+            let area = viewport.row(row, 1);
+            let label_width = 11.min(area.width);
+            frame.render_widget(
+                Line::raw(label),
+                Rect::new(area.x, area.y, label_width, area.height),
+            );
+            let field = Rect::new(
+                area.x + label_width,
+                area.y,
+                area.width - label_width,
+                area.height,
+            );
+            let selected = wizard.combo.selection(id, committed);
+            let value = values.get(selected).cloned().unwrap_or_default();
+            let options = values.into_iter().map(Line::raw).collect::<Vec<_>>();
+            ComboBox::render(
+                frame,
+                inner,
+                field,
+                &value,
+                &options,
+                selected,
+                false,
+                enabled,
+                " Values ",
+                PopupSide::Below,
+                form,
+                id,
+            );
+            if wizard.combo.is_open(id) {
+                expanded_subagent_combo = Some((id, field, value, options, selected, enabled));
+            }
+        }
     }
     if can_attach && !mounts.mounts.is_empty() {
         let list_area = viewport.row(summary_height, list_height);
@@ -1093,6 +1216,23 @@ pub(crate) fn render_review_wizard(
             && (allocation.is_some() || !matches!(target, TargetTemplate::AwsEc2 { .. })),
     ));
     Dialog::render_actions(frame, DialogShell::layout(inner, 1).actions, &buttons, form);
+    // Paint the active popup last so it overlays the remaining review fields.
+    if let Some((id, field, value, options, selected, enabled)) = expanded_subagent_combo {
+        ComboBox::render(
+            frame,
+            inner,
+            field,
+            &value,
+            &options,
+            selected,
+            true,
+            enabled,
+            " Values ",
+            PopupSide::Below,
+            form,
+            id,
+        );
+    }
 }
 
 /// Suffix that shows an attached directory's access mode in a list row.
@@ -1501,13 +1641,18 @@ pub(crate) fn render_resume_wizard(
                 moving: wizard.moving,
                 preparing: wizard.preparing,
                 preparation_error: wizard.preparation_error.as_deref(),
-                submit_enabled: (!wizard.moving
-                    || wizard.preparation.is_some()
-                    || wizard.preparation_error.is_some()),
+                submit_enabled: (wizard.subagent_change(dashboard).is_none()
+                    || wizard.subagents.error().is_none())
+                    && (!wizard.moving
+                        || wizard.preparation.is_some()
+                        || wizard.preparation_error.is_some()),
                 source_unavailable: wizard
                     .preparation
                     .as_ref()
                     .is_some_and(|p| p.source_unavailable),
+                subagents: wizard
+                    .subagent_choice_applies(dashboard)
+                    .then_some(&*wizard.subagents),
                 stopped_subagents: if wizard.moving {
                     dashboard
                         .subagents_not_handed_back(&wizard.session_id)

@@ -122,6 +122,9 @@ impl DashboardState {
             .position(|target_id| target_id == &session.target_template_id)
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            subagents: Box::new(subagents::SubagentDraft::new(
+                session.subagents.clone().unwrap_or_default(),
+            )),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
@@ -192,6 +195,7 @@ impl DashboardState {
             .and_then(|wanted| self.config.targets.keys().position(|id| id == wanted))
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            subagents: Box::default(),
             files: Default::default(),
             session_id: wiki_id,
             source: ResumeSource::Archive,
@@ -260,6 +264,9 @@ impl DashboardState {
             .position(|target_id| target_id == &session.target_template_id)
             .unwrap_or(0);
         self.mode = Mode::Resume(ResumeWizard {
+            subagents: Box::new(subagents::SubagentDraft::new(
+                session.subagents.clone().unwrap_or_default(),
+            )),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
@@ -338,6 +345,14 @@ impl DashboardState {
             return;
         };
         self.mode = Mode::Resume(ResumeWizard {
+            subagents: Box::new(subagents::SubagentDraft::new(
+                operation
+                    .selection
+                    .subagents
+                    .clone()
+                    .or_else(|| session.subagents.clone())
+                    .unwrap_or_default(),
+            )),
             files: Default::default(),
             session_id: session.id.clone(),
             source: ResumeSource::Session,
