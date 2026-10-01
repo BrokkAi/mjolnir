@@ -21,7 +21,8 @@ You can see it working in the lab described under Validation and Acceptance. The
 - [x] (2026-10-01 21:30Z) Milestone 2: runtime feed deltas carry per-session transcript changes; protocol 52 -> 53 (renumbered at integration: master had already taken 52 for daemon-owned profile capabilities).
 - [x] (2026-10-01 21:30Z) Milestone 3: the dashboard's runtime feed holds the tails, applies the changes, fetches fresh tails from the daemon on gaps, and no longer reads transcript tails from SQLite. Milestones 1 to 3 land as one commit, because none of them works without the others.
 - [x] (2026-10-01 23:30Z) Milestone 4 (required): the browser's conversation projection reads the same shared tail, and its update cursors are exact for every item kind.
-- [ ] Lab measurements before and after, at 30 sessions with 3 streaming and at 66 sessions with 6 streaming.
+- [x] (2026-10-02 00:50Z) Lab measurements before and after, at 30 sessions with 3 streaming and at 66 sessions with 6 streaming (see Artifacts and Notes).
+- [x] (2026-10-02 00:30Z) `SessionTail::publish` walks held and published items side by side, so a publication allocates only for changed items.
 
 ## Surprises & Discoveries
 
@@ -82,7 +83,11 @@ You can see it working in the lab described under Validation and Acceptance. The
 
 ## Outcomes & Retrospective
 
-Milestone 0 is done and measured (see Artifacts and Notes). The rest has not started.
+All milestones are done. The dashboard no longer reads transcript tails from SQLite: its read rate fell from 34-72 MB/s to 0.1-0.2 MB/s in the lab, and its CPU fell by roughly a quarter to a half. Key latency did not change beyond the noise of a heavily shared host, because building frames, not reading tails, dominates the event loop in these debug builds. The browser now receives an entry again only when its rendering changed.
+
+What remains: daemon CPU after the change was not separated from host noise (see Artifacts and Notes). The resume seed and stopped sub-agent transcripts still read the store once each (issue #1043). A projection reload that changes content without moving the session's ordinal or digest does not re-project the browser conversation, because `ConversationProjectionKey` compares only those two values.
+
+Lessons: the feed needed a design that serves a fetched tail at the client's cursor. A tail fetched "now" can fall between two frames, and then the next delta cannot apply to it. The browser's exact cursor had to compare rendered entries: an item version would miss changes made by list rules and window trimming.
 
 ## Context and Orientation
 
@@ -154,6 +159,23 @@ Milestone 0 (commit c184ee00), 66 live sessions with 6 streaming, debug build, h
 
 Frame building (about 550 ms per second of wall time in this debug build) still dominates the loop, so key latency did not move beyond the noise. Read bytes (54 to 81 MB/s) did not change, as expected; that is milestone 3's measure.
 
+Milestones 1 to 4 (commits 0e3d1f7c, 1de9b1b4; daemon and dashboard both at the new build) against milestone 0 (each run uses its own build's daemon), debug builds, two interleaved rounds each, host load average in brackets:
+
+    66 sessions, 6 streaming        milestone 0               milestones 1-4
+      key median / p95 (ms)         76.6 / 142 [116]          21.5 / 38 [149]
+                                    19.8 / 35  [70]           20.4 / 39 [62]
+      dashboard read (MB/s)         33.7, 72.0                0.2, 0.2
+      dashboard CPU (%)             137, 142                  107, 107
+      loop busy (%)                 66, 58                    58, 57
+    30 sessions, 3 streaming
+      key median / p95 (ms)         15.2 / 26 [38]            38.4 / 148 [95]
+                                    14.0 / 24 [42]            14.5 / 24 [30]
+      dashboard read (MB/s)         47.0, 43.7                0.1, 0.2
+      dashboard CPU (%)             92, 85                    46, 65
+      loop busy (%)                 40, 38                    57, 40
+
+The one slow run (30 sessions, first round of milestones 1-4) coincided with a load spike from 38 to 95. Daemon CPU with no dashboard attached, measured 90 s after each daemon switch, was 124 and 133 percent for milestone 0, and 222 and 111 percent after. That is too noisy to call. Part of each switch is the daemon rechecking worker builds, which a profile showed as the hot path right after a switch (`verify_worker_build`).
+
 A build that also shared unchanged items between SQLite reads (by a digest of each stored body, set aside when option 3 was chosen) did better at 30 sessions with 3 streaming: allocator free on the main thread fell from 4.7 to 1.9 percent of samples, and dashboard CPU from about 95 to about 80 percent. Milestone 3 gets that sharing from the daemon's deltas instead.
 
 ## Interfaces and Dependencies
@@ -177,4 +199,4 @@ In `mj-client/src/runtime_feed.rs`:
 
 `RuntimeProjection` gains `#[serde(skip)] transcripts: SnapshotMap<String, SessionTail>`, and `RuntimeDelta` gains `transcripts: Vec<(String, TranscriptChange)>`. In `mj-client/src/daemon.rs`: `DaemonAction::SessionTail { session_id, cursor }`, `DaemonReply::SessionTail(Box<SessionTailReply>)` (chunked), `DaemonClient::session_tail`, and `PROTOCOL_VERSION = 53`. In `mj-controller/src/daemon/`: `RuntimeStateOwner::publish_view`, `RuntimeState::session_tail(session_id, cursor)`, and `RuntimeHistory::session_tail(cursor, session_id)`. In `mj-controller/src/pollers/`: `load_session_tail` (remote.rs) and `TailCursorExpired` (runtime_feed.rs).
 
-Revision note (2026-10-01): rewritten around the daemon publishing transcript changes (the user's option 3). The earlier draft proposed a store change marker and is superseded. Its in-memory part is kept as milestone 0. Later the same day: implemented milestones 1 to 3. Paging was dropped because daemon replies are already chunked, the browser milestone became required, and the convergence check was kept for native agents. Then: milestone 4 implemented, with exact browser cursors from comparing rendered entries; the per-item change ordinal was removed.
+Revision note (2026-10-01): rewritten around the daemon publishing transcript changes (the user's option 3). The earlier draft proposed a store change marker and is superseded. Its in-memory part is kept as milestone 0. Later the same day: implemented milestones 1 to 3. Paging was dropped because daemon replies are already chunked, the browser milestone became required, and the convergence check was kept for native agents. Then: milestone 4 implemented, with exact browser cursors from comparing rendered entries; the per-item change ordinal was removed. Finally: measurements and outcomes recorded.
