@@ -161,7 +161,7 @@ pub(crate) fn drawn_session_rows_with_options(
         .as_secs();
     let animation_ms = mj_chat::spinner::elapsed_ms();
     let sessions = dashboard.ordered_sessions();
-    let targets = session_display_targets(dashboard, &sessions);
+    let targets = dashboard.session_order().targets().to_vec();
     let flow_rows = dashboard.sessions_rows().into_iter().map(|row| match row {
         SessionsRow::ProjectHeading { key, label, number } => SessionsRow::ProjectHeading {
             key,
@@ -971,45 +971,46 @@ pub(crate) fn current_agent_excerpt(detail: &SessionDetail) -> Option<&str> {
     }
 }
 
-/// The target label shown for each session, in `ordered_sessions()` order.
+/// The target label shown for each of `sessions`, given each one's project
+/// key in `projects`.
 ///
 /// A target repeated inside one project is ambiguous on its own, so repeats
-/// are numbered `[1]`, `[2]`, … in the order they appear. Every Sessions
-/// representation reads from this so labels remain consistent.
+/// are numbered `[1]`, `[2]`, … in the order they appear. The Sessions order
+/// keeps these labels for `ordered_sessions()`, and every Sessions
+/// representation reads them from there so labels remain consistent.
 pub(crate) fn session_display_targets(
     dashboard: &DashboardState,
     sessions: &[&SessionRecord],
+    projects: &[String],
 ) -> Vec<String> {
-    let mut counts = BTreeMap::<(String, String), usize>::new();
-    for session in sessions {
-        let key = (
-            dashboard.project_source(session).key,
-            session_target_label(
-                &dashboard.state,
-                session,
-                dashboard.session_operations.get(&session.id),
-                &dashboard.config,
-            ),
-        );
+    let keys = sessions
+        .iter()
+        .zip(projects)
+        .map(|(session, project)| {
+            (
+                project.clone(),
+                session_target_label(
+                    &dashboard.state,
+                    session,
+                    dashboard.session_operations.get(&session.id),
+                    &dashboard.config,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::<&(String, String), usize>::new();
+    for key in &keys {
         *counts.entry(key).or_default() += 1;
     }
-    let mut occurrences = BTreeMap::<(String, String), usize>::new();
-    sessions
-        .iter()
-        .map(|session| {
-            let base = session_target_label(
-                &dashboard.state,
-                session,
-                dashboard.session_operations.get(&session.id),
-                &dashboard.config,
-            );
-            let key = (dashboard.project_source(session).key, base.clone());
-            let occurrence = occurrences.entry(key.clone()).or_default();
+    let mut occurrences = BTreeMap::<&(String, String), usize>::new();
+    keys.iter()
+        .map(|key| {
+            let occurrence = occurrences.entry(key).or_default();
             *occurrence += 1;
-            if counts.get(&key).copied().unwrap_or_default() > 1 {
-                format!("{base} [{}]", *occurrence)
+            if counts.get(key).copied().unwrap_or_default() > 1 {
+                format!("{} [{}]", key.1, *occurrence)
             } else {
-                base
+                key.1.clone()
             }
         })
         .collect()

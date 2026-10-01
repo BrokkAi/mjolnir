@@ -404,7 +404,7 @@ impl DashboardState {
     }
 
     pub(crate) fn mark_layout_modified(&mut self) {
-        if let Some(workspace_id) = &self.active_workspace_id {
+        if let Some(workspace_id) = self.active_workspace_id.as_ref() {
             self.workspace_layouts_modified.insert(workspace_id.clone());
         }
     }

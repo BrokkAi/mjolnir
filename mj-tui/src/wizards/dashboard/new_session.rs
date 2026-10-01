@@ -359,7 +359,7 @@ impl DashboardState {
     }
 
     pub fn apply_created_bundle(&mut self, config: Config, bundle_id: &str) -> DashboardAction {
-        self.config = config;
+        *self.config = config;
         let Mode::New(mut wizard) = self.mode.clone() else {
             return DashboardAction::None;
         };
@@ -409,7 +409,7 @@ impl DashboardState {
     /// Installs the config without the removed project and keeps the
     /// selection on a row that still exists.
     pub fn apply_removed_bundle(&mut self, config: Config, bundle_id: &str) {
-        self.config = config;
+        *self.config = config;
         if let Mode::New(mut wizard) = self.mode.clone()
             && wizard.bundle_removal_in_flight
         {

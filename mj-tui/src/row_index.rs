@@ -1,5 +1,8 @@
 //! Incremental membership for ordinary rendering; the resume dialog lists
 //! stopped records itself. Direct presentation edits use the same input map.
+//!
+//! [`crate::session_view::SessionFacts`] synchronizes the index when the
+//! records it is built from change; readers go through the facts first.
 use super::*;
 use mj_core::snapshot_map::SnapshotMap;
 
@@ -7,15 +10,15 @@ use mj_core::snapshot_map::SnapshotMap;
 pub(crate) struct RowIndex {
     records: SnapshotMap<String, SessionRecord>,
     relations: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
-    live: BTreeSet<String>,
+    pub(crate) live: BTreeSet<String>,
     children: BTreeMap<String, BTreeSet<String>>,
-    active_children: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) active_children: BTreeMap<String, BTreeSet<String>>,
     #[cfg(test)]
     pub(crate) visits: usize,
 }
 
 impl RowIndex {
-    fn synchronize(&mut self, state: &State) {
+    pub(crate) fn synchronize(&mut self, state: &State) {
         for (id, record) in self.records.changes(&state.sessions) {
             #[cfg(test)]
             {
@@ -82,25 +85,28 @@ impl RowIndex {
 
 impl DashboardState {
     pub(crate) fn listed_session_candidates(&self) -> Vec<&SessionRecord> {
-        let mut index = self.row_index.borrow_mut();
-        index.synchronize(&self.state);
-        let mut ids = index.live.clone();
-        ids.extend(self.session_operations.keys().cloned());
-        ids.into_iter()
-            .filter_map(|id| self.state.sessions.get(&id))
+        self.session_facts()
+            .listed()
+            .iter()
+            .filter_map(|id| self.state.sessions.get(id))
             .collect()
     }
 
+    /// The index, synchronized with the current records.
+    fn synchronized_row_index(&self) -> std::cell::Ref<'_, RowIndex> {
+        drop(self.session_facts());
+        self.row_index.borrow()
+    }
+
     pub(crate) fn managed_child_count(&self, parent: &str) -> usize {
-        let mut index = self.row_index.borrow_mut();
-        index.synchronize(&self.state);
-        index.children.get(parent).map_or(0, BTreeSet::len)
+        self.synchronized_row_index()
+            .children
+            .get(parent)
+            .map_or(0, BTreeSet::len)
     }
 
     pub(crate) fn managed_active_child_ids(&self, parent: &str) -> Vec<String> {
-        let mut index = self.row_index.borrow_mut();
-        index.synchronize(&self.state);
-        index
+        self.synchronized_row_index()
             .active_children
             .get(parent)
             .map(|ids| ids.iter().cloned().collect())
@@ -108,9 +114,7 @@ impl DashboardState {
     }
 
     pub(crate) fn managed_child_ids(&self, parent: &str) -> Vec<String> {
-        let mut index = self.row_index.borrow_mut();
-        index.synchronize(&self.state);
-        index
+        self.synchronized_row_index()
             .children
             .get(parent)
             .map(|ids| ids.iter().cloned().collect())

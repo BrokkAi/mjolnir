@@ -86,7 +86,7 @@ impl DashboardState {
         for (id, view) in changes {
             if let Some(old) = self.native_agents.get(&id) {
                 for (index, key) in [
-                    (&mut self.native_by_parent, old.agent.parent_view_id()),
+                    (&mut *self.native_by_parent, old.agent.parent_view_id()),
                     (
                         &mut self.native_running_by_parent,
                         old.agent.parent_view_id(),
@@ -276,7 +276,7 @@ impl DashboardState {
             KeyCode::End => pane.scroll = 0,
             KeyCode::Char('p') if key.modifiers.is_empty() => {
                 let parent = pane.agent.parent_view_id();
-                self.subagent_parent_id = self.subagent_parent_for(&parent);
+                *self.subagent_parent_id = self.subagent_parent_for(&parent);
                 self.select_active_session(&parent);
                 return Some(DashboardAction::Open { session_id: parent });
             }

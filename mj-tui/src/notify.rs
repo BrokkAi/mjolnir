@@ -92,18 +92,14 @@ impl DashboardState {
         let visible = self.current_session_id().map(str::to_owned);
         let mut episodes = std::mem::take(&mut self.attention_episodes);
         let mut due = Vec::new();
-        let ids = self
-            .state
-            .sessions
-            .keys()
-            .filter(|id| !self.state.is_subagent_session(id))
-            .cloned()
-            .collect::<Vec<_>>();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
-        for id in ids {
-            let level = self.attention_notice_level(&id);
+        for id in self.state.sessions.keys() {
+            if self.state.is_subagent_session(id) {
+                continue;
+            }
+            let level = self.attention_notice_level(id);
             if !level.needs_person() {
-                episodes.remove(&id);
+                episodes.remove(id);
                 continue;
             }
             let episode = episodes.entry(id.clone()).or_insert(AttentionEpisode {
@@ -132,14 +128,14 @@ impl DashboardState {
             if !enabled {
                 continue;
             }
-            let Some(session) = self.state.sessions.get(&id) else {
+            let Some(session) = self.state.sessions.get(id) else {
                 continue;
             };
             due.push(Notification {
                 session_id: id.clone(),
                 session_title: session.listed_title().to_owned(),
                 level,
-                body: self.notification_body(&id, level),
+                body: self.notification_body(id, level),
             });
         }
         self.attention_episodes = episodes;

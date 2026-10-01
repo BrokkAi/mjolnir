@@ -58,7 +58,7 @@ impl DashboardState {
         *pane_size_for_mut(&mut self.pane_sizes, pane) = size;
         self.clamp_selections();
         if self.pane_sizes != previous
-            && let Some(workspace_id) = &self.active_workspace_id
+            && let Some(workspace_id) = self.active_workspace_id.as_ref()
         {
             self.workspace_pane_sizes_modified
                 .insert(workspace_id.clone());

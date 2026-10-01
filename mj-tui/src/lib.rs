@@ -55,7 +55,9 @@ mod keybinds;
 mod modal_surface;
 mod notify;
 mod row_index;
+mod session_view;
 pub use notify::Notification;
+use session_view::Tracked;
 mod palette;
 mod render;
 mod render_changes;
@@ -786,12 +788,9 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 }
 
 /// Stateful, renderable projection of controller configuration and state.
-#[derive(Default)]
-struct SessionOrderCache {
-    inputs: Vec<(String, bool, String, String, String, String)>,
-    ids: Vec<String>,
-}
-
+///
+/// The fields wrapped in [`Tracked`] are the inputs the session facts and
+/// the Sessions pane's order are derived from (see [`session_view`]).
 pub struct DashboardState {
     pending_welcome: Option<welcome::WelcomeDialog>,
     #[cfg(test)]
@@ -800,10 +799,11 @@ pub struct DashboardState {
     pub(crate) presented_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     pub(crate) durable_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     pub(crate) native_running_by_parent: BTreeMap<String, BTreeSet<String>>,
-    pub(crate) native_by_parent: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) native_by_parent: Tracked<BTreeMap<String, BTreeSet<String>>>,
     pub(crate) native_by_owner: BTreeMap<String, BTreeSet<String>>,
-    session_order_cache: RefCell<SessionOrderCache>,
-    pub(crate) config: Config,
+    session_facts: RefCell<session_view::SessionFacts>,
+    session_order: RefCell<session_view::SessionOrder>,
+    pub(crate) config: Tracked<Config>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
     /// replaced so a `config.toml` edit takes effect without a restart.
     pub(crate) keybinds: mj_core::config::Keybinds,
@@ -811,24 +811,24 @@ pub struct DashboardState {
     /// chord. Cleared by that key, by Esc, and by any mouse press.
     pub(crate) prefix_pending: bool,
     pub(crate) resize_mode: bool,
-    pub(crate) state: State,
+    pub(crate) state: Tracked<State>,
     pub(crate) quotas: BTreeMap<String, ProfileQuota>,
     pub(crate) quota_refreshing: BTreeSet<String>,
-    pub(crate) session_details: BTreeMap<String, SessionDetail>,
+    pub(crate) session_details: Tracked<BTreeMap<String, SessionDetail>>,
     /// Sessions whose relay worker the controller currently cannot reach. Their
     /// summary band renders red so an unreachable target is obvious at a glance.
-    pub(crate) unreachable_sessions: BTreeSet<String>,
+    pub(crate) unreachable_sessions: Tracked<BTreeSet<String>>,
     /// The controller's complete review projection, keyed by session. Review
     /// state is an overlay on the primary session lifecycle and is replaced
     /// as a whole whenever a runtime snapshot arrives, so removals clear
     /// stale row badges as well as closing the review pane.
-    pub(crate) session_reviews: BTreeMap<String, RuntimeReviewView>,
+    pub(crate) session_reviews: Tracked<BTreeMap<String, RuntimeReviewView>>,
     /// Sessions with an attached plan-review second opinion. This is kept
     /// separately from the controller's turn-review projection because the
     /// chat owns this older reviewer workflow and its stop warning still
     /// needs to follow the live chat state.
     pub(crate) sessions_with_review: BTreeSet<String>,
-    pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
+    pub(crate) project_sources: Tracked<BTreeMap<String, ProjectSourceIdentity>>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
     /// Stopped records loaded one at a time: the row picked in the resume
     /// dialog, the session `mj go` starts in, and a session just imported.
@@ -838,7 +838,7 @@ pub struct DashboardState {
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
-    pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
+    pub(crate) session_operations: Tracked<BTreeMap<String, SessionOperationDisplay>>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
     /// session so each draft stays with its row; the controller hands the
@@ -925,9 +925,9 @@ pub struct DashboardState {
     pub(crate) session_action_focus: Option<CommandId>,
     pub(crate) session_menu_ids: Vec<String>,
     /// The Sessions pane's search and state filter, when one is open.
-    pub(crate) sessions_filter: Option<SessionsFilter>,
+    pub(crate) sessions_filter: Tracked<Option<SessionsFilter>>,
     /// What the daemon said about the Sessions filter's text in conversations.
-    pub(crate) sessions_text: dashboard_sessions::SessionsTextSearch,
+    pub(crate) sessions_text: Tracked<dashboard_sessions::SessionsTextSearch>,
     /// The commands run lately, newest first, for the palette's Recent group.
     pub(crate) recent_commands: std::collections::VecDeque<CommandId>,
     /// The rows the open resume dialog shows, derived from the records, the
@@ -954,7 +954,7 @@ pub struct DashboardState {
     /// Projects the user has collapsed in the focused Sessions pane. Absent
     /// means expanded, so a project that appears later starts expanded without
     /// any extra bookkeeping.
-    pub(crate) collapsed_project_keys: BTreeSet<String>,
+    pub(crate) collapsed_project_keys: Tracked<BTreeSet<String>>,
     /// The sessions currently needing a person and whether each has been
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
@@ -1014,10 +1014,10 @@ pub struct DashboardState {
     /// order, so existing ids retain their position and new ids append.
     pub(crate) workspace_order: Vec<String>,
     /// The local filter applied to the one global live session feed.
-    active_workspace_id: Option<String>,
+    active_workspace_id: Tracked<Option<String>>,
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
-    subagent_parent_id: Option<String>,
-    pub(crate) native_agents: BTreeMap<String, native_agents::NativeAgentPane>,
+    subagent_parent_id: Tracked<Option<String>>,
+    pub(crate) native_agents: Tracked<BTreeMap<String, native_agents::NativeAgentPane>>,
     pub(crate) native_sources:
         mj_core::snapshot_map::SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
@@ -1112,16 +1112,17 @@ impl DashboardState {
             keybinds: config.keybinds(),
             prefix_pending: false,
             resize_mode: false,
-            config,
-            state,
+            config: config.into(),
+            state: state.into(),
             quotas,
             quota_refreshing: BTreeSet::new(),
-            session_details: BTreeMap::new(),
-            unreachable_sessions: BTreeSet::new(),
-            session_reviews: BTreeMap::new(),
+            session_details: Default::default(),
+            unreachable_sessions: Default::default(),
+            session_reviews: Default::default(),
             sessions_with_review: BTreeSet::new(),
-            project_sources: BTreeMap::new(),
-            session_order_cache: RefCell::default(),
+            project_sources: Default::default(),
+            session_facts: RefCell::default(),
+            session_order: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
             launch_recency,
@@ -1132,7 +1133,7 @@ impl DashboardState {
             git_status: BTreeMap::new(),
             git_probe_at: BTreeMap::new(),
             unreachable_notices: BTreeMap::new(),
-            session_operations: BTreeMap::new(),
+            session_operations: Default::default(),
             standby_prompts: BTreeMap::new(),
             launch_standby: None,
             move_operations: Default::default(),
@@ -1169,7 +1170,7 @@ impl DashboardState {
             surface_form: RefCell::new(mj_chat::components::Form::default()),
             session_action_focus: None,
             session_menu_ids: Vec::new(),
-            sessions_filter: None,
+            sessions_filter: Default::default(),
             sessions_text: Default::default(),
             recent_commands: std::collections::VecDeque::new(),
             resume_rows: Vec::new(),
@@ -1178,7 +1179,7 @@ impl DashboardState {
             project_heading_areas: Vec::new(),
             pane_size_control_areas: Vec::new(),
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
-            collapsed_project_keys: BTreeSet::new(),
+            collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
             viewed_failures: BTreeMap::new(),
             drawn_failures: BTreeMap::new(),
@@ -1199,9 +1200,9 @@ impl DashboardState {
             workspace_name: String::new(),
             workspace_names: BTreeMap::new(),
             workspace_order: vec![mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()],
-            active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()),
-            subagent_parent_id: None,
-            native_agents: BTreeMap::new(),
+            active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()).into(),
+            subagent_parent_id: Default::default(),
+            native_agents: Default::default(),
             native_sources: Default::default(),
             stopped_subagents: BTreeMap::new(),
             stopped_by_suspend: StoppedBySuspend::default(),
@@ -1218,7 +1219,7 @@ impl DashboardState {
             render_change_snapshot: render_changes::RenderChangeSnapshot::default(),
             last_event_consumed: Cell::new(false),
         };
-        dashboard.session_details = dashboard
+        *dashboard.session_details = dashboard
             .state
             .sessions
             .keys()

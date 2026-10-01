@@ -168,12 +168,13 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
     let mut foreign = running_session();
     foreign.id = "foreign-session".into();
     foreign.workspace_id = "other-workspace".into();
+    let pending_elicitations = dashboard.session_details["session-1"]
+        .pending_elicitations
+        .clone();
     dashboard.session_details.insert(
         foreign.id.clone(),
         SessionDetail {
-            pending_elicitations: dashboard.session_details["session-1"]
-                .pending_elicitations
-                .clone(),
+            pending_elicitations,
             ..SessionDetail::default()
         },
     );
