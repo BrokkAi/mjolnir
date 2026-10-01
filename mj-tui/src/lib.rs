@@ -775,7 +775,7 @@ pub(crate) fn cycle_control<T: Copy + PartialEq>(current: T, order: &[T], revers
 /// Stateful, renderable projection of controller configuration and state.
 #[derive(Default)]
 struct SessionOrderCache {
-    inputs: Vec<(String, String, String, String, String)>,
+    inputs: Vec<(String, bool, String, String, String, String)>,
     ids: Vec<String>,
 }
 
