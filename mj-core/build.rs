@@ -46,9 +46,44 @@ fn git_revision(root: &Path) -> Option<String> {
         })
 }
 
+/// The committer time of `revision`, in seconds since the Unix epoch.
+///
+/// Two builds of one release are ordered by the time of the commit they were
+/// built from; a commit hash alone has no order. A source archive without Git
+/// supplies it as `MJ_BUILD_COMMIT_TIME`, which is what `git log -1
+/// --format=%ct` prints. Without either the time is unknown, never guessed:
+/// the build still succeeds, and startup treats its order as unknown.
+///
+/// The revision is looked up by hash, so a registry crate unpacked inside an
+/// unrelated checkout cannot pick up that checkout's time: the commit is
+/// either there, with its own time, or the lookup fails. Cargo already reruns
+/// this script whenever the revision changes, which is its only input.
+fn commit_time(root: &Path, revision: &str) -> Option<i64> {
+    if let Ok(time) = std::env::var("MJ_BUILD_COMMIT_TIME") {
+        return Some(
+            time.trim()
+                .parse()
+                .expect("MJ_BUILD_COMMIT_TIME must be the commit's Unix time in seconds"),
+        );
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", "-s", "--format=%ct"])
+        .arg(format!("{revision}^{{commit}}"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MJ_BUILD_REVISION");
+    println!("cargo:rerun-if-env-changed=MJ_BUILD_COMMIT_TIME");
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let revision = std::env::var("MJ_BUILD_REVISION").ok().or_else(|| {
         // Registry installs must use the published crate's revision, even if
@@ -69,6 +104,12 @@ fn main() {
         "cargo:rustc-env=MJ_BUILD_ID={}+{}",
         std::env::var("CARGO_PKG_VERSION").unwrap(),
         revision.to_ascii_lowercase()
+    );
+    // Empty when unknown: daemon startup then cannot order this build against
+    // a different revision of the same release.
+    println!(
+        "cargo:rustc-env=MJ_BUILD_COMMIT_TIME={}",
+        commit_time(&root, &revision).map_or_else(String::new, |time| time.to_string())
     );
     if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
         // Generate this fixture at build time: writing an executable during

@@ -90,6 +90,24 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     path
 }
 
+/// The `build_version` a daemon of this release publishes when it was built
+/// from `revision`, committed `commit_offset` seconds after this build's
+/// commit. `None` publishes no commit time.
+fn same_release_build(revision: char, commit_offset: Option<i64>) -> String {
+    let mut published = format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        revision.to_string().repeat(40)
+    );
+    if let Some(offset) = commit_offset {
+        let commit: i64 = mj_core::worker_build::BUILD_COMMIT_TIME
+            .parse()
+            .expect("this test build knows its commit time");
+        published.push_str(&format!(".c{}", commit + offset));
+    }
+    published
+}
+
 fn current_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     let path = storage.path().join("data/mj.sqlite3");
     mj_controller::database::save_state_to(&path, &Default::default()).unwrap();
@@ -316,6 +334,7 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
     use std::time::{Duration, Instant};
     // Same protocol, changed protocol, and a development build whose version
     // did not change: all must converge without a restart command or stdin.
+    let older_build = same_release_build('a', Some(-86_400));
     for (version, protocol, needs_migration) in [
         ("2.21.0", mj_client::daemon::PROTOCOL_VERSION, true),
         ("2.21.0", mj_client::daemon::PROTOCOL_VERSION - 1, true),
@@ -324,11 +343,18 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
             mj_client::daemon::PROTOCOL_VERSION,
             true,
         ),
-        // Different executable, identical release, wire protocol and schema.
-        // The fixture is a separate executable, just like a previous build.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // Identical release, wire protocol and schema, from a build that
+        // published no revision: every such daemon predates build ordering,
+        // so it is the older build.
         (
             env!("CARGO_PKG_VERSION"),
+            mj_client::daemon::PROTOCOL_VERSION,
+            false,
+        ),
+        // Identical release, wire protocol and schema, built from a commit a
+        // day older than this client's.
+        (
+            older_build.as_str(),
             mj_client::daemon::PROTOCOL_VERSION,
             false,
         ),
@@ -380,7 +406,13 @@ fn concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner() {
         let metadata: mj_client::daemon::DaemonMetadata =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
         assert_ne!(metadata.pid, old.0.id());
-        assert_eq!(metadata.build_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            metadata
+                .build_version
+                .starts_with(mj_core::worker_build::BUILD_ID),
+            "{}",
+            metadata.build_version
+        );
         let output =
             mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
         assert!(output.status.success());
@@ -438,6 +470,87 @@ fn a_different_same_version_build_cannot_replace_an_incompatible_store_owner() {
     assert_eq!(retained.pid, old.0.id());
     // Release the fixture owner before DaemonStorage tries a real stop command.
     drop(old);
+}
+
+/// An older build of the same release never replaces a newer daemon, nor one
+/// whose order it cannot establish (campaign finding U-1: alternating builds
+/// each replaced the other). Concurrent older clients all use the daemon and
+/// say why, and an explicit restart from the older build refuses the
+/// downgrade.
+#[test]
+fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
+    for (daemon_build, expected) in [
+        (
+            same_release_build('b', Some(86_400)),
+            "The daemon's build is newer, so it keeps running and this client uses it.",
+        ),
+        // A different revision without a published commit time.
+        (
+            same_release_build('b', None),
+            "Mjolnir cannot tell which build is newer, so the daemon keeps running",
+        ),
+    ] {
+        let storage = upgrade_storage();
+        current_store(&storage);
+        let output =
+            mj_core::subprocess::run_with_input(&mut upgrade_command(&storage), &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata_path = storage.path().join("data/daemon.json");
+        let mut metadata: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        // The running daemon now presents itself as the other build.
+        metadata.build_version = daemon_build.clone();
+        mj_core::config::atomic_write(&metadata_path, &serde_json::to_vec(&metadata).unwrap())
+            .unwrap();
+
+        let outputs = std::thread::scope(|scope| {
+            let clients: Vec<_> = (0..3)
+                .map(|index| {
+                    let mut command = upgrade_command(&storage);
+                    let log = storage.path().join(format!("older-client-{index}.log"));
+                    scope.spawn(move || run_client_with_deadline(&mut command, &log))
+                })
+                .collect();
+            clients
+                .into_iter()
+                .map(|client| client.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (status, log) in outputs {
+            assert!(status.success(), "{daemon_build}: {log}");
+            assert!(log.contains(expected), "{daemon_build}: {log}");
+            // Both builds are named.
+            assert!(log.contains(&daemon_build[..15]), "{log}");
+            assert!(
+                log.contains(&mj_core::worker_build::BUILD_ID[..15]),
+                "{log}"
+            );
+        }
+        let kept: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(kept.pid, metadata.pid, "{daemon_build} was replaced");
+        assert_eq!(kept.build_version, daemon_build);
+
+        let (status, log) = run_client_with_deadline(
+            upgrade_command(&storage).args(["daemon", "restart"]),
+            &storage.path().join("restart.log"),
+        );
+        let restarted: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        if expected.starts_with("The daemon's build is newer") {
+            assert!(!status.success(), "{log}");
+            assert!(log.contains("so it was not restarted"), "{log}");
+            assert_eq!(restarted.pid, metadata.pid, "restart downgraded the daemon");
+        } else {
+            // An explicit restart is how a person settles an unknown order.
+            assert!(status.success(), "{log}");
+            assert_ne!(restarted.pid, metadata.pid);
+        }
+    }
 }
 
 #[test]

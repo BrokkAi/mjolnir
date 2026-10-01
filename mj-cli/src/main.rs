@@ -1555,7 +1555,8 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             println!(
                 "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
                 status.pid,
-                status.build_version,
+                mj_client::build_identity::BuildIdentity::parse(&status.build_version)
+                    .map_or_else(|_| status.build_version.clone(), |build| build.describe()),
                 status.started_at,
                 status.attached_clients,
                 if status.attached_clients == 1 {

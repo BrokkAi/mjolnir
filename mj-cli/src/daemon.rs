@@ -6,10 +6,13 @@ use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use mj_client::build_identity::{
+    BuildIdentity, DaemonBuildOrder, compare_daemon_build, this_build,
+};
 pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::{
-    describe_executable, process_executable_path, process_runs_this_executable,
-    running_executable_path,
+    describe_executable, describe_running_daemon_and_client_builds, process_executable_path,
+    process_runs_this_executable, running_executable_path,
 };
 pub(crate) use mj_controller::daemon::run_daemon_process;
 use std::fs::{self, OpenOptions};
@@ -276,12 +279,55 @@ async fn wait_for_web_viewer_with_timeout(
     .context("timed out waiting for the web viewer to become ready")?
 }
 
-fn daemon_release_order(metadata: &DaemonMetadata) -> Result<std::cmp::Ordering> {
+/// How the running daemon's build stands against this client's.
+#[derive(Debug, Clone, Copy)]
+struct DaemonBuild {
+    /// The release versions alone, for the steps that apply only across
+    /// releases: replacing an older release before connecting to it, and an
+    /// attached client's re-execution into an upgraded release.
+    release: std::cmp::Ordering,
+    /// The full order: release, then commit time, then executable time.
+    order: DaemonBuildOrder,
+}
+
+impl DaemonBuild {
+    fn daemon_is_newer(self) -> bool {
+        self.order == DaemonBuildOrder::Newer
+    }
+}
+
+/// The one place a client decides whether the running daemon is newer than
+/// itself. Ordinary startup, the development refresh and `mj daemon restart`
+/// all ask here while they hold the startup lock, so the answer they act on
+/// is the one for the daemon that lock lets them replace.
+fn daemon_build(metadata: &DaemonMetadata) -> Result<DaemonBuild> {
     let daemon =
-        semver::Version::parse(&metadata.build_version).context("parse daemon build version")?;
-    let client =
-        semver::Version::parse(env!("CARGO_PKG_VERSION")).context("parse client build version")?;
-    Ok(daemon.cmp_precedence(&client))
+        BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
+    let client = this_build();
+    Ok(DaemonBuild {
+        release: daemon.version().cmp_precedence(client.version()),
+        order: compare_daemon_build(&daemon, client),
+    })
+}
+
+/// The sentence naming both builds, followed by what this client does.
+fn daemon_build_notice(metadata: &DaemonMetadata, decision: &str) -> String {
+    format!(
+        "{}. {decision}",
+        describe_running_daemon_and_client_builds(metadata.pid, &metadata.build_version)
+    )
+}
+
+/// Say once per process that this client keeps using a daemon it will not
+/// replace. Every command, and every dashboard action, comes through startup,
+/// and the reason does not change between them.
+fn kept_daemon_notice(message: String) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        startup_notice(message);
+    } else {
+        tracing::info!("{message}");
+    }
 }
 
 /// Called only while holding the startup lock. Wire compatibility alone does
@@ -296,13 +342,12 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
         return Ok(None);
     };
     ensure_supported_daemon_protocol(&metadata)?;
-    let release_order = daemon_release_order(&metadata)?;
-    if metadata.protocol_version < PROTOCOL_VERSION || release_order.is_lt() {
+    let build = daemon_build(&metadata)?;
+    if metadata.protocol_version < PROTOCOL_VERSION || build.release.is_lt() {
         ensure!(
-            !release_order.is_gt(),
-            "refusing to replace newer daemon {} with client {}",
-            metadata.build_version,
-            env!("CARGO_PKG_VERSION")
+            !build.daemon_is_newer(),
+            "refusing to replace a newer daemon with this client: {}",
+            daemon_build_notice(&metadata, "Run the daemon's build instead.")
         );
         replace_daemon(&metadata).await?;
         return Ok(None);
@@ -325,25 +370,33 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
             return Err(error);
         }
         ensure!(
-            !release_order.is_gt(),
+            !build.daemon_is_newer(),
             "a newer daemon has not completed database initialization: {error:#}"
         );
         replace_daemon(&metadata).await?;
         return Ok(None);
     }
-    if release_order.is_eq() {
-        let pid = metadata.pid;
-        let same_build = tokio::task::spawn_blocking(move || process_runs_this_executable(pid))
-            .await
-            .context("inspect daemon executable task failed")??;
-        if same_build == Some(false) {
-            startup_notice(format!(
-                "Mjolnir daemon {} is running a different build of {}; replacing it.",
-                metadata.pid, metadata.build_version
+    match build.order {
+        DaemonBuildOrder::Same => {}
+        DaemonBuildOrder::Older => {
+            startup_notice(daemon_build_notice(
+                &metadata,
+                "This client's build is newer; replacing the daemon.",
             ));
             replace_daemon(&metadata).await?;
             return Ok(None);
         }
+        // Same release, protocol and readable store: the older client can use
+        // the newer daemon, and must not replace it.
+        DaemonBuildOrder::Newer => kept_daemon_notice(daemon_build_notice(
+            &metadata,
+            "The daemon's build is newer, so it keeps running and this client uses it.",
+        )),
+        DaemonBuildOrder::Unknown => kept_daemon_notice(daemon_build_notice(
+            &metadata,
+            "Mjolnir cannot tell which build is newer, so the daemon keeps running and this \
+             client uses it. Run `mj daemon restart` to replace it with this build.",
+        )),
     }
     Ok(Some(client))
 }
@@ -393,6 +446,19 @@ pub async fn restart_daemon() -> Result<RestartedDaemon> {
     let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     for attempt in 1..=RESTART_ATTEMPTS {
         if let Ok(metadata) = read_metadata_any() {
+            // An explicit restart may replace a build it cannot order, but
+            // never a newer one: that is a downgrade, which `mj daemon stop`
+            // makes deliberate.
+            ensure!(
+                !daemon_build(&metadata)?.daemon_is_newer(),
+                "{}",
+                daemon_build_notice(
+                    &metadata,
+                    "The daemon's build is newer, so it was not restarted. Run `mj daemon \
+                     restart` from the daemon's build, or run `mj daemon stop` first to \
+                     start this older build instead."
+                )
+            );
             stop_daemon(&metadata).await?;
         }
         let mut client = connect_or_start_holding(&startup).await?;
@@ -626,6 +692,11 @@ async fn maybe_replace_stale_development_daemon() -> Result<()> {
             let Ok(metadata) = read_metadata_any() else {
                 return Ok(());
             };
+            // The variable makes this client authoritative over stale builds,
+            // not over newer ones. Ordinary startup explains the kept daemon.
+            if daemon_build(&metadata)?.daemon_is_newer() {
+                return Ok(());
+            }
             let pid = metadata.pid;
             let started: SystemTime = chrono::DateTime::parse_from_rfc3339(&metadata.started_at)
                 .context("parse development daemon start time")?
@@ -898,7 +969,7 @@ fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };
-    let newer = daemon_release_order(&metadata)?.is_gt();
+    let newer = daemon_build(&metadata)?.release.is_gt();
     if !newer && metadata.protocol_version <= PROTOCOL_VERSION {
         return Ok(None);
     }

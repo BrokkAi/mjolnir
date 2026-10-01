@@ -2202,7 +2202,7 @@ fn daemon_build_check() -> DoctorCheck {
             TITLE,
             format!(
                 "Daemon {pid} runs this build (version {}).",
-                metadata.build_version
+                mj_client::build_identity::this_build().describe()
             ),
         ),
         Ok(Some(false)) => DoctorCheck::warning(

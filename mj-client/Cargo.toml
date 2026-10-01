@@ -29,6 +29,8 @@ image = { workspace = true, features = ["jpeg", "webp"] }
 serde = { workspace = true, features = ["rc"] }
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+semver.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.

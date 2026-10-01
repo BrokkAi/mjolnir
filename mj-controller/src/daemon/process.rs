@@ -109,7 +109,9 @@ pub(super) async fn run_daemon_runtime(
         address: listener.local_addr()?,
         token: random_hex::<32>()?,
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        build_version: env!("CARGO_PKG_VERSION").to_owned(),
+        // The version, with the revision and build times as semver build
+        // metadata that older clients ignore; see `mj_client::build_identity`.
+        build_version: mj_client::build_identity::this_build().published(),
     };
     let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
         .await

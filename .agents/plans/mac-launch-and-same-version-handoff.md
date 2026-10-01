@@ -199,3 +199,19 @@ verification comment is
 `https://github.com/BrokkAi/mjolnir/issues/1135#issuecomment-5920101526`. #1184
 closed through its fixing commit. The final documentation-only checkpoint
 records these outcomes; it does not change the validated implementation.
+
+Revision note (2026-09-30, campaign finding U-1): Executable identity alone
+replaced the daemon in either direction, so two builds of 2.24.0 replaced
+each other on every alternate command, and a stale `mj` earlier on PATH
+displaced a newer daemon. Startup now orders builds instead of only telling
+them apart. `mj_client::build_identity` defines the order: release version,
+then the commit time of the build's revision (embedded by `mj-core/build.rs`
+from Git or `MJ_BUILD_COMMIT_TIME`), then, for one revision, the executable's
+modification time. The daemon publishes these facts as semver build metadata
+on `build_version`, because `daemon.json` and the status reply reject unknown
+fields while older clients ignore build metadata. `daemon_build` in
+`mj-cli/src/daemon.rs` is the single decision used by ordinary startup, the
+development refresh and `mj daemon restart`. A newer client replaces the
+daemon; an older one uses it and says so; an unknown order keeps it and points
+to `mj daemon restart`, which refuses only a known-newer daemon. A daemon that
+publishes no revision predates build ordering and is treated as older.

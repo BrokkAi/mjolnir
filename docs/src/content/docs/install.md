@@ -62,6 +62,8 @@ On every interactive startup, before starting the daemon, `mj` asks the channel 
 - Homebrew installs: mj runs `brew update` (so the local formula index learns about the release) and then `brew upgrade --formula brokkai/tap/mjolnir` (the bare name `mjolnir` is an unrelated Homebrew cask).
 - Cargo installs: mj prints `cargo install --locked brokk-mjolnir` and leaves the rebuild to you.
 
+When `mj` finds the daemon running a different build, it replaces the daemon only if its own build is newer: a later release or, within one release, a build from a later commit. An older `mj`, such as a stale copy earlier on `PATH`, uses the newer daemon and says so. When `mj` cannot tell which build is newer, it also keeps the running daemon and says so; `mj daemon restart` then replaces it.
+
 The check contacts the channel's own endpoint — GitHub Releases, the npm registry, or the Homebrew tap on GitHub — and it is skipped entirely for non-interactive commands, debug builds, or when `MJOLNIR_NO_UPDATE_CHECK` is set. Set that variable to disable automatic update checks altogether.
 
 ## npm or npx
