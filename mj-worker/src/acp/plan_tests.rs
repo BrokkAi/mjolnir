@@ -250,6 +250,10 @@ impl PlanProbe {
     }
 
     async fn with_config(policy: ExecutionPolicy, config: bool) -> Self {
+        Self::with_harness(policy, config, HarnessKind::Claude).await
+    }
+
+    async fn with_harness(policy: ExecutionPolicy, config: bool, harness: HarnessKind) -> Self {
         let (client, agent) = tokio::io::duplex(4096);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -272,7 +276,7 @@ impl PlanProbe {
             resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
-            harness: HarnessKind::Claude,
+            harness,
             execution_policy: policy,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
@@ -304,7 +308,10 @@ impl PlanProbe {
         };
         let init = probe.message().await;
         assert_eq!(init["method"], "initialize");
-        probe.result(&init, json!({"protocolVersion": 1})).await;
+        probe.result(&init, json!({
+            "protocolVersion": 1,
+            "_meta": {"jetbrains": {"air": {"version": 1, "capabilities": ["nativeSubagentSessions"]}}}
+        })).await;
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
         probe
@@ -313,17 +320,19 @@ impl PlanProbe {
                 json!({"sessionId": "plan-session", "configOptions": if config {mode_config("plan")} else {json!([])}, "modes": {
                     "currentModeId": "plan", "availableModes": [
                         {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
-                        {"id": "bypassPermissions", "name": "Bypass"}
+                        {"id": "bypassPermissions", "name": "Bypass"},
+                        {"id": "agent", "name": "Agent"},
+                        {"id": "agent-full-access", "name": "Full access"},
+                        {"id": "allowAll", "name": "Allow all"}
                     ]
                 }}),
             )
             .await;
-        // Claude enforces an execution mode under both policies: guardian
-        // sessions take Auto, unconstrained sessions take bypassPermissions.
-        let enforced = if policy.is_unconstrained() {
-            "bypassPermissions"
-        } else {
-            "auto"
+        let Some(enforced) = harness
+            .execution_enforcement(policy)
+            .and_then(|mode| mode.acp_mode())
+        else {
+            return probe;
         };
         let mode = probe.message().await;
         if config {
@@ -411,11 +420,19 @@ impl PlanProbe {
     }
 
     async fn answer(&mut self, id: &str) -> std::result::Result<(), String> {
+        self.answer_with(id, implement()).await
+    }
+
+    async fn answer_with(
+        &mut self,
+        id: &str,
+        answer: ElicitationResponse,
+    ) -> std::result::Result<(), String> {
         let (resolved, response) = oneshot::channel();
         self.commands
             .send(CommandRequest::ResolveElicitation {
                 elicitation_id: id.into(),
-                response: implement(),
+                response: answer,
                 resolved,
             })
             .await
@@ -941,6 +958,220 @@ async fn close_is_applied_when_the_harness_lacks_session_close() {
     }
 }
 
+#[tokio::test]
+async fn unconstrained_tool_permissions_are_auto_approved_for_every_harness() {
+    let once = json!({"optionId": "one-time-id", "name": "Approve", "kind": "allow_once"});
+    let always = json!({"optionId": "persistent-id", "name": "Approve", "kind": "allow_always"});
+    let reject = json!({"optionId": "reject", "name": "No", "kind": "reject_once"});
+    for harness in HarnessKind::ALL {
+        let mut probe =
+            PlanProbe::with_harness(ExecutionPolicy::Unconstrained, false, harness).await;
+        for (options, expected) in [
+            (
+                vec![always.clone(), reject.clone(), once.clone()],
+                "one-time-id",
+            ),
+            (vec![once.clone(), always.clone()], "one-time-id"),
+            (vec![reject.clone(), always.clone()], "persistent-id"),
+        ] {
+            // Claude's live requests both included wildcard deletion in /tmp/snip.
+            // Display names deliberately agree: approval must use kind and ID.
+            probe
+                .send(json!({
+                    "jsonrpc": "2.0", "id": "delete-ask", "method": "session/request_permission",
+                    "params": {
+                        "sessionId": "plan-session",
+                        "toolCall": {
+                            "toolCallId": "delete-tool", "kind": "execute",
+                            "title": "cd /tmp/snip && rm -f *",
+                            "rawInput": {"command": "cd /tmp/snip && rm -f *"}
+                        },
+                        "options": options
+                    }
+                }))
+                .await;
+            let answer = probe.message().await;
+            assert_eq!(answer["id"], "delete-ask");
+            assert_eq!(answer["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(answer["result"]["outcome"]["optionId"], expected);
+        }
+        assert!(
+            probe.answer("tool-permission-1").await.is_err(),
+            "auto-approval must not leave a pending form"
+        );
+        probe.close().await;
+        while let Ok(event) = probe.events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    RuntimeEvent::ElicitationRequested { .. } | RuntimeEvent::Warning { .. }
+                ),
+                "unexpected permission event: {event:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unconstrained_permission_without_allow_reports_error_without_waiting() {
+    for options in [
+        json!([]),
+        json!([{"optionId": "reject", "name": "No", "kind": "reject_once"}]),
+    ] {
+        let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
+        probe.send(json!({
+            "jsonrpc": "2.0", "id": "no-allow", "method": "session/request_permission",
+            "params": {
+                "sessionId": "plan-session",
+                "toolCall": {"toolCallId": "no-allow-tool", "kind": "execute", "title": "Run command"},
+                "options": options
+            }
+        })).await;
+        let answer = probe.message().await;
+        assert_eq!(answer["id"], "no-allow");
+        assert_eq!(answer["error"]["code"], -32602);
+        assert!(
+            answer["error"]["data"]
+                .as_str()
+                .unwrap()
+                .contains("without offering an allow response")
+        );
+        assert!(probe.answer("tool-permission-1").await.is_err());
+        probe.close().await;
+        let mut warned = false;
+        while let Ok(event) = probe.events.try_recv() {
+            match event {
+                RuntimeEvent::Warning { message } => {
+                    assert!(
+                        message.contains("Claude Code")
+                            && message.contains("plan-session")
+                            && message.contains("no-allow-tool"),
+                        "{message}"
+                    );
+                    warned = true;
+                }
+                RuntimeEvent::ElicitationRequested { .. } => {
+                    panic!("an unanswerable request must not leave a form")
+                }
+                _ => {}
+            }
+        }
+        assert!(warned, "the malformed request must be reported");
+    }
+}
+
+#[tokio::test]
+async fn unconstrained_native_child_tool_permissions_are_auto_approved() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "plan-session", "update": {
+                "sessionUpdate": "subagent_spawned", "subagentSessionId": "child",
+                "name": "worker", "task": "inspect", "capabilities": {}
+            }}
+        }))
+        .await;
+    loop {
+        if let RuntimeEvent::NativeAgent { .. } = probe.event().await {
+            break;
+        }
+    }
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "id": "child-ask", "method": "session/request_permission",
+            "params": {
+                "sessionId": "child",
+                "toolCall": {"toolCallId": "child-tool", "kind": "execute", "title": "Run command"},
+                "options": [{"optionId": "allow-once", "name": "Yes", "kind": "allow_once"}]
+            }
+        }))
+        .await;
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "child-ask");
+    assert_eq!(answer["result"]["outcome"]["optionId"], "allow-once");
+    probe.close().await;
+    while let Ok(event) = probe.events.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                RuntimeEvent::ElicitationRequested { .. } | RuntimeEvent::Warning { .. }
+            ),
+            "unexpected child permission event: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unconstrained_plan_permissions_still_wait_for_approval_for_every_harness() {
+    for harness in HarnessKind::ALL {
+        let mut probe =
+            PlanProbe::with_harness(ExecutionPolicy::Unconstrained, false, harness).await;
+        probe
+            .send(json!({
+                "jsonrpc": "2.0", "id": "plan-ask", "method": "session/request_permission",
+                "params": permission("Implement the parser.", &["bypassPermissions", "reject"])
+            }))
+            .await;
+        let request = loop {
+            match probe.event().await {
+                RuntimeEvent::ElicitationRequested { request } => break request,
+                RuntimeEvent::Warning { message } => {
+                    panic!("plan approval must not warn: {message}")
+                }
+                _ => {}
+            }
+        };
+        assert!(request.id.starts_with("plan-review-"));
+        probe.no_message().await;
+        probe
+            .answer_with(&request.id, ElicitationResponse::Decline)
+            .await
+            .unwrap();
+        let answer = probe.message().await;
+        assert_eq!(answer["id"], "plan-ask");
+        assert_eq!(answer["result"]["outcome"]["optionId"], "reject");
+        probe.close().await;
+    }
+}
+
+#[tokio::test]
+async fn unconstrained_user_questions_still_wait_for_an_answer() {
+    let mut probe = PlanProbe::new(ExecutionPolicy::Unconstrained).await;
+    probe
+        .send(json!({
+            "jsonrpc": "2.0", "id": "question", "method": "elicitation/create",
+            "params": {
+                "sessionId": "plan-session", "mode": "form", "message": "Which file?",
+                "requestedSchema": {"type": "object", "required": ["file"], "properties": {
+                    "file": {"type": "string", "title": "File", "enum": ["a.c", "b.c"]}
+                }}
+            }
+        }))
+        .await;
+    let request = loop {
+        if let RuntimeEvent::ElicitationRequested { request } = probe.event().await {
+            break request;
+        }
+    };
+    assert_eq!(request.message, "Which file?");
+    probe.no_message().await;
+    probe
+        .answer_with(
+            &request.id,
+            ElicitationResponse::Accept {
+                content: BTreeMap::from([("file".into(), ElicitationValue::String("b.c".into()))]),
+            },
+        )
+        .await
+        .unwrap();
+    let answer = probe.message().await;
+    assert_eq!(answer["id"], "question");
+    assert_eq!(answer["result"]["action"], "accept");
+    assert_eq!(answer["result"]["content"]["file"], "b.c");
+    probe.close().await;
+}
+
 /// A tool permission request that is not a plan review must reach the user as
 /// a form instead of being cancelled, which the adapter reports to the agent
 /// as "Tool use aborted".
@@ -1143,10 +1374,9 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
         let request = loop {
             match probe.event().await {
                 RuntimeEvent::ElicitationRequested { request } => break request,
-                RuntimeEvent::Warning { message } => assert_ne!(
-                    message, UNEXPECTED_PERMISSION_REQUEST_WARNING,
-                    "plan approval is an expected question"
-                ),
+                RuntimeEvent::Warning { message } => {
+                    panic!("plan approval must not warn: {message}")
+                }
                 _ => {}
             }
         };
