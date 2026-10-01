@@ -902,7 +902,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rustls",
- "semver",
  "serde",
  "serde_json",
  "sysinfo",
