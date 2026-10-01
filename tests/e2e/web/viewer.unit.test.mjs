@@ -985,7 +985,7 @@ test('path suggestions abort superseded requests and drop stale replies', async 
       }),
   });
   vm.runInContext(
-    sourceBetween('function attachPathSuggestions(', '\nfunction pathField('),
+    sourceBetween('const pathSuggestionOwners = new Map();', '\nfunction pathField('),
     context,
   );
   context.input = input;

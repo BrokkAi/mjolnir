@@ -2262,25 +2262,41 @@ const PATH_SUGGESTION_DELAY_MS = 250;
 /// `owner/repo` shorthand. The controller applies the same predicate.
 const looksLikePath = text => /^[\/~.]/.test(text) || /^[A-Za-z]:[\\/]/.test(text);
 
+/// Suggestion state per path field id. The step re-renders (and replaces the
+/// input) when the project list finishes loading or a snapshot changes what the
+/// step shows, so the state outlives any one input element: the new input
+/// adopts it and an in-flight reply for the current value still lands.
+const pathSuggestionOwners = new Map();
+
 /// Live suggestions beneath one path field.
 ///
 /// The list only ever suggests. It never rewrites text that is being typed,
 /// which is why the controller's shared-prefix `insert` is ignored here. A
 /// reply is shown only if it still answers what the field holds: a request
-/// that was superseded, a value that has changed, or a field that has lost
-/// focus all drop the answer instead of pushing it under the person.
+/// that was superseded, a value or host that has changed, or a field that has
+/// lost focus all drop the answer instead of pushing it under the person.
 function attachPathSuggestions(input, complete) {
   const list = el('div', 'field-suggestions hidden');
   list.setAttribute('role', 'listbox');
   input.after(list);
-  const state = { timer: null, controller: null, matches: [], selected: 0, rows: [], list };
+  // One owner per field id; `state.input` is the element currently mounted.
+  let state = pathSuggestionOwners.get(input.id);
+  if (!state) {
+    state = { timer: null, controller: null, matches: [], selected: 0, rows: [], truncated: false, prefix: null, host: null };
+    if (input.id) pathSuggestionOwners.set(input.id, state);
+  }
+  state.input = input;
+  state.list = list;
+  state.complete = complete;
+  const current = () => state.input === input;
 
   const hide = () => {
     state.matches = [];
     state.rows = [];
     state.selected = 0;
-    list.replaceChildren();
-    list.classList.add('hidden');
+    state.prefix = null;
+    state.list.replaceChildren();
+    state.list.classList.add('hidden');
   };
 
   const accept = index => {
@@ -2300,7 +2316,7 @@ function attachPathSuggestions(input, complete) {
     );
   };
 
-  const render = truncated => {
+  const render = () => {
     state.rows = state.matches.map((candidate, index) => {
       const row = el('button', 'palette-row');
       row.type = 'button';
@@ -2315,13 +2331,19 @@ function attachPathSuggestions(input, complete) {
       return row;
     });
     const rows = [...state.rows];
-    if (truncated) rows.push(el('div', 'palette-row dim', 'More matches \u2014 keep typing'));
-    list.replaceChildren(...rows);
-    list.classList.remove('hidden');
+    if (state.truncated) rows.push(el('div', 'palette-row dim', 'More matches — keep typing'));
+    state.list.replaceChildren(...rows);
+    state.list.classList.remove('hidden');
   };
 
+  // A replacement input adopts the list the previous input had earned, but
+  // only while it still answers what the field holds.
+  if (state.matches.length && state.prefix === input.value && state.host === complete.host()) render();
+  else hide();
+
   const fetchSuggestions = async () => {
-    const prefix = input.value;
+    const prefix = state.input.value;
+    const host = state.complete.host();
     const controller = new AbortController();
     state.controller = controller;
     let answer;
@@ -2329,7 +2351,7 @@ function attachPathSuggestions(input, complete) {
       answer = await request('/api/paths/complete', {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify({ target_id: complete.host(), prefix, kind: complete.kind }),
+        body: JSON.stringify({ target_id: host, prefix, kind: state.complete.kind }),
       });
     } catch {
       // An abort, a lost connection, and a host that cannot list the
@@ -2337,17 +2359,25 @@ function attachPathSuggestions(input, complete) {
       if (state.controller === controller) hide();
       return;
     }
-    if (controller.signal.aborted || input.value !== prefix || document.activeElement !== input) return;
+    // Judge the reply against the field as it is now, not the element that
+    // asked: a re-render may have replaced it with one holding the same text.
+    const now = state.input;
+    if (controller.signal.aborted || now.value !== prefix || document.activeElement !== now
+      || state.complete.host() !== host) return;
     state.matches = (answer && answer.candidates) || [];
     state.selected = 0;
     if (!state.matches.length) {
       hide();
       return;
     }
-    render(Boolean(answer.truncated));
+    state.prefix = prefix;
+    state.host = host;
+    state.truncated = Boolean(answer.truncated);
+    render();
   };
 
   input.addEventListener('input', () => {
+    if (!current()) return;
     clearTimeout(state.timer);
     if (state.controller) state.controller.abort();
     state.controller = null;
@@ -2358,7 +2388,7 @@ function attachPathSuggestions(input, complete) {
   });
 
   input.addEventListener('keydown', event => {
-    if (!state.matches.length) return;
+    if (!current() || !state.matches.length) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       const delta = event.key === 'ArrowDown' ? 1 : -1;
@@ -2373,7 +2403,11 @@ function attachPathSuggestions(input, complete) {
     }
   });
 
-  input.addEventListener('blur', hide);
+  // Removing a focused input may blur it; that is a re-render, not the
+  // person leaving the field.
+  input.addEventListener('blur', () => {
+    if (current() && input.isConnected) hide();
+  });
 }
 function pathField(label, id, value, onInput, complete = null) {
   const field = textField(label, id, value, onInput);

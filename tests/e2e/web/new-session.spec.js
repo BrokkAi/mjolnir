@@ -70,7 +70,10 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       state.completions.push(body);
       return json(await state.complete(body));
     }
-    if (pathname === '/api/projects') return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
+    if (pathname === '/api/projects') {
+      if (state.holdCatalog) await state.holdCatalog;
+      return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
+    }
     if (pathname === '/api/projects/discover') {
       const body = route.request().postDataJSON();
       state.discoveries.push(body);
@@ -205,6 +208,39 @@ test('a project directory suggests paths on its own host and a URL never searche
   await page.locator('#new-project-source').fill('owner/repo');
   await page.waitForTimeout(400);
   expect(state.completions).toHaveLength(2);
+});
+
+// The project list finishing re-renders the step and replaces the field. A
+// slow machine makes that land after the person has typed.
+test('path suggestions survive the step re-rendering while a reply is pending', async ({ page }) => {
+  const state = await mount(page);
+  let finishCatalog;
+  state.holdCatalog = new Promise(resolve => { finishCatalog = resolve; });
+  let answer;
+  const held = new Promise(resolve => { answer = resolve; });
+  state.complete = async () => { await held; return { candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false }; };
+  await projectStep(page, 'local');
+  const directory = page.locator('#new-project-directory');
+  await directory.fill('/work/re');
+  await expect.poll(() => state.completions.length).toBe(1);
+  finishCatalog();
+  await expect(page.locator('#new-step')).not.toContainText('Refreshing recent projects');
+  answer();
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveCount(2);
+  await expect(page.locator('#new-project-directory')).toHaveValue('/work/re');
+  await expect(page.locator('#new-project-directory')).toBeFocused();
+
+  // A reply for an older value never shows.
+  state.completions.length = 0;
+  let late;
+  state.complete = async body => { if (body.prefix === '/work/rep') await new Promise(resolve => { late = resolve; }); return { candidates: ['/old/'], insert: '', truncated: false }; };
+  await page.locator('#new-project-directory').pressSequentially('p');
+  await expect.poll(() => state.completions.length).toBe(1);
+  await page.locator('#new-project-directory').pressSequentially('o');
+  late();
+  await page.waitForTimeout(300);
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveCount(1);
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveText('/old/');
 });
 
 test('empty projects show choices and a pasted source retries then continues directly to review', async ({ page }) => {
