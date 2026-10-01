@@ -190,12 +190,11 @@ pub fn runtime_missing_on_host(
     local_engine_command(template).is_some_and(|engine| !program_on_path(engine, path))
 }
 
-/// Whether `program` is a file in one of the directories of `path`, a PATH
-/// value. A missing PATH finds nothing.
+/// Whether `program` is found in one of the directories of `path`, a PATH
+/// value, under the platform's executable extensions (`docker.exe` on
+/// Windows). A missing PATH finds nothing.
 pub fn program_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
-    path.is_some_and(|path| {
-        std::env::split_paths(path).any(|directory| directory.join(program).is_file())
-    })
+    mj_core::program_path::find_program_on_path(program, path).is_some()
 }
 
 /// Why local Docker cannot run sessions: one sentence per case, where the

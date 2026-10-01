@@ -194,22 +194,7 @@ fn find_binary() -> Option<PathBuf> {
 }
 
 fn find_binary_in_path(path: &OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path).find_map(|directory| {
-        tailscale_binary_names()
-            .iter()
-            .map(|name| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-#[cfg(windows)]
-fn tailscale_binary_names() -> &'static [&'static str] {
-    &["tailscale.exe", "tailscale"]
-}
-
-#[cfg(not(windows))]
-fn tailscale_binary_names() -> &'static [&'static str] {
-    &["tailscale"]
+    mj_core::program_path::find_program_on_path("tailscale", Some(path))
 }
 
 #[cfg(target_os = "macos")]
