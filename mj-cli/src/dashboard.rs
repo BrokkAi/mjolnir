@@ -604,44 +604,58 @@ pub(crate) async fn run_dashboard_for_workspace(
     let mut splash_tick = tokio::time::interval(crate::splash::FRAME);
     splash_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // One wakeup is one frame. `ratatui` writes only the cells that differ
-    // from the previous frame, so an unconditional rebuild costs CPU time and
-    // never terminal output. The two timer arms below are the only wakeups
-    // that can decline a frame, because they fire whether or not anything they
-    // display has moved.
-    let mut redraw = true;
+    // A wakeup applies what it brought and marks the surface out of date; the
+    // pacer decides when a frame shows it. `ratatui` writes only the cells
+    // that differ, but building a frame costs the same whatever moved, so
+    // background updates share one frame per interval while input is drawn
+    // at once. The first frame is drawn before anything is awaited.
+    let mut pacer = FramePacer::new(FRAME_INTERVAL);
+    pacer.mark_urgent();
     loop {
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
         }
         // A hint that reaches the bar needs the frame that draws it, whatever
-        // this wakeup was otherwise going to do.
+        // this wakeup was otherwise going to do: the next pass records it as
+        // shown.
         if hints.pump(
             &context.notices,
             context.ready_for_a_hint(),
             std::time::Instant::now(),
         ) {
-            redraw = true;
+            pacer.mark_urgent();
         }
-        if redraw {
+        let started = tokio::time::Instant::now();
+        if pacer.should_draw(started) {
             context.draw()?;
+            pacer.drew(started, tokio::time::Instant::now());
         }
         // After the frame, so a bell never precedes the row it is about.
-        context.emit_notifications()?;
-        redraw = true;
+        if !pacer.pending() {
+            context.emit_notifications()?;
+        }
+        let now = tokio::time::Instant::now();
+        let feed_gate = pacer.feed_gate(now);
+        let deferred_frame = pacer.deferred_frame(now);
+        let mut input = false;
         let mut action = DashboardAction::None;
         let mut chat_outcome = mj_chat::chat::ChatEventOutcome::None;
         // The winning arm takes the message that woke the loop; the drains
-        // below batch whatever is queued behind it, so one wakeup is one draw.
+        // below batch whatever is queued behind it. The order is the
+        // priority: input first, so a key never waits behind a feed, then
+        // the timers, which fire at most once per period and so cannot
+        // starve the feeds after them. Feeds are held until a paced frame
+        // could show what they bring.
         tokio::select! {
-            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {}
-            () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {}
+            biased;
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
+                pacer.mark_urgent();
             }
-            _ = splash_tick.tick(), if context.splash.is_some() => {}
             event = next_terminal_event(&mut context.events) => {
+                input = true;
+                pacer.mark_urgent();
                 let Some(event) = event else { break };
                 if context.shutdown_requested {
                     continue;
@@ -749,61 +763,59 @@ pub(crate) async fn run_dashboard_for_workspace(
                     event = next?;
                 }
             }
-            // The warm chat's own feeds: remote command results, its clipboard
-            // and history I/O, dictation, and the session view. They run
-            // whether or not the chat is on screen, which is what keeps an
-            // off-screen chat current.
-            () = pump_chats(&mut context.chats) => {
-                // A warm chat may be hidden by another tab or selection.
-                // Only conversations that were on screen advance their read
-                // receipts.
-                context.acknowledge_visible_chats();
+            // A drag held past a scrollable surface's edge keeps scrolling it
+            // and keeps extending the selection, the way a held pointer does
+            // in a terminal's own selection.
+            _ = autoscroll_tick.tick(), if context.autoscroll_request().is_some() => {
+                input = true;
+                pacer.mark_urgent();
+                context.apply_autoscroll()?;
             }
-            update = context.quota.wait(), if context.quota.is_open() => {
-                context.quota.accept(update);
+            () = tokio::time::sleep_until(deferred_frame.unwrap_or_else(frame_pacer::never)),
+                if deferred_frame.is_some() => {}
+            _ = splash_tick.tick(), if context.splash.is_some() => {
+                pacer.mark();
             }
-            update = context.worker.wait(), if context.worker.is_open() => {
-                context.worker.accept(update);
+            // Poll displayed time values without forcing a frame when none
+            // of the visible clocks or countdowns changed.
+            _ = clock_tick.tick() => {
+                // Resume search covers the moving "Last active" text, so the
+                // same clock that redraws the dialog rebuilds its rows.
+                context.dashboard.rebuild_resume_rows();
+                let mut redraw = context.clock_tick_redraws();
+                let presence = context.daemon_presence.borrow().clone();
+                redraw |= reconcile_daemon_failure(
+                    &mut context.dashboard,
+                    &presence,
+                    &mut context.daemon_running_again_since,
+                    std::time::Instant::now(),
+                );
+                redraw |= expire_daemon_running_again(
+                    &context.notices,
+                    &mut context.daemon_running_again_since,
+                    std::time::Instant::now(),
+                );
+                // The startup pick fires at most once, and opening the
+                // conversation it chooses has to reach the screen.
+                redraw |= context.maybe_open_startup_session();
+                if redraw {
+                    pacer.mark();
+                }
             }
-            update = context.runtime_reviews.wait(), if context.runtime_reviews.is_open() => {
-                context.runtime_reviews.accept(update);
+            // Input redraws never advance animations. Only visible activity
+            // arms this timer; settled conversations keep the slow clock.
+            _ = animation_tick.tick(), if context.needs_animation() => {
+                if context.dashboard.animation_changed()
+                    || context.visible_chat().is_some_and(|chat| chat.animation_changed())
+                {
+                    pacer.mark();
+                }
             }
-            update = context.runtime_notices.wait(), if context.runtime_notices.is_open() => {
-                context.runtime_notices.accept(update);
-            }
-            update = context.runtime_config.wait(), if context.runtime_config.is_open() => {
-                context.runtime_config.accept(update);
-            }
-            update = context.runtime_health.wait(), if context.runtime_health.is_open() => {
-                context.runtime_health.accept(update);
-            }
-            update = context.runtime_state.wait(), if context.runtime_state.is_open() => {
-                context.runtime_state.accept(update);
-            }
-            update = context.capacity.wait(), if context.capacity.is_open() => {
-                context.capacity.accept(update);
-            }
-            options = context.aws_options.wait(), if context.aws_options.is_open() => {
-                context.aws_options.accept(options);
-            }
-            profile = context.import_profiles.wait(), if context.import_profiles.is_open() => {
-                context.import_profiles.accept(profile);
-            }
-            update = context.import_tasks.wait(), if context.import_tasks.is_open() => {
-                context.import_tasks.accept(update);
-            }
-            update = context.lifecycle.wait(), if context.lifecycle.is_open() => {
-                context.lifecycle.accept(update);
-            }
-            update = context.dashboard_io.wait(), if context.dashboard_io.is_open() => {
-                context.dashboard_io.accept(update);
-            }
-            _ = context.critical_operations_changed.changed(),
-                if context.shutdown_requested => {}
             // The keep-alive no longer starts a daemon, so a daemon that is
             // gone has to be visible instead of silently replaced.
             changed = context.daemon_presence.changed() => {
                 if changed.is_ok() {
+                    pacer.mark();
                     let presence = context.daemon_presence.borrow_and_update().clone();
                     match presence {
                         crate::daemon::DaemonPresence::Upgraded(executable) => {
@@ -829,46 +841,79 @@ pub(crate) async fn run_dashboard_for_workspace(
                     }
                 }
             }
-            // Poll displayed time values without forcing a frame when none
-            // of the visible clocks or countdowns changed.
-            _ = clock_tick.tick() => {
-                // Resume search covers the moving "Last active" text, so the
-                // same clock that redraws the dialog rebuilds its rows.
-                context.dashboard.rebuild_resume_rows();
-                redraw = context.clock_tick_redraws();
-                let presence = context.daemon_presence.borrow().clone();
-                redraw |= reconcile_daemon_failure(
-                    &mut context.dashboard,
-                    &presence,
-                    &mut context.daemon_running_again_since,
-                    std::time::Instant::now(),
-                );
-                redraw |= expire_daemon_running_again(
-                    &context.notices,
-                    &mut context.daemon_running_again_since,
-                    std::time::Instant::now(),
-                );
-                // The startup pick fires at most once, and opening the
-                // conversation it chooses has to reach the screen.
-                redraw |= context.maybe_open_startup_session();
+            _ = context.critical_operations_changed.changed(),
+                if context.shutdown_requested => {
+                pacer.mark_urgent();
             }
-            // Input redraws never advance animations. Only visible activity
-            // arms this timer; settled conversations keep the slow clock.
-            _ = animation_tick.tick(), if context.needs_animation() => {
-                redraw = context.dashboard.animation_changed()
-                    || context.visible_chat().is_some_and(|chat| chat.animation_changed());
+            () = context.pane_size_persistence.wait(), if context.pane_size_persistence.is_running() => {
+                pacer.mark();
             }
-            // A drag held past a scrollable surface's edge keeps scrolling it
-            // and keeps extending the selection, the way a held pointer does
-            // in a terminal's own selection.
-            _ = autoscroll_tick.tick(), if context.autoscroll_request().is_some() => {
-                context.apply_autoscroll()?;
+            () = context.layout_persistence.wait(), if context.layout_persistence.is_running() => {
+                pacer.mark();
+            }
+            // The warm chat's own feeds: remote command results, its clipboard
+            // and history I/O, dictation, and the session view. They run
+            // whether or not the chat is on screen, which is what keeps an
+            // off-screen chat current.
+            () = paced(feed_gate, pump_chats(&mut context.chats)) => {
+                pacer.mark();
+                // A warm chat may be hidden by another tab or selection.
+                // Only conversations that were on screen advance their read
+                // receipts.
+                context.acknowledge_visible_chats();
+            }
+            update = paced(feed_gate, context.quota.wait()), if context.quota.is_open() => {
+                context.quota.accept(update);
+            }
+            update = paced(feed_gate, context.worker.wait()), if context.worker.is_open() => {
+                context.worker.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_reviews.wait()), if context.runtime_reviews.is_open() => {
+                context.runtime_reviews.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_notices.wait()), if context.runtime_notices.is_open() => {
+                context.runtime_notices.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_config.wait()), if context.runtime_config.is_open() => {
+                context.runtime_config.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_health.wait()), if context.runtime_health.is_open() => {
+                context.runtime_health.accept(update);
+            }
+            update = paced(feed_gate, context.runtime_state.wait()), if context.runtime_state.is_open() => {
+                context.runtime_state.accept(update);
+            }
+            update = paced(feed_gate, context.capacity.wait()), if context.capacity.is_open() => {
+                context.capacity.accept(update);
+            }
+            update = paced(feed_gate, context.aws_options.wait()), if context.aws_options.is_open() => {
+                context.aws_options.accept(update);
+            }
+            update = paced(feed_gate, context.import_profiles.wait()), if context.import_profiles.is_open() => {
+                context.import_profiles.accept(update);
+            }
+            update = paced(feed_gate, context.import_tasks.wait()), if context.import_tasks.is_open() => {
+                context.import_tasks.accept(update);
+            }
+            update = paced(feed_gate, context.lifecycle.wait()), if context.lifecycle.is_open() => {
+                context.lifecycle.accept(update);
+            }
+            update = paced(feed_gate, context.dashboard_io.wait()), if context.dashboard_io.is_open() => {
+                context.dashboard_io.accept(update);
             }
         }
-        // A background message can be queued behind a timer that won the
-        // select, and the drain applies it here. Its result has to reach the
-        // screen even when the timer itself had nothing to show.
-        redraw |= context.drain_feeds();
+        if input {
+            // The frame that shows this input is drawn before any queued
+            // feed message is applied; the next wakeup drains them. Only the
+            // bookkeeping that input itself can invalidate runs now.
+            context.cancel_stale_path_input();
+            context.refresh_open_review();
+        } else if context.drain_feeds() {
+            // A background message can be queued behind a timer that won the
+            // select, and the drain applies it here. Its result has to reach
+            // the screen even when the timer itself had nothing to show.
+            pacer.mark();
+        }
         if let Some(workspace_id) = context.dashboard.active_workspace_id()
             && context.known_workspace_layouts.contains(workspace_id)
             && context
@@ -994,6 +1039,8 @@ pub(crate) use upgrade::UpgradeResume;
 mod drafts;
 mod drains;
 pub(crate) use drains::{refresh_open_chats, refresh_subagent_counts};
+mod frame_pacer;
+use frame_pacer::{FRAME_INTERVAL, FramePacer, paced};
 mod session_state;
 mod surface;
 

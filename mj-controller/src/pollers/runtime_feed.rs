@@ -18,7 +18,7 @@ pub struct RemoteDashboardWorkerPoller {
 }
 
 /// Records and lifecycle ownership must reach the surface in the same frame.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RuntimeStateUpdate {
     pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
     pub native_agents: SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
