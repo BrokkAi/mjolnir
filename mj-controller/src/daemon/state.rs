@@ -82,6 +82,7 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
+            profile_catalog: std::sync::OnceLock::new(),
             recovery_observer,
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),

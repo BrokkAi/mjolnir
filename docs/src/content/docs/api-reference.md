@@ -382,9 +382,10 @@ single model does not mean a single profile. The other modes take no other
 fields. The API spells the modes with underscores; `mj new --subagents` spells
 them with hyphens (`single-model`); both interfaces offer Native, single model,
 and None. An explicit policy overrides the profile for this session without
-changing the profile's settings.
+changing the profile's settings. Existing sessions retain their recorded policy
+when profile defaults change or sessions resume; Move can explicitly change it.
 Only Claude and Codex sessions accept a mode other than `native`. When
-`subagents` is omitted, the session uses the selected profile’s setting
+`subagents` is omitted, the session uses the selected profile’s creation default
 (Native when unset). An unsupported mode or an unavailable model answers
 `422` with the reason in the body.
 

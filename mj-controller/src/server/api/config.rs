@@ -19,11 +19,19 @@ pub(super) async fn subagent_options(
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::subagent::SubagentOptions>, ApiFailure> {
     crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
-    let options = crate::controller::profile_config::subagent_options(profile_id, query.model)
+    let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
         .await
-        .map_err(|error| {
-            ApiFailure::unavailable(format!("subagent discovery failed: {error:#}"))
-        })?;
+        .map_err(|error| ApiFailure::unavailable(error.to_string()))?
+        .map_err(|error| ApiFailure::unavailable(error.to_string()))?;
+    let backend = backend(&state)?;
+    let options = crate::controller::profile_config::subagent_options_with(
+        &config,
+        &profile_id,
+        query.model,
+        |id, model| backend.profile_config(id, model, false),
+    )
+    .await
+    .map_err(|error| ApiFailure::unavailable(format!("subagent discovery failed: {error:#}")))?;
     Ok(Json(options))
 }
 

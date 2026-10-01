@@ -1573,3 +1573,35 @@ fn a_session_nobody_named_is_listed_by_the_title_it_was_created_with() {
     session.session_title_override = Some(session.id.clone());
     assert_eq!(session.listed_title(), session.id);
 }
+
+#[test]
+fn active_sessions_allow_creation_defaults_but_protect_their_profile_installation() {
+    let state = sample_state();
+    let before = sample_config();
+    let profile_id = &state.sessions.values().next().unwrap().last_profile;
+    let mut after = before.clone();
+    after.profiles.get_mut(profile_id).unwrap().subagents =
+        crate::subagent::SubagentPolicy::SingleModel {
+            model: "creation-default".into(),
+            effort: Some("low".into()),
+        };
+    state.validate_setup_update(&before, &after).unwrap();
+    for field in ["harness", "home", "environment", "remove"] {
+        let mut changed = after.clone();
+        let profile = changed.profiles.get_mut(profile_id).unwrap();
+        match field {
+            "harness" => profile.kind = HarnessKind::Claude,
+            "home" => profile.home = "/different/home".into(),
+            "environment" => {
+                profile.environment = [("NEW".into(), "value".into())].into_iter().collect()
+            }
+            _ => {
+                changed.profiles.remove(profile_id);
+            }
+        }
+        assert!(
+            state.validate_setup_update(&before, &changed).is_err(),
+            "{field}"
+        );
+    }
+}

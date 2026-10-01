@@ -2186,6 +2186,11 @@ impl SubagentBackend for ApiBackend {
                         .model_capabilities(profile, model)
                         .await
                 }
+                None if !refresh => Ok(self
+                    .profile_catalog
+                    .capabilities(&[profile])
+                    .await?
+                    .remove(0)),
                 model => crate::controller::profile_config::discover(profile, model, refresh).await,
             }
         })

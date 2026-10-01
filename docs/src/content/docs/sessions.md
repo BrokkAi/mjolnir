@@ -363,6 +363,10 @@ prepares and checks the destination, interrupts the active turn only after you
 confirm, captures a verified checkpoint, and restores the same logical session
 on the destination. Like the resume wizard, the Move wizard skips its target
 step when only one target suits the session and it has no size to set.
+The Move review remains available even when both destination pickers are
+skipped. Its Subagents, Model, and Effort fields start from the session's
+recorded policy. Changing the destination profile preserves that policy;
+only an explicit edit sends an override.
 
 How much is rebuilt depends on what changes. When the target, the attached
 directories, and the resource allocation all stay the same, Move replaces only

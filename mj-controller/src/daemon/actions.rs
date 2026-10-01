@@ -43,10 +43,12 @@ pub(super) async fn handle_action(
                 biased;
                 _ = cancellation.cancelled() => bail!("subagent discovery cancelled by daemon shutdown"),
                 options = async move {
-                    match config {
-                        Some(config) => crate::controller::profile_config::subagent_options_for(*config, profile, model).await,
-                        None => crate::controller::profile_config::subagent_options(profile, model).await,
-                    }
+                    let config = match config {
+                        Some(config) => *config,
+                        None => state.worker_controller_projection().config,
+                    };
+                    state.profile_catalog.get().context("profile catalogue unavailable")?
+                        .options_for(&config, &profile, model).await
                 } => {
                     Ok(DaemonReply::SubagentOptions(options?))
                 }

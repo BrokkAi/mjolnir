@@ -642,7 +642,7 @@ pub(super) fn search_aliases(path: &[String]) -> &'static [&'static str] {
 
 pub(super) fn help(path: &[String]) -> &'static str {
     if path.len() >= 3 && path[0] == "profiles" && path[2] == "subagents" {
-        return "Delegation for new sessions and Moves using this profile. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort.";
+        return "Creation defaults copied into new sessions. Existing sessions keep their own policy; edit it in Move. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort.";
     }
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {

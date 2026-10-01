@@ -635,12 +635,21 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
-    /// Delegation for new sessions and Moves using this profile.
+    /// Creation default copied into each new session; existing sessions own their policy.
     #[serde(
         default,
         skip_serializing_if = "crate::subagent::SubagentPolicy::is_native"
     )]
     pub subagents: crate::subagent::SubagentPolicy,
+}
+
+/// Inputs that change advertised models and efforts. Session defaults and UI
+/// preferences are deliberately absent. Use this projection in every cache.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProfileDiscoveryInputs {
+    pub kind: HarnessKind,
+    pub home: PathBuf,
+    pub environment: BTreeMap<String, String>,
 }
 
 /// The transcript budget a profile without an explicit `context_window_bytes`
@@ -654,6 +663,14 @@ pub const GUARDIAN_REVIEW_NEWEST_FLASH: &str = "newest-flash";
 pub const GUARDIAN_REVIEW_SESSION: &str = "session";
 
 impl HarnessProfile {
+    pub fn discovery_inputs(&self) -> ProfileDiscoveryInputs {
+        ProfileDiscoveryInputs {
+            kind: self.kind,
+            home: self.home.clone(),
+            environment: self.environment.resolved().clone(),
+        }
+    }
+
     /// Discovery identifies an installation independently of user settings.
     pub fn same_installation(&self, other: &Self) -> bool {
         self.kind == other.kind && self.home == other.home

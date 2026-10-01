@@ -194,38 +194,13 @@ impl ReviewSettingsDialog {
     fn value_label(
         value: Option<&str>,
         choices: &[SessionConfigChoice],
-        capabilities_discovered: bool,
+        discovered: bool,
     ) -> String {
-        let Some(value) = value else {
-            return "Profile default".to_owned();
-        };
-        choices
-            .iter()
-            .find(|choice| choice.value == value)
-            .map(|choice| choice.name.clone())
-            .unwrap_or_else(|| {
-                let state = if capabilities_discovered {
-                    "unavailable"
-                } else {
-                    "unverified"
-                };
-                format!("{value} ({state})")
-            })
+        crate::widgets::config_choice_label(value, choices, discovered)
     }
 
     fn choice_values(value: Option<&str>, choices: &[SessionConfigChoice]) -> Vec<Option<String>> {
-        let mut values = vec![None];
-        values.extend(choices.iter().map(|choice| Some(choice.value.clone())));
-        if let Some(value) = value
-            && !values
-                .iter()
-                .any(|candidate| candidate.as_deref() == Some(value))
-        {
-            // Keep an invalid value in the form until the user explicitly
-            // changes it. A refresh must never silently pick a new model.
-            values.push(Some(value.to_owned()));
-        }
-        values
+        crate::widgets::config_choice_values(value, choices)
     }
 
     fn focused(&self) -> ReviewSettingsFocus {

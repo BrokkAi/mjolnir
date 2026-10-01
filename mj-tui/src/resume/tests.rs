@@ -304,6 +304,39 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
     ));
 }
 
+#[test]
+fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
+    use mj_core::subagent::SubagentPolicy;
+    for retained in [None, Some(SubagentPolicy::None)] {
+        let mut session = running_session();
+        session.subagents = Some(SubagentPolicy::AllModels);
+        let mut configuration = config();
+        configuration.profiles.get_mut("codex-1").unwrap().subagents =
+            SubagentPolicy::SingleModel {
+                model: "creation-default".into(),
+                effort: None,
+            };
+        let mut dashboard =
+            DashboardState::new(configuration, state_with(vec![session]), BTreeMap::new());
+        let mut operation = incomplete_move();
+        operation.selection.subagents = retained.clone();
+        operation.selection.target_template_id = Some("podman".into());
+        dashboard.begin_move_recovery(operation);
+        let Mode::Resume(wizard) = &dashboard.mode else {
+            panic!("recovery wizard");
+        };
+        assert_eq!(
+            wizard.subagents.policy,
+            retained.clone().unwrap_or(SubagentPolicy::AllModels)
+        );
+        assert_eq!(wizard.subagent_change(&dashboard), retained);
+        assert_eq!(
+            dashboard.state.sessions["session-1"].subagents,
+            Some(SubagentPolicy::AllModels)
+        );
+    }
+}
+
 fn replace_search(dashboard: &mut DashboardState, search: &str) {
     let Mode::ResumeDialog(dialog) = &mut dashboard.mode else {
         panic!("expected the resume dialog");

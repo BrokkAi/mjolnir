@@ -143,6 +143,8 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     projects: Arc<crate::project_catalog::Catalog>,
+    profile_catalog:
+        std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>,
     recovery_observer: RecoveryObserver,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.

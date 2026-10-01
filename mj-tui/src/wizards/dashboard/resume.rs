@@ -87,6 +87,10 @@ impl DashboardState {
         mut wizard: ResumeWizard,
         profile_id: String,
     ) -> DashboardAction {
+        if wizard.subagent_change(self).is_some() && wizard.subagents.error().is_some() {
+            self.mode = Mode::Resume(wizard);
+            return DashboardAction::None;
+        }
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let mounts = wizard.mounts.mounts.clone();
         let clear_resource_allocation = matches!(
@@ -129,6 +133,7 @@ impl DashboardState {
         };
         if !wizard.moving
             || !matches!(wizard.step, WizardStep::Review | WizardStep::Launching)
+            || (wizard.subagent_change(self).is_some() && wizard.subagents.error().is_some())
             || wizard.preparing
             || wizard.preparation.is_some()
             || wizard.preparation_error.is_some()
