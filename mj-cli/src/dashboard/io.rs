@@ -1091,11 +1091,8 @@ impl DashboardContext {
                     self.dashboard.apply_mount_history(history);
                     self.dashboard
                         .apply_project_catalog_status(view.status.clone());
-                    if let mj_core::project_catalog::ProjectCatalogStatus::Failed { errors } =
-                        view.status
-                    {
-                        self.dashboard
-                            .set_notice(format!("Project discovery: {}", errors.join("; ")));
+                    if let Some(summary) = view.status.failure_summary() {
+                        self.dashboard.set_notice(summary);
                     } else {
                         self.dashboard.set_notice("Recent projects refreshed.");
                     }

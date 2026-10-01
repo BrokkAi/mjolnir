@@ -4235,6 +4235,24 @@ fn review_hides_the_worktree_choice_for_isolated_targets() {
         .unwrap();
     let bare = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(bare.contains("Create isolated checkout"), "{bare}");
+    let lines = buffer_lines(terminal.backend().buffer());
+    assert_eq!(
+        row_of(&lines, "Profile:") + 1,
+        row_of(&lines, "Project directory:")
+    );
+    assert_eq!(
+        row_of(&lines, "Project directory:") + 1,
+        row_of(&lines, "Target:")
+    );
+    assert_eq!(row_of(&lines, "Target:") + 1, row_of(&lines, "Compute:"));
+    assert_eq!(
+        row_of(&lines, "Compute:") + 2,
+        row_of(&lines, "Create isolated checkout")
+    );
+    assert_eq!(
+        row_of(&lines, "Create isolated checkout") + 1,
+        row_of(&lines, "Create a separate session-owned clone")
+    );
 }
 
 /// A bare local target with supported and unsupported harness profiles.
@@ -5437,8 +5455,8 @@ fn create_and_move_steps_keep_padding_and_separate_information() {
         assert!(dashboard.apply_move_preparation(id, move_preparation()));
         let lines = drawn(&mut dashboard, width, height);
         assert_dialog_spacing(&lines, "Move", "Cancel");
-        assert_eq!(row_of(&lines, "Profile:") + 2, row_of(&lines, "Project:"));
-        assert_eq!(row_of(&lines, "Target:") + 2, row_of(&lines, "Compute:"));
+        assert_eq!(row_of(&lines, "Profile:") + 1, row_of(&lines, "Project:"));
+        assert_eq!(row_of(&lines, "Target:") + 1, row_of(&lines, "Compute:"));
     }
 }
 
@@ -5648,7 +5666,10 @@ fn recent_projects_update_an_open_picker_and_failed_discovery_has_an_explicit_re
     dashboard.apply_mount_history(history.mount_history);
     dashboard.apply_project_catalog_status(
         mj_core::project_catalog::ProjectCatalogStatus::Failed {
-            errors: vec!["missing native project".into()],
+            errors: vec![
+                format!("missing native project: {}", "stale checkout; ".repeat(100)),
+                "fatal: not a git repository".into(),
+            ],
         },
     );
     let Mode::New(wizard) = &dashboard.mode else {
@@ -5661,14 +5682,21 @@ fn recent_projects_update_an_open_picker_and_failed_discovery_has_an_explicit_re
             .iter()
             .any(|entry| entry.source == "/work/discovered")
     );
-    assert!(
-        wizard
-            .project_picker
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("missing")
+    assert_eq!(
+        wizard.project_picker.error.as_deref(),
+        Some("Project discovery reported 2 errors. See daemon logs for details.")
     );
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(
+        rendered.contains("Project discovery reported 2 errors."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("stale checkout"), "{rendered}");
+    assert!(!rendered.contains("fatal:"), "{rendered}");
     activate_project_control(&mut dashboard, WizardControl::ProjectRetry);
     assert_eq!(
         dashboard.take_project_discovery(),

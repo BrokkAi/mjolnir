@@ -33,6 +33,20 @@ pub enum ProjectCatalogStatus {
     },
 }
 
+impl ProjectCatalogStatus {
+    /// Discovery details are logged by the daemon; keep picker notices bounded.
+    pub fn failure_summary(&self) -> Option<String> {
+        let Self::Failed { errors } = self else {
+            return None;
+        };
+        let count = errors.len();
+        let noun = if count == 1 { "error" } else { "errors" };
+        Some(format!(
+            "Project discovery reported {count} {noun}. See daemon logs for details."
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectCatalogView {
     pub projects: Vec<SavedProject>,

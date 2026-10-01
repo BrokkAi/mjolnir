@@ -716,7 +716,6 @@ pub(crate) fn render_review_wizard(
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::raw(""),
         Line::from(vec![
             Span::styled(format!("{project_label}: "), theme::muted()),
             Span::styled(
@@ -727,13 +726,11 @@ pub(crate) fn render_review_wizard(
             ),
             Span::styled(project_note, theme::muted()),
         ]),
-        Line::raw(""),
         Line::from(vec![
             Span::styled("Target: ", theme::muted()),
             Span::styled(target_id, Style::default().fg(theme::palette().accent)),
             Span::styled(format!(" ({})", target_label(target)), theme::muted()),
         ]),
-        Line::raw(""),
         Line::from(vec![
             Span::styled("Compute: ", theme::muted()),
             Span::raw(resource_allocation_description(allocation)),
@@ -853,7 +850,6 @@ pub(crate) fn render_review_wizard(
     let worktree_row = worktree.map(|(checked, available)| {
         lines.push(Line::raw(""));
         let row = lines.len() as u16;
-        lines.push(Line::raw(""));
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             if checked && available {

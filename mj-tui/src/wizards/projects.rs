@@ -272,12 +272,7 @@ impl DashboardState {
             return;
         }
         wizard.project_picker.loading = false;
-        wizard.project_picker.error = match status {
-            mj_core::project_catalog::ProjectCatalogStatus::Failed { errors } => {
-                Some(errors.join("; "))
-            }
-            _ => None,
-        };
+        wizard.project_picker.error = status.failure_summary();
     }
 
     pub fn take_project_discovery(&mut self) -> Option<DashboardAction> {
