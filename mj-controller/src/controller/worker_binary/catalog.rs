@@ -196,19 +196,38 @@ pub(super) fn stamp_guardian_reviewer(
     Ok(())
 }
 
-/// Prepend `model_catalog_json` to a staged Codex `config.toml`.
+/// The top-level key a staged Codex `config.toml` uses to name its catalog.
+const CATALOG_KEY: &str = "model_catalog_json";
+
+/// Point a staged Codex `config.toml` at the staged catalog.
 ///
 /// The key is top-level in Codex's configuration, and TOML puts every top-level
-/// key before the first table header, so the line goes at the front. Appending
-/// would make it a key of whichever table happens to come last, which Codex
-/// ignores. Profile validation guarantees the user wrote no such key.
+/// key before the first table header, so it is written into the root table.
+/// A profile may have written its own key — pointing at a catalog file of its
+/// own — so the staged copy replaces it rather than adding a second one, which
+/// would be a duplicate key Codex rejects outright. The replacement keeps the
+/// user's own decoration around the key. Only the staged copy changes; the
+/// profile's own `config.toml` is never written.
 pub(super) fn point_config_at_catalog(path: &Path) -> Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    std::fs::write(
-        path,
-        format!("model_catalog_json = \"{STAGED_CATALOG_FILE}\"\n{existing}"),
-    )
-    .with_context(|| format!("point {} at the staged model catalog", path.display()))
+    let mut document = existing
+        .parse::<toml_edit::Document>()
+        .with_context(|| format!("parse staged Codex configuration {}", path.display()))?;
+    match document.get_mut(CATALOG_KEY) {
+        Some(item) => {
+            let decor = item.as_value().map(|value| value.decor().clone());
+            let mut replacement = toml_edit::Value::from(STAGED_CATALOG_FILE);
+            if let Some(decor) = decor {
+                *replacement.decor_mut() = decor;
+            }
+            *item = toml_edit::Item::Value(replacement);
+        }
+        None => {
+            document[CATALOG_KEY] = toml_edit::value(STAGED_CATALOG_FILE);
+        }
+    }
+    std::fs::write(path, document.to_string())
+        .with_context(|| format!("point {} at the staged model catalog", path.display()))
 }
 
 /// Fetch a provider's catalog over HTTPS. Mirrors the bounded client the Coding

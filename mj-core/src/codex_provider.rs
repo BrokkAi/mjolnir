@@ -27,9 +27,10 @@ pub struct CodexProvider {
     pub env_key: Option<String>,
     /// True when the key is inline as `experimental_bearer_token`.
     pub inline_bearer_token: bool,
-    /// The top-level `model_catalog_json` path, when the user wrote one
-    /// themselves. Mjolnir generates this file for custom providers, so a
-    /// user-supplied value is rejected by profile validation.
+    /// The top-level `model_catalog_json` path, when the profile's Codex
+    /// `config.toml` names one. Mjolnir stages its own catalog and points the
+    /// staged configuration at that, replacing this key, so the file the path
+    /// names is ignored.
     pub model_catalog_json: Option<PathBuf>,
 }
 
