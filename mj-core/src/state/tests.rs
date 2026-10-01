@@ -1417,6 +1417,27 @@ fn first_prompt_is_not_used_as_an_acp_session_title() {
 }
 
 #[test]
+fn session_titles_are_bounded_by_characters_at_word_boundaries() {
+    assert_eq!(normalize_session_title(" \n\t "), None);
+    assert_eq!(
+        normalize_session_title("  short\n title \t").as_deref(),
+        Some("short title")
+    );
+    let exact = "界".repeat(256);
+    assert_eq!(normalize_session_title(&exact), Some(exact));
+    assert_eq!(
+        normalize_session_title(&"界".repeat(257)),
+        Some(format!("{}…", "界".repeat(255)))
+    );
+    let words = "word ".repeat(20_000);
+    assert_eq!(words.len(), 100_000);
+    assert_eq!(
+        normalize_session_title(&words),
+        Some(format!("{}word…", "word ".repeat(50)))
+    );
+}
+
+#[test]
 fn provisional_title_is_cleaned_and_bounded() {
     assert_eq!(
         provisional_session_title(concat!(
