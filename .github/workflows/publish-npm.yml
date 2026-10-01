@@ -147,26 +147,12 @@ jobs:
             dist_tag=latest
           fi
           # Read the registry's own version document rather than `npm view`,
-          # which can answer from a cached response.
+          # which can answer from a cached response. This only skips versions
+          # an earlier run already published, so rerunning never republishes.
           readable() {
             local package="$1"
             curl -fsS -o /dev/null \
               "https://registry.npmjs.org/${package/\//%2F}/$version" 2>/dev/null
-          }
-          # A published version takes minutes to become readable, because these
-          # platform packages are tens of megabytes. Publishing is recorded the
-          # moment it succeeds, so a timeout here never needs a republish.
-          wait_until_readable() {
-            local package="$1"
-            local deadline=$((SECONDS + 600))
-            until readable "$package"; do
-              if ((SECONDS >= deadline)); then
-                echo "$package@$version was published but is still not readable after 10 minutes; rerunning this job is safe and republishes nothing" >&2
-                return 1
-              fi
-              echo "waiting for $package@$version to become readable" >&2
-              sleep 10
-            done
           }
           packages=(
             @brokkai/mjolnir-darwin-universal
@@ -185,15 +171,20 @@ jobs:
             else
               npm publish "./npm-tarballs/$tarball" --access public --provenance --tag "$dist_tag" || return "$?"
             fi
-            wait_until_readable "$package"
           }
+          # Publish all three concurrently, then the wrapper once every upload
+          # has succeeded. Nothing waits for a published version to become
+          # readable: the registry's read path lags its write path, and a fresh
+          # version can 404 for many minutes. The wrapper resolves the platform
+          # packages on the user's machine at install time, so waiting only
+          # turned registry lag into a failed release that left `latest` behind.
           pids=()
           for index in "${!packages[@]}"; do
             publish_platform "${packages[$index]}" "${tarballs[$index]}" &
             pids+=("$!")
           done
           # Collect every result, even on failure; never publish the wrapper
-          # until all platform uploads and availability checks have succeeded.
+          # until every platform upload has succeeded.
           failed=0
           for pid in "${pids[@]}"; do
             wait "$pid" || failed=1
@@ -205,4 +196,3 @@ jobs:
           else
             npm publish "./npm-tarballs/brokkai-mjolnir-$version.tgz" --access public --provenance --tag "$dist_tag"
           fi
-          wait_until_readable "$root"
