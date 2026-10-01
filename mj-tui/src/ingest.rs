@@ -793,7 +793,7 @@ impl DashboardState {
         operation_id: Option<String>,
         cancellable: bool,
     ) {
-        let placeholder = placeholder.or_else(|| self.state.sessions.get(&session_id).cloned());
+        let placeholder = placeholder.or_else(|| self.session_record(&session_id).cloned());
         self.session_operations.insert(
             session_id,
             SessionOperationDisplay {

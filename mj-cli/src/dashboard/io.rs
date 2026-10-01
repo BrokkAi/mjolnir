@@ -224,6 +224,12 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         access: WebViewerAccess,
     },
+    /// The resume dialog's stopped sessions. The discovery id is the
+    /// dialog's; an answer for one that has closed is dropped there.
+    ResumeCandidates {
+        discovery_id: u64,
+        result: Box<std::result::Result<mj_client::daemon::ResumeCandidates, String>>,
+    },
     /// One SessionWiki search result. The request id is the dialog's; an
     /// answer for an older one is dropped there.
     WikiRows {
@@ -513,11 +519,12 @@ impl DashboardIoUpdate {
             Self::RemovedBundle { bundle_id, result } => {
                 result.is_ok() && controller.config.bundles.contains_key(bundle_id)
             }
+            // An imported session is stopped, and the feed carries only live
+            // sessions; only the project it may have added arrives there.
             Self::ImportedSessionApplied { result } => {
                 result.as_ref().as_ref().is_ok_and(|applied| {
-                    !controller.state.sessions.contains_key(&applied.session.id)
-                        || controller.config.bundles.get(&applied.session.bundle_id)
-                            != Some(&applied.bundle)
+                    controller.config.bundles.get(&applied.session.bundle_id)
+                        != Some(&applied.bundle)
                 })
             }
             Self::CreateSession(update) => matches!(update.as_ref(),
@@ -1157,6 +1164,18 @@ impl DashboardContext {
                     self.dashboard.apply_web_access(access);
                 }
             }
+            DashboardIoUpdate::ResumeCandidates {
+                discovery_id,
+                result,
+            } => {
+                if self
+                    .dashboard
+                    .apply_resume_candidates(discovery_id, *result)
+                {
+                    // Checkpoint sizes follow the stopped records.
+                    self.controller_changed = true;
+                }
+            }
             DashboardIoUpdate::WikiRows { request_id, result } => match result {
                 Ok(page) => {
                     self.dashboard.apply_wiki_search(request_id, page);
@@ -1372,6 +1391,10 @@ impl DashboardContext {
             DashboardIoUpdate::ImportedSessionApplied { result } => match *result {
                 Ok(applied) => {
                     let session_id = applied.session.id.clone();
+                    // The import's own answer carries the stopped record the
+                    // resume wizard opens on.
+                    self.dashboard
+                        .remember_stopped_record(applied.session.clone());
                     self.resolve_project_sources();
                     self.dashboard.set_notice(format!(
                         "Imported {} session {}.",

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use mj_core::config::{TargetTemplate, raw_project_context_id};
 use mj_core::go::GoRecipe;
+use mj_core::state::SessionRecord;
 
 use crate::{DashboardAction, DashboardState};
 
@@ -47,7 +48,15 @@ impl DashboardState {
     ) {
         self.go_contexts.insert(session_id, result);
     }
-    pub fn begin_go(&mut self, mode: GoMode, setup: bool) -> DashboardAction {
+    /// Start the fast-start workflow. `startup` is the session the daemon
+    /// chose for this workspace (`DaemonClient::go_startup_session`): the
+    /// remembered one while it is still eligible, otherwise the newest.
+    pub fn begin_go(
+        &mut self,
+        mode: GoMode,
+        setup: bool,
+        startup: Option<SessionRecord>,
+    ) -> DashboardAction {
         let needs_remote_path = mode.recipe.as_ref().is_some_and(|recipe| {
             matches!(
                 self.config.targets.get(&recipe.target_id),
@@ -58,38 +67,20 @@ impl DashboardState {
         self.focus_prompt();
         if setup || needs_remote_path {
             self.change_go_setup()
-        } else if let Some(session_id) = self.go_startup_session() {
-            self.select_active_session(&session_id);
-            if self.state.sessions[&session_id].state == mj_core::state::SessionState::Stopped {
+        } else if let Some(session) = startup {
+            let session_id = session.id.clone();
+            if session.state == mj_core::state::SessionState::Stopped {
+                // The runtime feed carries only live sessions; the resume
+                // wizard reads this one from the on-demand store.
+                self.remember_stopped_record(session);
                 self.begin_resume_for(&session_id)
             } else {
+                self.select_active_session(&session_id);
                 self.open_selected_session()
             }
         } else {
             self.begin_new()
         }
-    }
-
-    fn go_startup_session(&self) -> Option<String> {
-        let eligible = |session: &&mj_core::state::SessionRecord| {
-            self.active_workspace_id.as_deref() == Some(session.workspace_id.as_str())
-                && !session.archived
-                && !self.state.is_subagent_session(&session.id)
-                && session.state != mj_core::state::SessionState::DestroyedWithDataLoss
-        };
-        self.go
-            .as_ref()
-            .and_then(|go| go.last_session_id.as_ref())
-            .and_then(|id| self.state.sessions.get(id))
-            .filter(eligible)
-            .or_else(|| {
-                self.state
-                    .sessions
-                    .values()
-                    .filter(eligible)
-                    .max_by_key(|session| &session.updated_at)
-            })
-            .map(|session| session.id.clone())
     }
 
     pub fn go_conversation_title(&self, session_id: &str) -> String {
@@ -250,7 +241,9 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{buffer_lines, chord, dashboard_with_session, running_session};
+    use crate::test_support::{
+        buffer_lines, chord, dashboard_with_session, running_session, stopped_session,
+    };
     use crate::{CommandId, Mode};
 
     fn mode() -> GoMode {
@@ -272,12 +265,31 @@ mod tests {
         }
     }
 
+    /// The session the daemon would choose in these one-session fixtures.
+    fn startup(dashboard: &DashboardState) -> Option<SessionRecord> {
+        dashboard.state.sessions.values().next().cloned()
+    }
+
+    #[test]
+    fn a_stopped_startup_session_opens_the_resume_wizard_without_a_feed_record() {
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut stopped = stopped_session();
+        stopped.id = "stopped".into();
+        stopped.workspace_id = dashboard.state.sessions["session-1"].workspace_id.clone();
+        dashboard.begin_go(mode(), false, Some(stopped));
+        let Mode::Resume(wizard) = &dashboard.mode else {
+            panic!("expected the resume wizard, got {:?}", dashboard.mode);
+        };
+        assert_eq!(wizard.session_id, "stopped");
+        assert!(!dashboard.state.sessions.contains_key("stopped"));
+    }
+
     #[test]
     fn new_reuses_the_recipe_without_stopping_the_existing_session() {
         let mut dashboard = dashboard_with_session(running_session());
         let expected = mode().recipe.unwrap();
         assert_eq!(
-            dashboard.begin_go(mode(), false),
+            dashboard.begin_go(mode(), false, startup(&dashboard)),
             DashboardAction::Open {
                 session_id: "session-1".into()
             }
@@ -292,70 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn reopening_prefers_the_remembered_conversation_and_ignores_other_workspaces() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut newer = running_session();
-        newer.id = "newer".into();
-        newer.updated_at = "2026-09-01T00:00:00Z".into();
-        dashboard.state.sessions.insert(newer.id.clone(), newer);
-        let mut other = running_session();
-        other.id = "other-project".into();
-        other.workspace_id = "other-workspace".into();
-        other.updated_at = "2026-09-02T00:00:00Z".into();
-        dashboard.state.sessions.insert(other.id.clone(), other);
-        let mut go = mode();
-        go.last_session_id = Some("session-1".into());
-        assert_eq!(
-            dashboard.begin_go(go, false),
-            DashboardAction::Open {
-                session_id: "session-1".into()
-            }
-        );
-        let mut go = mode();
-        go.last_session_id = Some("other-project".into());
-        assert_eq!(
-            dashboard.begin_go(go, false),
-            DashboardAction::Open {
-                session_id: "newer".into()
-            }
-        );
-    }
-
-    #[test]
-    fn reopening_skips_a_remembered_harness_owned_sub_agent() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let agent = mj_core::native_agent::NativeAgent {
-            owner_session_id: "session-1".into(),
-            session_id: "child".into(),
-            parent_session_id: None,
-            name: "Explore".into(),
-            task: "Map the code".into(),
-            capabilities: Default::default(),
-            state: mj_core::native_agent::NativeAgentState::Completed,
-            availability: Default::default(),
-            availability_reason: None,
-            stable_id: None,
-        };
-        let child = agent.view_id();
-        dashboard.set_native_agents(vec![mj_core::native_agent::NativeAgentView {
-            generation_ordinal: 1,
-            projection: mj_core::state::MaterializedSession::empty(child.clone()),
-            agent,
-        }]);
-        let mut go = mode();
-        go.last_session_id = Some(child);
-        assert_eq!(
-            dashboard.begin_go(go, false),
-            DashboardAction::Open {
-                session_id: "session-1".into()
-            }
-        );
-    }
-
-    #[test]
     fn workspace_management_remains_available_from_go() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_go(mode(), false);
+        dashboard.begin_go(mode(), false, startup(&dashboard));
         assert!(dashboard.command_allowed_now(CommandId::Workspaces));
         chord(&mut dashboard, CommandId::Workspaces);
         assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
@@ -371,7 +322,7 @@ mod tests {
         second.directory = "/projects/second".into();
         second.recipe.as_mut().unwrap().target_id = "other-runtime".into();
         dashboard.register_go_workspaces([second.clone()]);
-        dashboard.begin_go(first.clone(), false);
+        dashboard.begin_go(first.clone(), false, startup(&dashboard));
         dashboard.set_active_workspace(second.workspace_id.clone());
         assert!(
             dashboard
@@ -417,7 +368,7 @@ mod tests {
     #[test]
     fn change_setup_is_explicit_and_cancelling_keeps_the_previous_recipe() {
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_go(mode(), false);
+        dashboard.begin_go(mode(), false, startup(&dashboard));
         dashboard.dispatch_command(CommandId::ChangeGoSetup);
         assert!(matches!(dashboard.mode, Mode::New(_)));
         dashboard.cancel_modal();
@@ -444,7 +395,7 @@ mod tests {
         session.project_directory = Some("/actual/checkout".into());
         let id = session.id.clone();
         let mut dashboard = dashboard_with_session(session);
-        dashboard.begin_go(mode(), false);
+        dashboard.begin_go(mode(), false, startup(&dashboard));
         dashboard.set_go_context(id, Ok(("/actual/checkout".into(), "feature-x".into())));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
@@ -514,7 +465,7 @@ mod tests {
         let session = running_session();
         let id = session.id.clone();
         let mut dashboard = dashboard_with_session(session);
-        dashboard.begin_go(mode(), false);
+        dashboard.begin_go(mode(), false, startup(&dashboard));
         dashboard.set_go_context(id.clone(), Ok(("/old".into(), "main".into())));
         dashboard.set_go_context(id, Err("target disconnected".into()));
         let text = dashboard.go_context().join("\n");

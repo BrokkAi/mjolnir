@@ -568,6 +568,16 @@ pub enum DaemonAction {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
     },
+    /// The sessions the resume dialog lists. The runtime feed carries only
+    /// live sessions, so the dialog asks for these when it opens.
+    ResumeCandidates,
+    /// The session `mj go` opens: the remembered one while it is still
+    /// eligible, otherwise the most recently updated eligible session of the
+    /// workspace, live or stopped.
+    GoStartupSession {
+        workspace_id: String,
+        last_session_id: Option<String>,
+    },
     /// Ask the daemon's quota poller to probe now. The daemon is the only
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
@@ -748,8 +758,11 @@ pub enum DaemonReply {
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
-    /// Transport fragments of one RuntimeFrame; never exposed to consumers.
-    RuntimeChunk {
+    ResumeCandidates(Box<ResumeCandidates>),
+    GoStartupSession(Option<Box<SessionRecord>>),
+    /// Transport fragments of one chunked reply (see
+    /// [`DaemonReply::is_chunked`]); never exposed to consumers.
+    ReplyChunk {
         bytes: Vec<u8>,
         finished: bool,
     },
@@ -772,6 +785,30 @@ pub enum DaemonReply {
     /// Whether a queued startup prompt was withdrawn before delivery.
     PromptWithdrawn(bool),
     Done,
+}
+
+impl DaemonReply {
+    /// Replies that can outgrow one frame. The daemon sends them as
+    /// [`DaemonReply::ReplyChunk`] fragments and the client reassembles them.
+    pub fn is_chunked(&self) -> bool {
+        matches!(self, Self::RuntimeChanges(_) | Self::ResumeCandidates(_))
+    }
+}
+
+/// What the resume dialog lists, read on demand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeCandidates {
+    /// Every inactive session that is not a sub-agent.
+    pub records: Vec<SessionRecord>,
+    /// Durable moves of those sessions, for "move needs recovery" marks.
+    pub moves: Vec<MoveOperation>,
+    /// Native sessions that some record, live or not, already holds. The
+    /// import list must not offer them again.
+    pub adopted_native_sessions: Vec<(mj_core::config::HarnessKind, String)>,
+    /// Local checkouts that Mjolnir created for its sessions. Every native
+    /// thread that ran inside one belongs to that session.
+    pub local_checkout_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1103,42 +1140,42 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) ->
     serde_json::from_slice(&body).context("decode daemon frame")
 }
 
-/// Reassemble one runtime publication before exposing it to a replica. All
+/// Read one reply, reassembling a chunked one before exposing it. All
 /// fragments belong to the same response; disconnects discard partial state.
-pub async fn read_response(
-    stream: &mut TcpStream,
-    accepts_runtime_chunks: bool,
-) -> Result<ResponseEnvelope> {
+pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
     let mut response: ResponseEnvelope = read_frame(stream).await?;
-    if !matches!(response.result, Ok(DaemonReply::RuntimeChunk { .. })) {
+    if !matches!(response.result, Ok(DaemonReply::ReplyChunk { .. })) {
         return Ok(response);
     }
-    ensure!(accepts_runtime_chunks, "unexpected runtime fragments");
     let protocol_version = response.protocol_version;
     let request_id = response.request_id;
     let mut body = Vec::new();
     loop {
         ensure!(
             response.protocol_version == protocol_version && response.request_id == request_id,
-            "daemon crossed runtime fragment identities"
+            "daemon crossed reply fragment identities"
         );
-        let Ok(DaemonReply::RuntimeChunk { bytes, finished }) = response.result else {
-            bail!("daemon interrupted runtime publication");
+        let Ok(DaemonReply::ReplyChunk { bytes, finished }) = response.result else {
+            bail!("daemon interrupted a chunked reply");
         };
-        ensure!(!bytes.is_empty(), "empty runtime fragment");
+        ensure!(!bytes.is_empty(), "empty reply fragment");
         body.extend(bytes);
         if finished {
             break;
         }
         response = read_frame(stream).await?;
     }
-    let frame = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
+    let reply: DaemonReply = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
         .await
-        .context("runtime decoder task failed")??;
+        .context("reply decoder task failed")??;
+    ensure!(
+        reply.is_chunked(),
+        "daemon chunked a reply that is never chunked"
+    );
     Ok(ResponseEnvelope {
         protocol_version,
         request_id,
-        result: Ok(DaemonReply::RuntimeChanges(Box::new(frame))),
+        result: Ok(reply),
     })
 }
 
@@ -1204,7 +1241,6 @@ impl DaemonClient {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        let accepts_runtime_chunks = matches!(action, DaemonAction::RuntimeChanges { .. });
         write_frame(
             &mut self.stream,
             &RequestEnvelope {
@@ -1215,7 +1251,7 @@ impl DaemonClient {
             },
         )
         .await?;
-        let response = read_response(&mut self.stream, accepts_runtime_chunks).await?;
+        let response = read_response(&mut self.stream).await?;
         ensure!(
             response.protocol_version == protocol_version,
             "daemon changed protocol"
@@ -1791,6 +1827,30 @@ impl DaemonClient {
         }
     }
 
+    pub async fn resume_candidates(&mut self) -> Result<ResumeCandidates> {
+        match self.request(DaemonAction::ResumeCandidates).await? {
+            DaemonReply::ResumeCandidates(candidates) => Ok(*candidates),
+            reply => bail!("unexpected resume candidates reply {reply:?}"),
+        }
+    }
+
+    pub async fn go_startup_session(
+        &mut self,
+        workspace_id: String,
+        last_session_id: Option<String>,
+    ) -> Result<Option<SessionRecord>> {
+        match self
+            .request(DaemonAction::GoStartupSession {
+                workspace_id,
+                last_session_id,
+            })
+            .await?
+        {
+            DaemonReply::GoStartupSession(record) => Ok(record.map(|record| *record)),
+            reply => bail!("unexpected go startup session reply {reply:?}"),
+        }
+    }
+
     pub async fn submit_session_command(
         &mut self,
         session_id: String,
@@ -2178,8 +2238,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// The daemon serves project discovery and durable failed-startup cleanup together.
-pub const PROTOCOL_VERSION: u32 = 49;
+// The runtime feed carries live sessions; the resume dialog and `mj go` ask
+// for stopped ones, and any reply can be chunked.
+pub const PROTOCOL_VERSION: u32 = 50;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

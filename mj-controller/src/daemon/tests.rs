@@ -5430,9 +5430,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
         }
     });
     let (mut stream, _) = listener.accept().await.unwrap();
-    let response = mj_client::daemon::read_response(&mut stream, true)
-        .await
-        .unwrap();
+    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
     assert_eq!(response.request_id, 7);
     let Ok(DaemonReply::RuntimeChanges(frame)) = response.result else {
         panic!("expected complete publication")
@@ -5441,9 +5439,7 @@ async fn runtime_publication_crosses_frame_limit_atomically_and_keeps_connection
         panic!("expected snapshot")
     };
     assert_eq!(*projection, expected);
-    let response = mj_client::daemon::read_response(&mut stream, false)
-        .await
-        .unwrap();
+    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
     assert_eq!(response.request_id, 8);
     assert!(matches!(response.result, Ok(DaemonReply::Pong)));
     sender.await.unwrap();
@@ -5460,7 +5456,7 @@ async fn interrupted_runtime_fragments_never_publish_partial_state() {
             &ResponseEnvelope {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: 7,
-                result: Ok(DaemonReply::RuntimeChunk {
+                result: Ok(DaemonReply::ReplyChunk {
                     bytes: b"{\"Snapshot\":".to_vec(),
                     finished: false,
                 }),
@@ -5470,11 +5466,7 @@ async fn interrupted_runtime_fragments_never_publish_partial_state() {
         .unwrap();
     });
     let (mut stream, _) = listener.accept().await.unwrap();
-    assert!(
-        mj_client::daemon::read_response(&mut stream, true)
-            .await
-            .is_err()
-    );
+    assert!(mj_client::daemon::read_response(&mut stream).await.is_err());
     sender.await.unwrap();
 }
 
@@ -6044,4 +6036,140 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
         RuntimeState::wait_lifecycle_result(result).await.unwrap(),
         DaemonLifecycleResult::Done
     ));
+}
+
+fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller {
+            config: Config::default(),
+            state,
+        },
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        || {
+            Ok(Controller {
+                config: Config::default(),
+                state: mj_core::state::State::default(),
+            })
+        },
+    ))
+}
+
+#[tokio::test]
+async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_native_session() {
+    let mut live = runtime_test_session("live", "workspace", SessionState::Running);
+    live.native_session_id = Some("native-live".into());
+    let mut stopped = runtime_test_session("stopped", "workspace", SessionState::Stopped);
+    stopped.native_session_id = Some("native-stopped".into());
+    let lost = runtime_test_session("lost", "workspace", SessionState::Lost);
+    let child = runtime_test_session("child", "workspace", SessionState::Stopped);
+    let mut state = mj_core::state::State::default();
+    for record in [live, stopped, lost, child] {
+        state.sessions.insert(record.id.clone(), record);
+    }
+    state
+        .subagents
+        .insert("child".into(), runtime_test_subagent("child", "live"));
+    let candidates = test_runtime_state_holding(state).resume_candidates();
+    let ids = candidates
+        .records
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids, BTreeSet::from(["lost", "stopped"]));
+    let adopted = candidates
+        .adopted_native_sessions
+        .iter()
+        .map(|(_, id)| id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(adopted, BTreeSet::from(["native-live", "native-stopped"]));
+}
+
+#[tokio::test]
+async fn go_starts_in_the_remembered_session_or_the_newest_eligible_one() {
+    let session = |id: &str, workspace: &str, state, updated_at: &str| {
+        let mut record = runtime_test_session(id, workspace, state);
+        record.updated_at = updated_at.into();
+        record
+    };
+    let mut state = mj_core::state::State::default();
+    for record in [
+        session("old", "w", SessionState::Stopped, "2026-01-01T00:00:00Z"),
+        session("new", "w", SessionState::Running, "2026-02-01T00:00:00Z"),
+        session(
+            "elsewhere",
+            "x",
+            SessionState::Running,
+            "2026-03-01T00:00:00Z",
+        ),
+        session(
+            "gone",
+            "w",
+            SessionState::DestroyedWithDataLoss,
+            "2026-04-01T00:00:00Z",
+        ),
+    ] {
+        state.sessions.insert(record.id.clone(), record);
+    }
+    let runtime = test_runtime_state_holding(state);
+    let pick = |last: Option<&str>| {
+        runtime
+            .go_startup_session("w", last)
+            .map(|record| record.id)
+    };
+    assert_eq!(pick(None).as_deref(), Some("new"));
+    assert_eq!(pick(Some("old")).as_deref(), Some("old"));
+    assert_eq!(pick(Some("gone")).as_deref(), Some("new"));
+    assert_eq!(pick(Some("elsewhere")).as_deref(), Some("new"));
+    assert_eq!(runtime.go_startup_session("empty", None), None);
+}
+
+#[tokio::test]
+async fn resume_candidates_larger_than_a_frame_arrive_whole() {
+    let mut record = runtime_test_session("stopped", "workspace", SessionState::Stopped);
+    record.acp_session_title = Some("t".repeat(MAX_FRAME_BYTES + 1024));
+    let candidates = mj_client::daemon::ResumeCandidates {
+        records: vec![record],
+        ..Default::default()
+    };
+    let expected = candidates.clone();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let sender = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        for (request_id, result) in [
+            (3, Ok(DaemonReply::ResumeCandidates(Box::new(candidates)))),
+            (4, Ok(DaemonReply::Pong)),
+        ] {
+            super::serve::write_response(
+                &mut stream,
+                ResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    result,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
+    assert_eq!(response.request_id, 3);
+    let Ok(DaemonReply::ResumeCandidates(received)) = response.result else {
+        panic!("expected the whole candidate list")
+    };
+    assert_eq!(*received, expected);
+    let response = mj_client::daemon::read_response(&mut stream).await.unwrap();
+    assert_eq!(response.request_id, 4);
+    assert!(matches!(response.result, Ok(DaemonReply::Pong)));
+    sender.await.unwrap();
 }

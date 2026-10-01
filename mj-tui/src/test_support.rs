@@ -404,6 +404,45 @@ pub(crate) fn question(session_id: &str) -> mj_core::elicitation::ElicitationReq
 /// Moves the open resume dialog to the Mjolnir tab with its list focused. The
 /// dialog opens on the running sessions with the list itself focused, and a
 /// stopped record is one tab to the right of them.
+/// What the daemon's `ResumeCandidates` answer holds for `state`: the
+/// inactive top-level records, and what every record says about native
+/// sessions and local checkouts.
+pub(crate) fn resume_candidates_for(
+    state: &mj_core::state::State,
+) -> mj_client::daemon::ResumeCandidates {
+    let mut candidates = mj_client::daemon::ResumeCandidates::default();
+    for (id, record) in &state.sessions {
+        if let Some(native) = &record.native_session_id {
+            candidates
+                .adopted_native_sessions
+                .push((record.harness_kind, native.clone()));
+        }
+        if let Some(checkout) = &record.managed_worktree
+            && checkout.target == mj_core::state::ManagedWorktreeTarget::Local
+        {
+            candidates
+                .local_checkout_roots
+                .push(checkout.worktree_root.clone());
+        }
+        if !record.state.is_active() && !state.is_subagent_session(id) {
+            candidates.records.push(record.clone());
+        }
+    }
+    candidates
+}
+
+/// Open the resume dialog and answer its request for stopped sessions from
+/// the dashboard's own records, as the daemon would.
+pub(crate) fn open_resume_dialog(
+    dashboard: &mut DashboardState,
+    discovery_id: u64,
+    profiles: Vec<crate::ImportProfileOption>,
+) {
+    dashboard.show_resume_dialog(discovery_id, profiles);
+    let candidates = resume_candidates_for(&dashboard.state);
+    assert!(dashboard.apply_resume_candidates(discovery_id, Ok(candidates)));
+}
+
 pub(crate) fn focus_resume_hel_rows(dashboard: &mut DashboardState) {
     if let crate::Mode::ResumeDialog(dialog) = &mut dashboard.mode {
         dialog.tab = crate::resume::ResumeTab::Hel;
@@ -419,7 +458,7 @@ pub(crate) fn focus_resume_hel_rows(dashboard: &mut DashboardState) {
 /// to the Mjolnir tab, then activate the first row, which is the session's own
 /// stopped record.
 pub(crate) fn open_resume_wizard(dashboard: &mut DashboardState) -> crate::DashboardAction {
-    dashboard.show_resume_dialog(1, Vec::new());
+    open_resume_dialog(dashboard, 1, Vec::new());
     focus_resume_hel_rows(dashboard);
     dashboard.handle_key(key(KeyCode::Enter))
 }

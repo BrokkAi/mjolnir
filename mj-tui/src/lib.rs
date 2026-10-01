@@ -822,6 +822,10 @@ pub struct DashboardState {
     pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
+    /// Stopped records loaded on demand: by the resume dialog, by `mj go`,
+    /// and after an import. The runtime feed carries only live sessions; read
+    /// both through [`DashboardState::session_record`].
+    pub(crate) stopped_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     pub(crate) session_operations: BTreeMap<String, SessionOperationDisplay>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
@@ -1102,6 +1106,7 @@ impl DashboardState {
             project_sources: BTreeMap::new(),
             session_order_cache: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
+            stopped_records: Default::default(),
             go: None,
             launch_project_directory: None,
             go_workspaces: BTreeMap::new(),

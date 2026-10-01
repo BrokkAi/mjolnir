@@ -31,6 +31,7 @@ use mj_client::daemon::{
     WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
 };
 use mj_core::config::{Config, HarnessKind};
+use mj_core::snapshot_map::SnapshotMap;
 use mj_core::state::{MoveOperation, PublicationState, SessionRecord, SessionState, State};
 
 use mj_chat::selection::{FrameSurfaces, SurfaceFrame, SurfaceId};
@@ -302,6 +303,54 @@ pub(crate) struct ResumeDialog {
     /// one changing starts the pane at the top, or at the new query's first
     /// hit.
     pub(crate) preview_key: Option<PreviewKey>,
+    /// What the daemon said about stopped sessions when the dialog opened.
+    /// The runtime feed carries only live sessions, so the Mjolnir tab and
+    /// the import de-duplication wait for this answer.
+    pub(crate) history: HistoryLoad,
+}
+
+/// The dialog's request for stopped sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HistoryLoad {
+    Loading,
+    Loaded(Arc<ResumeHistory>),
+    Failed(String),
+}
+
+/// What the dialog needs besides the stopped records themselves, which are
+/// kept in [`DashboardState::session_record`]'s store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ResumeHistory {
+    /// Native sessions that a record held when the dialog opened, live or not.
+    adopted: BTreeSet<(HarnessKind, String)>,
+    /// Local checkouts Mjolnir created for its sessions.
+    local_checkout_roots: Vec<std::path::PathBuf>,
+    /// Durable moves of the listed sessions, for "move needs recovery" marks.
+    moves: BTreeMap<String, MoveOperation>,
+}
+
+impl ResumeHistory {
+    /// The daemon's answer, as the dialog's own data and the stopped records
+    /// that [`DashboardState::session_record`] serves.
+    fn split(
+        candidates: mj_client::daemon::ResumeCandidates,
+    ) -> (Self, SnapshotMap<String, SessionRecord>) {
+        let history = Self {
+            adopted: candidates.adopted_native_sessions.into_iter().collect(),
+            local_checkout_roots: candidates.local_checkout_roots,
+            moves: candidates
+                .moves
+                .into_iter()
+                .map(|operation| (operation.selection.session_id.clone(), operation))
+                .collect(),
+        };
+        let records = candidates
+            .records
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect();
+        (history, records)
+    }
 }
 
 /// What the preview pane is showing: a SessionWiki session, and the query
@@ -626,12 +675,27 @@ fn harness_of_tool(tool: &str) -> Option<HarnessKind> {
 pub(crate) fn merged_resume_rows(
     config: &Config,
     state: &State,
+    stopped: &SnapshotMap<String, SessionRecord>,
+    history: &HistoryLoad,
     profiles: &[ImportProfileOption],
     wiki: &[WikiRow],
 ) -> Vec<ResumeRow> {
-    let mut adopted = BTreeSet::new();
-    let mut own_checkouts = Vec::new();
-    let mut rows = Vec::new();
+    // Until the daemon answers, the stopped records may be an older dialog's,
+    // and nothing says which native sessions Mjolnir already holds, so the
+    // Mjolnir and Import rows wait for it. Archived search hits do not.
+    let history = match history {
+        HistoryLoad::Loaded(history) => Some(history.as_ref()),
+        HistoryLoad::Loading | HistoryLoad::Failed(_) => None,
+    };
+    let mut adopted = history
+        .map(|history| history.adopted.clone())
+        .unwrap_or_default();
+    let mut own_checkouts = history
+        .iter()
+        .flat_map(|history| history.local_checkout_roots.iter())
+        .map(std::path::PathBuf::as_path)
+        .collect::<Vec<_>>();
+    // Live records joined after the dialog opened can adopt more.
     for session in state.sessions.values() {
         // Every record adopts its native session, live ones included: the
         // native file of a session Hel is running now must not be offered as
@@ -647,7 +711,30 @@ pub(crate) fn merged_resume_rows(
         {
             own_checkouts.push(checkout.worktree_root.as_path());
         }
-        // A sub-agent is resumed through its parent, never on its own.
+    }
+    let mut rows = Vec::new();
+    let (stopped, profiles) = if history.is_some() {
+        (Some(stopped), profiles)
+    } else {
+        (None, &[][..])
+    };
+    // The loaded stopped records, plus inactive records the feed itself
+    // carries (a session that failed after the dialog opened). The feed's
+    // copy is newer when it has one: a session resumed since the dialog
+    // opened is active now, and the Live tab lists it.
+    let feed_inactive = stopped.is_some().then(|| {
+        state
+            .sessions
+            .values()
+            .filter(|session| !session.state.is_active())
+    });
+    let listed = stopped
+        .into_iter()
+        .flat_map(SnapshotMap::values)
+        .filter(|loaded| !state.sessions.contains_key(&loaded.id))
+        .chain(feed_inactive.into_iter().flatten());
+    for session in listed {
+        // A sub-agent is resumed through its parent.
         if session.state.is_active() || state.is_subagent_session(&session.id) {
             continue;
         }
@@ -865,11 +952,19 @@ fn archive_details(hit: &WikiRow) -> String {
 fn build_resume_rows(
     config: &Config,
     state: &State,
+    stopped: &SnapshotMap<String, SessionRecord>,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
 ) -> (Vec<ResumeRow>, [usize; ResumeTab::COUNT]) {
     let searching = !dialog.search.is_empty();
-    let merged = merged_resume_rows(config, state, &dialog.profiles, &dialog.wiki);
+    let merged = merged_resume_rows(
+        config,
+        state,
+        stopped,
+        &dialog.history,
+        &dialog.profiles,
+        &dialog.wiki,
+    );
     // Counted before the tab filter: the other tabs' hits are already ranked
     // here, and throwing them away is what hid where a query matched.
     let mut hits = [0usize; ResumeTab::COUNT];
@@ -1014,6 +1109,7 @@ impl DashboardState {
         let (history_rows, hits) = build_resume_rows(
             &self.config,
             &self.state,
+            &self.stopped_records,
             dialog,
             &self.checkpoint_archive_sizes,
         );
@@ -1034,8 +1130,11 @@ impl DashboardState {
         for row in &mut self.resume_rows {
             // Recovery is the settled record's offer; Enter on a running session
             // goes to it, so a mark inviting a recovery here would not act.
-            row.move_recovery = match &row.key {
-                ResumeRowKey::Hel(session_id) => self.move_operations.get(session_id),
+            row.move_recovery = match (&row.key, &dialog.history) {
+                (ResumeRowKey::Hel(session_id), HistoryLoad::Loaded(history)) => history
+                    .moves
+                    .get(session_id)
+                    .or_else(|| self.move_operations.get(session_id)),
                 _ => None,
             }
             .filter(|operation| {
@@ -1069,7 +1168,9 @@ impl DashboardState {
             // The scan notice lives on the Import tab, so it animates only
             // while that tab is the one on screen.
             Mode::ResumeDialog(dialog) => {
-                (dialog.is_scanning() && dialog.tab == ResumeTab::Import) || dialog.wiki_pending
+                (dialog.is_scanning() && dialog.tab == ResumeTab::Import)
+                    || dialog.wiki_pending
+                    || dialog.history == HistoryLoad::Loading
             }
             Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
             _ => false,
@@ -1120,6 +1221,7 @@ impl DashboardState {
             preview_scrollbar: RefCell::new(ScrollbarDrag::default()),
             preview_hit: 0,
             preview_key: None,
+            history: HistoryLoad::Loading,
         });
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
@@ -1128,6 +1230,55 @@ impl DashboardState {
         // The dialog opens on Live with nothing focused yet, so the list gets
         // the default focus `end_frame` hands out; `/` or a click moves it to
         // the search box from there.
+    }
+
+    /// One session's record: the live one from the runtime feed, or else a
+    /// stopped one loaded on demand for the resume dialog, `mj go`, or an
+    /// import. The feed carries only live sessions.
+    pub fn session_record(&self, session_id: &str) -> Option<&SessionRecord> {
+        self.state
+            .sessions
+            .get(session_id)
+            .or_else(|| self.stopped_records.get(session_id))
+    }
+
+    /// The stopped records loaded on demand, for work that follows them such
+    /// as reading checkpoint sizes.
+    pub fn stopped_records(&self) -> &SnapshotMap<String, SessionRecord> {
+        &self.stopped_records
+    }
+
+    /// Keep one stopped record that something loaded on demand: the session
+    /// `mj go` starts in, or a session just imported.
+    pub fn remember_stopped_record(&mut self, record: SessionRecord) {
+        self.stopped_records.insert(record.id.clone(), record);
+    }
+
+    /// Install the daemon's answer about stopped sessions in the open dialog.
+    /// Returns whether it was installed; an answer for a dialog that has since
+    /// closed or reopened is dropped.
+    pub fn apply_resume_candidates(
+        &mut self,
+        discovery_id: u64,
+        candidates: Result<mj_client::daemon::ResumeCandidates, String>,
+    ) -> bool {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return false;
+        };
+        if dialog.discovery_id != discovery_id {
+            return false;
+        }
+        match candidates {
+            Ok(candidates) => {
+                let (history, records) = ResumeHistory::split(candidates);
+                dialog.history = HistoryLoad::Loaded(Arc::new(history));
+                self.stopped_records = records;
+            }
+            Err(error) => dialog.history = HistoryLoad::Failed(error),
+        }
+        self.rebuild_resume_rows();
+        self.resync_resume_selection();
+        true
     }
 
     /// Fold one profile's scan result into the open dialog, keeping the
@@ -1800,9 +1951,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         let delete_branch_available = self
-            .state
-            .sessions
-            .get(&session_id)
+            .session_record(&session_id)
             .and_then(|session| session.managed_worktree.as_ref())
             .is_some_and(|owned| owned.kind == mj_core::state::ManagedCheckoutKind::Worktree);
         self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::DestroyStopped {
@@ -2315,6 +2464,25 @@ fn resume_list_title(
     rows: usize,
 ) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
+    if matches!(dialog.tab, ResumeTab::Hel | ResumeTab::Import) {
+        match &dialog.history {
+            HistoryLoad::Loading => {
+                spans.push(mj_chat::spinner::compact_span(
+                    dashboard.config.spinner,
+                    dialog.opened_at.elapsed().as_millis(),
+                ));
+                spans.push(Span::raw(" Loading suspended sessions…"));
+                return Line::from(spans);
+            }
+            HistoryLoad::Failed(error) => {
+                spans.push(Span::raw(format!(
+                    "Could not list suspended sessions: {error}"
+                )));
+                return Line::from(spans);
+            }
+            HistoryLoad::Loaded(_) => {}
+        }
+    }
     if dialog.search.is_empty() {
         // A state filter replaces "every workspace": the list is still every
         // workspace's, and what it is narrowed to is the news.

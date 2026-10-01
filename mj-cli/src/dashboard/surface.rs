@@ -339,9 +339,11 @@ impl DashboardContext {
         self.controller_changed = false;
         let mut changed_targets = BTreeMap::new();
         let mut removed_sizes = BTreeMap::new();
+        // Only the resume dialog shows checkpoint sizes, for the stopped
+        // records it loaded.
         for (id, record) in self
             .checkpoint_archive_records
-            .changes(&self.controller.state.sessions)
+            .changes(self.dashboard.stopped_records())
         {
             let target = record
                 .filter(|record| record.state == SessionState::Stopped)
@@ -360,7 +362,7 @@ impl DashboardContext {
                 removed_sizes.insert(id.clone(), None);
             }
         }
-        self.checkpoint_archive_records = self.controller.state.sessions.clone();
+        self.checkpoint_archive_records = self.dashboard.stopped_records().clone();
         self.dashboard.patch_checkpoint_archive_sizes(removed_sizes);
         if !changed_targets.is_empty() {
             self.checkpoint_archive_generation = self

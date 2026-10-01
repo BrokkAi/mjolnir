@@ -226,7 +226,7 @@ impl DashboardState {
         session_id: &str,
         target_id: &str,
     ) -> Option<String> {
-        let session = self.state.sessions.get(session_id)?;
+        let session = self.session_record(session_id)?;
         mj_client::target::resume_compatibility(session, &self.config, target_id).err()
     }
 

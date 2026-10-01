@@ -29,6 +29,10 @@ impl DashboardContext {
                     .map(|(id, profile)| (id.to_owned(), profile.kind)),
             ),
         );
+        crate::dashboard::io::spawn_resume_candidates(
+            self.import_discovery_id,
+            self.dashboard_io_tx.clone(),
+        );
         // Opening the dialog issues the empty query. It lists the most recent
         // indexed sessions and, just as importantly, brings back the index's
         // state, which decides whether the search box can be typed into.

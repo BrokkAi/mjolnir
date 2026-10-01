@@ -18,10 +18,10 @@ The web viewer and the HTTP API (`/api/v1/...`, used by `mj sessions` and `mj re
 
 - [x] (2026-10-01) Surveyed every consumer of feed records in the TUI, the daemon, the web server, and the HTTP API, and every place that could serve stopped sessions on demand. Findings are folded into Context and Orientation and the Decision Log.
 - [x] (2026-10-01) Milestone 1: removed the "Show suspended sessions" setting. `AdvancedConfig.show_stopped_sessions` and the deprecated top-level `Config.show_stopped_sessions` are gone; `StoredConfig` still accepts the old top-level key and `AdvancedConfig` ignores the old advanced key (test `retired_stopped_session_filters_load_and_are_dropped_on_save`). Full `cargo test`, clippy and fmt passed.
-- [ ] Milestone 2: define the live set once and filter the terminal feed by it; keep the web server's full record set.
-- [ ] Milestone 3: add daemon requests for resume candidates, for one record by id, and for the `mj go` startup session; allow chunked replies for them.
-- [ ] Milestone 4: move the resume dialog, the resume wizard, import, and `mj go` to the new requests.
+- [x] (2026-10-01) Milestone 3 (done before Milestone 2, see Decision Log): `DaemonAction::ResumeCandidates` and `DaemonAction::GoStartupSession`, `DaemonReply::is_chunked` deciding chunked replies for both ends (`ReplyChunk` replaces `RuntimeChunk`), `PROTOCOL_VERSION` 50. Daemon tests: `resume_candidates_are_inactive_top_level_sessions_with_every_adopted_native_session`, `go_starts_in_the_remembered_session_or_the_newest_eligible_one`, `resume_candidates_larger_than_a_frame_arrive_whole`.
+- [x] (2026-10-01) Milestone 4: the resume dialog requests candidates on open (`spawn_resume_candidates`, `DashboardIoUpdate::ResumeCandidates`, `DashboardState::apply_resume_candidates`), shows "Loading suspended sessions…" and withholds Mjolnir and Import rows until the answer arrives; `DashboardState::session_record` serves live then loaded stopped records to the resume wizard, Hel-row Destroy, confirmations and operation placeholders; import completion no longer waits for the feed to show the stopped record; `mj go` asks the daemon (`begin_go` takes the chosen record); checkpoint sizes follow the loaded stopped records. Test `the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks`. Full suite passed.
 - [ ] Milestone 5: make the dashboard treat "left the live set" correctly (panes, chat drafts, sub-agents stopped by a suspend, startup state, new-session defaults).
+- [ ] Milestone 2 (last): define the live set once and filter the terminal feed by it; keep the web server's full record set.
 - [ ] Milestone 6: measure on a copy of a large store in a named instance; full validation; commit and push.
 
 
@@ -90,6 +90,14 @@ The web viewer and the HTTP API (`/api/v1/...`, used by `mj sessions` and `mj re
 
 - Decision: also remove the deprecated top-level `Config.show_stopped_sessions` field, keeping only the file-format acceptance in `StoredConfig`.
   Rationale: it already had no effect; keeping a dead field on `Config` invites someone to read it.
+  Date/Author: 2026-10-01, Claude.
+
+- Decision: implement in the order 3, 4, 5, 2: requests first, consumers next, then the dashboard's handling of sessions leaving the feed, and the feed filter last.
+  Rationale: every commit then works on its own. Filtering first would leave commits where the resume dialog is empty and imports never complete.
+  Date/Author: 2026-10-01, Claude.
+
+- Decision: the Mjolnir tab lists the loaded stopped records plus any inactive record the feed itself carries, preferring the feed's copy of a record.
+  Rationale: `Lost` and data-loss sessions stay in the feed and can appear after the dialog opens; a loaded record that has since been resumed must not be listed as stopped.
   Date/Author: 2026-10-01, Claude.
 
 - Decision: advance `PROTOCOL_VERSION` (in `mj-client/src/daemon.rs`) once for this change.

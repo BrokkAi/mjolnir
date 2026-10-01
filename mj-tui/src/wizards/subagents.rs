@@ -393,9 +393,7 @@ impl ResumeWizard {
     /// an untouched choice changes nothing.
     pub(crate) fn subagent_change(&self, dashboard: &DashboardState) -> Option<SubagentPolicy> {
         let stored = dashboard
-            .state
-            .sessions
-            .get(&self.session_id)
+            .session_record(&self.session_id)
             .and_then(|session| session.subagents.clone())
             .unwrap_or_default();
         (self.subagent_choice_applies(dashboard) && self.subagents.policy != stored)

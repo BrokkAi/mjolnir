@@ -1585,7 +1585,7 @@ pub(crate) fn render_resume_wizard(
             .get(wizard.profile)
             .map(|(id, _)| id.as_str())
             .unwrap_or("unknown");
-        let session = dashboard.state.sessions.get(&wizard.session_id);
+        let session = dashboard.session_record(&wizard.session_id);
         let bundle_id = session
             .map(|session| session.bundle_id.as_str())
             .unwrap_or("unknown");
@@ -1672,9 +1672,7 @@ pub(crate) fn render_resume_wizard(
                     || {
                         wizard.moving
                             && dashboard
-                                .state
-                                .sessions
-                                .get(&wizard.session_id)
+                                .session_record(&wizard.session_id)
                                 .is_some_and(|session| session.resource_allocation.is_some())
                             && matches!(
                                 dashboard.config.targets.get(&target_id),
@@ -1745,9 +1743,7 @@ pub(crate) fn render_resume_wizard(
         WizardStep::Profile => {
             let profiles = dashboard.resume_wizard_profiles(wizard);
             let session_harness = dashboard
-                .state
-                .sessions
-                .get(&wizard.session_id)
+                .session_record(&wizard.session_id)
                 .map(|session| session.harness_kind);
             let rows = profiles
                 .iter()

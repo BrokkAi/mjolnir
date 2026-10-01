@@ -552,7 +552,18 @@ pub(crate) async fn run_dashboard_for_workspace(
             .context("load project workspace settings task failed")??;
         context.dashboard.register_go_workspaces(modes);
         context.cancel_startup_session();
-        let action = context.dashboard.begin_go(mode, setup);
+        // The daemon holds every record, stopped ones included, so it
+        // chooses the session to start in.
+        let startup = match context.dashboard.active_workspace_id().map(str::to_owned) {
+            Some(workspace_id) => {
+                crate::daemon::connect_or_start()
+                    .await?
+                    .go_startup_session(workspace_id, mode.last_session_id.clone())
+                    .await?
+            }
+            None => None,
+        };
+        let action = context.dashboard.begin_go(mode, setup, startup);
         actions::apply_dashboard_action(&mut context, action).await?;
     }
     if open_workspace_manager {
@@ -1318,10 +1329,8 @@ impl DashboardContext {
     }
 
     pub(crate) fn session_in_active_workspace(&self, session_id: &str) -> bool {
-        self.controller
-            .state
-            .sessions
-            .get(session_id)
+        self.dashboard
+            .session_record(session_id)
             .is_some_and(|session| {
                 Some(session.workspace_id.as_str()) == self.dashboard.active_workspace_id()
             })

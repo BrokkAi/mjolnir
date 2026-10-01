@@ -740,9 +740,7 @@ impl WizardDraft for ResumeWizard {
         dashboard: &'a DashboardState,
     ) -> Option<&'a SessionResourceAllocation> {
         dashboard
-            .state
-            .sessions
-            .get(&self.session_id)
+            .session_record(&self.session_id)
             .and_then(|session| session.resource_allocation.as_ref())
     }
 

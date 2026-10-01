@@ -1339,6 +1339,24 @@ pub(crate) fn spawn_imported_session_apply(
     );
 }
 
+/// Loads the stopped sessions the resume dialog lists. The runtime feed
+/// carries only live sessions.
+pub(crate) fn spawn_resume_candidates(
+    discovery_id: u64,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    spawn_background_async(
+        "load suspended sessions",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async { daemon::connect_or_start().await?.resume_candidates().await },
+        move |result| DashboardIoUpdate::ResumeCandidates {
+            discovery_id,
+            result: Box::new(result),
+        },
+    )
+}
+
 pub(crate) fn spawn_checkpoint_archive_size_refresh(
     generation: u64,
     targets: BTreeMap<String, PathBuf>,

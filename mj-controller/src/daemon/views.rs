@@ -270,6 +270,82 @@ impl RuntimeState {
         (controller_owner.projected_records(), operations)
     }
 
+    /// What the resume dialog lists: every inactive session that is not a
+    /// sub-agent, with the import de-duplication data from every record.
+    /// Only shared map handles cross the owner lock; the copies are made after.
+    pub(super) fn resume_candidates(&self) -> mj_client::daemon::ResumeCandidates {
+        let (records, subagents, moves) = {
+            let owner = self.owner();
+            (
+                owner.projected_records(),
+                owner.controller().state.subagents.clone(),
+                owner
+                    .committed()
+                    .map(|committed| committed.moves.clone())
+                    .unwrap_or_default(),
+            )
+        };
+        let mut candidates = mj_client::daemon::ResumeCandidates::default();
+        for (id, record) in &records {
+            if let Some(native_session_id) = &record.native_session_id {
+                candidates
+                    .adopted_native_sessions
+                    .push((record.harness_kind, native_session_id.clone()));
+            }
+            if let Some(checkout) = &record.managed_worktree
+                && checkout.target == mj_core::state::ManagedWorktreeTarget::Local
+            {
+                candidates
+                    .local_checkout_roots
+                    .push(checkout.worktree_root.clone());
+            }
+            if record.state.is_active()
+                || subagents.contains_key(id)
+                || mj_core::native_agent::is_view_id(id)
+            {
+                continue;
+            }
+            if let Some(operation) = moves.get(id) {
+                candidates.moves.push(operation.clone());
+            }
+            candidates.records.push(record.clone());
+        }
+        candidates
+    }
+
+    /// The session `mj go` opens in `workspace_id`: `last_session_id` while it
+    /// is still eligible, otherwise the most recently updated eligible one.
+    pub(super) fn go_startup_session(
+        &self,
+        workspace_id: &str,
+        last_session_id: Option<&str>,
+    ) -> Option<SessionRecord> {
+        let (records, subagents) = {
+            let owner = self.owner();
+            (
+                owner.projected_records(),
+                owner.controller().state.subagents.clone(),
+            )
+        };
+        let eligible = |session: &&SessionRecord| {
+            session.workspace_id == workspace_id
+                && !session.archived
+                && !subagents.contains_key(&session.id)
+                && !mj_core::native_agent::is_view_id(&session.id)
+                && session.state != SessionState::DestroyedWithDataLoss
+        };
+        last_session_id
+            .and_then(|id| records.get(id))
+            .filter(eligible)
+            .or_else(|| {
+                records
+                    .values()
+                    .filter(eligible)
+                    .max_by_key(|session| &session.updated_at)
+            })
+            .cloned()
+    }
+
     pub(crate) fn worker_controller_projection(&self) -> Controller {
         self.owner().pollable_worker_inputs().controller()
     }

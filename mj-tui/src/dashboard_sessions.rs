@@ -1206,7 +1206,7 @@ impl DashboardState {
     }
 
     pub(crate) fn compatible_profiles(&self, session_id: &str) -> Vec<(&String, HarnessKind)> {
-        if !self.state.sessions.contains_key(session_id) {
+        if self.session_record(session_id).is_none() {
             return Vec::new();
         }
         self.config

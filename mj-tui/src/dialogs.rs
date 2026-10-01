@@ -546,7 +546,7 @@ impl DashboardState {
     pub(crate) fn confirm_dialog(&self, confirmation: Confirmation) -> ConfirmDialog {
         let name = confirmation
             .session_id()
-            .and_then(|session_id| self.state.sessions.get(session_id))
+            .and_then(|session_id| self.session_record(session_id))
             .map(|session| crate::render::session_name(session).to_owned());
         let dialog = ConfirmDialog::new(confirmation);
         match name {

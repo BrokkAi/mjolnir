@@ -383,6 +383,17 @@ pub(super) async fn handle_action(
         DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
             state.runtime_changes(cursor, wait).await?,
         ))),
+        DaemonAction::ResumeCandidates => Ok(DaemonReply::ResumeCandidates(Box::new(
+            state.resume_candidates(),
+        ))),
+        DaemonAction::GoStartupSession {
+            workspace_id,
+            last_session_id,
+        } => Ok(DaemonReply::GoStartupSession(
+            state
+                .go_startup_session(&workspace_id, last_session_id.as_deref())
+                .map(Box::new),
+        )),
         DaemonAction::RefreshQuota => {
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)
