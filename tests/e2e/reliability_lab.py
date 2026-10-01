@@ -1084,8 +1084,6 @@ pull_policy = "never"
         self.record_action("web-login")
 
         second = self.start_tui("tui-2")
-        second.wait_for("Workspaces")
-        second.send(b"\r")
         second.wait_for("Sessions")
         deadline = time.monotonic() + 5
         attached = 0
@@ -1133,14 +1131,7 @@ pull_policy = "never"
         self.record_client_revision("tui-2", revision)
 
         prompt = f"prompt seed={self.seed}"
-        status, _ = self.request(
-            "POST",
-            "/api/actions",
-            {"action": "prompt", "session_id": session_id, "text": prompt},
-        )
-        if status != 202:
-            raise ScenarioFailure(f"prompt action returned {status}")
-        self.record_action("prompt", session_id=session_id, text=prompt)
+        self.submit_prompt(session_id, prompt)
         reply = f"reliability reply: {prompt}"
 
         transcript: dict[str, object] = {}
