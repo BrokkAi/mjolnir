@@ -170,6 +170,8 @@ async function request(url, options = {}) {
     // Callers that treat one status specially, such as SessionWiki being
     // switched off, need the code and not only the sentence.
     failure.status = response.status;
+    // The daemon names some refusals so each surface can add its own remedy.
+    failure.code = body.code;
     throw failure;
   }
   if (response.status === 202 || response.status === 204) {
@@ -1341,8 +1343,8 @@ function handleSessionMenuKeydown(event) {
 /// clone plan on the review step; raw local targets still validate their
 /// project directory before that review.
 const NEW_STEPS = [
-  { key: 'profile', title: 'Account', applies: () => true },
-  { key: 'target', title: 'Where to run', applies: () => true },
+  { key: 'profile', title: 'Account', applies: () => !soleProfileId() },
+  { key: 'target', title: 'Where to run', applies: () => !loneNewTargetId() },
   { key: 'project', title: 'Project', applies: () => true },
   { key: 'review', title: 'Review', applies: () => true },
 ];
@@ -1358,6 +1360,23 @@ function abortPendingNewPreflight() {
   pendingNewPreflightController?.abort();
   pendingNewPreflightController = null;
   pendingNewPreflight = null;
+}
+
+// The id of the only profile there is to choose, or '' when the Account
+// choice is real. The terminal wizard skips that step the same way.
+function soleProfileId() {
+  const profiles = snapshot?.profiles || [];
+  return profiles.length === 1 ? profiles[0].id : '';
+}
+
+// The id of the only target the Where-to-run step could offer, or '' when it
+// has a decision to make. This is the terminal wizard's rule (`lone_target`):
+// a target counts unless its runtime is missing or its last check failed; the
+// one left must be a raw host, because a container or EC2 target is sized on
+// that step. A check that has not answered yet still counts.
+function loneNewTargetId() {
+  const offered = launchableTargets(snapshot?.targets).filter(target => target.availability !== 'unavailable');
+  return offered.length === 1 && offered[0].requires_project_directory === true ? offered[0].id : '';
 }
 
 // A target whose runtime (Docker, Podman) is not installed on the daemon's
@@ -1544,6 +1563,23 @@ function profileSubagents(profileId) {
   return snapshot?.profiles.find(profile => profile.id === profileId)?.subagents || { mode: 'native' };
 }
 
+// What the review says about delegation: the policy the new session will get.
+function subagentPolicyLabel(policy) {
+  if (policy?.mode === 'single_model') {
+    return `Single model: ${policy.model || 'none chosen'}${policy.effort ? ` · ${policy.effort}` : ''}`;
+  }
+  return SUBAGENT_MODES.find(([value]) => value === policy?.mode)?.[1] || 'Native';
+}
+
+// The daemon's refusal names the problem and no surface. A browser user can
+// only change the profile's default, so that is the remedy added here.
+function newSessionFailure(err, profileId) {
+  if (err.code === 'subagent_choice_unavailable') {
+    return `${err.message} Change the default in Settings → Agent Profiles → ${profileId} → Sub-agents, or choose another account.`;
+  }
+  return err.message;
+}
+
 function targetIsBare(targetId) {
   return (
     snapshot?.targets.find(target => target.id === targetId)?.requires_project_directory === true
@@ -1552,6 +1588,19 @@ function targetIsBare(targetId) {
 
 function visibleSteps() {
   return NEW_STEPS.filter(step => step.applies(newDraft));
+}
+
+// A step that is not shown still has an answer: the only choice. The draft
+// may have started on a default that has since stopped being offered.
+function settleSkippedNewSteps(draft) {
+  const profileId = soleProfileId();
+  if (profileId) draft.profileId = profileId;
+  const targetId = loneNewTargetId();
+  if (targetId && draft.targetId !== targetId) {
+    draft.targetId = targetId;
+    draft.projectDirectory = draft.projectDirectories[targetId]
+      ?? snapshot.targets.find(t => t.id === targetId)?.recent_project_directories?.[0] ?? '';
+  }
 }
 
 /// The title the daemon would derive, shown on review so the person sees the
@@ -1572,6 +1621,7 @@ function renderNewForm() {
     newDraft = freshDraft();
     newError.textContent = '';
   }
+  settleSkippedNewSteps(newDraft);
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
@@ -1696,6 +1746,7 @@ function renderNewForm() {
       const review = el('dl', 'review');
       const rows = [
         ['Account', newDraft.profileId],
+        ...(subagentChoiceApplies(newDraft) ? [['Subagents', subagentPolicyLabel(profileSubagents(newDraft.profileId))]] : []),
         ['Where to run', newDraft.targetId],
         targetIsBare(newDraft.targetId)
           ? ['Project files', newDraft.projectDirectory]
@@ -2211,25 +2262,41 @@ const PATH_SUGGESTION_DELAY_MS = 250;
 /// `owner/repo` shorthand. The controller applies the same predicate.
 const looksLikePath = text => /^[\/~.]/.test(text) || /^[A-Za-z]:[\\/]/.test(text);
 
+/// Suggestion state per path field id. The step re-renders (and replaces the
+/// input) when the project list finishes loading or a snapshot changes what the
+/// step shows, so the state outlives any one input element: the new input
+/// adopts it and an in-flight reply for the current value still lands.
+const pathSuggestionOwners = new Map();
+
 /// Live suggestions beneath one path field.
 ///
 /// The list only ever suggests. It never rewrites text that is being typed,
 /// which is why the controller's shared-prefix `insert` is ignored here. A
 /// reply is shown only if it still answers what the field holds: a request
-/// that was superseded, a value that has changed, or a field that has lost
-/// focus all drop the answer instead of pushing it under the person.
+/// that was superseded, a value or host that has changed, or a field that has
+/// lost focus all drop the answer instead of pushing it under the person.
 function attachPathSuggestions(input, complete) {
   const list = el('div', 'field-suggestions hidden');
   list.setAttribute('role', 'listbox');
   input.after(list);
-  const state = { timer: null, controller: null, matches: [], selected: 0, rows: [], list };
+  // One owner per field id; `state.input` is the element currently mounted.
+  let state = pathSuggestionOwners.get(input.id);
+  if (!state) {
+    state = { timer: null, controller: null, matches: [], selected: 0, rows: [], truncated: false, prefix: null, host: null };
+    if (input.id) pathSuggestionOwners.set(input.id, state);
+  }
+  state.input = input;
+  state.list = list;
+  state.complete = complete;
+  const current = () => state.input === input;
 
   const hide = () => {
     state.matches = [];
     state.rows = [];
     state.selected = 0;
-    list.replaceChildren();
-    list.classList.add('hidden');
+    state.prefix = null;
+    state.list.replaceChildren();
+    state.list.classList.add('hidden');
   };
 
   const accept = index => {
@@ -2249,7 +2316,7 @@ function attachPathSuggestions(input, complete) {
     );
   };
 
-  const render = truncated => {
+  const render = () => {
     state.rows = state.matches.map((candidate, index) => {
       const row = el('button', 'palette-row');
       row.type = 'button';
@@ -2264,13 +2331,19 @@ function attachPathSuggestions(input, complete) {
       return row;
     });
     const rows = [...state.rows];
-    if (truncated) rows.push(el('div', 'palette-row dim', 'More matches \u2014 keep typing'));
-    list.replaceChildren(...rows);
-    list.classList.remove('hidden');
+    if (state.truncated) rows.push(el('div', 'palette-row dim', 'More matches — keep typing'));
+    state.list.replaceChildren(...rows);
+    state.list.classList.remove('hidden');
   };
 
+  // A replacement input adopts the list the previous input had earned, but
+  // only while it still answers what the field holds.
+  if (state.matches.length && state.prefix === input.value && state.host === complete.host()) render();
+  else hide();
+
   const fetchSuggestions = async () => {
-    const prefix = input.value;
+    const prefix = state.input.value;
+    const host = state.complete.host();
     const controller = new AbortController();
     state.controller = controller;
     let answer;
@@ -2278,7 +2351,7 @@ function attachPathSuggestions(input, complete) {
       answer = await request('/api/paths/complete', {
         method: 'POST',
         signal: controller.signal,
-        body: JSON.stringify({ target_id: complete.host(), prefix, kind: complete.kind }),
+        body: JSON.stringify({ target_id: host, prefix, kind: state.complete.kind }),
       });
     } catch {
       // An abort, a lost connection, and a host that cannot list the
@@ -2286,17 +2359,25 @@ function attachPathSuggestions(input, complete) {
       if (state.controller === controller) hide();
       return;
     }
-    if (controller.signal.aborted || input.value !== prefix || document.activeElement !== input) return;
+    // Judge the reply against the field as it is now, not the element that
+    // asked: a re-render may have replaced it with one holding the same text.
+    const now = state.input;
+    if (controller.signal.aborted || now.value !== prefix || document.activeElement !== now
+      || state.complete.host() !== host) return;
     state.matches = (answer && answer.candidates) || [];
     state.selected = 0;
     if (!state.matches.length) {
       hide();
       return;
     }
-    render(Boolean(answer.truncated));
+    state.prefix = prefix;
+    state.host = host;
+    state.truncated = Boolean(answer.truncated);
+    render();
   };
 
   input.addEventListener('input', () => {
+    if (!current()) return;
     clearTimeout(state.timer);
     if (state.controller) state.controller.abort();
     state.controller = null;
@@ -2307,7 +2388,7 @@ function attachPathSuggestions(input, complete) {
   });
 
   input.addEventListener('keydown', event => {
-    if (!state.matches.length) return;
+    if (!current() || !state.matches.length) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       const delta = event.key === 'ArrowDown' ? 1 : -1;
@@ -2322,7 +2403,11 @@ function attachPathSuggestions(input, complete) {
     }
   });
 
-  input.addEventListener('blur', hide);
+  // Removing a focused input may blur it; that is a re-render, not the
+  // person leaving the field.
+  input.addEventListener('blur', () => {
+    if (current() && input.isConnected) hide();
+  });
 }
 function pathField(label, id, value, onInput, complete = null) {
   const field = textField(label, id, value, onInput);
@@ -2472,20 +2557,50 @@ async function commitNew() {
     if (newDraft !== draft) return;
     navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
   } catch (err) {
-    if (newDraft === draft) newError.textContent = err.message;
+    if (newDraft === draft) newError.textContent = newSessionFailure(err, draft.profileId);
   } finally {
     draft.committing = false;
     if (newDraft === draft) renderNewForm();
   }
 }
 
-/// Resume is a workspace-scoped list. Retained move recoveries remain
-/// discoverable even when the normal resume capability is temporarily false.
+/// Resume is a workspace-scoped list. A failed or cancelled Move stays
+/// discoverable even when Resume is refused: its card is where the person
+/// retries it, or reads why it cannot be retried and destroys the session.
 function isResumeSession(session) {
   const recovery = session?.move_recovery;
-  const retainedMove = recovery?.checkpoint_retained
-    && ['failed', 'cancelled'].includes(recovery.phase);
-  return Boolean(session?.capabilities?.resume || retainedMove);
+  const settledMove = ['failed', 'cancelled'].includes(recovery?.phase);
+  return Boolean(session?.capabilities?.resume || settledMove);
+}
+
+/// What the resume card says and offers for a session's Move recovery. Every
+/// answer comes from the daemon's Move record (`move_recovery`) and the
+/// published capabilities, the same facts the daemon's own guidance text is
+/// written from, so the card never offers an action that guidance rules out.
+function resumeMoveRecovery(session) {
+  const recovery = session?.move_recovery;
+  const active = ['live', 'starting', 'suspending'].includes(session?.lifecycle);
+  const queuePinned = Boolean(recovery?.queue_admission_started && !recovery.queue_admission_finished);
+  const settled = ['failed', 'cancelled'].includes(recovery?.phase);
+  const retry = Boolean(recovery?.checkpoint_retained && settled);
+  const resume = session?.capabilities?.resume === true && !queuePinned && !active;
+  let status = '';
+  if (recovery) {
+    status = recovery.phase === 'cancelled' ? 'Move cancelled.'
+      : recovery.phase === 'failed' ? 'Move failed.'
+        : 'Move interrupted.';
+  }
+  let explanation = '';
+  if (retry && queuePinned) {
+    explanation = 'Queued work already began on the destination. Retry the move using its retained destination and queue choice.';
+  } else if (retry && recovery.environment_retained) {
+    explanation = 'The environment and a verified checkpoint are retained. Retry the move; the checkout is kept.';
+  } else if (retry) {
+    explanation = 'Retry the move with the retained destination, or resume with the source settings.';
+  } else if (settled && recovery.environment_retained) {
+    explanation = 'This move cannot be retried and the session cannot be resumed. Read the reported error below.';
+  }
+  return { active, queuePinned, retry, resume, status, explanation };
 }
 
 function resumeActivityMs(session) {
@@ -3230,26 +3345,23 @@ function updateResumeCard(card, session, rebuild = false) {
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
   else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
   else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
-  if (recovery) {
-    const phase = recovery.phase === 'cancelled' ? 'cancelled' : recovery.phase === 'failed' ? 'failed' : 'interrupted';
-    body.append(el('p', '', `Move was ${phase}.`));
-    if (recovery.checkpoint_retained) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
+  const move = resumeMoveRecovery(session);
+  if (move.status) {
+    body.append(el('p', '', move.status));
+    if (recovery.checkpoint_retained && !move.explanation) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
   }
-  const queuePinned = recovery?.queue_admission_started && !recovery.queue_admission_finished;
-  const moveRow = el('div', 'row');
-  if (recovery?.checkpoint_retained && ['failed', 'cancelled'].includes(recovery.phase)) {
-    const retry = button('Retry move', 'secondary', { action: 'move', id: session.id });
-    moveRow.append(retry);
-  }
-  if (moveRow.children.length) {
-    body.append(el('p', 'dim', queuePinned
-      ? 'Queued work already began on the destination. Retry the move using its retained destination and queue choice.'
-      : 'Retry the move with the retained destination, or resume with the source settings.'));
+  const queuePinned = move.queuePinned;
+  if (move.explanation) body.append(el('p', 'dim', move.explanation));
+  if (move.retry) {
+    const moveRow = el('div', 'row');
+    moveRow.append(button('Retry move', 'secondary', { action: 'move', id: session.id }));
     body.append(moveRow);
   }
   const noRecovery = !recovery?.checkpoint_retained && ['lost', 'destroyed-with-data-loss'].includes(session.state);
-  const canResume = session.capabilities?.resume === true && !queuePinned && !noRecovery;
-  const stale = session.capabilities?.open === true || ['live', 'starting', 'suspending'].includes(session.lifecycle);
+  const canResume = move.resume && !noRecovery;
+  // `capabilities.open` only says the conversation can be read; a failed or
+  // stopped session has one too. Only the lifecycle says it is active.
+  const stale = move.active || isTransitioningSession(session);
   card._invalid = false;
   if (stale) {
     body.append(el('p', 'dim', 'This session is active now and cannot be resumed.'));
@@ -3526,6 +3638,9 @@ function renderMoveForm() {
 
   if (!preparation) {
     moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
+    // A sole profile has nothing to choose; the terminal's Move skips it too.
+    const soleProfile = !draft.queueLocked && soleProfileId();
+    if (soleProfile) draft.profileId = soleProfile;
     const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
       if (draft.queueLocked) return;
       draft.profileId = value;
@@ -3533,7 +3648,7 @@ function renderMoveForm() {
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
     });
-    moveStep.append(profilePicker);
+    if (!soleProfile) moveStep.append(profilePicker);
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
@@ -3689,7 +3804,8 @@ async function prepareMove() {
         session_id: draft.sessionId,
         profile_id: draft.profileId || null,
         target_template_id: draft.targetId || null,
-        clear_resource_allocation: draft.clearResourceAllocation,
+        // A bare target has fixed host resources, so inherited sizing must go.
+        clear_resource_allocation: draft.clearResourceAllocation || targetIsBare(draft.targetId),
         additional_mounts: draft.destinationAdditionalMounts,
         resource_allocation: draft.destinationResourceAllocation,
         subagents: moveSubagentChange(draft),

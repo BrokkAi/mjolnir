@@ -361,6 +361,22 @@ async fn await_resume_started(state: &ServerState, session_id: &str) {
 
 /// Why a session cannot be resumed, in words the caller can act on.
 pub(super) fn resume_refusal(session: &ViewerSession) -> String {
+    // The same Move facts that withdrew the Resume capability.
+    if let Some(recovery) = session
+        .move_recovery
+        .as_ref()
+        .filter(|recovery| recovery.environment_retained)
+        .filter(|_| !session.lifecycle.is_dashboard_visible())
+    {
+        return if recovery.checkpoint_retained {
+            format!(
+                "a failed Move keeps this session's environment, so Resume would recreate it; retry the Move to {} / {} instead, or destroy the session",
+                recovery.destination_profile_id, recovery.destination_target_template_id
+            )
+        } else {
+            "a failed Move keeps this session's environment but lost the checkpoint a retry or Resume would restore; destroy the session".to_owned()
+        };
+    }
     match session.lifecycle {
         ViewerLifecycleCategory::Suspending => {
             "this session is suspending; wait until it is suspended, then resume it".to_owned()

@@ -275,6 +275,9 @@ the recovery archive. Older linked worktrees keep their managed branch by defaul
 and offer a choice to delete it.
 
 **Interrupt turn** leaves the environment available for further prompts.
+On Codex sessions, interrupting a turn stops the agent, but a shell command the
+turn was running can keep running until it exits on its own. Codex does not list
+that command as a background task, so `mj stop-task` cannot stop it either.
 **Close pane** only dismisses a viewer; it does not interrupt or suspend a session.
 
 ## Resume on a fresh target

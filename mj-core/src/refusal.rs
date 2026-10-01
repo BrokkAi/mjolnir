@@ -22,6 +22,7 @@
 pub struct Refusal {
     kind: RefusalKind,
     message: String,
+    code: Option<&'static str>,
 }
 
 /// Which kind of refusal this is. The two map onto the answers the HTTP
@@ -41,6 +42,7 @@ impl Refusal {
         Self {
             kind: RefusalKind::Precondition,
             message: message.into(),
+            code: None,
         }
     }
 
@@ -49,7 +51,21 @@ impl Refusal {
         Self {
             kind: RefusalKind::Unusable,
             message: message.into(),
+            code: None,
         }
+    }
+
+    /// Names the reason for clients that choose their own remedy, so the
+    /// message can stay free of instructions for one surface.
+    #[must_use]
+    pub const fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Option<&'static str> {
+        self.code
     }
 
     #[must_use]

@@ -28,7 +28,8 @@ use canvas::{Canvas, Dissolve, Rgb};
 const DESCENT_START: f32 = -0.16;
 const IMPACT: f32 = 0.44;
 const TITLE_START: f32 = 0.61;
-const HOLD_START: Duration = Duration::from_millis(1240);
+/// The finished title stays up for a moment before the splash may end.
+const HOLD_START: Duration = Duration::from_millis(1340);
 const DISSOLVE: Duration = Duration::from_millis(250);
 
 /// The horizon, in scene units below the centre of the screen.

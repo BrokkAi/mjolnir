@@ -152,6 +152,27 @@ pub(crate) struct TargetReadiness {
     recorded_at: Instant,
 }
 
+/// What is known about one configured project directory.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectDirectoryCheck {
+    state: ProjectDirectoryState,
+    recorded_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectDirectoryState {
+    /// In flight, and never re-requested.
+    Checking,
+    Present,
+    Missing,
+    /// The check could not tell, so the picker says nothing about it.
+    Unknown,
+}
+
+/// A directory that was missing may come back, and one that was there may
+/// go, so answers are re-checked on a later visit to the project step.
+const PROJECT_DIRECTORY_CHECK_TTL: Duration = Duration::from_secs(60);
+
 impl TargetReadiness {
     fn is_stale(&self, now: Instant) -> bool {
         let ttl = match &self.result {

@@ -1447,7 +1447,12 @@ assert((await upgradeAwareFetch('/api/actions', options)).status === 503,
 /// what the field holds, and accepting a row has to re-announce the edit.
 #[test]
 fn web_path_suggestions_drop_stale_answers_and_re_announce_an_accepted_row() {
-    let source = viewer_source("function attachPathSuggestions(", "\nfunction pathField(");
+    // The suggestion state outlives any one input element, so the slice starts
+    // at the map that owns it rather than at the function that reads it.
+    let source = viewer_source(
+        "const pathSuggestionOwners = new Map();",
+        "\nfunction pathField(",
+    );
     let setup = r#"
 const PATH_SUGGESTION_DELAY_MS = 0;
 const setTimeout = run => run();
@@ -3766,6 +3771,17 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    // The refusal names the target and carries the controller's reason, but
+    // the wire projection still publishes ids only.
+    let reason =
+        crate::controller::resume_compatibility(&state.sessions["session-1"], &config, "raw")
+            .unwrap_err();
+    assert!(error.message.contains("\"raw\""), "{}", error.message);
+    assert!(error.message.contains(&reason), "{}", error.message);
+    assert!(
+        !serde_json::to_string(&snapshot).unwrap().contains(&reason),
+        "the reason must not leave the process"
+    );
 }
 
 #[test]
@@ -4131,6 +4147,16 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "no target named laptop",
         ),
+        (
+            ActionOutcome::Refused(
+                mj_core::refusal::Refusal::unusable(
+                    "Selected subagent model \"x\" is unavailable.",
+                )
+                .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "is unavailable",
+        ),
     ] {
         let (app, mut actions, _, _, _) = app();
         let cookie = login_cookie(&app).await;
@@ -4160,6 +4186,12 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
         } else {
             assert!(body.get("running_actions").is_none(), "{body}");
         }
+        // A refusal's code reaches the viewer, so it can add its own remedy.
+        let expected_code = match &outcome {
+            ActionOutcome::Refused(refusal) => refusal.code(),
+            _ => None,
+        };
+        assert_eq!(body["code"].as_str(), expected_code, "{body}");
     }
 }
 

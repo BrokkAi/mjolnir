@@ -517,10 +517,13 @@ pub fn validate_bare_project_directory(
 ) -> Result<()> {
     validate_bare_project_path(path)?;
     if !ssh_directory_exists(ssh, path, executor)? {
-        bail!(
-            "remote project directory {} does not exist or is not a directory",
-            path.display()
-        );
+        return Err(anyhow::Error::new(crate::refusal::Refusal::unusable(
+            format!(
+                "remote project directory {} does not exist or is not a directory on {}",
+                path.display(),
+                ssh.destination
+            ),
+        )));
     }
     let output = executor.execute(&ssh_validation_command(
         ssh,

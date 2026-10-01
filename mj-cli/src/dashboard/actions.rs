@@ -568,6 +568,31 @@ pub(crate) async fn apply_dashboard_action(
                 );
             }
         }
+        DashboardAction::CheckProjectDirectories { paths } => {
+            for path in paths {
+                let reported = path.clone();
+                let label = format!("checking project directory {}", path.display());
+                spawn_cancellable_io(
+                    context.critical_operations.clone(),
+                    label,
+                    context.dashboard_io_tx.clone(),
+                    move |_| match std::fs::metadata(&path) {
+                        Ok(metadata) => Ok(Some(metadata.is_dir())),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            Ok(Some(false))
+                        }
+                        Err(error) => {
+                            Err(anyhow::Error::new(error)
+                                .context(format!("read {}", path.display())))
+                        }
+                    },
+                    move |checked| DashboardIoUpdate::ProjectDirectory {
+                        path: reported,
+                        exists: checked.unwrap_or(None),
+                    },
+                );
+            }
+        }
         DashboardAction::TestTarget { target_id } => {
             let config = context.controller.config.clone();
             let reported_id = target_id.clone();

@@ -102,7 +102,15 @@ pub fn deserialize_launch_policy<'de, D: serde::Deserializer<'de>>(
     Ok(deserialize_optional_policy(deserializer)?.unwrap_or_default())
 }
 
-pub const PROFILE_HELP: &str = "Configure creation defaults for the subagent model and effort in Settings → Agent Profiles → a profile → Sub-agents, or override them for a new session with --subagent-model and --subagent-effort. Existing sessions keep their recorded policy; edit it in Move. Mjolnir chooses an eligible profile offering that selection by remaining quota. Configure additional eligible profiles in Settings → Sub-agents. This session's own profile is always eligible.";
+/// The refusal code for a single-model choice discovery does not offer. A
+/// client picks its own remedy from it: the daemon's message names no
+/// surface, and only the client knows whether the person has a Settings
+/// screen or command-line flags to change the choice with.
+pub const CHOICE_UNAVAILABLE_CODE: &str = "subagent_choice_unavailable";
+
+/// How a choice is matched to a profile. Surface-neutral, so it can follow
+/// any message from [`SubagentOptions::validate`].
+const ELIGIBILITY_NOTE: &str = "Mjolnir chooses an eligible profile offering that selection by remaining quota. This session's own profile is always eligible.";
 
 /// Choices before a parent session exists, using the same eligibility as spawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,11 +126,11 @@ impl SubagentOptions {
             return Ok(());
         };
         if model.is_empty() {
-            return Err(format!("Choose a subagent model. {PROFILE_HELP}"));
+            return Err(format!("Choose a subagent model. {ELIGIBILITY_NOTE}"));
         }
         if !self.models.iter().any(|choice| &choice.value == model) {
             return Err(format!(
-                "Selected subagent model {model:?} is unavailable.{} {PROFILE_HELP}",
+                "Selected subagent model {model:?} is unavailable.{} {ELIGIBILITY_NOTE}",
                 choice_list(" Available models", &self.models)
             ));
         }
@@ -141,7 +149,7 @@ impl SubagentOptions {
             ));
         }
         Err(format!(
-            "Select an available effort for subagent model {model:?}.{} {PROFILE_HELP}",
+            "Select an available effort for subagent model {model:?}.{} {ELIGIBILITY_NOTE}",
             choice_list(" Available efforts", &self.efforts)
         ))
     }
@@ -1129,6 +1137,18 @@ mod tests {
             "{message}"
         );
         assert!(options.validate(&single("haiku", Some("low"))).is_ok());
+        // The message names no surface: a browser has no `--subagent-model`
+        // flag and a script has no Settings screen.
+        for message in [
+            options.validate(&single("opus", None)).unwrap_err(),
+            options.validate(&single("haiku", Some("max"))).unwrap_err(),
+            SubagentOptions::default()
+                .validate(&single("", None))
+                .unwrap_err(),
+        ] {
+            assert!(!message.contains("--subagent"), "{message}");
+            assert!(!message.contains("Settings"), "{message}");
+        }
 
         // A model with no efforts refuses one, saying so, instead of asking
         // for a selection that cannot be made.

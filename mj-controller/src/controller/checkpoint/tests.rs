@@ -224,7 +224,7 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
-        reconcile_managed_checkpoint_archives_in(directory.path(), &state).unwrap(),
+        reconcile_managed_checkpoint_archives_in(directory.path(), &state, &[]).unwrap(),
         1
     );
     assert!(directory.path().join(referenced_name).exists());

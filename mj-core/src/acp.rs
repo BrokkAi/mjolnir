@@ -254,6 +254,10 @@ pub fn missing_config_selector_refusal(key: &str) -> String {
     )
 }
 
+/// Option ids harnesses use for the effort selector when they publish no
+/// thought-level category. The canonical key is `effort`.
+pub const EFFORT_OPTION_IDS: [&str; 2] = ["effort", "reasoning_effort"];
+
 pub fn find_session_config_option<'a>(
     options: &'a [SessionConfigOption],
     key: &str,
@@ -264,21 +268,15 @@ pub fn find_session_config_option<'a>(
     match key {
         "model" => options.iter().find(|option| {
             option.category == Some(SessionConfigOptionCategory::Model)
-                && !matches!(
-                    option.id.to_string().as_str(),
-                    "effort" | "reasoning_effort"
-                )
+                && !EFFORT_OPTION_IDS.contains(&option.id.to_string().as_str())
         }),
         "effort" => options
             .iter()
             .find(|option| option.category == Some(SessionConfigOptionCategory::ThoughtLevel))
             .or_else(|| {
-                options.iter().find(|option| {
-                    matches!(
-                        option.id.to_string().as_str(),
-                        "effort" | "reasoning_effort"
-                    )
-                })
+                options
+                    .iter()
+                    .find(|option| EFFORT_OPTION_IDS.contains(&option.id.to_string().as_str()))
             }),
         "mode" => options
             .iter()
@@ -744,6 +742,28 @@ impl AcceptedSessionConfig {
             model: accepted("model"),
             effort: accepted("effort"),
         }
+    }
+
+    /// The accepted pair as an archived session stored it, keyed by the
+    /// canonical names. The archive keeps each value under the harness's own
+    /// option id (Codex publishes effort as `reasoning_effort`) and no option
+    /// catalogue, so the known effort ids are read here.
+    pub fn from_archived_values(
+        values: &BTreeMap<String, serde_json::Value>,
+    ) -> BTreeMap<String, String> {
+        let read = |ids: &[&str]| {
+            ids.iter().find_map(|id| {
+                let value = values.get(*id)?.as_str()?;
+                (!value.trim().is_empty()).then(|| value.to_owned())
+            })
+        };
+        [
+            ("model", read(&["model"])),
+            ("effort", read(&EFFORT_OPTION_IDS)),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| Some((key.to_owned(), value?)))
+        .collect()
     }
 
     pub fn remember(&mut self, key: &str, value: &str, options: &[SessionConfigOption]) -> bool {

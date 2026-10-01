@@ -123,6 +123,12 @@ fn stopped_source_recovery(
 
 /// The recovery guidance a failed or cancelled Move shows, from its persisted
 /// state.
+///
+/// What is retained is read from the Move record alone
+/// ([`MoveOperation::checkpoint_retained`] and
+/// [`MoveOperation::holds_source_environment`]), the same facts the API's
+/// `move_recovery` and the web page read, so the text never promises a retry
+/// the record cannot support.
 fn failed_move_recovery(
     operation: &MoveOperation,
     record: Option<&mj_core::state::SessionRecord>,
@@ -130,8 +136,25 @@ fn failed_move_recovery(
     if operation.queue_admission_started {
         return "Destination is live; retry queue admission on this same destination. Already accepted work may have effects.".to_owned();
     }
+    let source_live = record.is_some_and(|record| {
+        matches!(
+            record.state,
+            SessionState::Running | SessionState::Disconnected
+        )
+    });
+    let environment_held = operation.holds_source_environment()
+        || (operation.in_place
+            && !source_live
+            && record.is_some_and(|record| record.target.is_some()));
+    if environment_held && !operation.checkpoint_retained() {
+        return missing_move_checkpoint_recovery(record);
+    }
     if operation.in_place && record.is_some_and(|record| record.target.is_some()) {
-        return "Environment and checkpoint retained. Retry Move on the same target; the checkout will not be recreated.".to_owned();
+        return if source_live {
+            "Source retained and still running. Retry Move when ready.".to_owned()
+        } else {
+            "Environment and checkpoint retained. Retry Move on the same target; the checkout will not be recreated.".to_owned()
+        };
     }
     match record {
         Some(record) if source_stopped_with_verified_checkpoint(record) => {
@@ -143,6 +166,181 @@ fn failed_move_recovery(
         }
         _ => "Source or partial destination is retained. Retry move after resolving the reported error.".to_owned(),
     }
+}
+
+/// The guidance for a Move that holds its source environment but has lost the
+/// checkpoint a retry would restore. Neither a retry nor Resume can bring the
+/// conversation back, and Destroy removes the checkout, so the text says where
+/// the files are first.
+fn missing_move_checkpoint_recovery(record: Option<&mj_core::state::SessionRecord>) -> String {
+    let checkout = record
+        .and_then(|record| {
+            record
+                .managed_worktree
+                .as_ref()
+                .map(|checkout| checkout.worktree_root.clone())
+                .or_else(|| record.project_directory.clone())
+        })
+        .map(|path| format!(" in {}", path.display()))
+        .unwrap_or_default();
+    format!(
+        "The Move's checkpoint archive is missing, so the Move cannot be retried and Resume cannot restore the session. \
+         The environment and checkout{checkout} are retained; copy out anything you need, then destroy the session."
+    )
+}
+
+/// The published message of a Move that did not finish. `phase` is where it
+/// stopped, when that is known.
+fn failed_move_message(
+    phase: Option<&str>,
+    cancelled: bool,
+    recovery: &str,
+    operation_id: &str,
+) -> String {
+    format!(
+        "{}{}{}. {recovery} The daemon log records the reason under reference {operation_id}",
+        mj_core::state::MOVE_FAILURE_PREFIX,
+        phase
+            .map(|phase| format!(" while {phase}"))
+            .unwrap_or_default(),
+        if cancelled { " (cancelled)" } else { "" },
+    )
+}
+
+/// Drop every archive reference whose file is gone from this Move record, and
+/// say whether anything changed.
+///
+/// A Move that took a handoff restores only from it: its `checkpoint` is the
+/// source's older full checkpoint, and restoring that would silently lose the
+/// conversation since. So a missing handoff drops both references, and the
+/// record then says plainly that nothing is retained to restore.
+pub(crate) fn forget_missing_move_archives(operation: &mut MoveOperation) -> bool {
+    let missing = |checkpoint: &Option<mj_core::state::CheckpointMetadata>| {
+        checkpoint.as_ref().is_some_and(|checkpoint| {
+            matches!(
+                std::fs::symlink_metadata(&checkpoint.archive_path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+    };
+    let lost = if missing(&operation.handoff) {
+        [operation.handoff.take(), operation.checkpoint.take()]
+    } else if operation.handoff.is_none() && missing(&operation.checkpoint) {
+        [None, operation.checkpoint.take()]
+    } else {
+        return false;
+    };
+    for checkpoint in lost.iter().flatten() {
+        tracing::warn!(
+            session_id = %operation.selection.session_id,
+            reference = %operation.operation_id,
+            path = %checkpoint.archive_path.display(),
+            "a Move's checkpoint archive is missing; recording that the Move cannot restore it"
+        );
+    }
+    true
+}
+
+/// Record, at daemon startup, every Move whose archive is missing. An active
+/// Move is then recovered from the corrected record; a finished one gets its
+/// published guidance rewritten from it, since nothing else publishes it again.
+pub(crate) fn record_missing_move_archives(
+    state: &mj_core::state::State,
+    operations: Vec<MoveOperation>,
+) -> Result<()> {
+    for mut operation in operations {
+        if !operation.retains_checkpoint() || !forget_missing_move_archives(&mut operation) {
+            continue;
+        }
+        let record = state.sessions.get(&operation.selection.session_id);
+        let published = record.and_then(|record| record.last_error.as_deref());
+        if operation.is_active()
+            || !published
+                .is_some_and(|error| error.starts_with(mj_core::state::MOVE_FAILURE_PREFIX))
+        {
+            crate::database::save_move_operation(&operation)?;
+            continue;
+        }
+        let message = failed_move_message(
+            None,
+            operation.phase == MovePhase::Cancelled,
+            &failed_move_recovery(&operation, record),
+            &operation.operation_id,
+        );
+        operation.updated_at = now();
+        crate::database::save_move_outcome(&operation, Some(&message))?;
+    }
+    Ok(())
+}
+
+/// Why a retried sealed Move's selection is refused: each part that differs
+/// from the selection the Move was sealed with, and what to send to match it.
+fn sealed_selection_difference(retained: &MoveSelection, requested: &MoveSelection) -> String {
+    let mut parts = Vec::new();
+    for (name, flag, retained, requested) in [
+        (
+            "profile",
+            "--profile",
+            &retained.profile_id,
+            &requested.profile_id,
+        ),
+        (
+            "target",
+            "--target",
+            &retained.target_template_id,
+            &requested.target_template_id,
+        ),
+    ] {
+        if retained != requested {
+            parts.push(format!(
+                "{name} (sealed with {0}; pass {flag} {0})",
+                retained.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    if retained.workspace.acknowledge_large_transfer
+        != requested.workspace.acknowledge_large_transfer
+    {
+        parts.push(if retained.workspace.acknowledge_large_transfer {
+            "large-transfer acknowledgement (the Move was sealed with it; pass --allow-large-transfer)".to_owned()
+        } else {
+            "large-transfer acknowledgement (the Move was sealed without it; omit --allow-large-transfer)".to_owned()
+        });
+    }
+    if retained.workspace.exclusions != requested.workspace.exclusions {
+        let excluded = retained
+            .workspace
+            .exclusions
+            .iter()
+            .map(|path| format!("{}:{}", path.repository, path.path.display()))
+            .collect::<Vec<_>>();
+        parts.push(if excluded.is_empty() {
+            "excluded files (the Move was sealed excluding none)".to_owned()
+        } else {
+            format!(
+                "excluded files (the Move was sealed excluding exactly {})",
+                excluded.join(", ")
+            )
+        });
+    }
+    if retained.additional_mounts != requested.additional_mounts {
+        parts.push("attached directories (send the ones the Move was sealed with)".to_owned());
+    }
+    if retained.resource_allocation != requested.resource_allocation
+        || retained.clear_resource_allocation != requested.clear_resource_allocation
+    {
+        parts.push("resource allocation (send the one the Move was sealed with)".to_owned());
+    }
+    if retained.subagents != requested.subagents {
+        parts.push("sub-agent policy (send the one the Move was sealed with)".to_owned());
+    }
+    if retained.session_id != requested.session_id || parts.is_empty() {
+        parts.push("the session".to_owned());
+    }
+    format!(
+        "a sealed Move must be retried with the selection it was sealed with; this request differs in its {}",
+        parts.join("; ")
+    )
 }
 
 pub struct MoveMutationGuard(String);
@@ -575,6 +773,15 @@ impl Controller {
             "sub-agent sessions cannot move independently of their parent"
         );
         let previous = crate::database::load_move_operation(&source.id)?;
+        if previous
+            .as_ref()
+            .is_some_and(|op| op.holds_source_environment() && !op.checkpoint_retained())
+        {
+            bail!(
+                "this Move cannot be retried. {}",
+                missing_move_checkpoint_recovery(Some(source))
+            );
+        }
         let retry = previous.as_ref().is_some_and(|op| {
             !matches!(op.phase, MovePhase::Completed)
                 && (op.restore_artifact().is_some() || source.checkpoint.is_some())
@@ -612,14 +819,17 @@ impl Controller {
         {
             selection.clear_resource_allocation = false;
         }
-        if let Some(retained) = previous.as_ref().filter(|op| {
-            op.retains_source_environment()
-                && op.phase != MovePhase::Completed
-                && op.recovery_session.is_some()
-        }) {
+        if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
+            // An in-place Move transfers no files, so its file selection is
+            // not part of what a retry has to repeat. Every surface (the web
+            // retry has no large-transfer flag at all) retries it the same way.
+            if retained.in_place {
+                selection.workspace = retained.selection.workspace.clone();
+            }
             ensure!(
                 retained.selection == selection,
-                "a sealed Move must be retried with its prepared destination and file selection"
+                "{}",
+                sealed_selection_difference(&retained.selection, &selection)
             );
             ensure!(
                 !retained.in_place
@@ -1024,11 +1234,11 @@ impl Controller {
                     %error,
                     "session move did not finish"
                 );
-                last_error = Some(format!(
-                    "{} while {phase}{}. {recovery} The daemon log records the reason under reference {}",
-                    mj_core::state::MOVE_FAILURE_PREFIX,
-                    if cancelled { " (cancelled)" } else { "" },
-                    operation.operation_id,
+                last_error = Some(failed_move_message(
+                    Some(phase),
+                    cancelled,
+                    &recovery,
+                    &operation.operation_id,
                 ));
                 operation.error = Some(error.clone());
                 (
@@ -1079,8 +1289,21 @@ impl Controller {
             }
             if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                 let cleanup = crate::targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(15));
-                Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
-                operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
+                // An in-place Move writes `recovery_session` only after its
+                // relay reported Closed, so the seal is a durable fact of the
+                // Move. Asking the sealed relay again cannot change it and
+                // fails when its actor is gone, which left the record
+                // `Closing` (suspending) with nothing to finish it.
+                let sealed = operation.in_place && operation.recovery_session.is_some() && session.state == SessionState::Closing;
+                if !sealed {
+                    Box::pin(self.recover_move_source_stop(&mut operation, &cleanup, manager)).await?;
+                }
+                // A Move that keeps the environment restores only from the
+                // handoff its seal recorded. Taking the source's older full
+                // checkpoint here would make a lost handoff look retained.
+                if !operation.retains_source_environment() {
+                    operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
+                }
                 if operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Closing {
                     let previous = self.state.sessions[&id].clone();
                     operation.recovery_session = Some(previous.clone());
@@ -1177,11 +1400,10 @@ impl Controller {
             {
                 super::checkpoint::wait_for_relay_closed(lease.connection_mut()).await?;
                 lease.release();
-                ensure!(
-                    operation.restore_artifact().is_some()
-                        || self.state.sessions[&id].checkpoint.is_some(),
-                    "sealed Move source has no checkpoint"
-                );
+                // The source is sealed whether or not its handoff survived.
+                // A missing handoff is already recorded on the Move, whose
+                // owner retains the environment and publishes the loss;
+                // refusing here would leave the session suspending instead.
                 return Ok(());
             }
             lease.release();
@@ -1240,6 +1462,15 @@ impl Controller {
             "move cancelled before source interruption"
         );
         if !operation.queue_admission_started {
+            // A retry restores from the archive this record names. When the
+            // file is gone, record that before touching the session, so the
+            // failure publishes what is really retained and the session stays
+            // in the state Destroy can act on.
+            if forget_missing_move_archives(operation) {
+                operation.updated_at = now();
+                crate::database::save_move_operation(operation)?;
+                bail!("the Move's checkpoint archive is missing; nothing is left to restore");
+            }
             if operation.in_place {
                 ensure!(
                     operation.source_target.is_some()
@@ -1254,10 +1485,12 @@ impl Controller {
                 // Restore source identity only after that owner is stopped.
                 let cause = anyhow::anyhow!("clean up the partial Move destination before retry");
                 if operation.in_place {
+                    // The record stays `Error`: `restore_session_in_place`
+                    // accepts a retained environment in that state, and every
+                    // failure before the swap leaves it there for Destroy or
+                    // another retry. Marking it `Closing` here left a failed
+                    // retry suspending with nothing to finish it.
                     self.retain_failed_in_place_move(&id, previous, cause)?;
-                    let record = self.state.sessions.get_mut(&id).unwrap();
-                    record.state = SessionState::Closing;
-                    crate::database::save_resumed_session(record, None)?;
                 } else if operation.workspace_transfer.is_some() {
                     self.rollback_move_destination(operation, cause, executor)?;
                     let record = self.state.sessions.get_mut(&id).unwrap();

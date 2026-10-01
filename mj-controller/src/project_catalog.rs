@@ -220,25 +220,11 @@ fn reconcile_config(
     Ok(())
 }
 
+/// Record a local directory found in history in the catalog. Discovery never
+/// writes `config.toml`: saved bundles are the ones the user created, and a
+/// discovered project becomes one only when the user chooses it.
 fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
-    let project = accept_directory(&TargetTemplate::LocalBare, path, executor)?.1;
-    // A remote-less repository can be suggested for raw launch, but managed
-    // launch already requires a network source. Keep its local definition.
-    let catalog = database::read_project_catalog()?;
-    let entry = catalog
-        .projects
-        .iter()
-        .find(|entry| entry.project.key().ok() == project.key().ok())
-        .context("discovered project was not stored")?;
-    let id = entry.bundle_id.clone();
-    let _commit = crate::upgrade::activity_unless_draining("project discovery config")?;
-    Config::update(|config| {
-        config
-            .bundles
-            .entry(id)
-            .or_insert_with(|| entry.project.bundle.clone());
-        Ok(())
-    })?;
+    accept_directory(&TargetTemplate::LocalBare, path, executor)?;
     Ok(())
 }
 
@@ -868,6 +854,9 @@ mod tests {
         let view = database::read_project_catalog().unwrap();
         assert_eq!(view.projects.len(), 10);
         assert_eq!(view.locations.len(), 10);
+        // Discovered projects belong to the catalog. config.toml holds only
+        // the bundles the user saved.
+        assert!(Config::load().unwrap().bundles.is_empty());
         assert!(
             !view
                 .locations
@@ -914,6 +903,7 @@ mod tests {
             database::read_project_catalog().unwrap().locations.len(),
             11
         );
+        assert!(Config::load().unwrap().bundles.is_empty());
         assert!(
             database::project_discovery_changes(false)
                 .unwrap()

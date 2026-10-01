@@ -591,6 +591,80 @@ fn select_saved_project(dashboard: &mut DashboardState, bundle_id: &str) {
     wizard.form.get_mut().focus(WizardControl::BundleList);
 }
 
+/// A configured project whose local directory is gone stays listed, marked
+/// unavailable with the reason. Finding T-6.
+#[test]
+fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
+    let missing = PathBuf::from("/definitely/not/here/missingpath");
+    let mut configuration = config();
+    configuration.bundles.insert(
+        "missingpath".into(),
+        mj_core::config::ProjectBundle {
+            primary_repo: "missingpath".into(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: "missingpath".into(),
+                github: None,
+                local: Some(missing.clone()),
+                destination: PathBuf::from("missingpath"),
+                git_ref: None,
+            }],
+        },
+    );
+    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
+    // The dashboard loop asks for checks after every event; collect them
+    // while moving to the project step.
+    let mut checks = Vec::new();
+    let mut collect = |dashboard: &mut DashboardState| {
+        while let Some(action) = dashboard.take_prerequisite_check() {
+            match action {
+                DashboardAction::CheckTargetReadiness {
+                    generation,
+                    target_ids,
+                } => {
+                    for id in target_ids {
+                        dashboard.apply_target_readiness(generation, id, Ok(()));
+                    }
+                }
+                other => checks.push(other),
+            }
+        }
+    };
+    open_new_session_wizard(&mut dashboard);
+    collect(&mut dashboard);
+    for _ in 0..2 {
+        dashboard.handle_key(key(KeyCode::Enter));
+        collect(&mut dashboard);
+    }
+    assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+    assert_eq!(
+        checks,
+        vec![DashboardAction::CheckProjectDirectories {
+            paths: vec![missing.clone()]
+        }],
+        "the directory is checked once, off the draw loop"
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let before = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
+    assert!(before.contains("missingpath"), "{before}");
+    assert!(!before.contains("unavailable"), "{before}");
+
+    // The answer marks the row.
+    dashboard.apply_project_directory_check(missing, Some(false));
+    select_saved_project(&mut dashboard, "missingpath");
+    let lines = draw_project_picker(&mut dashboard, &mut terminal);
+    let text = lines.join("\n");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("missingpath") && line.contains("(unavailable")),
+        "{text}"
+    );
+    assert!(
+        text.contains("Unavailable: the directory") && text.contains("does not exist."),
+        "{text}"
+    );
+}
+
 #[test]
 fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() {
     let mut dashboard = dashboard_at_saved_projects(State::default());

@@ -422,6 +422,14 @@ pub fn repository_remote_repairs(
     let mut repairs = Vec::new();
     for repository in &bundle.repositories {
         if let Some(path) = &repository.local {
+            if !path.is_dir() {
+                return Err(crate::refusal::Refusal::precondition(format!(
+                    "Project {:?}: the directory {} does not exist.",
+                    repository.id,
+                    path.display()
+                ))
+                .into());
+            }
             match resolve_local_repository(path, executor) {
                 Ok(_) => {}
                 Err(error) => match error.downcast_ref::<LocalRemoteRepair>() {
@@ -652,7 +660,7 @@ fn git_text(
 }
 
 fn git_config(path: &Path, key: &str, executor: &impl CommandExecutor) -> Result<Option<String>> {
-    let output = git_command(path, ["config", "--get", key]);
+    let output = git_command(path, ["config", "--get", key]).purpose("read Git configuration key");
     if executor.cancellation_requested() {
         bail!("operation cancelled while read Git configuration");
     }
@@ -914,6 +922,37 @@ mod tests {
         assert_eq!(source.push_urls, ["https://github.com/me/fork.git"]);
     }
 
+    /// Every command the daemon runs is logged with its purpose; an empty one
+    /// leaves a log line that says nothing about what ran.
+    #[test]
+    fn resolving_a_repository_gives_every_command_a_purpose() {
+        use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
+        use std::cell::RefCell;
+
+        struct Recording(RefCell<Vec<String>>);
+        impl CommandExecutor for Recording {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.0.borrow_mut().push(command.purpose.clone());
+                ProcessExecutor.execute(command)
+            }
+        }
+
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(
+            path,
+            &["remote", "add", "origin", "https://github.com/acme/app.git"],
+        );
+        let recording = Recording(RefCell::new(Vec::new()));
+        resolve_local_repository(path, &recording).unwrap();
+        let purposes = recording.0.borrow();
+        assert!(!purposes.is_empty());
+        assert!(
+            purposes.iter().all(|purpose| !purpose.is_empty()),
+            "{purposes:?}"
+        );
+    }
+
     #[test]
     fn no_remote_project_identity_is_its_canonical_repository() {
         let directory = initialized_repository();
@@ -936,6 +975,22 @@ mod tests {
                 git_ref: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_missing_project_directory_is_reported_in_plain_language() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("gone");
+        let mut bundle = repair_bundle(&missing);
+        bundle.repositories[0].id = "missingpath".into();
+        let error = repository_remote_repairs(&bundle, &ProcessExecutor).unwrap_err();
+        assert_eq!(
+            crate::refusal::Refusal::of(&error).unwrap().message(),
+            format!(
+                "Project \"missingpath\": the directory {} does not exist.",
+                missing.display()
+            )
+        );
     }
 
     #[test]

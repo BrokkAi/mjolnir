@@ -70,7 +70,10 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
       state.completions.push(body);
       return json(await state.complete(body));
     }
-    if (pathname === '/api/projects') return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
+    if (pathname === '/api/projects') {
+      if (state.holdCatalog) await state.holdCatalog;
+      return json({ projects: [], locations: [], status: state.catalogStatus || { state: 'ready' } });
+    }
     if (pathname === '/api/projects/discover') {
       const body = route.request().postDataJSON();
       state.discoveries.push(body);
@@ -95,6 +98,7 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
     if (pathname === '/api/actions') {
       state.actions.push(route.request().postDataJSON());
       if (state.holdLaunch) await state.holdLaunch;
+      if (state.actionError) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(state.actionError) });
       return route.fulfill({ status: 202, body: '' });
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);
@@ -206,6 +210,39 @@ test('a project directory suggests paths on its own host and a URL never searche
   expect(state.completions).toHaveLength(2);
 });
 
+// The project list finishing re-renders the step and replaces the field. A
+// slow machine makes that land after the person has typed.
+test('path suggestions survive the step re-rendering while a reply is pending', async ({ page }) => {
+  const state = await mount(page);
+  let finishCatalog;
+  state.holdCatalog = new Promise(resolve => { finishCatalog = resolve; });
+  let answer;
+  const held = new Promise(resolve => { answer = resolve; });
+  state.complete = async () => { await held; return { candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false }; };
+  await projectStep(page, 'local');
+  const directory = page.locator('#new-project-directory');
+  await directory.fill('/work/re');
+  await expect.poll(() => state.completions.length).toBe(1);
+  finishCatalog();
+  await expect(page.locator('#new-step')).not.toContainText('Refreshing recent projects');
+  answer();
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveCount(2);
+  await expect(page.locator('#new-project-directory')).toHaveValue('/work/re');
+  await expect(page.locator('#new-project-directory')).toBeFocused();
+
+  // A reply for an older value never shows.
+  state.completions.length = 0;
+  let late;
+  state.complete = async body => { if (body.prefix === '/work/rep') await new Promise(resolve => { late = resolve; }); return { candidates: ['/old/'], insert: '', truncated: false }; };
+  await page.locator('#new-project-directory').pressSequentially('p');
+  await expect.poll(() => state.completions.length).toBe(1);
+  await page.locator('#new-project-directory').pressSequentially('o');
+  late();
+  await page.waitForTimeout(300);
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveCount(1);
+  await expect(page.locator('.field-suggestions .palette-row[role="option"]')).toHaveText('/old/');
+});
+
 test('empty projects show choices and a pasted source retries then continues directly to review', async ({ page }) => {
   const state = await mount(page, { bundles: [] });
   await projectStep(page);
@@ -280,12 +317,11 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(page.locator('#new-back')).toBeEnabled();
   const worktree = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(worktree).toBeDisabled();
-  const subagents = page.locator('#new-subagents');
-  await subagents.selectOption('native');
+  await expect(page.locator('#new-step')).toContainText('SubagentsNative');
   await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   expect(state.actions).toHaveLength(0);
   await refresh(page, state);
-  await expect(subagents).toHaveValue('native');
+  await expect(page.locator('#new-step')).toContainText('SubagentsNative');
   await expect(page.locator('#new-step')).toContainText('Checking project…');
   expect(state.preflights).toHaveLength(1);
   release();
@@ -443,28 +479,38 @@ test('an existing linked checkout can explicitly create a managed worktree', asy
   expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: true, project_directory: '/work/linked' });
 });
 
-test('the Subagents input offers four modes and preserves the choice on refresh', async ({ page }) => {
-  const state = await mount(page);
-  await projectStep(page, 'container');
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  const select = page.locator('#new-subagents');
-  await expect(select).toHaveValue('native');
-  await expect(select.locator('option')).toHaveText(['Native', 'Mjolnir, all models', 'Mjolnir, single model', 'None']);
-  await select.selectOption('all_models');
-  await refresh(page, state);
-  await expect(select).toHaveValue('all_models');
-  await page.locator('#new-next').click();
-  expect(state.actions.at(-1)).toMatchObject({ subagents: { mode: 'all_models' } });
-});
+// Policy comes from the profile's setting; the form has no session-level selector.
+for (const [policy, label] of [
+  [undefined, 'SubagentsNative'],
+  [{ mode: 'none' }, 'SubagentsNone'],
+    [{ mode: 'single_model', model: 'model-a', effort: 'high' }, 'SubagentsSingle model: model-a · high'],
+]) {
+  test(`Review states the profile subagent policy ${label}, offers no input, and sends it`, async ({ page }) => {
+    const state = await mount(page);
+    if (policy) {
+      state.snapshot.profiles[0].subagents = policy;
+      await refresh(page, state);
+    }
+    await projectStep(page, 'container');
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-step')).toContainText(label);
+    await expect(page.locator('#new-subagents')).toHaveCount(0);
+    await refresh(page, state);
+    await expect(page.locator('#new-step')).toContainText(label);
+    await page.locator('#new-next').click();
+    expect(state.actions.at(-1).subagents).toEqual(policy || { mode: 'native' });
+  });
+}
 
-test('a harness that cannot receive Mjolnir sub-agents shows no Subagents input and sends no choice', async ({ page }) => {
+test('a harness that cannot receive Mjolnir sub-agents shows no Subagents row', async ({ page }) => {
   const state = await mount(page);
   await page.locator('#new-profile').getByRole('radio', { name: /^gamma/ }).check();
   await projectStep(page, 'container');
   await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.locator('#new-subagents')).toHaveCount(0);
+  await expect(page.locator('#new-step')).toContainText('Accountgamma');
+  await expect(page.locator('#new-step')).not.toContainText('Subagents');
   await page.locator('#new-next').click();
-  expect(state.actions.at(-1).subagents).toBe(null);
+  expect(state.actions.at(-1).subagents).toEqual({ mode: 'native' });
 });
 
 test('changing the directory resets the worktree choice to its inspected default', async ({ page }) => {
@@ -925,53 +971,17 @@ test('group creation is single flight and leaving it preserves the draft while i
   ]);
 });
 
-test('single-model selection loads corresponding efforts and sends the fixed pair', async ({ page }) => {
+test('an unavailable subagent model is reported with the Settings path for the chosen account', async ({ page }) => {
   const state = await mount(page);
-  await projectStep(page, 'container');
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await page.locator('#new-subagents').selectOption('single_model');
-  await expect(page.locator('#new-subagent-model')).toBeEnabled();
-  await expect(page.locator('#new-next')).toBeDisabled();
-  await expect(page.locator('#new-step')).toContainText('Settings → Sub-agents');
-  await page.locator('#new-subagent-model').selectOption('model-a');
-  await expect(page.locator('#new-subagent-effort')).toBeEnabled();
-  await expect(page.locator('#new-next')).toBeDisabled();
-  await page.locator('#new-subagent-effort').selectOption('high');
-  await expect(page.locator('#new-next')).toBeEnabled();
-  await page.locator('#new-next').click();
-  expect(state.actions.at(-1).subagents).toEqual({ mode: 'single_model', model: 'model-a', effort: 'high' });
-});
-
-test('remembered single-model choice is validated and changing to an effortless model clears effort', async ({ page }) => {
-  const state = await mount(page);
-  state.snapshot.last_subagent_policy = { mode: 'single_model', model: 'model-a', effort: 'high' };
+  state.snapshot.profiles[0].subagents = { mode: 'single_model', model: 'removed', effort: 'high' };
+  state.actionError = { error: 'Selected subagent model "removed" is unavailable.', code: 'subagent_choice_unavailable' };
   await refresh(page, state);
-  await page.goto('https://viewer.test/#workspace/test');
-  await page.goto('https://viewer.test/#workspace/test/new');
   await projectStep(page, 'container');
   await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.locator('#new-subagents')).toHaveValue('single_model');
-  await expect(page.locator('#new-subagent-effort')).toHaveValue('high');
-  await expect(page.locator('#new-next')).toBeEnabled();
-  await page.locator('#new-subagent-model').selectOption('model-b');
-  await expect(page.locator('#new-subagent-effort')).toBeDisabled();
-  await expect(page.locator('#new-next')).toBeEnabled();
+  await expect(page.locator('#new-step')).toContainText('Single model: removed · high');
   await page.locator('#new-next').click();
-  expect(state.actions.at(-1).subagents).toEqual({ mode: 'single_model', model: 'model-b', effort: null });
-});
-
-test('unavailable remembered model blocks creation until changed; None needs no discovery', async ({ page }) => {
-  const state = await mount(page);
-  state.snapshot.last_subagent_policy = { mode: 'single_model', model: 'removed', effort: 'high' };
-  await refresh(page, state);
-  await page.goto('https://viewer.test/#workspace/test');
-  await page.goto('https://viewer.test/#workspace/test/new');
-  await projectStep(page, 'container');
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.locator('#new-step')).toContainText('removed is unavailable');
-  await expect(page.locator('#new-next')).toBeDisabled();
-  await page.locator('#new-subagents').selectOption('none');
-  await expect(page.locator('#new-subagent-model')).toHaveCount(0);
-  await page.locator('#new-next').click();
-  expect(state.actions.at(-1).subagents).toEqual({ mode: 'none' });
+  await expect(page.locator('#new-error')).toContainText('"removed" is unavailable');
+  await expect(page.locator('#new-error')).toContainText('Settings → Agent Profiles → alpha → Sub-agents');
+  await expect(page.locator('#new-error')).not.toContainText('--subagent');
+  await expect(page.locator('#new-next')).toBeEnabled();
 });

@@ -14,13 +14,6 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::Context as _;
 
-/// The version this build reports, which is also the version a daemon started
-/// from it records in `daemon.json`.
-///
-/// Every crate in the workspace carries the workspace version, so the client
-/// crate's version is the running binary's version.
-pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// A file, identified by what it is rather than by what it is called.
 ///
 /// A running executable can be renamed (NFS moves an unlinked open file to a
@@ -202,15 +195,19 @@ pub fn describe_daemon_and_client_builds(
 /// [`describe_daemon_and_client_builds`] with both executables resolved from
 /// the operating system and this build's own version on the client side.
 pub fn describe_running_daemon_and_client_builds(daemon_pid: u32, daemon_version: &str) -> String {
+    // A daemon publishes its revision and times as build metadata; name them
+    // the way a person reads them, and this client's the same way.
+    let daemon_build = crate::build_identity::BuildIdentity::parse(daemon_version)
+        .map_or_else(|_| daemon_version.to_owned(), |build| build.describe());
     describe_daemon_and_client_builds(
         daemon_pid,
         BuildDescription {
             executable: process_executable_path(daemon_pid).as_deref(),
-            version: daemon_version,
+            version: &daemon_build,
         },
         BuildDescription {
             executable: running_executable_path().as_deref(),
-            version: BUILD_VERSION,
+            version: &crate::build_identity::this_build().describe(),
         },
     )
 }

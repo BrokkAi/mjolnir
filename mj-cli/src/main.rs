@@ -803,7 +803,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
                     recovery: None,
                 })?;
             }
-            return Err(error).context("prepare move");
+            return Err(with_clear_resources_hint(error)).context("prepare move");
         }
     };
     if args.prepare {
@@ -930,6 +930,16 @@ async fn move_session(args: MoveArgs) -> Result<()> {
 fn with_large_transfer_hint(error: anyhow::Error) -> anyhow::Error {
     if error.is::<mj_core::move_workspace::LargeTransferConsentRequired>() {
         error.context("use --prepare to inspect files, --allow-large-transfer to include all eligible data, or --exclude REPOSITORY:PATH to leave selected files at the source")
+    } else {
+        error
+    }
+}
+
+/// The daemon owns the bare-target refusal text; the flag that resolves it is
+/// specific to this command line, so it is added here.
+fn with_clear_resources_hint(error: anyhow::Error) -> anyhow::Error {
+    if format!("{error:#}").contains(mj_core::state::BARE_TARGET_FIXED_RESOURCES) {
+        error.context("add --clear-resources to remove the inherited container sizing when moving to a fixed host")
     } else {
         error
     }
@@ -1545,7 +1555,8 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             println!(
                 "Mjolnir daemon {} (version {}) started {}; {} attached client{}; web viewer {}",
                 status.pid,
-                status.build_version,
+                mj_client::build_identity::BuildIdentity::parse(&status.build_version)
+                    .map_or_else(|_| status.build_version.clone(), |build| build.describe()),
                 status.started_at,
                 status.attached_clients,
                 if status.attached_clients == 1 {
@@ -2124,6 +2135,18 @@ mod tests {
         let error = WorkspaceSelection::default().validate(&large).unwrap_err();
         let shown = format!("{:#}", with_large_transfer_hint(error));
         assert!(shown.contains("--allow-large-transfer"), "{shown}");
+    }
+
+    #[test]
+    fn move_error_hint_names_clear_resources_for_the_bare_target_refusal() {
+        let refusal = anyhow::anyhow!(mj_core::state::BARE_TARGET_FIXED_RESOURCES);
+        let shown = format!("{:#}", with_clear_resources_hint(refusal));
+        assert!(shown.contains("--clear-resources"), "{shown}");
+        assert!(shown.contains("fixed host resources"), "{shown}");
+
+        let other = anyhow::anyhow!("unknown destination target");
+        let shown = format!("{:#}", with_clear_resources_hint(other));
+        assert!(!shown.contains("--clear-resources"), "{shown}");
     }
 
     #[test]

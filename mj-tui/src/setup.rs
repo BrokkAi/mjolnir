@@ -195,8 +195,9 @@ pub(crate) struct SetupDialog {
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
-    /// The notice describes the build cache page and goes when the page does.
-    build_cache_notice: bool,
+    /// Where the notice was first shown. A status line belongs to the page
+    /// or prompt that set it and goes when the dialog is no longer there.
+    notice_anchor: Option<NoticeAnchor>,
     /// The host-resolved values behind the blank fields of the build cache
     /// page being viewed, keyed by the settings they were resolved from.
     build_cache_preview: Option<BuildCachePreviewState>,
@@ -205,6 +206,13 @@ pub(crate) struct SetupDialog {
     archive_space_preview: Option<ArchiveSpacePreviewState>,
     preferred_width: u16,
     preferred_height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NoticeAnchor {
+    text: String,
+    /// The page path, and whether a value editor or the search is open.
+    view: (Vec<String>, bool, bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -837,7 +845,7 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             notice: None,
-            build_cache_notice: false,
+            notice_anchor: None,
             build_cache_preview: None,
             archive_space_preview: None,
             preferred_width: preferred.width,
@@ -954,15 +962,39 @@ impl SetupDialog {
             .collect()
     }
 
+    fn notice_view(&self) -> (Vec<String>, bool, bool) {
+        (
+            self.path.clone(),
+            self.editor.is_some(),
+            self.search.is_some(),
+        )
+    }
+
+    /// Anchors a new notice to the view showing it, and drops a notice once
+    /// the dialog has left that view.
+    fn expire_notice(&mut self) {
+        let Some(text) = self.notice.clone() else {
+            self.notice_anchor = None;
+            return;
+        };
+        let view = self.notice_view();
+        match &self.notice_anchor {
+            Some(anchor) if anchor.text == text => {
+                if anchor.view != view {
+                    self.notice = None;
+                    self.notice_anchor = None;
+                }
+            }
+            _ => self.notice_anchor = Some(NoticeAnchor { text, view }),
+        }
+    }
+
     pub(crate) fn prepare(&mut self) {
         if let Some(review) = &self.review_editor {
             review.prepare();
             return;
         }
-        if self.build_cache_notice && self.build_cache_page().is_none() {
-            self.notice = None;
-            self.build_cache_notice = false;
-        }
+        self.expire_notice();
         use SetupControl::*;
         if let Some(search) = &self.search {
             let len = search.matches.len();
@@ -1048,7 +1080,6 @@ impl SetupDialog {
             if let Some(reason) = self.build_cache_blocked() {
                 let notice = format!("The build cache cannot be turned on here: {reason}");
                 self.notice = Some(notice);
-                self.build_cache_notice = true;
                 return;
             }
             *self.draft.pointer_mut(&pointer(&path)).unwrap() =
@@ -1063,7 +1094,6 @@ impl SetupDialog {
                 "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
                     .into(),
             );
-            self.build_cache_notice = true;
             return;
         }
         if value.is_object() || value.is_array() {
@@ -1400,7 +1430,6 @@ impl SetupDialog {
             result: BuildCachePreviewResult::Resolving,
         });
         self.notice = Some("Resolving the build cache defaults on the machine…".into());
-        self.build_cache_notice = true;
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
@@ -1920,12 +1949,16 @@ impl SetupDialog {
                 ))
             }
             "effort" if value.is_null() => {
+                // Saving refuses an unset effort whenever the model offers
+                // efforts (`SubagentOptions::validate`), so "Model default" is
+                // only true once the options are known to offer none; until
+                // they arrive the field asks for a selection.
                 let requires_effort = self
                     .subagent_choices
                     .as_ref()
                     .and_then(|choices| choices.result.as_ref())
                     .and_then(|result| result.as_ref().ok())
-                    .is_some_and(|options| !options.efforts.is_empty());
+                    .is_none_or(|options| !options.efforts.is_empty());
                 Some(
                     if requires_effort {
                         "Select effort"
@@ -1996,6 +2029,7 @@ impl SetupDialog {
         if self.saving {
             return DashboardAction::None;
         }
+        let mut subagent_page = None;
         let result = config_from_draft(self.draft.clone())
             .map_err(|error| error.to_string())
             .and_then(|config| {
@@ -2011,6 +2045,9 @@ impl SetupDialog {
                         &profile.subagents
                     && choices.model.as_deref() == Some(model.as_str())
                 {
+                    // A refusal here is about this page's fields, so the
+                    // dialog opens the page that holds them.
+                    subagent_page = Some(choices.profile.clone());
                     match &choices.result {
                         Some(Ok(options)) => options.validate(&profile.subagents)?,
                         Some(Err(error)) => return Err(error.clone()),
@@ -2020,6 +2057,7 @@ impl SetupDialog {
                             );
                         }
                     }
+                    subagent_page = None;
                 }
                 config
                     .validate()
@@ -2037,6 +2075,12 @@ impl SetupDialog {
                 }
             }
             Err(error) => {
+                if let Some(profile) = subagent_page {
+                    self.editor = None;
+                    self.path = vec!["profiles".into(), profile, "subagents".into()];
+                    self.selected = 0;
+                    self.form = RefCell::new(Dialog::default());
+                }
                 self.notice = Some(error);
                 DashboardAction::None
             }
@@ -2703,7 +2747,6 @@ impl DashboardState {
             },
         });
         dialog.notice = Some(notice);
-        dialog.build_cache_notice = true;
         dialog.prepare();
     }
 
@@ -3031,13 +3074,16 @@ pub(crate) fn render_setup(
         );
     }
     let help_y = inner.y + u16::from(nested);
-    frame.render_widget(
-        Paragraph::new(schema::page_help(path, &dialog.draft))
-            .wrap(Wrap { trim: false })
-            .style(theme::muted()),
-        Rect::new(inner.x, help_y, inner.width, 2),
-    );
-    let body_y = help_y + 3;
+    // The hint wraps in full; two rows is the least it keeps, so pages with
+    // short hints do not move.
+    let help = Paragraph::new(schema::page_help(path, &dialog.draft))
+        .wrap(Wrap { trim: false })
+        .style(theme::muted());
+    let help_rows = u16::try_from(help.line_count(inner.width))
+        .unwrap_or(u16::MAX)
+        .clamp(2, (inner.height / 3).max(2));
+    frame.render_widget(help, Rect::new(inner.x, help_y, inner.width, help_rows));
+    let body_y = help_y + help_rows + 1;
     // Back and the commit share the dialog's bottom row; the page's own
     // actions stack in a column beside the body.
     let footer_row = mj_chat::components::DialogShell::layout(inner, 0).actions;
@@ -3056,7 +3102,7 @@ pub(crate) fn render_setup(
         inner.width,
         inner
             .height
-            .saturating_sub(4 + notice_rows + u16::from(nested))
+            .saturating_sub(2 + help_rows + notice_rows + u16::from(nested))
             .max(1),
     );
     // The three rows a notice would occupy belong to the page while no notice

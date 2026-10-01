@@ -34,7 +34,10 @@ pub use mj_client::session::{
 #[cfg(test)]
 use mj_core::worker_launch::ReviewerLaunchConfig;
 
+/// Sync cadence while the worker owns work, so streamed events show promptly.
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
+/// Sync cadence while the worker is quiet. See `actor::sync_delay`.
+const QUIET_SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// Release SQLite's single writer between bounded pieces of a large relay
 /// catch-up. One transport page can contain thousands of terminal events and
 /// must not prevent every other session actor from publishing its view.

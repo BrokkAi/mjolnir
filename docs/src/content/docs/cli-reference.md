@@ -40,7 +40,7 @@ mj daemon restart
 
 - `status` prints the daemon PID, version, start time, connected-client count, and viewer state. When the viewer is ready it also prints the URL and six-digit access code; otherwise it reports disabled, starting, stopped, or error state.
 - `stop` gracefully stops the controller daemon. Detached workers keep running.
-- `restart` gracefully replaces the daemon with the installed Mjolnir build and reconnects to existing workers.
+- `restart` gracefully replaces the daemon with the installed Mjolnir build and reconnects to existing workers. It refuses when the running daemon's build is newer than its own; to go back to an older build, run `mj daemon stop` first.
 
 ## Setup
 

@@ -681,8 +681,17 @@ fn resolve_git_root(
         );
     }
 
-    let common = mj_core::local_git::resolve_git_path(
+    let prefix = managed_git_stdout(
+        executor,
+        target,
         directory,
+        ["rev-parse", "--show-prefix"],
+        "resolve project relative directory",
+    )?;
+    // Relative Git results resolve against Git's own spelling of the
+    // directory, which `root` shares, not the caller's possibly symlinked one.
+    let common = mj_core::local_git::resolve_git_path(
+        &root.join(prefix),
         &managed_git_stdout(
             executor,
             target,
@@ -1435,8 +1444,10 @@ fn inspect_raw_project(
         ["rev-parse", "--absolute-git-dir"],
         "resolve raw project Git directory",
     )?);
+    // Git prints `--absolute-git-dir` with symlinks resolved, so resolve the
+    // relative common directory against Git's spelling of `selected` too.
     let common_git_dir = mj_core::local_git::resolve_git_path(
-        selected,
+        &repository.join(&prefix),
         &managed_git_stdout(
             executor,
             target,

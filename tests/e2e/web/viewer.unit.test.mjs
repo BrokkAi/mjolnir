@@ -985,7 +985,7 @@ test('path suggestions abort superseded requests and drop stale replies', async 
       }),
   });
   vm.runInContext(
-    sourceBetween('function attachPathSuggestions(', '\nfunction pathField('),
+    sourceBetween('const pathSuggestionOwners = new Map();', '\nfunction pathField('),
     context,
   );
   context.input = input;
@@ -1133,6 +1133,61 @@ test('a review published without roles renders and clears when it ends', () => {
   harness.renderTurnReview(ended);
   assert.equal(harness.reviewHost.children.length, 0, 'the card stayed after the review ended');
 });
+test('a failed Move offers Retry exactly when the daemon kept what a retry restores (W-5)', () => {
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${sourceBetween('function isResumeSession(', 'function resumeActivityMs(')}
+     this.isResumeSession = isResumeSession;
+     this.resumeMoveRecovery = resumeMoveRecovery;`,
+    context,
+  );
+  // The session the campaign saw: a failed in-place Move whose conversation
+  // can still be read (`capabilities.open`), with its handoff retained.
+  const failed = {
+    lifecycle: 'failed',
+    state: 'error',
+    capabilities: { open: true, resume: false, move_session: false },
+    move_recovery: {
+      phase: 'failed',
+      checkpoint_retained: true,
+      environment_retained: true,
+      queue_admission_started: false,
+      queue_admission_finished: false,
+    },
+  };
+  const retained = context.resumeMoveRecovery(failed);
+  assert.equal(retained.status, 'Move failed.');
+  assert.equal(retained.active, false, 'a readable conversation is not an active session');
+  assert.equal(retained.retry, true);
+  assert.equal(retained.resume, false, 'Resume is refused while the Move holds the environment');
+  assert.match(retained.explanation, /Retry the move/);
+  assert.equal(context.isResumeSession(failed), true);
+
+  // The archive is gone: the record says so, and neither Retry nor Resume is
+  // offered, but the card stays reachable to read why and to destroy.
+  const lost = {
+    ...failed,
+    move_recovery: { ...failed.move_recovery, checkpoint_retained: false },
+  };
+  const missing = context.resumeMoveRecovery(lost);
+  assert.equal(missing.retry, false);
+  assert.equal(missing.resume, false);
+  assert.match(missing.explanation, /cannot be retried/);
+  assert.doesNotMatch(missing.explanation, /Retry the move/);
+  assert.equal(context.isResumeSession(lost), true);
+
+  // A cancelled Move that did not take the environment can be retried or
+  // resumed with the source settings.
+  const cancelled = context.resumeMoveRecovery({
+    lifecycle: 'suspended',
+    capabilities: { resume: true },
+    move_recovery: { phase: 'cancelled', checkpoint_retained: true, environment_retained: false },
+  });
+  assert.equal(cancelled.status, 'Move cancelled.');
+  assert.equal(cancelled.retry, true);
+  assert.equal(cancelled.resume, true);
+});
+
 test('the offline state is announced by one live region with one message', () => {
   const start = viewerSource.indexOf("const CONNECTION_BANNER_TEXT");
   const end = viewerSource.indexOf("function reconnect()");

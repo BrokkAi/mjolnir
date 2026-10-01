@@ -1597,6 +1597,28 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
 }
 
 #[tokio::test]
+async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+
+    let response = tokio::spawn(app.oneshot(start_request(start_body(""))));
+    let request = actions.recv().await.unwrap();
+    request
+        .reply
+        .send(ActionOutcome::Busy {
+            running: 4,
+            limit: 4,
+        })
+        .unwrap();
+
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = json_body(response).await;
+    assert_eq!(body["running_actions"], 4, "{body}");
+    assert_eq!(body["action_limit"], 4, "{body}");
+}
+
+#[tokio::test]
 async fn start_accepts_native_and_none_and_returns_the_multi_model_refusal() {
     use mj_core::subagent::SubagentPolicy;
     let backend = Arc::new(FakeBackend::default());
@@ -1651,6 +1673,31 @@ async fn start_accepts_native_and_none_and_returns_the_multi_model_refusal() {
         }
     }
     assert_eq!(backend.followups.lock().unwrap().len(), 2);
+}
+
+/// The unavailable-model refusal reaches the client with its code, so each
+/// client can add the remedy that fits it.
+#[tokio::test]
+async fn start_answers_an_unavailable_subagent_model_with_a_code() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
+    let body = start_body(r#","subagents":{"mode":"single_model","model":"fake-model"}"#);
+    let response = tokio::spawn(app.oneshot(start_request(body)));
+    let request = actions.recv().await.unwrap();
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::unusable(
+                "Selected subagent model \"fake-model\" is unavailable.",
+            )
+            .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+        ))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error = json_body(response).await;
+    assert_eq!(error["code"], mj_core::subagent::CHOICE_UNAVAILABLE_CODE);
+    assert!(error["error"].as_str().unwrap().contains("fake-model"));
 }
 
 #[tokio::test]
@@ -3719,6 +3766,46 @@ fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
     let refusal = resume_refusal(&session);
     assert!(refusal.contains("wait until it is suspended"), "{refusal}");
     assert!(!refusal.contains("close"), "{refusal}");
+}
+
+/// W-2: a failed Move that holds the session's environment withdraws
+/// Resume, and the refusal says why and what to do instead, rather than
+/// claiming an operation is running.
+#[test]
+fn a_resume_refused_for_a_move_held_environment_names_the_move() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.lifecycle = ViewerLifecycleCategory::Failed;
+    session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        operation_id: "move-a".into(),
+        source_profile_id: "destination".into(),
+        source_target_template_id: "destination".into(),
+        destination_profile_id: "fake".into(),
+        destination_target_template_id: "localhost".into(),
+        phase: "failed".into(),
+        queue: "discard".into(),
+        clear_resource_allocation: false,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_additional_mounts: Vec::new(),
+        destination_resource_allocation: None,
+        checkpoint_retained: true,
+        environment_retained: true,
+        destination_ready: false,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+    });
+    let refusal = resume_refusal(&session);
+    assert!(
+        refusal.contains("retry the Move to fake / localhost"),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("operation running"), "{refusal}");
+    session.move_recovery.as_mut().unwrap().checkpoint_retained = false;
+    let refusal = resume_refusal(&session);
+    assert!(refusal.contains("destroy the session"), "{refusal}");
+    assert!(!refusal.contains("retry the Move"), "{refusal}");
 }
 
 /// Launch finding R6-1: `mj resume` on a session with no checkpoint was

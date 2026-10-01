@@ -5,6 +5,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 
 pub const BUILD_ID: &str = env!("MJ_BUILD_ID");
+/// The committer time, in Unix seconds, of the revision in [`BUILD_ID`], or
+/// empty when the build had neither Git nor `MJ_BUILD_COMMIT_TIME`.
+pub const BUILD_COMMIT_TIME: &str = env!("MJ_BUILD_COMMIT_TIME");
 /// Referenced by the worker entry point so stripping cannot discard it.
 pub const WORKER_BUILD_STAMP: &str = concat!("\0MJ-WORKER-BUILD:", env!("MJ_BUILD_ID"), "\0");
 const PREFIX: &[u8] = b"\0MJ-WORKER-BUILD:";

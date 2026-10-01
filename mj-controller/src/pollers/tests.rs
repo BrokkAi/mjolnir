@@ -1410,9 +1410,11 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
     };
-    let notice = CredentialSyncNotices::default()
-        .notice(&result, None, &State::default())
+    let leveled = CredentialSyncNotices::default()
+        .leveled_notice(&result, None, &State::default())
         .unwrap();
+    assert!(!leveled.routine, "a failed sync stays a warning");
+    let notice = leveled.text;
     assert!(notice.contains("reconciliation failed"), "{notice}");
     assert!(notice.contains("credential file is unreadable"), "{notice}");
     assert!(!notice.contains("nothing fresher"), "{notice}");
@@ -1555,9 +1557,11 @@ fn skills_and_github_syncs_speak_while_harness_credentials_stay_out_of_the_notic
             },
         ],
     };
-    let notice = CredentialSyncNotices::default()
-        .notice(&result, None, &State::default())
+    let leveled = CredentialSyncNotices::default()
+        .leveled_notice(&result, None, &State::default())
         .unwrap();
+    assert!(leveled.routine, "a summary of good syncs is not a warning");
+    let notice = leveled.text;
     assert!(!notice.contains("harness credentials"), "{notice}");
     assert!(
         notice.contains("Synced skills for profile work to 2 session(s)."),

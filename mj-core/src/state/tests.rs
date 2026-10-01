@@ -1509,6 +1509,44 @@ fn locator_rejects_parent_traversal() {
     );
 }
 
+/// A sub-agent child on a bare SSH target runs its own worker in the parent's
+/// workspace (`borrowed_locator`), so its workspace ends in the parent's id and
+/// its `worker_id` names the child.
+#[test]
+fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
+    let mut state = sample_state();
+    let session = state.sessions.first_value_mut().unwrap();
+    let child_id = session.id.clone();
+    let borrowed = |worker_id: &str, workspace: &str| TargetLocator::SshBare {
+        host: "builder".into(),
+        workspace: PathBuf::from(workspace),
+        worker_id: Some(worker_id.into()),
+    };
+
+    session.target = Some(borrowed(
+        &child_id,
+        ".local/share/hel/workspaces/parent-session",
+    ));
+    state.validate().unwrap();
+
+    let session = state.sessions.first_value_mut().unwrap();
+    session.target = Some(borrowed(
+        "someone-else",
+        ".local/share/hel/workspaces/parent-session",
+    ));
+    assert!(
+        state
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("worker identity")
+    );
+
+    let session = state.sessions.first_value_mut().unwrap();
+    session.target = Some(borrowed(&child_id, ".local/share/hel/../parent-session"));
+    assert!(state.validate().is_err());
+}
+
 #[test]
 fn generated_session_ids_are_valid_and_distinct() {
     let first = new_session_id().unwrap();

@@ -32,12 +32,20 @@ pub(crate) enum SplashOutcome<T> {
 }
 
 /// Whether this launch shows the splash. It needs color, Unicode half
-/// blocks, and the dashboard's minimum width. The configuration is not
-/// loaded yet, so the symbol set is the terminal's own guess.
+/// blocks, and the dashboard's minimum width. The symbol set is the one the
+/// configuration names; with no setting, or a config that does not load
+/// (normal startup reports that), it is the terminal's own guess.
 pub(crate) fn wanted() -> bool {
     !mj_chat::theme::no_color_requested()
-        && mj_chat::theme::symbols_for(None) == mj_chat::theme::SymbolSet::Unicode
+        && symbols_for_splash(&mj_core::config::config_path()) == mj_chat::theme::SymbolSet::Unicode
         && crossterm::terminal::size().is_ok_and(|(width, _)| mj_tui::splash::fits(width))
+}
+
+fn symbols_for_splash(config_path: &std::path::Path) -> mj_chat::theme::SymbolSet {
+    let configured = mj_core::config::Config::load_from(config_path)
+        .ok()
+        .and_then(|config| config.advanced.symbols);
+    mj_chat::theme::symbols_for(configured)
 }
 
 /// One showing of the splash: its clock, and what it waits for.
@@ -148,5 +156,37 @@ pub(crate) async fn play_until_loaded<T: Send + 'static>(
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_chat::theme::SymbolSet;
+
+    #[test]
+    fn configured_ascii_symbols_skip_the_splash_and_unreadable_config_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "version = {}\n[advanced]\nsymbols = \"ascii\"\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        assert_eq!(symbols_for_splash(&path), SymbolSet::Ascii);
+        std::fs::write(
+            &path,
+            format!(
+                "version = {}\n[advanced]\nsymbols = \"unicode\"\n",
+                mj_core::config::CONFIG_VERSION
+            ),
+        )
+        .unwrap();
+        assert_eq!(symbols_for_splash(&path), SymbolSet::Unicode);
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert_eq!(symbols_for_splash(&path), mj_chat::theme::symbols_for(None));
     }
 }

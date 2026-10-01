@@ -63,8 +63,8 @@ pub(super) async fn run_session_actor(
     let mut reviewer_connections = BTreeMap::new();
     let mut reviewer_tails = BTreeMap::new();
     let mut reviewer_cancellation = tokio_util::sync::CancellationToken::new();
-    let mut interval = tokio::time::interval(SESSION_SYNC_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut schedule = SyncSchedule::immediately();
+    let mut handled_command = false;
     enum Event {
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
@@ -73,6 +73,12 @@ pub(super) async fn run_session_actor(
         Retirement(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        // A command can start work on a quiet session (a prompt) or drop the
+        // connection. Bring the next sync forward to what the connection's
+        // state now calls for, but never past a reconnect backoff.
+        if std::mem::take(&mut handled_command) && (connection.is_some() || failures == 0) {
+            schedule.no_later_than(sync_delay(connection.as_ref()));
+        }
         lifecycle.set_retirement_requested(*retirement.borrow_and_update());
         if lifecycle.should_stop() {
             break;
@@ -86,7 +92,7 @@ pub(super) async fn run_session_actor(
             event = async {
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
-                    _ = interval.tick() => Event::Tick,
+                    () = tokio::time::sleep_until(schedule.deadline) => Event::Tick,
                     command = commands.recv() => Event::Command(command),
                     changed = retirement.changed() => Event::Retirement(changed),
                 }
@@ -100,7 +106,7 @@ pub(super) async fn run_session_actor(
                     // reconnects on demand, so the drain needs no special case.
                     connection = returned.connection;
                     failures = 0;
-                    interval.reset();
+                    schedule.after(SESSION_SYNC_INTERVAL);
                     // A lease syncs the connection it borrowed, so this actor's
                     // next sync can find nothing left to apply. Publish what the
                     // returned connection already knows or watchers keep reading
@@ -144,6 +150,9 @@ pub(super) async fn run_session_actor(
                 }
             }
             Event::Tick => {
+                // Every outcome below either replaces this deadline or keeps
+                // it, so no path leaves one that has already passed.
+                schedule.after(SESSION_SYNC_INTERVAL);
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if lifecycle.should_stop() {
                     break;
@@ -155,6 +164,7 @@ pub(super) async fn run_session_actor(
                 match result {
                     Ok(snapshot) => {
                         failures = 0;
+                        schedule.after(sync_delay(connection.as_ref()));
                         if let Some(snapshot) = snapshot {
                             publish_view(
                                 &target.session_id,
@@ -306,7 +316,7 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    interval.reset_after(RECONNECT_INTERVAL);
+                                    schedule.after(RECONNECT_INTERVAL);
                                 }
                                 Ok(WorkerRecoveryOutcome::Alive) => {
                                     tracing::warn!(
@@ -326,7 +336,7 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    interval.reset_after(reconnect_delay(failures));
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Starting) => {
                                     tracing::warn!(
@@ -346,7 +356,7 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    interval.reset_after(reconnect_delay(failures));
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Suppressed) => {
                                     tracing::info!(
@@ -367,7 +377,7 @@ pub(super) async fn run_session_actor(
                                                 .into(),
                                         )),
                                     }, &view_tx, &updates);
-                                    interval.reset_after(RECONNECT_BACKOFF_CEILING);
+                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Ok(WorkerRecoveryOutcome::WorkspaceMissing(directory)) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
@@ -384,7 +394,7 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    interval.reset_after(RECONNECT_BACKOFF_CEILING);
+                                    schedule.after(RECONNECT_BACKOFF_CEILING);
                                 }
                                 Err(recovery_error) => {
                                     tracing::warn!(
@@ -404,17 +414,18 @@ pub(super) async fn run_session_actor(
                                         &view_tx,
                                         &updates,
                                     );
-                                    interval.reset_after(reconnect_delay(failures));
+                                    schedule.after(reconnect_delay(failures));
                                 }
                             }
                         } else {
-                            interval.reset_after(reconnect_delay(failures));
+                            schedule.after(reconnect_delay(failures));
                         }
                     }
                 }
             }
             Event::Command(command) => {
                 let Some(command) = command else { break };
+                handled_command = true;
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if !lifecycle.accepts_new_work() {
                     tracing::debug!(
@@ -1292,6 +1303,49 @@ pub(super) async fn drive_reviewer(
             requests: client.take_lane_dispatches().await?,
         },
     })
+}
+
+/// When the actor next syncs its relay connection.
+///
+/// The tick sets the deadline from the outcome of its sync (and a returned
+/// lease restarts it); every other event may only bring it forward through
+/// `no_later_than`. A fixed interval cannot express "slow while quiet", which
+/// is why this replaced one.
+struct SyncSchedule {
+    deadline: tokio::time::Instant,
+}
+
+impl SyncSchedule {
+    fn immediately() -> Self {
+        Self {
+            deadline: tokio::time::Instant::now(),
+        }
+    }
+
+    fn after(&mut self, delay: Duration) {
+        self.deadline = tokio::time::Instant::now() + delay;
+    }
+
+    fn no_later_than(&mut self, delay: Duration) {
+        self.deadline = self.deadline.min(tokio::time::Instant::now() + delay);
+    }
+}
+
+/// How long until the next sync of this connection.
+///
+/// The relay protocol has no push, so the actor must ask. While the worker
+/// has work under way, its events stream in and the actor follows them
+/// closely. A quiet worker changes only on the daemon's own commands, which
+/// bring the sync forward, or on rare events of its own (a harness exit), which
+/// the slow sweep catches. Without the distinction an idle daemon made four
+/// relay round trips per session every 150 ms, over SSH for remote sessions
+/// (T-5). A missing connection reconnects at the fast cadence; the tick's
+/// failure handling owns any backoff.
+fn sync_delay(connection: Option<&StandaloneSession>) -> Duration {
+    match connection {
+        Some(connection) if !connection.follows_closely() => QUIET_SESSION_SYNC_INTERVAL,
+        _ => SESSION_SYNC_INTERVAL,
+    }
 }
 
 pub(super) async fn sync_actor_connection(

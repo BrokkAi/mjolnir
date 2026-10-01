@@ -1134,18 +1134,37 @@ impl TargetLocator {
                 bail!("target locator has an empty AWS instance id")
             }
             Self::SshBare {
-                host, workspace, ..
+                host,
+                workspace,
+                worker_id,
             } => {
                 if host.trim().is_empty() {
                     bail!("bare SSH target locator has an empty host");
                 }
-                if workspace.as_os_str().is_empty()
+                let unsafe_path = workspace.as_os_str().is_empty()
                     || workspace
                         .components()
-                        .any(|part| part == Component::ParentDir)
-                    || !workspace.ends_with(session_id)
-                {
-                    bail!("bare SSH target locator must be a safe path ending in the session id");
+                        .any(|part| part == Component::ParentDir);
+                match worker_id {
+                    // A sub-agent child works in its parent's workspace under
+                    // its own worker identity, as cleanup also requires.
+                    Some(worker_id) => {
+                        if worker_id != session_id {
+                            bail!(
+                                "bare SSH target locator's worker identity does not match the session id"
+                            );
+                        }
+                        if unsafe_path {
+                            bail!("bare SSH target locator must have a safe workspace path");
+                        }
+                    }
+                    None => {
+                        if unsafe_path || !workspace.ends_with(session_id) {
+                            bail!(
+                                "bare SSH target locator must be a safe path ending in the session id"
+                            );
+                        }
+                    }
                 }
             }
             Self::SshPodman { host, .. } if host.trim().is_empty() => {

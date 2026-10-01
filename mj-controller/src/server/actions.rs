@@ -260,13 +260,16 @@ impl ActionOutcome {
             // A refusal is a precondition the caller can fix, so it answers
             // 4xx with the sentence written for it: 409 for a state that has
             // to change first, 422 for a request naming something unusable.
-            Self::Refused(refusal) => Some(ApiError::new(
-                match refusal.kind() {
-                    RefusalKind::Precondition => StatusCode::CONFLICT,
-                    RefusalKind::Unusable => StatusCode::UNPROCESSABLE_ENTITY,
-                },
-                refusal.message().to_owned(),
-            )),
+            Self::Refused(refusal) => Some(
+                ApiError::new(
+                    match refusal.kind() {
+                        RefusalKind::Precondition => StatusCode::CONFLICT,
+                        RefusalKind::Unusable => StatusCode::UNPROCESSABLE_ENTITY,
+                    },
+                    refusal.message().to_owned(),
+                )
+                .with_code(refusal.code()),
+            ),
             Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(

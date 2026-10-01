@@ -537,6 +537,12 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
                 .any(|argument| argument == "--git-common-dir")
             {
                 "/projects/project/.git\n"
+            } else if command
+                .args
+                .iter()
+                .any(|argument| argument == "--show-prefix")
+            {
+                "\n"
             } else {
                 panic!("unexpected command {:?}", command.args);
             };
@@ -572,7 +578,7 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
     assert_eq!(source.key, "path:/projects/project");
     assert_eq!(source.short, "project");
     assert_eq!(source.full, "/projects/project");
-    assert_eq!(executor.commands.borrow().len(), 3);
+    assert_eq!(executor.commands.borrow().len(), 4);
 }
 
 #[test]
@@ -1516,6 +1522,27 @@ fn an_unmanaged_conversion_accepts_a_checkout_reached_through_a_symlink() {
         repository.path().canonicalize().unwrap()
     );
     assert_eq!(conversion.retire, None);
+}
+/// A launch directory reached through a symlink (macOS temp directories)
+/// must still be recognized as the primary checkout, with the project root
+/// identity independent of the spelling.
+#[cfg(unix)]
+#[test]
+fn a_primary_checkout_is_recognized_through_a_symlinked_directory() {
+    let repository = committed_repository();
+    let alias = tempfile::tempdir().unwrap();
+    let symlink = alias.path().join("checkout");
+    std::os::unix::fs::symlink(repository.path(), &symlink).unwrap();
+    let target = ManagedWorktreeTarget::Local;
+
+    for selected in [symlink.clone(), symlink.join("nested")] {
+        let inspection = inspect_raw_project(&ProcessExecutor, &target, &selected).unwrap();
+        assert!(inspection.primary_checkout, "{selected:?}");
+        let root = resolve_git_root(&target, &selected, &ProcessExecutor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(root, repository.path().canonicalize().unwrap());
+    }
 }
 #[test]
 fn a_conversion_reuses_a_bundle_that_already_describes_the_checkout() {

@@ -1137,13 +1137,7 @@ impl DashboardState {
                     .or_else(|| self.move_operations.get(session_id)),
                 _ => None,
             }
-            .filter(|operation| {
-                matches!(
-                    operation.phase,
-                    mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
-                ) && (operation.checkpoint.is_some()
-                    || (operation.queue_admission_started && !operation.queue_admission_finished))
-            })
+            .filter(|operation| operation.offers_retry())
             .cloned();
         }
         dialog.prepare(&self.resume_rows);

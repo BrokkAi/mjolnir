@@ -154,14 +154,16 @@ impl ViewerSnapshot {
             .map(|session| {
                 #[cfg(test)]
                 VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
-                let incompatible = config
+                let resume_refusals = config
                     .targets
                     .keys()
-                    .filter(|target_id| {
-                        crate::controller::resume_compatibility(session, config, target_id).is_err()
+                    .filter_map(|target_id| {
+                        crate::controller::resume_compatibility(session, config, target_id)
+                            .err()
+                            .map(|reason| (target_id.clone(), reason))
                     })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeMap<_, _>>();
+                let incompatible = resume_refusals.keys().cloned().collect::<Vec<_>>();
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 // A sub-agent child works in its parent's checkout and owns no
                 // worktree, so its project identity has to come from the
@@ -243,6 +245,7 @@ impl ViewerSnapshot {
                     conversation_available: false,
                     prompt_images_supported: false,
                     incompatible_resume_targets: incompatible.clone(),
+                    resume_refusals,
                     compatible_resume_targets: config
                         .targets
                         .keys()
@@ -475,6 +478,12 @@ pub struct ViewerSession {
     /// before that field existed keeps working through a deployment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incompatible_resume_targets: Vec<String>,
+    /// The controller's reason for each id in `incompatible_resume_targets`.
+    /// It names project paths and SSH hosts, so it is never serialized: only
+    /// in-process validation reads it, to tell the caller why a resume or move
+    /// was refused.
+    #[serde(skip)]
+    pub resume_refusals: BTreeMap<String, String>,
     /// Target ids this session can resume on, so the browser never has to
     /// subtract one set from another to find out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -576,7 +585,15 @@ pub struct ViewerMoveRecovery {
     pub destination_additional_mounts: Vec<AdditionalMount>,
     #[serde(default)]
     pub destination_resource_allocation: Option<SessionResourceAllocation>,
+    /// The Move still has the checkpoint a retry restores, so Retry Move is
+    /// possible. Read from [`MoveOperation::checkpoint_retained`], the fact
+    /// the published recovery guidance is written from.
     pub checkpoint_retained: bool,
+    /// The Move holds the source environment for a retry, so Resume is
+    /// refused: only Retry Move (when the checkpoint is retained) or Destroy
+    /// can act on the session.
+    #[serde(default)]
+    pub environment_retained: bool,
     pub destination_ready: bool,
     pub queue_admission_started: bool,
     pub queue_admission_finished: bool,
@@ -622,7 +639,8 @@ impl ViewerMoveRecovery {
                 .clone()
                 .unwrap_or_default(),
             destination_resource_allocation: operation.selection.resource_allocation.clone(),
-            checkpoint_retained: operation.checkpoint.is_some(),
+            checkpoint_retained: operation.checkpoint_retained(),
+            environment_retained: operation.holds_source_environment(),
             destination_ready: operation.destination_target.is_some()
                 && operation.destination_native_session_id.is_some(),
             queue_admission_started: operation.queue_admission_started,

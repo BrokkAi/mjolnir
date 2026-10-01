@@ -1396,6 +1396,37 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
     }
 }
 
+/// Campaign finding W-1: the second Esc out of a dirty Settings draft opens
+/// the "Discard Settings changes?" prompt, which looks like the dashboard
+/// behind it. Esc on that prompt means "Keep editing", so a third Esc returns
+/// to Settings. Once the draft is discarded, Esc on the dashboard is inert.
+#[test]
+fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on the discard prompt keeps editing")
+    };
+    assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    // Discard, then Esc on the plain dashboard does nothing.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.handle_key(key(KeyCode::Right));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(!dashboard.modal_open());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(!dashboard.modal_open());
+}
+
 #[test]
 fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3542,6 +3573,54 @@ fn profile_setup_edits_native_or_one_model_and_saves_policy() {
 }
 
 #[test]
+fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page() {
+    let mut dialog = SetupDialog::new(&config());
+    let page = vec!["profiles".to_owned(), "claude-1".into(), "subagents".into()];
+    dialog.draft["profiles"]["claude-1"]["subagents"] =
+        json!({"mode":"single_model","model":"chosen","effort":null});
+    dialog.path = page.clone();
+    dialog.take_subagent_choices().unwrap();
+    let effort = |dialog: &SetupDialog| {
+        let mut path = page.clone();
+        path.push("effort".into());
+        dialog.subagent_value_label(&path, &Value::Null).unwrap()
+    };
+    // The same label while the efforts load as after they arrive: the field
+    // never claims "Model default" for a value the save will refuse.
+    assert_eq!(effort(&dialog), "Select effort");
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![subagent_choice("chosen")],
+            efforts: vec![subagent_choice("low"), subagent_choice("high")],
+            unavailable: vec![],
+        }));
+    assert_eq!(effort(&dialog), "Select effort");
+
+    // Saving from another page says what is wrong where it can be fixed.
+    dialog.path = Vec::new();
+    assert!(matches!(dialog.save(), DashboardAction::None));
+    assert_eq!(dialog.path, page);
+    assert!(
+        dialog
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("Select an available effort"),
+        "{:?}",
+        dialog.notice
+    );
+
+    // A model that offers no efforts is where "Model default" is the answer.
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![subagent_choice("chosen")],
+            efforts: vec![],
+            unavailable: vec![],
+        }));
+    assert_eq!(effort(&dialog), "Model default");
+}
+
+#[test]
 fn profile_subagent_discovery_uses_unsaved_draft_and_rejects_stale_replies() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_settings_section("profiles", Some("claude-1"));
@@ -3772,4 +3851,46 @@ fn profile_comboboxes_display_recorded_model_and_effort_before_discovery() {
         setup_dialog_mut(&mut dashboard.mode).unwrap().draft["profiles"]["claude-1"]["subagents"]["model"],
         "recorded-model"
     );
+}
+
+/// A status line belongs to the page or prompt that set it. Finding T-4.
+#[test]
+fn a_status_line_does_not_outlive_the_prompt_that_set_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let shown = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone();
+    assert_eq!(shown.as_deref(), Some("Choose a name for the new entry."));
+    dashboard.handle_key(key(KeyCode::Esc));
+    choose(&mut dashboard, "codex-1");
+    choose(&mut dashboard, "subagents");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.notice, None, "the name prompt's status lingered");
+    let page = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(!page.contains("Choose a name"), "{page}");
+}
+
+/// The Sub-agents page explains both modes in full at any width. Finding T-3.
+#[test]
+fn the_profile_subagents_page_shows_its_whole_hint() {
+    for (width, height) in [(140, 40), (80, 30)] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section("profiles", Some("codex-1"));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.path.push("subagents".into());
+        dialog.prepare();
+        let page = drawn(&mut dashboard, width, height)
+            .iter()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            page.contains("selected model and effort."),
+            "{width}x{height}: hint cut off: {page}"
+        );
+    }
 }

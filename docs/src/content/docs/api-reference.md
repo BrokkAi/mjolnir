@@ -73,11 +73,16 @@ does not know. `mj` refuses both.
 
 ## Errors
 
-A failure is a JSON object with one field:
+A failure is a JSON object with an `error` sentence:
 
 ```json
 { "error": "this session cannot take a prompt right now" }
 ```
+
+Some refusals also carry a `code` that names the reason, so a client can add
+advice that fits its own interface. The sentence names no interface. Today the
+only code is `subagent_choice_unavailable`: a new session asked for a
+single-model sub-agent model or effort that no eligible profile offers.
 
 | Status | Meaning |
 | --- | --- |

@@ -466,7 +466,11 @@ pub(crate) fn render_new_wizard(
                 let ids =
                     bundle_ids_by_recent_creation(&dashboard.config, &dashboard.launch_recency);
                 if let Some(id) = ids.get(wizard.bundle) {
-                    step_help = bundle_details(id, &dashboard.config.bundles[*id]);
+                    step_help = bundle_details(
+                        id,
+                        &dashboard.config.bundles[*id],
+                        &dashboard.missing_project_directories(&dashboard.config.bundles[*id]),
+                    );
                 }
                 ids.into_iter()
                     .map(|id| {
@@ -478,6 +482,9 @@ pub(crate) fn render_new_wizard(
                             .unwrap_or_default();
                         if bundle.repositories.len() > 1 {
                             summary.push_str(&format!("  +{} more", bundle.repositories.len() - 1));
+                        }
+                        if !dashboard.missing_project_directories(bundle).is_empty() {
+                            summary.push_str("  (unavailable)");
                         }
                         PickerChoice::table(vec![
                             PickerCell::text(id),
@@ -612,7 +619,11 @@ fn compact_path(source: &str) -> String {
 
 /// The selected project's full sources, drawn under the project list so a
 /// long path or a second repository is never cut off.
-fn bundle_details(id: &str, bundle: &mj_core::config::ProjectBundle) -> Vec<Line<'static>> {
+fn bundle_details(
+    id: &str,
+    bundle: &mj_core::config::ProjectBundle,
+    missing: &[&std::path::Path],
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         format!(
             "{id} · {}",
@@ -629,6 +640,19 @@ fn bundle_details(id: &str, bundle: &mj_core::config::ProjectBundle) -> Vec<Line
             repository_source(repository),
             if primary { "  (primary)" } else { "" }
         )));
+        if let Some(path) = repository
+            .local
+            .as_deref()
+            .filter(|path| missing.contains(path))
+        {
+            lines.push(Line::styled(
+                format!(
+                    "  Unavailable: the directory {} does not exist.",
+                    path.display()
+                ),
+                Style::default().fg(theme::palette().error),
+            ));
+        }
     }
     lines
 }
