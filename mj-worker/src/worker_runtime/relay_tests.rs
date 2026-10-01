@@ -6372,7 +6372,7 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     let state = root.join(mj_core::relay::RELAY_STATE_FILE);
     std::fs::write(&state, b"corrupt state").unwrap();
     let error = unix::run_daemon(root.clone(), config).await.unwrap_err();
-    assert!(format!("{error:#}").contains("parse"));
+    assert!(format!("{error:#}").contains("parse"), "{error:#}");
     assert_eq!(std::fs::read(state).unwrap(), b"corrupt state");
     assert!(!root.join("control.sock").exists());
     assert!(!root.join("acp-supervisor.json").exists());

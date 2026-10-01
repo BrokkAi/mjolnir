@@ -422,9 +422,16 @@ pub async fn refresh_move_source(
 /// was confirmed against is the state it interrupts. Dropping it hands the
 /// connection back to the actor.
 #[derive(Default)]
-pub(in crate::controller) struct MoveSourceRelay(Option<super::checkpoint::ControllerRelayLease>);
+pub(in crate::controller) struct MoveSourceRelay(
+    Option<super::checkpoint::ControllerRelayLease>,
+    Option<crate::worker_lifecycle::WorkerPermit>,
+);
 
 impl MoveSourceRelay {
+    pub(in crate::controller) fn owner(&self) -> Option<crate::worker_lifecycle::WorkerPermit> {
+        self.1.clone()
+    }
+
     /// Take the source's connection from its session actor, which syncs it
     /// before handing it over. Holds nothing when the source's worker cannot
     /// be reached; the Move then recovers it without its harness. Leasing
@@ -433,19 +440,26 @@ impl MoveSourceRelay {
         manager: &SessionManagerControl,
         id: &str,
     ) -> Result<Self> {
+        let owner = crate::worker_lifecycle::WorkerPermit::acquire(
+            id,
+            "Move source relay",
+            &crate::targets::ProcessExecutor,
+        )
+        .await?;
         let handle = manager
             .wait_for_session(id, std::time::Duration::from_secs(5))
             .await?;
         match handle.lease_connection().await {
-            Ok(lease) => Ok(Self(Some(
-                super::checkpoint::ControllerRelayLease::Managed {
+            Ok(lease) => Ok(Self(
+                Some(super::checkpoint::ControllerRelayLease::Managed {
                     handle,
                     lease: Some(lease),
-                },
-            ))),
+                }),
+                Some(owner),
+            )),
             Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
                 tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
-                Ok(Self(None))
+                Ok(Self(None, Some(owner)))
             }
             Err(error) => Err(error),
         }
@@ -508,6 +522,7 @@ impl Drop for MoveSourceRelay {
         if let Some(relay) = self.0.take() {
             relay.release();
         }
+        self.1.take();
     }
 }
 
@@ -971,6 +986,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
+        crate::worker_lifecycle::run(&request.preparation.selection.session_id.clone(), "move session managed controlled", executor, async {
         let prepared = &request.preparation;
         let id = prepared.selection.session_id.clone();
         let started = std::time::Instant::now();
@@ -1167,6 +1183,8 @@ impl Controller {
         ))
         .await;
         self.finish_move_result(&mut operation, result, executor)
+
+        }).await
     }
 
     fn finish_move_result(
@@ -1278,6 +1296,7 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
+        crate::worker_lifecycle::run(&operation.selection.session_id.clone(), "recover move managed controlled", executor, async {
         let id = operation.selection.session_id.clone();
         let result = async {
             let session = self.state.sessions.get(&id).context("move session is missing")?.clone();
@@ -1374,6 +1393,8 @@ impl Controller {
             }
         }.await;
         self.finish_move_result(&mut operation, result, executor)
+
+        }).await
     }
 
     async fn recover_move_source_stop(
@@ -1462,6 +1483,9 @@ impl Controller {
         manager: &SessionManagerControl,
         mut source_relay: MoveSourceRelay,
     ) -> Result<()> {
+        let retained = source_relay.owner();
+        let admission_id = operation.selection.session_id.clone();
+        crate::worker_lifecycle::run_with_owner(&admission_id, "execute move", executor, retained, async {
         let id = operation.selection.session_id.clone();
         ensure!(
             !executor.cancellation_requested(),
@@ -1638,6 +1662,8 @@ impl Controller {
         restore_move_queue_hold(operation);
         self.finish_workspace_transfer(operation, executor)?;
         self.admit_move_queue(operation, executor).await
+
+        }).await
     }
 
     async fn admit_move_queue(

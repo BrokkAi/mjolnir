@@ -58,3 +58,6 @@ mj-controller/src/doctor.rs
 mj-controller/src/doctor/*
 mj-tui/src/setup.rs
 mj-tui/src/setup/*
+
+# Worker file locking and descriptor inheritance also protect native macOS roots.
+mj-worker/src/worker_runtime/root_owner.rs

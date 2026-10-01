@@ -77,6 +77,7 @@ impl Controller {
         layout: SessionExportLayout,
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<LatchedCheckpoint> {
+        crate::worker_lifecycle::run(session_id, "checkpoint session latched with layout", executor, async {
         if let Some(operation) = crate::database::load_move_operation(session_id)?
             && operation.queue_admission_started
             && !operation.queue_admission_finished
@@ -94,6 +95,9 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         session.validate_configuration(&self.config)?;
+        if let Some(target) = session.target.as_ref() {
+            crate::worker_lifecycle::require(session_id)?.verify_target(target)?;
+        }
         let backend = layout.backend.clone();
         let profile = self
             .config
@@ -483,6 +487,7 @@ impl Controller {
             )
         {
             return Ok(LatchedCheckpoint {
+                _worker_owner: crate::worker_lifecycle::require(session_id)?,
                 artifact,
                 relay,
                 barrier_command_id,
@@ -758,12 +763,15 @@ impl Controller {
             }
         };
         Ok(LatchedCheckpoint {
+                _worker_owner: crate::worker_lifecycle::require(session_id)?,
             artifact,
             relay,
             barrier_command_id,
             cursor,
             completion,
         })
+
+        }).await
     }
 }
 

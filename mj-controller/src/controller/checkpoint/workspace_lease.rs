@@ -7,6 +7,7 @@ pub struct IdleWorkspaceLease {
     pub(super) lease: ManagedSessionLease,
     pub(super) command_id: String,
     pub(super) harness: HarnessKind,
+    _worker_owner: crate::worker_lifecycle::WorkerPermit,
 }
 
 impl IdleWorkspaceLease {
@@ -15,6 +16,13 @@ impl IdleWorkspaceLease {
         handle: &ManagedSessionHandle,
         harness: HarnessKind,
     ) -> Result<Option<Self>> {
+        let Some(worker_owner) = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            handle.session_id(),
+            "idle worker reservation",
+        )?
+        else {
+            return Ok(None);
+        };
         tokio::time::timeout(Duration::from_secs(30), async {
             let Some(mut lease) = handle.lease_idle_connection(harness).await? else {
                 return Ok(None);
@@ -56,6 +64,7 @@ impl IdleWorkspaceLease {
                         lease,
                         command_id,
                         harness,
+                        _worker_owner: worker_owner,
                     }));
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -80,6 +89,12 @@ impl IdleWorkspaceLease {
     }
 
     pub async fn acquire(handle: &ManagedSessionHandle, harness: HarnessKind) -> Result<Self> {
+        let worker_owner = crate::worker_lifecycle::WorkerPermit::acquire(
+            handle.session_id(),
+            "workspace write",
+            &ProcessExecutor,
+        )
+        .await?;
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut lease = handle.lease_connection().await?;
             let snapshot = lease.connection_mut().sync().await?;
@@ -104,6 +119,7 @@ impl IdleWorkspaceLease {
                         lease,
                         command_id,
                         harness,
+                        _worker_owner: worker_owner,
                     };
                     operation.verify().await?;
                     return Ok(operation);

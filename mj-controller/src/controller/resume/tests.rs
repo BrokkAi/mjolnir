@@ -803,7 +803,7 @@ fn start_begins_at_the_worker_launch_not_at_the_transfers_before_it() {
         }
     }
 
-    let session_id = "0123456789abcdef0123456789abcdef";
+    let session_id = "51515151515151515151515151515151";
     let worker_root = format!("/var/lib/hel/workers/{session_id}");
     let executor = RecordingExecutor {
         commands: RefCell::new(Vec::new()),
@@ -835,7 +835,11 @@ fn start_begins_at_the_worker_launch_not_at_the_transfers_before_it() {
     .unwrap();
     // Deliberately run the launch through the Sync-labelled executor: it
     // must still report Start.
-    start_worker(&syncing, &backend, &worker_root).unwrap();
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "test launch")
+        .unwrap()
+        .unwrap();
+    crate::controller::worker_binary::start_worker(&owner, &syncing, &backend, &worker_root)
+        .unwrap();
 
     let stages = executor
         .commands
@@ -1988,6 +1992,11 @@ exit 0
         },
         &ProcessExecutor,
     ));
+    assert!(
+        restore_spec.exists(),
+        "resume did not reach restore: {:?}",
+        restored.as_ref().err().map(|error| format!("{error:#}"))
+    );
     // The restore keys the harness's native session by the directory the
     // worker launches the harness in, spelled the same way: Grok Build keys
     // its session storage by that text, trailing separator included.

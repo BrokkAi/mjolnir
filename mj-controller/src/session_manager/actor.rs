@@ -1352,36 +1352,60 @@ pub(super) async fn sync_actor_connection(
     target: &RelaySessionTarget,
     connection: &mut Option<StandaloneSession>,
 ) -> Result<Option<ManagedSessionSnapshot>> {
+    let observation = if target.worker_recovery.is_some() {
+        let id = target.session_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            // If there is no intent, a snapshot cannot complete one. Skip
+            // ownership so ordinary actor sync never competes with a swap.
+            if crate::database::load_worker_restart(&id)?.is_none() {
+                return Ok(None);
+            }
+            crate::worker_lifecycle::WorkerPermit::try_observation(&id)
+        })
+        .await
+        .context("admit worker readiness observation")??
+    } else {
+        None
+    };
     if connection.is_none() {
         let fresh = StandaloneSession::connect(target).await?;
         let snapshot = fresh.snapshot();
-        if let Some(recovery) = target.worker_recovery.as_ref() {
-            let session_id = target.session_id.clone();
-            let source_target = recovery.source_target.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                if let Some(intent) = crate::database::load_worker_restart(&session_id)?
-                    && intent.target == source_target
-                {
-                    // A successful sync establishes a live owner, including
-                    // an older worker that survived a pre-stop interruption or
-                    // a newer build recovered by the replacement daemon.
-                    // Upgrade policy owns the separate build-version decision.
-                    crate::database::finish_worker_restart(&session_id, &intent.operation_id)?;
-                }
-                Ok(())
-            })
-            .await
-            .context("settle worker restart observation")??;
-        }
+        observe_worker_readiness(target, &snapshot, observation).await?;
         *connection = Some(fresh);
         return Ok(Some(snapshot));
     }
     let connection = connection.as_mut().expect("connection was initialized");
-    if connection.sync_in_place().await? {
-        Ok(Some(connection.snapshot()))
-    } else {
-        Ok(None)
+    let changed = connection.sync_in_place().await?;
+    if changed || observation.is_some() {
+        // Readiness can already have been published while the swap owner was
+        // active. Its abandoned intent still needs completion on a quiet tick.
+        let snapshot = connection.snapshot();
+        observe_worker_readiness(target, &snapshot, observation).await?;
+        if changed {
+            return Ok(Some(snapshot));
+        }
     }
+    Ok(None)
+}
+
+async fn observe_worker_readiness(
+    target: &RelaySessionTarget,
+    snapshot: &ManagedSessionSnapshot,
+    observation: Option<crate::worker_lifecycle::WorkerPermit>,
+) -> Result<()> {
+    if let Some(owner) = observation
+        && let Some(recovery) = target.worker_recovery.as_ref()
+    {
+        let source_target = recovery.source_target.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            crate::worker_lifecycle::observe_ready_worker(&owner, &source_target, &snapshot)?;
+            Ok(())
+        })
+        .await
+        .context("settle worker restart observation")??;
+    }
+    Ok(())
 }
 
 /// Cheap equivalence for published views.

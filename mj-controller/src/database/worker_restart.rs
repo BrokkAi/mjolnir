@@ -9,6 +9,7 @@ pub(crate) struct WorkerRestartIntent {
 }
 
 pub(crate) fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let intent = intent.clone();
     submit_database_write("begin_worker_restart", move |connection| {
@@ -18,20 +19,23 @@ pub(crate) fn begin_worker_restart(session_id: &str, intent: &WorkerRestartInten
             record.is_some_and(|s| s.target.as_ref() == Some(&intent.target)),
             "worker restart target changed before admission"
         );
-        tx.execute(
+        let claimed = tx.execute(
             "INSERT INTO worker_restart_intents(session_id,operation_id,target_json,desired_build,phase)
-             VALUES (?1,?2,?3,?4,'prepared') ON CONFLICT(session_id) DO UPDATE SET
-             operation_id=excluded.operation_id,target_json=excluded.target_json,
-             desired_build=excluded.desired_build,phase=excluded.phase",
+             VALUES (?1,?2,?3,?4,'prepared') ON CONFLICT(session_id) DO NOTHING",
             params![session_id, intent.operation_id, serde_json::to_string(&intent.target)?, intent.desired_build],
         )?;
+        ensure!(
+            claimed == 1,
+            "another worker replacement already owns session {session_id}"
+        );
         tx.commit()?;
         Ok(())
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerRestartPhase {
+    Prepared,
     Swapping,
     AwaitingReadiness,
 }
@@ -39,10 +43,30 @@ pub(crate) enum WorkerRestartPhase {
 impl WorkerRestartPhase {
     fn transition(self) -> (&'static str, &'static str) {
         match self {
+            Self::Prepared => ("prepared", "prepared"),
             Self::Swapping => ("prepared", "swapping"),
             Self::AwaitingReadiness => ("swapping", "awaiting_readiness"),
         }
     }
+}
+
+pub(crate) fn worker_restart_phase(session_id: &str) -> Result<Option<WorkerRestartPhase>> {
+    let connection = open_reader(&database_path())?;
+    let phase: Option<String> = connection
+        .query_row(
+            "SELECT phase FROM worker_restart_intents WHERE session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    phase
+        .map(|phase| match phase.as_str() {
+            "prepared" => Ok(WorkerRestartPhase::Prepared),
+            "swapping" => Ok(WorkerRestartPhase::Swapping),
+            "awaiting_readiness" => Ok(WorkerRestartPhase::AwaitingReadiness),
+            _ => bail!("unknown worker replacement phase {phase}"),
+        })
+        .transpose()
 }
 
 pub(crate) fn advance_worker_restart(
@@ -50,6 +74,7 @@ pub(crate) fn advance_worker_restart(
     operation_id: &str,
     phase: WorkerRestartPhase,
 ) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("advance_worker_restart", move |connection| {
@@ -86,6 +111,7 @@ fn load_worker_restart_with(
 }
 
 pub(crate) fn finish_worker_restart(session_id: &str, operation_id: &str) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("finish_worker_restart", move |connection| {

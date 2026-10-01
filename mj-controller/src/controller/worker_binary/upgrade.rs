@@ -12,6 +12,7 @@ pub(in crate::controller) fn replace_installed_worker_binary(
     session_id: &str,
     worker_binary: &Path,
 ) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     let plan = installed_worker_binary_replacement_plan(locator, session_id, worker_binary)?;
     for command in plan.commands {
         execute_checked(executor, command)?;
@@ -21,22 +22,108 @@ pub(in crate::controller) fn replace_installed_worker_binary(
 
 /// Upload without changing the executable path used by the running worker or
 /// its sidecars. Promotion happens only while an idle reservation is held.
-pub(in crate::controller) fn stage_worker_binary_for_upgrade(
-    executor: &impl CommandExecutor,
+/// A successfully transferred private binary has no live process using it.
+/// Deferred admission and failed swaps discard it without touching live files.
+pub(crate) struct PreparedWorkerBinary<'a, E: CommandExecutor> {
+    name: String,
+    cleanup: CommandSpec,
+    executor: &'a E,
+    locator: targets::TargetLocator,
+    session_id: String,
+}
+
+impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
+    pub(crate) fn install(&self, owner: &crate::worker_lifecycle::WorkerPermit) -> Result<()> {
+        install_staged_worker_binary(
+            owner,
+            &self.name,
+            self.executor,
+            &self.locator,
+            &self.session_id,
+        )
+    }
+}
+
+/// Resolve and transfer before the daemon admits a bounded recovery swap.
+pub(crate) fn prepare_recovery_worker_binary<'a, E: CommandExecutor>(
+    executor: &'a E,
+    refresh: &DeferredWorkerBinaryRefresh,
+) -> Result<Option<PreparedWorkerBinary<'a, E>>> {
+    let source = worker_binary_for(&refresh.locator, executor)?;
+    let expected = mj_core::worker_launch::worker_executable_digest(&source)?;
+    if crate::session_manager::installed_digest_matches(
+        executor,
+        &refresh.installed_digest,
+        &expected,
+    ) {
+        return Ok(None);
+    }
+    stage_worker_binary_for_upgrade(executor, &refresh.locator, &refresh.session_id, &source)
+        .map(Some)
+}
+
+impl<E: CommandExecutor> std::ops::Deref for PreparedWorkerBinary<'_, E> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl<E: CommandExecutor> Drop for PreparedWorkerBinary<'_, E> {
+    fn drop(&mut self) {
+        if let Err(error) = execute_checked(self.executor, self.cleanup.clone()) {
+            tracing::warn!(%error, staging = %self.name, "worker binary staging cleanup failed");
+        }
+    }
+}
+
+pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
+    executor: &'a E,
     locator: &targets::TargetLocator,
     session_id: &str,
     worker_binary: &Path,
-) -> Result<()> {
-    worker_binary_replacement_plan(locator, session_id, worker_binary, "hel.prepared")?
+) -> Result<PreparedWorkerBinary<'a, E>> {
+    let staging = format!(
+        "hel.prepared-{}",
+        crate::session_manager::new_command_id("upgrade-stage")?
+    );
+    worker_binary_replacement_plan(locator, session_id, worker_binary, &staging)?
         .execute(executor)?;
-    Ok(())
+    let root = targets::worker_root(locator, session_id)?;
+    Ok(PreparedWorkerBinary {
+        cleanup: targets::locator_command(
+            locator,
+            vec![
+                "rm".into(),
+                "-f".into(),
+                "--".into(),
+                format!("{root}/{staging}"),
+                format!("{root}/{staging}.next"),
+            ],
+        )
+        .purpose("discard private worker staging"),
+        name: staging,
+        executor,
+        locator: locator.clone(),
+        session_id: session_id.to_owned(),
+    })
 }
 
 pub(in crate::controller) fn install_staged_worker_binary(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    staging: &str,
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
 ) -> Result<()> {
+    ensure!(
+        owner.session_id() == session_id,
+        "prepared worker owner mismatch"
+    );
+    ensure!(
+        staging.starts_with("hel.prepared-") && !staging.contains('/'),
+        "invalid worker staging name"
+    );
     let root = targets::worker_root(locator, session_id)?;
     execute_checked(
         executor,
@@ -46,7 +133,7 @@ pub(in crate::controller) fn install_staged_worker_binary(
                 "mv".into(),
                 "-f".into(),
                 "--".into(),
-                format!("{root}/hel.prepared"),
+                format!("{root}/{staging}"),
                 format!("{root}/hel"),
             ],
         )
@@ -61,6 +148,7 @@ pub(in crate::controller) fn replace_installed_worker_launch_config(
     session_id: &str,
     launch: &WorkerLaunchConfig,
 ) -> Result<()> {
+    let _owner = crate::worker_lifecycle::require(session_id)?;
     let plan = worker_launch_refresh_plan(locator, session_id, launch)?;
     for command in plan.replace.commands {
         execute_checked(executor, command)?;
@@ -93,7 +181,10 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
         );
     }
     let worker_root = targets::worker_root(locator, session_id)?;
-    let staging_root = format!("{worker_root}/harness-prepare");
+    let staging_root = format!(
+        "{worker_root}/{}",
+        crate::session_manager::new_command_id("harness-prepare")?
+    );
     let staging_binary = format!("{staging_root}/hel");
     let staging_config = format!("{staging_root}/launch.json");
     let staging = tempfile::tempdir().context("create managed harness upgrade staging")?;
@@ -125,7 +216,7 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
         | targets::TargetLocator::SshBare { ssh, .. } => ssh,
         _ => bail!("managed harness policy requires a local bare, SSH-bare, or EC2 target"),
     };
-    let result = (|| {
+    let result = (|| -> Result<()> {
         execute_checked(
             executor,
             crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
@@ -167,20 +258,18 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
         )?;
         Ok(())
     })();
-    let cleanup = execute_checked(
+    // A failed remote exec may still be using its files. Retain them until
+    // process exit is known, just as for container harness preparation.
+    result.with_context(|| {
+        format!("harness preparation failed; staging retained at {staging_root}")
+    })?;
+    execute_checked(
         executor,
         crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &staging_root])
             .purpose("remove managed harness preparation staging"),
-    );
-    match (result, cleanup) {
-        (Ok(()), Ok(_)) => Ok(()),
-        (Ok(()), Err(error)) => Err(error).context("clean managed harness preparation staging"),
-        (Err(error), Ok(_)) => Err(error),
-        (Err(error), Err(cleanup)) => {
-            tracing::warn!(%cleanup, path = %staging_root, "managed harness preparation staging cleanup failed");
-            Err(error)
-        }
-    }
+    )
+    .context("clean managed harness preparation staging")?;
+    Ok(())
 }
 
 // A private staged binary prepares container fallbacks without touching the
@@ -386,7 +475,11 @@ fn worker_binary_replacement_plan(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let upload = format!("{}/{session_id}-hel.next", targets::REMOTE_UPLOAD_STAGING);
+            let upload = format!(
+                "{}/{}",
+                targets::REMOTE_UPLOAD_STAGING,
+                crate::session_manager::new_command_id("worker-upload")?
+            );
             vec![
                 crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
                     .purpose("create remote replacement worker staging"),

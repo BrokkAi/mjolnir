@@ -145,53 +145,58 @@ impl Controller {
         manager: &SessionManagerControl,
         failure: Option<&str>,
     ) -> Result<ParkOutcome> {
-        ensure!(
-            self.state.subagents.contains_key(session_id),
-            "session {session_id} is not a sub-agent"
-        );
-        let Some(session) = self.state.sessions.get(session_id) else {
-            return Ok(ParkOutcome::NotRunning);
-        };
-        if session.state != SessionState::Running {
-            return Ok(ParkOutcome::NotRunning);
-        }
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let handle = manager
-            .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
-            .await?;
-        let Some(mut lease) =
-            IdleWorkspaceLease::acquire_for_upgrade(&handle, session.harness_kind).await?
-        else {
-            return Ok(ParkOutcome::Busy);
-        };
-        if !lease.verify_for_upgrade().await? {
-            return Ok(ParkOutcome::Busy);
-        }
-        stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
-            .context("stop the sub-agent's worker")?;
-        let mut record = session.clone();
-        record.state = if failure.is_some() {
-            SessionState::Error
-        } else {
-            SessionState::Parked
-        };
-        record.last_error = failure.map(str::to_owned);
-        record.updated_at = super::now();
-        crate::database::save_lifecycle_session(&record).context("record the stopped sub-agent")?;
-        let released = tokio::time::timeout(PARK_RELEASE_TIMEOUT, async {
-            while manager.session(session_id.to_owned()).await.is_ok() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
-        if released.is_err() {
-            tracing::warn!(
-                session_id,
-                "the session manager still held the stopped sub-agent; releasing it anyway"
+        crate::worker_lifecycle::run(session_id, "stop idle subagent worker", executor, async {
+            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+            ensure!(
+                self.state.subagents.contains_key(session_id),
+                "session {session_id} is not a sub-agent"
             );
-        }
-        drop(lease);
-        Ok(ParkOutcome::Parked)
+            let Some(session) = self.state.sessions.get(session_id) else {
+                return Ok(ParkOutcome::NotRunning);
+            };
+            if session.state != SessionState::Running {
+                return Ok(ParkOutcome::NotRunning);
+            }
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let handle = manager
+                .wait_for_session(session_id, PARK_ACTOR_TIMEOUT)
+                .await?;
+            let Some(mut lease) =
+                IdleWorkspaceLease::acquire_for_upgrade(&handle, session.harness_kind).await?
+            else {
+                return Ok(ParkOutcome::Busy);
+            };
+            if !lease.verify_for_upgrade().await? {
+                return Ok(ParkOutcome::Busy);
+            }
+            stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
+                .context("stop the sub-agent's worker")?;
+            let mut record = session.clone();
+            record.state = if failure.is_some() {
+                SessionState::Error
+            } else {
+                SessionState::Parked
+            };
+            record.last_error = failure.map(str::to_owned);
+            record.updated_at = super::now();
+            crate::database::save_lifecycle_session(&record)
+                .context("record the stopped sub-agent")?;
+            let released = tokio::time::timeout(PARK_RELEASE_TIMEOUT, async {
+                while manager.session(session_id.to_owned()).await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            if released.is_err() {
+                tracing::warn!(
+                    session_id,
+                    "the session manager still held the stopped sub-agent; releasing it anyway"
+                );
+            }
+            drop(lease);
+            Ok(ParkOutcome::Parked)
+        })
+        .await
     }
 
     /// Start a parked sub-agent's worker again in place and record it as
@@ -213,91 +218,101 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        ensure!(
-            self.state.subagents.contains_key(session_id),
-            "session {session_id} is not a sub-agent"
-        );
-        let session = self
-            .state
-            .sessions
-            .get(session_id)
-            .with_context(|| format!("unknown session {session_id}"))?;
-        if session.state == SessionState::Running {
-            return Ok(());
-        }
-        ensure!(
-            session.state == SessionState::Parked,
-            "sub-agent {session_id} is {} and cannot be started again",
-            session.state.as_str()
-        );
-        let (backend, worker_root) = self.worker_placement(session_id)?;
-        let reconnect = targets::reconnect_plan(&backend, session_id)?
-            .commands
-            .into_iter()
-            .next()
-            .context("reconnect plan is empty")?;
-        let launch = self.current_worker_launch_config(session_id, &backend)?;
-        let started = async {
-            refresh_installed_worker_binary(executor, &backend, session_id)
-                .context(RESTART_FROM_PARKED.replace)?;
-            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                .context("install the current Mjolnir worker launch configuration")?;
-            // Held across the harness start, which is the part that does not
-            // survive a crowd of children starting in one container.
-            let gate = super::provisioning::container_start_gate(&backend);
-            let _admitted = match &gate {
-                Some(gate) => gate.acquire().await.ok(),
-                None => None,
+        crate::worker_lifecycle::run(session_id, "unpark subagent worker", executor, async {
+            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+            ensure!(
+                self.state.subagents.contains_key(session_id),
+                "session {session_id} is not a sub-agent"
+            );
+            let session = self
+                .state
+                .sessions
+                .get(session_id)
+                .with_context(|| format!("unknown session {session_id}"))?;
+            if session.state == SessionState::Running {
+                return Ok(());
+            }
+            ensure!(
+                session.state == SessionState::Parked,
+                "sub-agent {session_id} is {} and cannot be started again",
+                session.state.as_str()
+            );
+            let (backend, worker_root) = self.worker_placement(session_id)?;
+            let reconnect = targets::reconnect_plan(&backend, session_id)?
+                .commands
+                .into_iter()
+                .next()
+                .context("reconnect plan is empty")?;
+            let launch = self.current_worker_launch_config(session_id, &backend)?;
+            let started = async {
+                refresh_installed_worker_binary(executor, &backend, session_id)
+                    .context(RESTART_FROM_PARKED.replace)?;
+                replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                    .context("install the current Mjolnir worker launch configuration")?;
+                // Held across the harness start, which is the part that does not
+                // survive a crowd of children starting in one container.
+                let gate = super::provisioning::container_start_gate(&backend);
+                let _admitted = match &gate {
+                    Some(gate) => gate.acquire().await.ok(),
+                    None => None,
+                };
+                self.start_installed_worker(
+                    session_id,
+                    executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &worker_root,
+                        reconnect: &reconnect,
+                        launch: Some(&launch),
+                        prepared: true,
+                        messages: &RESTART_FROM_PARKED,
+                    },
+                )
+                .await
+            }
+            .await;
+            let connection = match started {
+                Ok(connection) => connection,
+                Err(error) => {
+                    if let Err(stop_error) = stop_worker(
+                        &crate::worker_lifecycle::require(session_id)?,
+                        &failed_launch_cleanup_executor(),
+                        &backend,
+                        &worker_root,
+                    ) {
+                        tracing::warn!(
+                            session_id,
+                            error = format!("{stop_error:#}"),
+                            "could not stop the worker of a sub-agent whose restart failed"
+                        );
+                    }
+                    return Err(explain_process_exhaustion(error, &backend, session_id));
+                }
             };
-            self.start_installed_worker(
-                session_id,
-                executor,
-                InstalledWorkerRestart {
-                    backend: &backend,
-                    worker_root: &worker_root,
-                    reconnect: &reconnect,
-                    launch: Some(&launch),
-                    prepared: true,
-                    messages: &RESTART_FROM_PARKED,
-                },
-            )
-            .await
-        }
-        .await;
-        let connection = match started {
-            Ok(connection) => connection,
-            Err(error) => {
-                if let Err(stop_error) =
-                    stop_worker(&failed_launch_cleanup_executor(), &backend, &worker_root)
-                {
+            // The manager opens its own connection once the record says running.
+            drop(connection);
+            let mut record = session.clone();
+            record.state = SessionState::Running;
+            record.last_error = None;
+            record.updated_at = super::now();
+            if let Err(error) = crate::database::save_lifecycle_session(&record) {
+                if let Err(stop_error) = stop_worker(
+                    &crate::worker_lifecycle::require(session_id)?,
+                    &failed_launch_cleanup_executor(),
+                    &backend,
+                    &worker_root,
+                ) {
                     tracing::warn!(
                         session_id,
                         error = format!("{stop_error:#}"),
-                        "could not stop the worker of a sub-agent whose restart failed"
+                        "could not stop the worker of a sub-agent whose restart was not recorded"
                     );
                 }
-                return Err(explain_process_exhaustion(error, &backend, session_id));
+                return Err(error.context("record the restarted sub-agent as running"));
             }
-        };
-        // The manager opens its own connection once the record says running.
-        drop(connection);
-        let mut record = session.clone();
-        record.state = SessionState::Running;
-        record.last_error = None;
-        record.updated_at = super::now();
-        if let Err(error) = crate::database::save_lifecycle_session(&record) {
-            if let Err(stop_error) =
-                stop_worker(&failed_launch_cleanup_executor(), &backend, &worker_root)
-            {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{stop_error:#}"),
-                    "could not stop the worker of a sub-agent whose restart was not recorded"
-                );
-            }
-            return Err(error.context("record the restarted sub-agent as running"));
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 

@@ -1817,20 +1817,21 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
 
     // A plan queued while Closing must read Destroying only after cleanup
     // releases ownership, rather than use the actor's old observation.
-    let mutex = crate::recovery_gate::worker_target_mutex(&record.id);
-    let guard = mutex.lock().unwrap();
-    std::thread::scope(|scope| {
-        let pending = scope
-            .spawn(|| recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor));
-        let mut destroying = record.clone();
-        destroying.state = SessionState::Destroying;
-        crate::database::save_session(&destroying).unwrap();
-        drop(guard);
-        assert_eq!(
-            pending.join().unwrap().unwrap(),
-            WorkerRecoveryOutcome::Suppressed
-        );
-    });
+    let guard = crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "test destruction")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+        WorkerRecoveryOutcome::Suppressed
+    );
+    let mut destroying = record.clone();
+    destroying.state = SessionState::Destroying;
+    crate::database::save_session(&destroying).unwrap();
+    drop(guard);
+    assert_eq!(
+        recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
+        WorkerRecoveryOutcome::Suppressed
+    );
     assert!(executor.0.lock().unwrap().is_empty());
 
     // A storage failure also refuses recovery before touching the target.
@@ -3036,15 +3037,26 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         target: recovery_source_target(),
         desired_build: "new-build".into(),
     };
-    crate::database::begin_worker_restart(&record.id, &intent).unwrap();
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::begin_worker_restart(&record.id, &intent),
+    )
+    .unwrap();
     for phase in [
         None,
         Some(crate::database::WorkerRestartPhase::Swapping),
         Some(crate::database::WorkerRestartPhase::AwaitingReadiness),
     ] {
         if let Some(phase) = phase {
-            crate::database::advance_worker_restart(&record.id, &intent.operation_id, phase)
-                .unwrap();
+            crate::worker_lifecycle::run_blocking(
+                &record.id,
+                "test intent",
+                &crate::targets::ProcessExecutor,
+                || crate::database::advance_worker_restart(&record.id, &intent.operation_id, phase),
+            )
+            .unwrap();
         }
         let executor = ProbeExecutor {
             live: true,
@@ -3057,7 +3069,13 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         assert_eq!(*executor.commands.lock().unwrap(), vec!["probe"]);
     }
     // An old attempt cannot erase a newer replacement's ownership.
-    crate::database::finish_worker_restart(&record.id, "previous-attempt").unwrap();
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::finish_worker_restart(&record.id, "previous-attempt"),
+    )
+    .unwrap();
     assert_eq!(
         crate::database::load_worker_restart(&record.id).unwrap(),
         Some(intent.clone())
@@ -3075,8 +3093,89 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     stale.target = mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/another-worker"),
     };
-    assert!(crate::database::begin_worker_restart(&record.id, &stale).is_err());
-    crate::database::finish_worker_restart(&record.id, &intent.operation_id).unwrap();
+    assert!(
+        crate::worker_lifecycle::run_blocking(
+            &record.id,
+            "test intent",
+            &crate::targets::ProcessExecutor,
+            || { crate::database::begin_worker_restart(&record.id, &stale) }
+        )
+        .is_err()
+    );
+    crate::worker_lifecycle::run_blocking(
+        &record.id,
+        "test intent",
+        &crate::targets::ProcessExecutor,
+        || crate::database::finish_worker_restart(&record.id, &intent.operation_id),
+    )
+    .unwrap();
+    let replacement = crate::database::load_worker_restart(&record.id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(replacement.operation_id, intent.operation_id);
+    assert_eq!(
+        crate::database::worker_restart_phase(&record.id).unwrap(),
+        Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+    );
+    // Conditional claim cannot overwrite this boot, even on the same target.
+    assert!(
+        crate::worker_lifecycle::run_blocking(
+            &record.id,
+            "test intent",
+            &crate::targets::ProcessExecutor,
+            || { crate::database::begin_worker_restart(&record.id, &intent) }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        crate::database::load_worker_restart(&record.id).unwrap(),
+        Some(replacement)
+    );
+    // A first hello without native readiness cannot complete the handoff.
+    let mut snapshot = view_at_ordinal(0).snapshot.unwrap();
+    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+        .unwrap()
+        .unwrap();
+    crate::worker_lifecycle::observe_ready_worker(
+        &observer,
+        &record.target.clone().unwrap(),
+        &snapshot,
+    )
+    .unwrap();
+    assert!(
+        crate::database::load_worker_restart(&record.id)
+            .unwrap()
+            .is_some()
+    );
+    drop(observer);
+    snapshot.operational.checkpoint_only = true;
+    let checkpoint_owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(&record.id, "checkpoint")
+            .unwrap()
+            .unwrap();
+    // Even a nested observation cannot acquire an active owner's swap.
+    checkpoint_owner.scope_blocking(|| {
+        assert!(
+            crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+                .unwrap()
+                .is_none()
+        )
+    });
+    assert!(
+        crate::database::load_worker_restart(&record.id)
+            .unwrap()
+            .is_some()
+    );
+    drop(checkpoint_owner);
+    let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
+        .unwrap()
+        .unwrap();
+    crate::worker_lifecycle::observe_ready_worker(
+        &observer,
+        &record.target.clone().unwrap(),
+        &snapshot,
+    )
+    .unwrap();
     assert!(
         crate::database::load_worker_restart(&record.id)
             .unwrap()

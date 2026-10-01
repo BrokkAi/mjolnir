@@ -707,16 +707,25 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
     let worker_binary = directory.path().join("hel-test-worker");
     std::fs::write(&worker_binary, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
 
-    let output = run_checkpoint_staging_command(
-        &executor,
-        &locator,
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
         LATCH_RELAY_SESSION,
-        &spec,
-        export_stdin_command,
-        "export target checkpoint",
-        Some(&worker_binary),
+        "test legacy export",
     )
+    .unwrap()
     .unwrap();
+    let output = owner
+        .scope_blocking(|| {
+            run_checkpoint_staging_command(
+                &executor,
+                &locator,
+                LATCH_RELAY_SESSION,
+                &spec,
+                export_stdin_command,
+                "export target checkpoint",
+                Some(&worker_binary),
+            )
+        })
+        .unwrap();
 
     assert_eq!(output.stdout, exported_checkpoint_json());
     assert_eq!(
@@ -1567,6 +1576,101 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         1,
         "busy deferral must return without detaching or restarting the connection"
     );
+    channels.shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
+    const CHILD: &str = "MJ_QUIET_RESTART_READY_CHILD";
+    let name = "a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(crate::controller::test_support::test_name(
+            module_path!(),
+            name,
+        ))
+        .env(CHILD, "1")
+        .env(LATCH_CHECKPOINT_ONLY, "1")
+        .env("MJ_INSTANCE", "worker-owner-quiet-readiness")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join(LATCH_RELAY_SESSION);
+    std::fs::create_dir_all(&root).unwrap();
+    drop(mj_worker::relay::DurableRelay::open(&root, LATCH_RELAY_SESSION, "1.0.0").unwrap());
+    let durable_target = TargetLocator::LocalBare {
+        worker_root: root.clone(),
+    };
+    let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
+    session.target = Some(durable_target.clone());
+    crate::database::save_session(&session).unwrap();
+    let mut target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
+    let restarted = root.join("unexpected-restart");
+    target.worker_recovery = Some(crate::session_manager::WorkerRecoveryPlan {
+        source_target: durable_target.clone(),
+        target: None,
+        workspace: None,
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: targets::CommandPlan {
+            description: "unexpected restart".into(),
+            commands: vec![CommandSpec::new(
+                "touch",
+                [restarted.to_string_lossy().into_owned()],
+            )],
+        },
+    });
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    channels.targets.send(vec![target]).unwrap();
+    let handle = channels
+        .control
+        .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    handle.sync_now().await.unwrap();
+    let ordinal = handle.view().snapshot.unwrap().operational.latest_ordinal;
+    let owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test swap")
+            .unwrap()
+            .unwrap();
+    owner
+        .scope_blocking(|| {
+            owner.begin_restart(&durable_target, String::new())?;
+            crate::database::advance_worker_restart(
+                LATCH_RELAY_SESSION,
+                owner.operation_id(),
+                crate::database::WorkerRestartPhase::Swapping,
+            )?;
+            crate::database::advance_worker_restart(
+                LATCH_RELAY_SESSION,
+                owner.operation_id(),
+                crate::database::WorkerRestartPhase::AwaitingReadiness,
+            )
+        })
+        .unwrap();
+    handle.sync_now().await.unwrap();
+    assert!(
+        crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_some()
+    );
+    drop(owner);
+    handle.sync_now().await.unwrap();
+    assert_eq!(
+        handle.view().snapshot.unwrap().operational.latest_ordinal,
+        ordinal
+    );
+    assert!(
+        crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!restarted.exists());
     channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -2643,6 +2747,12 @@ fn latched_checkpoint(
     completion: CheckpointCompletion,
 ) -> LatchedCheckpoint {
     LatchedCheckpoint {
+        _worker_owner: crate::worker_lifecycle::WorkerPermit::try_acquire(
+            LATCH_RELAY_SESSION,
+            "test checkpoint",
+        )
+        .unwrap()
+        .unwrap(),
         artifact: CheckpointArtifact {
             metadata: CheckpointMetadata {
                 archive_path: PathBuf::from("checkpoint.hel.zip"),

@@ -31,6 +31,7 @@ pub mod setup;
 pub mod tailscale;
 pub mod utility_llm;
 pub mod worker_client;
+pub(crate) mod worker_lifecycle;
 pub mod worker_upgrade;
 
 pub mod database;

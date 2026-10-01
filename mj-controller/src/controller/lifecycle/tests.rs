@@ -136,6 +136,11 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
 
 #[test]
 fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
+    if !in_isolated_store("deferred_cleanup_failure_is_visible_and_successful_retry_clears_it") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let persisted = RefCell::new(Vec::new());
@@ -209,6 +214,11 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
 
 #[test]
 fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
+    if !in_isolated_store("target_cleanup_persists_destroying_and_rechecks_the_installed_archive") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }
@@ -423,6 +433,11 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
 
 #[test]
 fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
+    if !in_isolated_store("podman_close_persists_stopped_before_deferred_storage_cleanup") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     struct RecordingExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }
@@ -531,6 +546,11 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
 }
 #[test]
 fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
+    if !in_isolated_store("verified_close_retires_managed_checkout_but_keeps_archive_and_branch") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     let archive_directory = tempfile::tempdir().unwrap();
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -582,6 +602,11 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
 }
 #[test]
 fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
+    if !in_isolated_store("force_stop_reuses_verified_archive_and_leaves_session_resumable") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     let archive_directory = tempfile::tempdir().unwrap();
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -632,6 +657,12 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
 /// of waiting forever (#1059).
 #[test]
 fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
+    if !in_isolated_store("closing_a_wedged_provisioning_session_tears_down_its_target_and_settles")
+    {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
@@ -975,6 +1006,11 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
 }
 #[test]
 fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
+    if !in_isolated_store("destroying_retry_finalizes_when_apple_container_is_confirmed_absent") {
+        return;
+    }
+    crate::database::load_state().unwrap();
+
     struct AlreadyRemovedExecutor {
         commands: RefCell<Vec<CommandSpec>>,
     }

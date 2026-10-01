@@ -243,7 +243,16 @@ pub(super) fn write_worker_pidfile(root: &std::path::Path, pid: u32) -> Result<(
         .with_context(|| format!("write worker pidfile {}", path.display()))
 }
 
-pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result<()> {
+pub async fn run_daemon(root: PathBuf, config: WorkerLaunchConfig) -> Result<()> {
+    let owner = super::WorkerRootOwner::acquire(&root)?;
+    run_daemon_owned(&owner, config).await
+}
+
+pub async fn run_daemon_owned(
+    owner: &super::WorkerRootOwner,
+    mut config: WorkerLaunchConfig,
+) -> Result<()> {
+    let root = owner.root().to_owned();
     let mut target_environment = config.target_environment.clone();
     target_environment.extend(config.environment);
     config.environment = target_environment;

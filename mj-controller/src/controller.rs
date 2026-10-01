@@ -79,7 +79,9 @@ pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
-pub(crate) use worker_binary::{refresh_target_worker_binary_if_stale, worker_source_problem};
+pub(crate) use worker_binary::{
+    prepare_recovery_worker_binary, refresh_target_worker_binary_if_stale, worker_source_problem,
+};
 pub(crate) use worktree::path_exists_on_managed_target;
 
 pub use checkpoint::{
