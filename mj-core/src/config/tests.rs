@@ -483,31 +483,19 @@ fn obsolete_startup_settings_are_ignored_and_removed_when_saving() {
 }
 
 #[test]
-fn stopped_session_visibility_defaults_off_and_uses_the_advanced_section() {
+fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    let legacy = "version = 6\nshow_stopped_sessions = true\n";
+    let legacy =
+        "version = 6\nshow_stopped_sessions = true\n\n[advanced]\nshow_stopped_sessions = true\n";
     fs::write(&path, legacy).unwrap();
     let config = Config::load_from(&path).unwrap();
-    assert!(config.show_stopped_sessions);
-    assert!(!config.advanced.show_stopped_sessions);
     assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
 
     config.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
-    assert!(!body.contains("show_stopped_sessions"));
-
-    let (saved, ()) = Config::update_to(&path, |config| {
-        config.advanced.show_stopped_sessions = true;
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), saved);
-    assert!(saved.advanced.show_stopped_sessions);
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(body.contains("[advanced]"));
-    assert!(body.contains("show_stopped_sessions = true"));
-    assert_eq!(saved.version, CONFIG_VERSION);
+    assert!(!body.contains("show_stopped_sessions"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), config);
 }
 
 #[test]
@@ -668,7 +656,6 @@ fn sample_config() -> Config {
         sessions_side: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),
-        show_stopped_sessions: false,
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
@@ -1334,10 +1321,8 @@ fn every_previous_config_version_upgrades_with_compatible_defaults() {
         fs::write(&path, format!("version = {version}\n")).unwrap();
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
-        assert!(!config.show_stopped_sessions);
         assert_eq!(config.theme, UiTheme::Midnight);
         assert!(!config.advanced.detailed_activity_clocks);
-        assert!(!config.advanced.show_stopped_sessions);
     }
 }
 

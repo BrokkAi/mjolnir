@@ -150,8 +150,6 @@ impl SessionsSide {
 pub struct AdvancedConfig {
     #[serde(skip_serializing_if = "is_false")]
     pub detailed_activity_clocks: bool,
-    #[serde(skip_serializing_if = "is_false")]
-    pub show_stopped_sessions: bool,
     #[serde(skip_serializing_if = "SessionOrder::is_default")]
     pub session_order: SessionOrder,
     /// Which glyphs the dashboard draws with. `None` decides from the

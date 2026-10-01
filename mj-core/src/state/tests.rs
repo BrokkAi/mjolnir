@@ -254,7 +254,6 @@ fn sample_config() -> Config {
         notify: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
-        show_stopped_sessions: false,
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
@@ -1127,7 +1126,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         .get_mut(&session.last_profile)
         .unwrap()
         .enabled = false;
-    after.advanced.show_stopped_sessions = !before.advanced.show_stopped_sessions;
+    after.advanced.detailed_activity_clocks = !before.advanced.detailed_activity_clocks;
     after.targets.insert(
         "alternative".into(),
         crate::config::TargetTemplate::LocalBare,

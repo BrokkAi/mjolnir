@@ -2061,7 +2061,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // An unrelated preference remains editable even while a session needs repair.
         updated = original.clone();
-        updated.advanced.show_stopped_sessions = true;
+        updated.advanced.detailed_activity_clocks = true;
         save_setup_at(
             &path,
             &serde_json::to_string(&original).unwrap(),
@@ -2073,7 +2073,7 @@ mod tests {
             Config::load_from(&path)
                 .unwrap()
                 .advanced
-                .show_stopped_sessions
+                .detailed_activity_clocks
         );
     }
 
@@ -2162,7 +2162,7 @@ mod tests {
         edited.sessions_side = mj_core::config::SessionsSide::Right;
         edited.theme = mj_core::config::UiTheme::Light;
         Config::update_to(&path, |current| {
-            current.advanced.show_stopped_sessions = true;
+            current.advanced.detailed_activity_clocks = true;
             Ok(())
         })
         .unwrap();
@@ -2176,7 +2176,7 @@ mod tests {
         .unwrap();
         assert_eq!(saved.sessions_side, mj_core::config::SessionsSide::Right);
         assert_eq!(saved.theme, mj_core::config::UiTheme::Light);
-        assert!(saved.advanced.show_stopped_sessions);
+        assert!(saved.advanced.detailed_activity_clocks);
         assert_eq!(Config::load_from(&path).unwrap(), saved);
 
         let mut conflicting = original.clone();

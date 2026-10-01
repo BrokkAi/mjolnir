@@ -11,7 +11,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"show_stopped_sessions":false,"session_order":"project","symbols":null})
+            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null})
         }
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
@@ -208,7 +208,6 @@ pub(super) fn label(key: &str) -> String {
         "spinner" => "Activity animation",
         "advanced" => "Advanced",
         "detailed_activity_clocks" => "Detailed activity clocks",
-        "show_stopped_sessions" => "Show suspended sessions",
         "session_order" => "Session order",
         "symbols" => "Symbols",
         "notify" => "Notifications",
@@ -368,7 +367,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             .to_lowercase()
         ),
         "advanced" => {
-            let on = ["detailed_activity_clocks", "show_stopped_sessions"]
+            let on = ["detailed_activity_clocks"]
                 .iter()
                 .filter(|field| section[*field] == Value::Bool(true))
                 .count();
@@ -682,7 +681,6 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Keep the terminal window title showing how many sessions are waiting or unread."
         }
         "detailed_activity_clocks" => "Show elapsed turn and tool clocks in session activity rows.",
-        "show_stopped_sessions" => "Include stopped sessions in the terminal Sessions pane.",
         "session_order" => {
             "Group sessions by project, or list the ones that need you first without project headings."
         }

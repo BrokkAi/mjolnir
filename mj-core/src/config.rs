@@ -413,9 +413,6 @@ fn discard_legacy_startup<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "StoredConfig", try_from = "StoredConfig")]
 pub struct Config {
-    /// Deprecated session filtering preference retained for read compatibility.
-    /// It is ignored and omitted from newly written configurations.
-    pub show_stopped_sessions: bool,
     pub sessions_side: SessionsSide,
     pub advanced: AdvancedConfig,
     pub notify: NotifyConfig,
@@ -448,7 +445,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredConfig {
+    /// A retired session filter. Files written before version 7 may still
+    /// carry it, so it is accepted and dropped.
     #[serde(default, skip_serializing)]
+    #[expect(dead_code, reason = "accepted only so that old files still load")]
     show_stopped_sessions: bool,
     #[serde(default, skip_serializing_if = "SessionsSide::is_default")]
     sessions_side: SessionsSide,
@@ -618,7 +618,7 @@ impl TryFrom<StoredConfig> for Config {
 
     fn try_from(stored: StoredConfig) -> Result<Self> {
         let StoredConfig {
-            show_stopped_sessions,
+            show_stopped_sessions: _,
             sessions_side,
             advanced,
             notify,
@@ -672,7 +672,6 @@ impl TryFrom<StoredConfig> for Config {
             resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
         }
         Ok(Self {
-            show_stopped_sessions,
             sessions_side,
             advanced,
             notify,
@@ -718,7 +717,7 @@ impl From<Config> for StoredConfig {
             machines.remove(LOCAL_MACHINE_ID);
         }
         Self {
-            show_stopped_sessions: config.show_stopped_sessions,
+            show_stopped_sessions: false,
             sessions_side: config.sessions_side,
             advanced: config.advanced,
             notify: config.notify,
@@ -748,7 +747,6 @@ impl Default for Config {
             sessions_side: SessionsSide::default(),
             advanced: AdvancedConfig::default(),
             notify: NotifyConfig::default(),
-            show_stopped_sessions: false,
             version: CONFIG_VERSION,
             spinner: SpinnerStyle::default(),
             theme: Default::default(),

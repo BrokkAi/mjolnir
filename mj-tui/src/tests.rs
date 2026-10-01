@@ -1507,9 +1507,6 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
     assert_eq!(ids(&dashboard), ["second", "first"]);
     dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Stopped;
     assert_eq!(ids(&dashboard), ["first"]);
-    dashboard.config.advanced.show_stopped_sessions = true;
-    // Stopped sessions sort after the rest, whatever their creation order.
-    assert_eq!(ids(&dashboard), ["first", "second"]);
     dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Running;
     assert_eq!(ids(&dashboard), ["second", "first"]);
     dashboard
@@ -1980,56 +1977,6 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         vec![first_child.id.clone(), second_child.id.clone()],
         "both children must appear in the virtual workspace"
     );
-}
-
-#[test]
-fn advanced_setting_reveals_only_stopped_sessions_in_the_selected_workspace() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let mut live = running_session();
-    live.id = "live".into();
-    dashboard.state.sessions.insert(live.id.clone(), live);
-    let mut lost = stopped_session();
-    lost.id = "lost".into();
-    lost.state = SessionState::Lost;
-    dashboard.state.sessions.insert(lost.id.clone(), lost);
-    let mut remote_history = stopped_session();
-    remote_history.id = "remote-history".into();
-    remote_history.workspace_id = "another-workspace".into();
-    dashboard
-        .state
-        .sessions
-        .insert(remote_history.id.clone(), remote_history);
-    dashboard.select_active_session("live");
-    dashboard.clamp_selections();
-
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<Vec<_>>(),
-        ["live"]
-    );
-
-    let mut config = dashboard.config.clone();
-    config.advanced.show_stopped_sessions = true;
-    dashboard.set_config(config);
-    let visible = dashboard
-        .ordered_sessions()
-        .iter()
-        .map(|session| session.id.as_str())
-        .collect::<Vec<_>>();
-    assert!(visible.contains(&"session-1"));
-    assert!(visible.contains(&"live"));
-    assert!(!visible.contains(&"lost"));
-    assert!(!visible.contains(&"remote-history"));
-
-    dashboard.select_active_session("session-1");
-    let mut config = dashboard.config.clone();
-    config.advanced.show_stopped_sessions = false;
-    dashboard.set_config(config);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
-    assert!(dashboard.state.sessions.contains_key("session-1"));
 }
 
 #[test]

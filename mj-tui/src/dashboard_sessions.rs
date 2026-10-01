@@ -267,10 +267,9 @@ impl DashboardState {
     }
 
     /// Sessions visible in the selected workspace, grouped by project and
-    /// ordered by creation, with stopped sessions after the rest. Stopped
-    /// sessions are included only when their
-    /// advanced display setting is enabled; in-flight transitions remain
-    /// visible regardless. The controller may feed all workspaces into one
+    /// ordered by creation. Stopped sessions appear only among a parent's
+    /// sub-agents, after the rest; in-flight transitions remain visible
+    /// regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
     pub(crate) fn ordered_sessions(&self) -> Vec<&SessionRecord> {
         let mut sessions = self.ordered_sessions_unfiltered();
@@ -571,8 +570,8 @@ impl DashboardState {
     }
 
     /// Whether the Sessions pane lists `session` as a top-level row of
-    /// `workspace_id`: live, mid-transition, or stopped when stopped sessions
-    /// are shown. Terminal failures such as a lost or data-loss session have
+    /// `workspace_id`: live or mid-transition. Stopped sessions are listed
+    /// only by the resume dialog. Terminal failures such as a lost or data-loss session have
     /// no row, so the badges and the attention queue must not count them
     /// either; they are reachable only through the resume dialog.
     pub(crate) fn is_listed_top_level_session(
@@ -582,10 +581,7 @@ impl DashboardState {
     ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.is_subagent_session(&session.id)
-            && (session.state.is_active()
-                || self.transition_kind(&session.id).is_some()
-                || (self.config.advanced.show_stopped_sessions
-                    && session.state == SessionState::Stopped))
+            && (session.state.is_active() || self.transition_kind(&session.id).is_some())
     }
 
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {

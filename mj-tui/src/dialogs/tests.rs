@@ -552,7 +552,6 @@ fn setup_opens_in_place_and_container_settings_remain_available() {
             sessions_side: Default::default(),
             advanced: Default::default(),
             notify: Default::default(),
-            show_stopped_sessions: false,
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),

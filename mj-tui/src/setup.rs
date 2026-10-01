@@ -376,13 +376,7 @@ fn root_group(key: &str) -> &'static str {
 fn hidden_root_key(key: &str) -> bool {
     matches!(
         key,
-        "version"
-            | "advanced"
-            | "sessions_side"
-            | "spinner"
-            | "theme"
-            | "keys"
-            | "show_stopped_sessions"
+        "version" | "advanced" | "sessions_side" | "spinner" | "theme" | "keys"
     )
 }
 

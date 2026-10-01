@@ -707,7 +707,6 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             sessions_side: Default::default(),
             advanced: Default::default(),
             notify: Default::default(),
-            show_stopped_sessions: false,
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),

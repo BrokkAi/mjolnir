@@ -18,7 +18,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
         ("notify", "Ring the terminal bell"),
         ("notify", "Show counts in the terminal title"),
         ("advanced", "Detailed activity clocks"),
-        ("advanced", "Show suspended sessions"),
         ("review", "Enabled"),
     ] {
         let mut dashboard = dashboard_with_session(stopped_session());
@@ -911,45 +910,6 @@ fn setup_does_not_offer_automatic_session_settings() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert!(!dialog.keys().iter().any(|key| key == "startup"));
     assert!(dialog.draft.get("startup").is_none());
-}
-
-#[test]
-fn stopped_session_visibility_is_only_editable_under_advanced() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    assert!(
-        !setup_dialog_mut(&mut dashboard.mode)
-            .unwrap()
-            .keys()
-            .iter()
-            .any(|key| key == "show_stopped_sessions")
-    );
-
-    choose(&mut dashboard, "advanced");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(
-        dialog.keys(),
-        [
-            "detailed_activity_clocks",
-            "show_stopped_sessions",
-            "session_order",
-            "symbols"
-        ]
-    );
-    assert_eq!(dialog.draft["advanced"]["show_stopped_sessions"], false);
-
-    choose(&mut dashboard, "show_stopped_sessions");
-    assert_eq!(
-        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["advanced"]["show_stopped_sessions"],
-        true
-    );
-    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    let DashboardAction::SaveSetup { updated, .. } = action else {
-        panic!("expected Settings save, got {action:?}")
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert!(saved.advanced.show_stopped_sessions);
-    assert!(!saved.show_stopped_sessions);
 }
 
 /// Launch campaign finding A-3: once `ascii` was chosen, the popup offered no
@@ -2577,18 +2537,18 @@ fn search_finds_a_setting_by_what_it_does_rather_than_its_name() {
 fn search_selects_a_switch_without_flipping_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
-    search(&mut dashboard, "show suspended");
+    search(&mut dashboard, "detailed activity");
     dashboard.handle_key(key(KeyCode::Enter));
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     assert_eq!(dialog.path, vec!["advanced".to_owned()]);
     assert_eq!(
         dialog.keys().get(dialog.selected).map(String::as_str),
-        Some("show_stopped_sessions"),
+        Some("detailed_activity_clocks"),
         "the switch is left selected on its own page"
     );
     assert!(dialog.editor.is_none());
     assert_eq!(
-        dialog.draft["advanced"]["show_stopped_sessions"],
+        dialog.draft["advanced"]["detailed_activity_clocks"],
         Value::Bool(false),
         "finding a setting must not change it"
     );
@@ -2987,7 +2947,6 @@ fn every_setting_description_fits_its_two_rows() {
         &["notify", "delay_seconds"],
         &["notify", "title"],
         &["advanced", "detailed_activity_clocks"],
-        &["advanced", "show_stopped_sessions"],
         &["advanced", "session_order"],
         &["advanced", "symbols"],
         &["bundles"],

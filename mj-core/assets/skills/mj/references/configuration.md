@@ -75,7 +75,7 @@ The only accepted top-level keys are:
 | --- | --- | --- | --- | --- |
 | `version` | integer | yes | none | Configuration schema version; use `14`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
-| `show_stopped_sessions` | boolean | no | ignored | Deprecated compatibility field. It is accepted when reading configuration files but has no effect and is omitted on the next save. Use `advanced.show_stopped_sessions` instead. |
+| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
@@ -121,7 +121,6 @@ activity without changing how sessions run:
 ```toml
 [advanced]
 detailed_activity_clocks = false
-show_stopped_sessions = false
 session_order = "project"
 # symbols = "ascii"
 ```
@@ -129,7 +128,6 @@ session_order = "project"
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
 | `detailed_activity_clocks` | boolean | `false` | When enabled, normal session rows and the conversation header show separate turn, step, and background clocks. |
-| `show_stopped_sessions` | boolean | `false` | When enabled, suspended sessions appear in the terminal Sessions pane for their workspace. |
 | `session_order` | `"project"` or `"priority"` | `"project"` | `project` groups sessions under a heading per project in creation order. `priority` lists sessions that need you first (waiting, failed, unread, working, idle) with no project headings. |
 | `symbols` | `"unicode"` or `"ascii"` | unset | Which glyphs the dashboard draws status marks, borders, chart bars, and separators with. Unset follows the terminal: ASCII when `TERM` is `linux` or the locale (`LC_ALL`, `LC_CTYPE`, `LANG`) names no UTF-8 encoding, Unicode otherwise. |
 

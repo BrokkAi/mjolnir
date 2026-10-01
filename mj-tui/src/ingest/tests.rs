@@ -104,7 +104,8 @@ fn changed_config_preserves_a_new_palette_and_its_query() {
     use crossterm::event::KeyCode;
     let mut dashboard = dashboard_with_session(running_session());
     let mut saved_config = dashboard.config.clone();
-    saved_config.advanced.show_stopped_sessions = !saved_config.advanced.show_stopped_sessions;
+    saved_config.advanced.detailed_activity_clocks =
+        !saved_config.advanced.detailed_activity_clocks;
     open_palette(&mut dashboard);
     dashboard.handle_paste("rename");
     dashboard.set_config(saved_config.clone());

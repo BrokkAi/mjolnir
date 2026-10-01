@@ -1,5 +1,5 @@
-//! Incremental membership for ordinary rendering; explicit history views may
-//! enumerate stopped records. Direct presentation edits use the same input map.
+//! Incremental membership for ordinary rendering; the resume dialog lists
+//! stopped records itself. Direct presentation edits use the same input map.
 use super::*;
 use mj_core::snapshot_map::SnapshotMap;
 
@@ -8,7 +8,6 @@ pub(crate) struct RowIndex {
     records: SnapshotMap<String, SessionRecord>,
     relations: SnapshotMap<String, mj_core::subagent::SubagentRecord>,
     live: BTreeSet<String>,
-    stopped: BTreeSet<String>,
     children: BTreeMap<String, BTreeSet<String>>,
     active_children: BTreeMap<String, BTreeSet<String>>,
     #[cfg(test)]
@@ -23,14 +22,10 @@ impl RowIndex {
                 self.visits += 1;
             }
             self.live.remove(id);
-            self.stopped.remove(id);
-            if let Some(record) = record {
-                if record.state.is_active() {
-                    self.live.insert(id.clone());
-                }
-                if record.state == SessionState::Stopped {
-                    self.stopped.insert(id.clone());
-                }
+            if let Some(record) = record
+                && record.state.is_active()
+            {
+                self.live.insert(id.clone());
             }
         }
         for (id, relation) in self.relations.changes(&state.subagents) {
@@ -90,9 +85,6 @@ impl DashboardState {
         let mut index = self.row_index.borrow_mut();
         index.synchronize(&self.state);
         let mut ids = index.live.clone();
-        if self.config.advanced.show_stopped_sessions {
-            ids.extend(index.stopped.iter().cloned());
-        }
         ids.extend(self.session_operations.keys().cloned());
         ids.into_iter()
             .filter_map(|id| self.state.sessions.get(&id))
