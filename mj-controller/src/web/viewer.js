@@ -1341,8 +1341,8 @@ function handleSessionMenuKeydown(event) {
 /// clone plan on the review step; raw local targets still validate their
 /// project directory before that review.
 const NEW_STEPS = [
-  { key: 'profile', title: 'Account', applies: () => true },
-  { key: 'target', title: 'Where to run', applies: () => true },
+  { key: 'profile', title: 'Account', applies: () => !soleProfileId() },
+  { key: 'target', title: 'Where to run', applies: () => !loneNewTargetId() },
   { key: 'project', title: 'Project', applies: () => true },
   { key: 'review', title: 'Review', applies: () => true },
 ];
@@ -1358,6 +1358,23 @@ function abortPendingNewPreflight() {
   pendingNewPreflightController?.abort();
   pendingNewPreflightController = null;
   pendingNewPreflight = null;
+}
+
+// The id of the only profile there is to choose, or '' when the Account
+// choice is real. The terminal wizard skips that step the same way.
+function soleProfileId() {
+  const profiles = snapshot?.profiles || [];
+  return profiles.length === 1 ? profiles[0].id : '';
+}
+
+// The id of the only target the Where-to-run step could offer, or '' when it
+// has a decision to make. This is the terminal wizard's rule (`lone_target`):
+// a target counts unless its runtime is missing or its last check failed; the
+// one left must be a raw host, because a container or EC2 target is sized on
+// that step. A check that has not answered yet still counts.
+function loneNewTargetId() {
+  const offered = launchableTargets(snapshot?.targets).filter(target => target.availability !== 'unavailable');
+  return offered.length === 1 && offered[0].requires_project_directory === true ? offered[0].id : '';
 }
 
 // A target whose runtime (Docker, Podman) is not installed on the daemon's
@@ -1554,6 +1571,19 @@ function visibleSteps() {
   return NEW_STEPS.filter(step => step.applies(newDraft));
 }
 
+// A step that is not shown still has an answer: the only choice. The draft
+// may have started on a default that has since stopped being offered.
+function settleSkippedNewSteps(draft) {
+  const profileId = soleProfileId();
+  if (profileId) draft.profileId = profileId;
+  const targetId = loneNewTargetId();
+  if (targetId && draft.targetId !== targetId) {
+    draft.targetId = targetId;
+    draft.projectDirectory = draft.projectDirectories[targetId]
+      ?? snapshot.targets.find(t => t.id === targetId)?.recent_project_directories?.[0] ?? '';
+  }
+}
+
 /// The title the daemon would derive, shown on review so the person sees the
 /// name before committing rather than discovering it afterwards.
 function derivedTitle() {
@@ -1572,6 +1602,7 @@ function renderNewForm() {
     newDraft = freshDraft();
     newError.textContent = '';
   }
+  settleSkippedNewSteps(newDraft);
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
@@ -3526,6 +3557,9 @@ function renderMoveForm() {
 
   if (!preparation) {
     moveStep.append(el('p', '', `Move “${session.title || session.id}” while keeping its session identity, transcript, and recoverable workspace state.`));
+    // A sole profile has nothing to choose; the terminal's Move skips it too.
+    const soleProfile = !draft.queueLocked && soleProfileId();
+    if (soleProfile) draft.profileId = soleProfile;
     const profilePicker = pickerField('Profile', `move-profile-${session.id}`, snapshot.profiles, draft.profileId, value => {
       if (draft.queueLocked) return;
       draft.profileId = value;
@@ -3533,7 +3567,7 @@ function renderMoveForm() {
       draft.workspaceSelection.acknowledge_large_transfer = false;
       draft.preparation = null;
     });
-    moveStep.append(profilePicker);
+    if (!soleProfile) moveStep.append(profilePicker);
     const targetIds = [...new Set([
       ...(session.compatible_resume_targets || []),
       recoveryTarget,
