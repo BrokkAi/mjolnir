@@ -3814,3 +3814,24 @@ fn profile_comboboxes_display_recorded_model_and_effort_before_discovery() {
         "recorded-model"
     );
 }
+
+/// A status line belongs to the page or prompt that set it. Finding T-4.
+#[test]
+fn a_status_line_does_not_outlive_the_prompt_that_set_it() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", None);
+    dashboard.handle_key(key(KeyCode::Char('a')));
+    dashboard.handle_key(key(KeyCode::Enter));
+    let shown = setup_dialog_mut(&mut dashboard.mode)
+        .unwrap()
+        .notice
+        .clone();
+    assert_eq!(shown.as_deref(), Some("Choose a name for the new entry."));
+    dashboard.handle_key(key(KeyCode::Esc));
+    choose(&mut dashboard, "codex-1");
+    choose(&mut dashboard, "subagents");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(dialog.notice, None, "the name prompt's status lingered");
+    let page = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(!page.contains("Choose a name"), "{page}");
+}

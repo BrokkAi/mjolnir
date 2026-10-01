@@ -195,8 +195,9 @@ pub(crate) struct SetupDialog {
     pub(crate) saving: bool,
     discovering: bool,
     pub(crate) notice: Option<String>,
-    /// The notice describes the build cache page and goes when the page does.
-    build_cache_notice: bool,
+    /// Where the notice was first shown. A status line belongs to the page
+    /// or prompt that set it and goes when the dialog is no longer there.
+    notice_anchor: Option<NoticeAnchor>,
     /// The host-resolved values behind the blank fields of the build cache
     /// page being viewed, keyed by the settings they were resolved from.
     build_cache_preview: Option<BuildCachePreviewState>,
@@ -205,6 +206,13 @@ pub(crate) struct SetupDialog {
     archive_space_preview: Option<ArchiveSpacePreviewState>,
     preferred_width: u16,
     preferred_height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NoticeAnchor {
+    text: String,
+    /// The page path, and whether a value editor or the search is open.
+    view: (Vec<String>, bool, bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -843,7 +851,7 @@ impl SetupDialog {
             saving: false,
             discovering: false,
             notice: None,
-            build_cache_notice: false,
+            notice_anchor: None,
             build_cache_preview: None,
             archive_space_preview: None,
             preferred_width: preferred.width,
@@ -960,15 +968,39 @@ impl SetupDialog {
             .collect()
     }
 
+    fn notice_view(&self) -> (Vec<String>, bool, bool) {
+        (
+            self.path.clone(),
+            self.editor.is_some(),
+            self.search.is_some(),
+        )
+    }
+
+    /// Anchors a new notice to the view showing it, and drops a notice once
+    /// the dialog has left that view.
+    fn expire_notice(&mut self) {
+        let Some(text) = self.notice.clone() else {
+            self.notice_anchor = None;
+            return;
+        };
+        let view = self.notice_view();
+        match &self.notice_anchor {
+            Some(anchor) if anchor.text == text => {
+                if anchor.view != view {
+                    self.notice = None;
+                    self.notice_anchor = None;
+                }
+            }
+            _ => self.notice_anchor = Some(NoticeAnchor { text, view }),
+        }
+    }
+
     pub(crate) fn prepare(&mut self) {
         if let Some(review) = &self.review_editor {
             review.prepare();
             return;
         }
-        if self.build_cache_notice && self.build_cache_page().is_none() {
-            self.notice = None;
-            self.build_cache_notice = false;
-        }
+        self.expire_notice();
         use SetupControl::*;
         if let Some(search) = &self.search {
             let len = search.matches.len();
@@ -1054,7 +1086,6 @@ impl SetupDialog {
             if let Some(reason) = self.build_cache_blocked() {
                 let notice = format!("The build cache cannot be turned on here: {reason}");
                 self.notice = Some(notice);
-                self.build_cache_notice = true;
                 return;
             }
             *self.draft.pointer_mut(&pointer(&path)).unwrap() =
@@ -1069,7 +1100,6 @@ impl SetupDialog {
                 "This machine's mbx installation owns its budgets. Mjolnir does not modify them."
                     .into(),
             );
-            self.build_cache_notice = true;
             return;
         }
         if value.is_object() || value.is_array() {
@@ -1406,7 +1436,6 @@ impl SetupDialog {
             result: BuildCachePreviewResult::Resolving,
         });
         self.notice = Some("Resolving the build cache defaults on the machine…".into());
-        self.build_cache_notice = true;
         DashboardAction::PreviewBuildCache {
             generation: self.generation,
             key,
@@ -2709,7 +2738,6 @@ impl DashboardState {
             },
         });
         dialog.notice = Some(notice);
-        dialog.build_cache_notice = true;
         dialog.prepare();
     }
 
