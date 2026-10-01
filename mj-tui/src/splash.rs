@@ -23,12 +23,12 @@ use ratatui::style::Color;
 
 use canvas::{Canvas, Dissolve, Rgb};
 
-/// Scene times, in seconds. The hammer drops in from above the screen as
-/// the splash opens and comes into view about a third of a second later.
-const DESCENT_START: f32 = 0.0;
-const IMPACT: f32 = 0.60;
-const TITLE_START: f32 = 0.77;
-const HOLD_START: Duration = Duration::from_millis(1400);
+/// Scene times, in seconds. The splash opens with the hammer already
+/// falling above the screen; it comes into view about 0.16s later.
+const DESCENT_START: f32 = -0.16;
+const IMPACT: f32 = 0.44;
+const TITLE_START: f32 = 0.61;
+const HOLD_START: Duration = Duration::from_millis(1240);
 const DISSOLVE: Duration = Duration::from_millis(250);
 
 /// The horizon, in scene units below the centre of the screen.
