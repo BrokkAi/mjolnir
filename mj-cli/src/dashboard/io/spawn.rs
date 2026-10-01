@@ -1357,6 +1357,29 @@ pub(crate) fn spawn_resume_candidates(
     )
 }
 
+/// Fetches the whole record of the session picked in the resume dialog.
+pub(crate) fn spawn_resume_record(
+    session_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) -> JoinHandle<()> {
+    let requested = session_id.clone();
+    spawn_background_async(
+        "load session to resume",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .session_record(requested)
+                .await
+        },
+        move |result| DashboardIoUpdate::ResumeRecord {
+            session_id,
+            result: Box::new(result),
+        },
+    )
+}
+
 pub(crate) fn spawn_checkpoint_archive_size_refresh(
     generation: u64,
     targets: BTreeMap<String, PathBuf>,

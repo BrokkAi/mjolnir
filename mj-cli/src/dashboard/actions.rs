@@ -670,6 +670,9 @@ pub(crate) async fn apply_dashboard_action(
                 context.dashboard_io_tx.clone(),
             );
         }
+        DashboardAction::LoadResumeRecord { session_id } => {
+            crate::dashboard::io::spawn_resume_record(session_id, context.dashboard_io_tx.clone());
+        }
         DashboardAction::LoadArchivedBrief { wiki_id } => {
             crate::dashboard::io::spawn_wiki_brief(wiki_id, context.dashboard_io_tx.clone());
         }

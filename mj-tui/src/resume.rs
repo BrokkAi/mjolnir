@@ -27,6 +27,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use mj_client::daemon::ResumeCandidate;
 use mj_client::daemon::{
     WikiHitBlock, WikiHitTranscript, WikiIndexState, WikiRow, WikiSearchPage, WikiStatus,
 };
@@ -307,6 +308,8 @@ pub(crate) struct ResumeDialog {
     /// The runtime feed carries only live sessions, so the Mjolnir tab and
     /// the import de-duplication wait for this answer.
     pub(crate) history: HistoryLoad,
+    /// The Mjolnir row whose record is being fetched to open the wizard.
+    pub(crate) opening: Option<String>,
 }
 
 /// The dialog's request for stopped sessions.
@@ -317,10 +320,11 @@ pub(crate) enum HistoryLoad {
     Failed(String),
 }
 
-/// What the dialog needs besides the stopped records themselves, which are
-/// kept in [`DashboardState::session_record`]'s store.
+/// The daemon's answer about stopped sessions, as the dialog keeps it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ResumeHistory {
+    /// One row for each inactive top-level session, by id.
+    candidates: BTreeMap<String, ResumeCandidate>,
     /// Native sessions that a record held when the dialog opened, live or not.
     adopted: BTreeSet<(HarnessKind, String)>,
     /// Local checkouts Mjolnir created for its sessions.
@@ -329,27 +333,22 @@ pub(crate) struct ResumeHistory {
     moves: BTreeMap<String, MoveOperation>,
 }
 
-impl ResumeHistory {
-    /// The daemon's answer, as the dialog's own data and the stopped records
-    /// that [`DashboardState::session_record`] serves.
-    fn split(
-        candidates: mj_client::daemon::ResumeCandidates,
-    ) -> (Self, SnapshotMap<String, SessionRecord>) {
-        let history = Self {
-            adopted: candidates.adopted_native_sessions.into_iter().collect(),
-            local_checkout_roots: candidates.local_checkout_roots,
-            moves: candidates
+impl From<mj_client::daemon::ResumeCandidates> for ResumeHistory {
+    fn from(answer: mj_client::daemon::ResumeCandidates) -> Self {
+        Self {
+            candidates: answer
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate.session_id.clone(), candidate))
+                .collect(),
+            adopted: answer.adopted_native_sessions.into_iter().collect(),
+            local_checkout_roots: answer.local_checkout_roots,
+            moves: answer
                 .moves
                 .into_iter()
                 .map(|operation| (operation.selection.session_id.clone(), operation))
                 .collect(),
-        };
-        let records = candidates
-            .records
-            .into_iter()
-            .map(|record| (record.id.clone(), record))
-            .collect();
-        (history, records)
+        }
     }
 }
 
@@ -598,8 +597,42 @@ fn timestamp_ms(timestamp: &str) -> Option<i64> {
         .map(|parsed| parsed.timestamp_millis())
 }
 
-fn hel_row_status(session: &SessionRecord) -> ResumeRowStatus {
-    match session.state {
+/// The Mjolnir tab's row for one session.
+fn hel_row(candidate: ResumeCandidate) -> ResumeRow {
+    let status = hel_row_status(candidate.state);
+    let mut details = match (candidate.has_checkpoint, status.explanation()) {
+        (_, Some(reason)) => format!("{reason} · {}", candidate.project),
+        (false, None) => format!("no checkpoint · {}", candidate.project),
+        (true, None) => candidate.project,
+    };
+    match candidate.publication {
+        Some(PublicationState::Unpublished) => {
+            details.push_str(" · Unpublished work in recovery copy")
+        }
+        Some(PublicationState::Unknown) => details.push_str(" · Publication status unknown"),
+        _ => {}
+    }
+    ResumeRow {
+        key: ResumeRowKey::Hel(candidate.session_id),
+        profile_id: candidate.last_profile,
+        title: candidate.title,
+        origin: candidate.origin,
+        details,
+        last_activity_ms: candidate.last_activity_ms.unwrap_or(0),
+        status,
+        publication: candidate.publication,
+        natively_archived: false,
+        unavailable_reason: None,
+        move_recovery: None,
+        wiki_match: None,
+        wiki_rank: None,
+        wiki_profile: None,
+        wiki_target: None,
+    }
+}
+
+fn hel_row_status(state: SessionState) -> ResumeRowStatus {
+    match state {
         SessionState::Lost => ResumeRowStatus::Lost,
         SessionState::DestroyedWithDataLoss => ResumeRowStatus::DataLoss,
         _ => ResumeRowStatus::Resumable,
@@ -675,14 +708,13 @@ fn harness_of_tool(tool: &str) -> Option<HarnessKind> {
 pub(crate) fn merged_resume_rows(
     config: &Config,
     state: &State,
-    stopped: &SnapshotMap<String, SessionRecord>,
     history: &HistoryLoad,
     profiles: &[ImportProfileOption],
     wiki: &[WikiRow],
 ) -> Vec<ResumeRow> {
-    // Until the daemon answers, the stopped records may be an older dialog's,
-    // and nothing says which native sessions Mjolnir already holds, so the
-    // Mjolnir and Import rows wait for it. Archived search hits do not.
+    // Until the daemon answers, nothing says which stopped sessions exist or
+    // which native sessions Mjolnir already holds, so the Mjolnir and Import
+    // rows wait for it. Archived search hits do not.
     let history = match history {
         HistoryLoad::Loaded(history) => Some(history.as_ref()),
         HistoryLoad::Loading | HistoryLoad::Failed(_) => None,
@@ -713,68 +745,27 @@ pub(crate) fn merged_resume_rows(
         }
     }
     let mut rows = Vec::new();
-    let (stopped, profiles) = if history.is_some() {
-        (Some(stopped), profiles)
-    } else {
-        (None, &[][..])
-    };
-    // The loaded stopped records, plus inactive records the feed itself
-    // carries (a session that failed after the dialog opened). The feed's
-    // copy is newer when it has one: a session resumed since the dialog
-    // opened is active now, and the Live tab lists it.
-    let feed_inactive = stopped.is_some().then(|| {
+    let profiles = if history.is_some() { profiles } else { &[] };
+    // The daemon's rows, plus inactive records the feed itself carries (a
+    // session that failed after the dialog opened). The feed's record is
+    // newer when there is one: a session resumed since the dialog opened is
+    // active now, and the Live tab lists it. A sub-agent is resumed through
+    // its parent.
+    let from_feed = history.is_some().then(|| {
         state
             .sessions
             .values()
-            .filter(|session| !session.state.is_active())
+            .filter(|session| !session.state.is_active() && !state.is_subagent_session(&session.id))
+            .map(|session| ResumeCandidate::of(session, config))
     });
-    let listed = stopped
+    let listed = history
         .into_iter()
-        .flat_map(SnapshotMap::values)
-        .filter(|loaded| !state.sessions.contains_key(&loaded.id))
-        .chain(feed_inactive.into_iter().flatten());
-    for session in listed {
-        // A sub-agent is resumed through its parent.
-        if session.state.is_active() || state.is_subagent_session(&session.id) {
-            continue;
-        }
-        let last_activity_ms = session
-            .checkpoint
-            .as_ref()
-            .and_then(|checkpoint| timestamp_ms(&checkpoint.created_at))
-            .or_else(|| timestamp_ms(&session.updated_at))
-            .unwrap_or(0);
-        let status = hel_row_status(session);
-        let project = session.project_name(config);
-        let mut details = match (&session.checkpoint, status.explanation()) {
-            (_, Some(reason)) => format!("{reason} · {project}"),
-            (None, None) => format!("no checkpoint · {project}"),
-            (Some(_), None) => project,
-        };
-        match session.publication_state() {
-            Some(PublicationState::Unpublished) => {
-                details.push_str(" · Unpublished work in recovery copy")
-            }
-            Some(PublicationState::Unknown) => details.push_str(" · Publication status unknown"),
-            _ => {}
-        }
-        rows.push(ResumeRow {
-            key: ResumeRowKey::Hel(session.id.clone()),
-            profile_id: session.last_profile.clone(),
-            title: session.listed_title().to_owned(),
-            origin: session.project_target(config, &session.target_template_id),
-            details,
-            last_activity_ms,
-            status,
-            publication: session.publication_state(),
-            natively_archived: false,
-            unavailable_reason: None,
-            move_recovery: None,
-            wiki_match: None,
-            wiki_rank: None,
-            wiki_profile: None,
-            wiki_target: None,
-        });
+        .flat_map(|history| history.candidates.values())
+        .filter(|candidate| !state.sessions.contains_key(&candidate.session_id))
+        .cloned()
+        .chain(from_feed.into_iter().flatten());
+    for candidate in listed {
+        rows.push(hel_row(candidate));
     }
     for profile in profiles {
         for native in &profile.sessions {
@@ -952,7 +943,6 @@ fn archive_details(hit: &WikiRow) -> String {
 fn build_resume_rows(
     config: &Config,
     state: &State,
-    stopped: &SnapshotMap<String, SessionRecord>,
     dialog: &ResumeDialog,
     checkpoint_archive_sizes: &BTreeMap<String, Option<u64>>,
 ) -> (Vec<ResumeRow>, [usize; ResumeTab::COUNT]) {
@@ -960,7 +950,6 @@ fn build_resume_rows(
     let merged = merged_resume_rows(
         config,
         state,
-        stopped,
         &dialog.history,
         &dialog.profiles,
         &dialog.wiki,
@@ -1109,7 +1098,6 @@ impl DashboardState {
         let (history_rows, hits) = build_resume_rows(
             &self.config,
             &self.state,
-            &self.stopped_records,
             dialog,
             &self.checkpoint_archive_sizes,
         );
@@ -1216,6 +1204,7 @@ impl DashboardState {
             preview_hit: 0,
             preview_key: None,
             history: HistoryLoad::Loading,
+            opening: None,
         });
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
@@ -1241,16 +1230,65 @@ impl DashboardState {
         self.launch_recency = recency;
     }
 
-    /// The stopped records loaded on demand, for work that follows them such
-    /// as reading checkpoint sizes.
-    pub fn stopped_records(&self) -> &SnapshotMap<String, SessionRecord> {
-        &self.stopped_records
+    /// The checkpoint archives of the open dialog's Mjolnir rows, whose sizes
+    /// the rows show.
+    pub fn resume_checkpoint_archives(&self) -> SnapshotMap<String, std::path::PathBuf> {
+        let Mode::ResumeDialog(ResumeDialog {
+            history: HistoryLoad::Loaded(history),
+            ..
+        }) = &self.mode
+        else {
+            return SnapshotMap::new();
+        };
+        history
+            .candidates
+            .values()
+            .filter_map(|candidate| {
+                Some((
+                    candidate.session_id.clone(),
+                    candidate.checkpoint_archive.clone()?,
+                ))
+            })
+            .collect()
     }
 
     /// Keep one stopped record that something loaded on demand: the session
     /// `mj go` starts in, or a session just imported.
     pub fn remember_stopped_record(&mut self, record: SessionRecord) {
         self.stopped_records.insert(record.id.clone(), record);
+    }
+
+    /// Open the resume wizard on a record fetched for the row picked in the
+    /// open dialog. An answer for a dialog that has since closed, or for a
+    /// row no longer being opened, is dropped.
+    pub fn apply_resume_record(
+        &mut self,
+        session_id: &str,
+        record: Result<Option<SessionRecord>, String>,
+    ) -> DashboardAction {
+        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+            return DashboardAction::None;
+        };
+        if dialog.opening.as_deref() != Some(session_id) {
+            return DashboardAction::None;
+        }
+        dialog.opening = None;
+        match record {
+            Ok(Some(record)) => {
+                self.remember_stopped_record(record);
+                self.cancel_modal();
+                self.begin_resume_for(session_id)
+            }
+            Ok(None) => {
+                self.notices.set("That session no longer exists.");
+                DashboardAction::None
+            }
+            Err(error) => {
+                self.notices
+                    .set(format!("Could not load the session to resume: {error}"));
+                DashboardAction::None
+            }
+        }
     }
 
     /// Install the daemon's answer about stopped sessions in the open dialog.
@@ -1267,14 +1305,10 @@ impl DashboardState {
         if dialog.discovery_id != discovery_id {
             return false;
         }
-        match candidates {
-            Ok(candidates) => {
-                let (history, records) = ResumeHistory::split(candidates);
-                dialog.history = HistoryLoad::Loaded(Arc::new(history));
-                self.stopped_records = records;
-            }
-            Err(error) => dialog.history = HistoryLoad::Failed(error),
-        }
+        dialog.history = match candidates {
+            Ok(candidates) => HistoryLoad::Loaded(Arc::new(candidates.into())),
+            Err(error) => HistoryLoad::Failed(error),
+        };
         self.rebuild_resume_rows();
         self.resync_resume_selection();
         true
@@ -1949,15 +1983,28 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = std::mem::replace(&mut self.mode, Mode::Dashboard) else {
             return DashboardAction::None;
         };
-        let delete_branch_available = self
-            .session_record(&session_id)
-            .and_then(|session| session.managed_worktree.as_ref())
-            .is_some_and(|owned| owned.kind == mj_core::state::ManagedCheckoutKind::Worktree);
-        self.mode = Mode::Confirm(self.confirm_dialog(Confirmation::DestroyStopped {
-            session_id,
-            delete_branch_available,
-            reopen: Some(Box::new(dialog)),
-        }));
+        let delete_branch_available = match &dialog.history {
+            HistoryLoad::Loaded(history) => history.candidates.get(&session_id),
+            HistoryLoad::Loading | HistoryLoad::Failed(_) => None,
+        }
+        .map(|candidate| candidate.worktree_checkout)
+        .or_else(|| {
+            self.session_record(&session_id).map(|session| {
+                session.managed_worktree.as_ref().is_some_and(|owned| {
+                    owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                })
+            })
+        })
+        .unwrap_or(false);
+        // The row is named as listed; the dashboard may not hold the record.
+        self.mode = Mode::Confirm(
+            ConfirmDialog::new(Confirmation::DestroyStopped {
+                session_id,
+                delete_branch_available,
+                reopen: Some(Box::new(dialog)),
+            })
+            .naming_session(&row.title),
+        );
         self.rebuild_resume_rows();
         DashboardAction::None
     }
@@ -2001,6 +2048,14 @@ impl DashboardState {
                         operation: Box::new(operation),
                     }));
                     return DashboardAction::None;
+                }
+                if self.session_record(&session_id).is_none() {
+                    // The dialog lists rows, not records. Fetch the one picked
+                    // and open the wizard when it arrives.
+                    if let Mode::ResumeDialog(dialog) = &mut self.mode {
+                        dialog.opening = Some(session_id.clone());
+                    }
+                    return DashboardAction::LoadResumeRecord { session_id };
                 }
                 self.cancel_modal();
                 self.begin_resume_for(&session_id)

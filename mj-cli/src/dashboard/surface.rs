@@ -1,6 +1,6 @@
 use super::io::spawn_quota_refresh_request;
 use super::*;
-use mj_core::state::{SessionState, State};
+use mj_core::state::State;
 
 #[derive(Default)]
 pub(super) struct PollingRecords {
@@ -339,16 +339,9 @@ impl DashboardContext {
         self.controller_changed = false;
         let mut changed_targets = BTreeMap::new();
         let mut removed_sizes = BTreeMap::new();
-        // Only the resume dialog shows checkpoint sizes, for the stopped
-        // records it loaded.
-        for (id, record) in self
-            .checkpoint_archive_records
-            .changes(self.dashboard.stopped_records())
-        {
-            let target = record
-                .filter(|record| record.state == SessionState::Stopped)
-                .and_then(|record| record.checkpoint.as_ref())
-                .map(|checkpoint| &checkpoint.archive_path);
+        // Only the resume dialog shows checkpoint sizes, for its Mjolnir rows.
+        let archives = self.dashboard.resume_checkpoint_archives();
+        for (id, target) in self.checkpoint_archive_records.changes(&archives) {
             if self.checkpoint_archive_targets_seen.get(id) == target {
                 continue;
             }
@@ -362,7 +355,7 @@ impl DashboardContext {
                 removed_sizes.insert(id.clone(), None);
             }
         }
-        self.checkpoint_archive_records = self.dashboard.stopped_records().clone();
+        self.checkpoint_archive_records = archives;
         self.dashboard.patch_checkpoint_archive_sizes(removed_sizes);
         if !changed_targets.is_empty() {
             self.checkpoint_archive_generation = self

@@ -274,7 +274,7 @@ impl RuntimeState {
     /// sub-agent, with the import de-duplication data from every record.
     /// Only shared map handles cross the owner lock; the copies are made after.
     pub(super) fn resume_candidates(&self) -> mj_client::daemon::ResumeCandidates {
-        let (records, subagents, moves) = {
+        let (records, subagents, moves, config) = {
             let owner = self.owner();
             (
                 owner.projected_records(),
@@ -283,6 +283,7 @@ impl RuntimeState {
                     .committed()
                     .map(|committed| committed.moves.clone())
                     .unwrap_or_default(),
+                owner.controller().config.clone(),
             )
         };
         let mut candidates = mj_client::daemon::ResumeCandidates::default();
@@ -308,7 +309,9 @@ impl RuntimeState {
             if let Some(operation) = moves.get(id) {
                 candidates.moves.push(operation.clone());
             }
-            candidates.records.push(record.clone());
+            candidates
+                .candidates
+                .push(mj_client::daemon::ResumeCandidate::of(record, &config));
         }
         candidates
     }

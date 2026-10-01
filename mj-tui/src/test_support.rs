@@ -408,6 +408,7 @@ pub(crate) fn question(session_id: &str) -> mj_core::elicitation::ElicitationReq
 /// inactive top-level records, and what every record says about native
 /// sessions and local checkouts.
 pub(crate) fn resume_candidates_for(
+    config: &Config,
     state: &mj_core::state::State,
 ) -> mj_client::daemon::ResumeCandidates {
     let mut candidates = mj_client::daemon::ResumeCandidates::default();
@@ -425,7 +426,9 @@ pub(crate) fn resume_candidates_for(
                 .push(checkout.worktree_root.clone());
         }
         if !record.state.is_active() && !state.is_subagent_session(id) {
-            candidates.records.push(record.clone());
+            candidates
+                .candidates
+                .push(mj_client::daemon::ResumeCandidate::of(record, config));
         }
     }
     candidates
@@ -439,7 +442,7 @@ pub(crate) fn open_resume_dialog(
     profiles: Vec<crate::ImportProfileOption>,
 ) {
     dashboard.show_resume_dialog(discovery_id, profiles);
-    let candidates = resume_candidates_for(&dashboard.state);
+    let candidates = resume_candidates_for(&dashboard.config, &dashboard.state);
     assert!(dashboard.apply_resume_candidates(discovery_id, Ok(candidates)));
 }
 

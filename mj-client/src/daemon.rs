@@ -571,6 +571,11 @@ pub enum DaemonAction {
     /// The sessions the resume dialog lists. The runtime feed carries only
     /// live sessions, so the dialog asks for these when it opens.
     ResumeCandidates,
+    /// One session's whole record, live or stopped. The resume wizard reads
+    /// it for the row picked in the resume dialog.
+    SessionRecord {
+        session_id: String,
+    },
     /// The session `mj go` opens: the remembered one while it is still
     /// eligible, otherwise the most recently updated eligible session of the
     /// workspace, live or stopped.
@@ -760,6 +765,7 @@ pub enum DaemonReply {
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     ResumeCandidates(Box<ResumeCandidates>),
     GoStartupSession(Option<Box<SessionRecord>>),
+    SessionRecord(Option<Box<SessionRecord>>),
     /// Transport fragments of one chunked reply (see
     /// [`DaemonReply::is_chunked`]); never exposed to consumers.
     ReplyChunk {
@@ -799,8 +805,8 @@ impl DaemonReply {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeCandidates {
-    /// Every inactive session that is not a sub-agent.
-    pub records: Vec<SessionRecord>,
+    /// One row for every inactive session that is not a sub-agent.
+    pub candidates: Vec<ResumeCandidate>,
     /// Durable moves of those sessions, for "move needs recovery" marks.
     pub moves: Vec<MoveOperation>,
     /// Native sessions that some record, live or not, already holds. The
@@ -809,6 +815,76 @@ pub struct ResumeCandidates {
     /// Local checkouts that Mjolnir created for its sessions. Every native
     /// thread that ran inside one belongs to that session.
     pub local_checkout_roots: Vec<PathBuf>,
+}
+
+/// One row of the resume dialog's Mjolnir tab: what the row shows, without
+/// the rest of the record. A session's title can be tens of kilobytes, and
+/// most of a store's history is never resumed, so the resume wizard fetches
+/// the whole record (`DaemonAction::SessionRecord`) only for the row picked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeCandidate {
+    pub session_id: String,
+    pub state: SessionState,
+    pub last_profile: String,
+    /// The listed title, cut to [`ResumeCandidate::TITLE_CHARS`].
+    pub title: String,
+    /// Where the session ran, as the session list names it.
+    pub origin: String,
+    pub project: String,
+    pub has_checkpoint: bool,
+    /// The checkpoint's creation time, or the record's last update without
+    /// one; `None` when neither parses.
+    pub last_activity_ms: Option<i64>,
+    pub publication: Option<PublicationState>,
+    /// The checkpoint archive whose size the row shows. Only a stopped
+    /// record is described by its checkpoint.
+    pub checkpoint_archive: Option<PathBuf>,
+    /// Whether destroying the session can also delete its worktree branch.
+    pub worktree_checkout: bool,
+}
+
+impl ResumeCandidate {
+    /// Longer than any row draws it.
+    pub const TITLE_CHARS: usize = 200;
+
+    /// The row for `record`. The daemon and the dashboard both build rows
+    /// here, so a row reads the same whichever of them held the record.
+    pub fn of(record: &SessionRecord, config: &Config) -> Self {
+        let timestamp_ms = |timestamp: &str| {
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|parsed| parsed.timestamp_millis())
+        };
+        Self {
+            session_id: record.id.clone(),
+            state: record.state,
+            last_profile: record.last_profile.clone(),
+            title: record
+                .listed_title()
+                .chars()
+                .take(Self::TITLE_CHARS)
+                .collect(),
+            origin: record.project_target(config, &record.target_template_id),
+            project: record.project_name(config),
+            has_checkpoint: record.checkpoint.is_some(),
+            last_activity_ms: record
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| timestamp_ms(&checkpoint.created_at))
+                .or_else(|| timestamp_ms(&record.updated_at)),
+            publication: record.publication_state(),
+            checkpoint_archive: record
+                .checkpoint
+                .as_ref()
+                .filter(|_| record.state == SessionState::Stopped)
+                .map(|checkpoint| checkpoint.archive_path.clone()),
+            worktree_checkout: record
+                .managed_worktree
+                .as_ref()
+                .is_some_and(|owned| owned.kind == ManagedCheckoutKind::Worktree),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1834,6 +1910,16 @@ impl DaemonClient {
         }
     }
 
+    pub async fn session_record(&mut self, session_id: String) -> Result<Option<SessionRecord>> {
+        match self
+            .request(DaemonAction::SessionRecord { session_id })
+            .await?
+        {
+            DaemonReply::SessionRecord(record) => Ok(record.map(|record| *record)),
+            reply => bail!("unexpected session record reply {reply:?}"),
+        }
+    }
+
     pub async fn go_startup_session(
         &mut self,
         workspace_id: String,
@@ -2238,9 +2324,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// The runtime feed carries live sessions; the resume dialog and `mj go` ask
-// for stopped ones, and any reply can be chunked.
-pub const PROTOCOL_VERSION: u32 = 50;
+// The resume dialog lists preview rows and fetches the record it resumes.
+pub const PROTOCOL_VERSION: u32 = 51;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -429,7 +429,7 @@ pub(crate) struct DashboardContext {
     checkpoint_archive_targets_seen: BTreeMap<String, std::path::PathBuf>,
     checkpoint_archive_generation: u64,
     checkpoint_archive_pending: BTreeMap<String, u64>,
-    checkpoint_archive_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    checkpoint_archive_records: mj_core::snapshot_map::SnapshotMap<String, std::path::PathBuf>,
     polling_records: std::cell::RefCell<surface::PollingRecords>,
 }
 

@@ -386,6 +386,9 @@ pub(super) async fn handle_action(
         DaemonAction::ResumeCandidates => Ok(DaemonReply::ResumeCandidates(Box::new(
             state.resume_candidates(),
         ))),
+        DaemonAction::SessionRecord { session_id } => Ok(DaemonReply::SessionRecord(
+            state.session_record(&session_id).map(Box::new),
+        )),
         DaemonAction::GoStartupSession {
             workspace_id,
             last_session_id,

@@ -481,6 +481,11 @@ pub enum DashboardAction {
         request_id: u64,
         query: String,
     },
+    /// Fetch the whole record of the Mjolnir row picked in the resume dialog,
+    /// which lists rows rather than records, to open the resume wizard on it.
+    LoadResumeRecord {
+        session_id: String,
+    },
     /// Fetch the briefing shown under the resume dialog's list.
     LoadArchivedBrief {
         wiki_id: String,
@@ -828,9 +833,10 @@ pub struct DashboardState {
     pub(crate) sessions_with_review: BTreeSet<String>,
     pub(crate) project_sources: BTreeMap<String, ProjectSourceIdentity>,
     pub(crate) checkpoint_archive_sizes: BTreeMap<String, Option<u64>>,
-    /// Stopped records loaded on demand: by the resume dialog, by `mj go`,
-    /// and after an import. The runtime feed carries only live sessions; read
-    /// both through [`DashboardState::session_record`].
+    /// Stopped records loaded one at a time: the row picked in the resume
+    /// dialog, the session `mj go` starts in, and a session just imported.
+    /// The runtime feed carries only live sessions; read both through
+    /// [`DashboardState::session_record`].
     pub(crate) stopped_records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.

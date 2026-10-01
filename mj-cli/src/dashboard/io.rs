@@ -236,6 +236,11 @@ pub(crate) enum DashboardIoUpdate {
         discovery_id: u64,
         result: Box<std::result::Result<mj_client::daemon::ResumeCandidates, String>>,
     },
+    /// The record of the row picked in the resume dialog.
+    ResumeRecord {
+        session_id: String,
+        result: Box<std::result::Result<Option<SessionRecord>, String>>,
+    },
     /// One SessionWiki search result. The request id is the dialog's; an
     /// answer for an older one is dropped there.
     WikiRows {
@@ -1183,6 +1188,18 @@ impl DashboardContext {
                 {
                     // Checkpoint sizes follow the stopped records.
                     self.controller_changed = true;
+                }
+            }
+            DashboardIoUpdate::ResumeRecord { session_id, result } => {
+                match self.dashboard.apply_resume_record(&session_id, *result) {
+                    DashboardAction::None => {}
+                    DashboardAction::ResolveAwsResourceOptions {
+                        target_template_ids,
+                    } => self.resolve_aws_resource_options(target_template_ids),
+                    action => tracing::warn!(
+                        ?action,
+                        "the resume wizard asked for an action its record loader cannot run"
+                    ),
                 }
             }
             DashboardIoUpdate::WikiRows { request_id, result } => match result {

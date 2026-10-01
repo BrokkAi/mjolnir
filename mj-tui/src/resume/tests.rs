@@ -17,11 +17,10 @@ fn merged_rows(
     profiles: &[ImportProfileOption],
     wiki: &[WikiRow],
 ) -> Vec<ResumeRow> {
-    let (history, stopped) = ResumeHistory::split(resume_candidates_for(state));
+    let history = ResumeHistory::from(resume_candidates_for(config, state));
     merged_resume_rows(
         config,
         state,
-        &stopped,
         &HistoryLoad::Loaded(Arc::new(history)),
         profiles,
         wiki,
@@ -2717,7 +2716,6 @@ fn resume_row_cost_for_a_few_thousand_sessions() {
         built += build_resume_rows(
             &dashboard.config,
             &dashboard.state,
-            &dashboard.stopped_records,
             &dialog,
             &dashboard.checkpoint_archive_sizes,
         )
@@ -3383,7 +3381,10 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
     assert!(rows(&dashboard).is_empty());
 
     let candidates = || mj_client::daemon::ResumeCandidates {
-        records: vec![stopped_session()],
+        candidates: vec![mj_client::daemon::ResumeCandidate::of(
+            &stopped_session(),
+            &config(),
+        )],
         adopted_native_sessions: vec![(HarnessKind::Codex, "adopted".into())],
         ..Default::default()
     };
@@ -3397,7 +3398,19 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
     switch_to_hel(&mut dashboard);
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
 
-    dashboard.handle_key(key(KeyCode::Enter));
+    // The rows are previews; the wizard opens on the record fetched for the
+    // row picked, and an answer for another row is dropped.
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::LoadResumeRecord {
+            session_id: "session-1".into()
+        }
+    );
+    let mut other = stopped_session();
+    other.id = "other".into();
+    dashboard.apply_resume_record("other", Ok(Some(other)));
+    assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
+    dashboard.apply_resume_record("session-1", Ok(Some(stopped_session())));
     let Mode::Resume(wizard) = &dashboard.mode else {
         panic!("expected the resume wizard");
     };

@@ -6085,6 +6085,7 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
     live.native_session_id = Some("native-live".into());
     let mut stopped = runtime_test_session("stopped", "workspace", SessionState::Stopped);
     stopped.native_session_id = Some("native-stopped".into());
+    stopped.acp_session_title = Some("long title ".repeat(10_000));
     let lost = runtime_test_session("lost", "workspace", SessionState::Lost);
     let child = runtime_test_session("child", "workspace", SessionState::Stopped);
     let mut state = mj_core::state::State::default();
@@ -6096,11 +6097,21 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
         .insert("child".into(), runtime_test_subagent("child", "live"));
     let candidates = test_runtime_state_holding(state).resume_candidates();
     let ids = candidates
-        .records
+        .candidates
         .iter()
-        .map(|record| record.id.as_str())
+        .map(|candidate| candidate.session_id.as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(ids, BTreeSet::from(["lost", "stopped"]));
+    // A row carries what it shows, not the whole record.
+    let stopped = candidates
+        .candidates
+        .iter()
+        .find(|candidate| candidate.session_id == "stopped")
+        .unwrap();
+    assert_eq!(
+        stopped.title.chars().count(),
+        mj_client::daemon::ResumeCandidate::TITLE_CHARS
+    );
     let adopted = candidates
         .adopted_native_sessions
         .iter()
@@ -6151,11 +6162,15 @@ async fn go_starts_in_the_remembered_session_or_the_newest_eligible_one() {
 #[tokio::test]
 async fn resume_candidates_larger_than_a_frame_arrive_whole() {
     let mut record = runtime_test_session("stopped", "workspace", SessionState::Stopped);
-    record.acp_session_title = Some("t".repeat(MAX_FRAME_BYTES + 1024));
+    record.acp_session_title = Some("t".repeat(500));
+    let row = mj_client::daemon::ResumeCandidate::of(&record, &Config::default());
+    // Enough rows that the list outgrows one frame, as a large store's does.
+    let rows = MAX_FRAME_BYTES / serde_json::to_vec(&row).unwrap().len() + 1_000;
     let candidates = mj_client::daemon::ResumeCandidates {
-        records: vec![record],
+        candidates: vec![row; rows],
         ..Default::default()
     };
+    assert!(serde_json::to_vec(&candidates).unwrap().len() > MAX_FRAME_BYTES);
     let expected = candidates.clone();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
