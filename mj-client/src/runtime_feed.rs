@@ -10,7 +10,7 @@ use mj_core::state::{MoveOperation, SessionRecord};
 use mj_core::subagent::{SubagentPolicy, SubagentRecord};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::{RuntimeLifecycleView, RuntimeNotice, RuntimeSessionView, RuntimeSnapshot};
+use crate::daemon::{RuntimeLifecycleView, RuntimeNotice, RuntimeSessionView};
 use crate::review::RuntimeReviewView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,49 +169,6 @@ impl RuntimeReplica {
                 self.cursor = None;
                 Ok(false)
             }
-        }
-    }
-}
-
-impl From<RuntimeSnapshot> for RuntimeProjection {
-    fn from(snapshot: RuntimeSnapshot) -> Self {
-        Self {
-            revision: snapshot.revision,
-            records: snapshot
-                .records
-                .into_iter()
-                .map(|r| (r.id.clone(), r))
-                .collect(),
-            subagents: snapshot
-                .subagents
-                .into_iter()
-                .map(|r| (r.child_session_id.clone(), r))
-                .collect(),
-            sessions: snapshot
-                .sessions
-                .into_iter()
-                .map(|r| (r.session_id.clone(), r))
-                .collect(),
-            moves: snapshot
-                .moves
-                .into_iter()
-                .map(|r| (r.selection.session_id.clone(), r))
-                .collect(),
-            native_agents: snapshot
-                .native_agents
-                .into_iter()
-                .map(|r| (r.agent.view_id(), r))
-                .collect(),
-            metadata: RuntimeMetadata {
-                config: snapshot.config,
-                last_subagent_policy: snapshot.last_subagent_policy,
-                workspace_names: snapshot.workspace_names,
-                lifecycles: snapshot.lifecycles,
-                reviews: snapshot.reviews,
-                notices: snapshot.notices,
-                // The one-shot snapshot predates the daemon's quota feed.
-                quotas: Default::default(),
-            },
         }
     }
 }

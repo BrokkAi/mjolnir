@@ -61,40 +61,6 @@ pub(super) fn active_child_session_ids(
         .collect()
 }
 
-pub(super) fn runtime_records_for_workspace(
-    controller: &Controller,
-    session_ids: &BTreeSet<String>,
-) -> Vec<SessionRecord> {
-    controller
-        .state
-        .sessions
-        .iter()
-        .filter(|(session_id, session)| {
-            !session.state.is_active() || session_ids.contains(*session_id)
-        })
-        .map(|(_, session)| session.clone())
-        .collect()
-}
-
-/// Relations for the children carried in `records`, so a surface can keep a
-/// daemon-created child out of the real workspace without a full state
-/// reload. Filtering by the returned records, rather than by `session_ids`
-/// directly, keeps this in step with `runtime_records_for_workspace`, which
-/// also includes inactive sessions outside that set.
-pub(super) fn runtime_subagents_for_workspace(
-    controller: &Controller,
-    records: &[SessionRecord],
-) -> Vec<SubagentRecord> {
-    let record_ids: BTreeSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
-    controller
-        .state
-        .subagents
-        .iter()
-        .filter(|(child_session_id, _)| record_ids.contains(child_session_id.as_str()))
-        .map(|(_, subagent)| subagent.clone())
-        .collect()
-}
-
 pub(super) struct DaemonStageReportingExecutor<E> {
     pub(super) inner: E,
     pub(super) state: Arc<RuntimeState>,

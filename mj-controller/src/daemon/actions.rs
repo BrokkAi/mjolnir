@@ -380,15 +380,6 @@ pub(super) async fn handle_action(
             let snapshot = blocking(move || workspace_snapshot(&workspace_id)).await?;
             Ok(DaemonReply::Snapshot(snapshot))
         }
-        DaemonAction::RuntimeSnapshot {
-            workspace_id,
-            after_revision,
-            all_workspaces,
-        } => Ok(DaemonReply::RuntimeSnapshot(Box::new(
-            state
-                .runtime_snapshot(&workspace_id, after_revision, all_workspaces)
-                .await?,
-        ))),
         DaemonAction::RuntimeChanges { cursor, wait } => Ok(DaemonReply::RuntimeChanges(Box::new(
             state.runtime_changes(cursor, wait).await?,
         ))),
@@ -699,7 +690,6 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::PrepareUpgrade
             | DaemonAction::UpgradeBlockers
             | DaemonAction::Stop
-            | DaemonAction::RuntimeSnapshot { .. }
             | DaemonAction::RuntimeChanges { .. }
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::ProjectCatalog { .. }
