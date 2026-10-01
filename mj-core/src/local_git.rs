@@ -660,7 +660,7 @@ fn git_text(
 }
 
 fn git_config(path: &Path, key: &str, executor: &impl CommandExecutor) -> Result<Option<String>> {
-    let output = git_command(path, ["config", "--get", key]);
+    let output = git_command(path, ["config", "--get", key]).purpose("read Git configuration key");
     if executor.cancellation_requested() {
         bail!("operation cancelled while read Git configuration");
     }
@@ -920,6 +920,37 @@ mod tests {
         let source = resolve_local_repository(path, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/me/fork.git");
         assert_eq!(source.push_urls, ["https://github.com/me/fork.git"]);
+    }
+
+    /// Every command the daemon runs is logged with its purpose; an empty one
+    /// leaves a log line that says nothing about what ran.
+    #[test]
+    fn resolving_a_repository_gives_every_command_a_purpose() {
+        use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
+        use std::cell::RefCell;
+
+        struct Recording(RefCell<Vec<String>>);
+        impl CommandExecutor for Recording {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                self.0.borrow_mut().push(command.purpose.clone());
+                ProcessExecutor.execute(command)
+            }
+        }
+
+        let directory = initialized_repository();
+        let path = directory.path();
+        git(
+            path,
+            &["remote", "add", "origin", "https://github.com/acme/app.git"],
+        );
+        let recording = Recording(RefCell::new(Vec::new()));
+        resolve_local_repository(path, &recording).unwrap();
+        let purposes = recording.0.borrow();
+        assert!(!purposes.is_empty());
+        assert!(
+            purposes.iter().all(|purpose| !purpose.is_empty()),
+            "{purposes:?}"
+        );
     }
 
     #[test]

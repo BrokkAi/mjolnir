@@ -193,11 +193,15 @@ impl Policy {
                         .observe(&result, profile);
                 }
                 self.notices
-                    .notice(&result, profile.map(|p| p.kind), &controller.state)
+                    .leveled_notice(&result, profile.map(|p| p.kind), &controller.state)
             };
             if let Some(notice) = notice {
-                tracing::warn!(%notice, "credential synchronization notice");
-                self.state.push_notice("", notice);
+                if notice.routine {
+                    tracing::info!(notice = %notice.text, "credential synchronization notice");
+                } else {
+                    tracing::warn!(notice = %notice.text, "credential synchronization notice");
+                }
+                self.state.push_notice("", notice.text);
             }
         }
     }

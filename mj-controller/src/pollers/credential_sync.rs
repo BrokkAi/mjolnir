@@ -128,6 +128,13 @@ pub(super) fn setup_token_advice(
     }
 }
 
+/// One credential-sync notice and whether it only reports routine syncs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialNotice {
+    pub text: String,
+    pub routine: bool,
+}
+
 impl CredentialSyncNotices {
     /// Healthy no-op cycles stay out of the UI; only actions, new failures, and
     /// answers to an event-triggered reconciliation are worth a notice.
@@ -137,6 +144,23 @@ impl CredentialSyncNotices {
         harness: Option<mj_core::config::HarnessKind>,
         state: &State,
     ) -> Option<String> {
+        self.leveled_notice(result, harness, state)
+            .map(|notice| notice.text)
+    }
+
+    /// The notice with the one decision about how loudly to log it. A routine
+    /// summary of syncs that went well is not a warning; a failure, an
+    /// authentication problem, or anything the person has to act on is.
+    pub fn leveled_notice(
+        &mut self,
+        result: &mj_core::credentials::CredentialSyncResult,
+        harness: Option<mj_core::config::HarnessKind>,
+        state: &State,
+    ) -> Option<CredentialNotice> {
+        let warning = |text: String| CredentialNotice {
+            text,
+            routine: false,
+        };
         let advice = setup_token_advice(&result.profile_id, harness);
         // Completed event-triggered syncs always speak: the upstream
         // per-session cooldown, not this dedup, is what keeps them rare.
@@ -149,7 +173,7 @@ impl CredentialSyncNotices {
                 })
             });
             if let Some(detail) = sync_failure {
-                return Some(match trigger.reason {
+                return Some(warning(match trigger.reason {
                     CredentialSyncReason::AuthenticationFailure => format!(
                         "Auth failure on profile {} (session {}); credential reconciliation failed: {detail}. Run `mj login --profile {}`{advice}.",
                         result.profile_id, session, result.profile_id
@@ -158,7 +182,7 @@ impl CredentialSyncNotices {
                         "Session {} returned no response; credential reconciliation for profile {} failed: {detail}. The failure is recorded in the transcript.",
                         session, result.profile_id
                     ),
-                });
+                }));
             }
             // A lifecycle can defer or preempt reconciliation. With no
             // result for this session, we have not checked its credentials.
@@ -171,24 +195,26 @@ impl CredentialSyncNotices {
             }
             // The first ~80 columns are all most people read before a notice
             // scrolls off, so the profile leads and the advice trails.
-            return Some(match (trigger.reason, result.pushed_to(session_id)) {
-                (CredentialSyncReason::AuthenticationFailure, true) => format!(
-                    "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
-                    result.profile_id, session, result.profile_id
-                ),
-                (CredentialSyncReason::AuthenticationFailure, false) => format!(
-                    "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
-                    result.profile_id, session, result.profile_id
-                ),
-                (CredentialSyncReason::EmptyPromptResponse, true) => format!(
-                    "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
-                    session, result.profile_id
-                ),
-                (CredentialSyncReason::EmptyPromptResponse, false) => format!(
-                    "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
-                    session, result.profile_id
-                ),
-            });
+            return Some(warning(
+                match (trigger.reason, result.pushed_to(session_id)) {
+                    (CredentialSyncReason::AuthenticationFailure, true) => format!(
+                        "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
+                        result.profile_id, session, result.profile_id
+                    ),
+                    (CredentialSyncReason::AuthenticationFailure, false) => format!(
+                        "Auth failure on profile {} (session {}); nothing fresher to push. Run `mj login --profile {}`{advice}.",
+                        result.profile_id, session, result.profile_id
+                    ),
+                    (CredentialSyncReason::EmptyPromptResponse, true) => format!(
+                        "Session {} returned no response; fresher credentials from profile {} were pushed. Retry the prompt.",
+                        session, result.profile_id
+                    ),
+                    (CredentialSyncReason::EmptyPromptResponse, false) => format!(
+                        "Session {} returned no response; profile {} had no newer credentials to push. The failure is recorded in the transcript.",
+                        session, result.profile_id
+                    ),
+                },
+            ));
         }
 
         let mut failures = std::collections::BTreeMap::new();
@@ -222,8 +248,8 @@ impl CredentialSyncNotices {
             }
             self.last_failures.insert(key, message);
         }
-        if notice.is_some() {
-            return notice;
+        if let Some(text) = notice {
+            return Some(warning(text));
         }
 
         let mut parts = Vec::new();
@@ -246,6 +272,9 @@ impl CredentialSyncNotices {
                 "Removed the GitHub CLI token from {github_removed} session(s)."
             ));
         }
-        (!parts.is_empty()).then(|| parts.join(" "))
+        (!parts.is_empty()).then(|| CredentialNotice {
+            text: parts.join(" "),
+            routine: true,
+        })
     }
 }
