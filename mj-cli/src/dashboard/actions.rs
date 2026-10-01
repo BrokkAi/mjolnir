@@ -662,13 +662,14 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::OpenResumeDialog => context.start_resume_discovery(),
         DashboardAction::SearchArchivedSessions { request_id, query } => {
-            crate::dashboard::io::spawn_wiki_search(
+            context.wiki_search_task = None;
+            let guard = crate::dashboard::io::spawn_wiki_search(
                 request_id,
                 query,
                 crate::dashboard::io::WIKI_SEARCH_DEBOUNCE,
-                context.wiki_search_request.clone(),
                 context.dashboard_io_tx.clone(),
             );
+            context.wiki_search_task = Some((request_id, guard));
         }
         DashboardAction::LoadResumeRecord { session_id } => {
             crate::dashboard::io::spawn_resume_record(session_id, context.dashboard_io_tx.clone());

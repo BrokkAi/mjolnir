@@ -992,6 +992,7 @@ pub struct DashboardState {
     /// whose effort choices were discovered.
     pub(crate) review_settings_choices: BTreeMap<(String, Option<String>), ReviewSettingsChoices>,
     session_preflight_generation: u64,
+    pub(crate) wiki_search_generation: u64,
     /// Monotonic identity for move preparation requests. This lives outside
     /// the wizard so a late reply cannot match a newly opened wizard.
     pub(crate) next_move_preparation_request_id: u64,
@@ -1193,6 +1194,7 @@ impl DashboardState {
             spinner_save_pending: false,
             review_settings_choices: BTreeMap::new(),
             session_preflight_generation: 0,
+            wiki_search_generation: 0,
             next_move_preparation_request_id: 0,
             archive_restores_in_flight: BTreeSet::new(),
             resume_preflight_generation: None,

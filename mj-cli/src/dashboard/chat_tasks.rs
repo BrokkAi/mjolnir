@@ -37,15 +37,15 @@ impl DashboardContext {
         // indexed sessions and, just as importantly, brings back the index's
         // state, which decides whether the search box can be typed into.
         if let Some((request_id, query)) = self.dashboard.next_wiki_search() {
-            crate::dashboard::io::spawn_wiki_search(
+            let guard = crate::dashboard::io::spawn_wiki_search(
                 request_id,
                 query,
                 // The dialog has just opened and has nothing to show yet, so
                 // this first ask does not wait out a typing pause.
                 std::time::Duration::ZERO,
-                self.wiki_search_request.clone(),
                 self.dashboard_io_tx.clone(),
             );
+            self.wiki_search_task = Some((request_id, guard));
         }
         let discovery_id = self.import_discovery_id;
         for (profile_id, profile) in self

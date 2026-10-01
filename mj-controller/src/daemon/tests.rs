@@ -4299,13 +4299,14 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             },
         ]
     );
-    // The removed child's conversation is still found by its id.
-    let found = state
-        .wiki_session(finished_id.to_owned())
-        .await
-        .unwrap()
-        .expect("the stopped sub-agent is found by its id");
-    assert_eq!(found.status, mj_client::daemon::WikiSessionStatus::Archived);
+    // Child transcripts are deliberately excluded from SessionWiki.
+    assert!(
+        state
+            .wiki_session(finished_id.to_owned())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Marks the isolated child a [`live_parent_with_a_working_sub_agent`] test
@@ -6203,4 +6204,73 @@ async fn resume_candidates_larger_than_a_frame_arrive_whole() {
     assert_eq!(response.request_id, 4);
     assert!(matches!(response.result, Ok(DaemonReply::Pong)));
     sender.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
+    const NAME: &str = "archiving_old_children_needs_no_index_copy_and_preserves_the_parent";
+    if !in_isolated_live_parent_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Top-level archive").unwrap();
+    let repository = crate::controller::test_support::committed_repository();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let child_id = "33333333333333333333333333333333";
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Stopped);
+    parent.project_directory = Some(repository.path().to_owned());
+    parent.updated_at = "2000-01-01T00:00:00Z".into();
+    let archives = mj_core::config::sessions_dir();
+    std::fs::create_dir_all(&archives).unwrap();
+    let mut input = crate::controller::test_support::checkpoint_archive_input(
+        parent_id,
+        1,
+        Vec::new(),
+        Vec::new(),
+    );
+    input
+        .canonical_session
+        .transcript
+        .push(mj_core::archive::CanonicalTranscriptItem {
+            stable_id: "prompt".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_700_000_000_000,
+            last_changed_at_ms: 1_700_000_000_000,
+            body: mj_core::archive::CanonicalTranscriptBody::User {
+                content: vec![
+                    serde_json::json!({"type": "text", "text": "parent quokka conversation"}),
+                ],
+            },
+        });
+    parent.checkpoint = Some(
+        crate::controller::test_support::write_checkpoint_archive_input(
+            &archives, parent_id, &input,
+        ),
+    );
+    crate::database::save_session(&parent).unwrap();
+    let mut child = parent.clone();
+    child.id = child_id.into();
+    child.checkpoint = None;
+    crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+    let state = test_runtime_state_loading_the_store();
+    let archived = tokio::time::timeout(Duration::from_secs(60), state.archive_aged_sessions(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        archived, 2,
+        "the child must not be held back for having no index row"
+    );
+    let stored = crate::database::load_state().unwrap();
+    assert!(!stored.sessions.contains_key(parent_id));
+    assert!(!stored.sessions.contains_key(child_id));
+    let rows = crate::sessionwiki::query_rows("quokka", 10, &Default::default(), true).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        [parent_id]
+    );
+    assert!(repository.path().join(".git").exists());
 }

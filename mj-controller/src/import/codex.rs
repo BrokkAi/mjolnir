@@ -427,6 +427,8 @@ pub(super) fn codex_rollout_id_from_path(path: &Path) -> Option<&str> {
 
 /// What one Codex rollout's own header says about it.
 pub(super) struct CodexSessionSummary {
+    /// Positive child ownership, independently of resume eligibility.
+    pub subagent: bool,
     /// The resume picker's verdict: a subagent rollout or an ephemeral thread.
     /// Importing a session the user named by id ignores this.
     pub filtered: bool,
@@ -451,6 +453,7 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     let mut filtered = false;
+    let mut subagent = false;
     for _ in 0..8 {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -464,6 +467,7 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
         // A structured source identifies a subagent, and an ephemeral thread
         // normally has no rollout path at all; the ephemeral check stays
         // defensive so a future writer cannot expose one in the picker.
+        subagent |= record.pointer("/payload/source/subagent").is_some();
         filtered = filtered
             || !codex_source_is_interactive(record.pointer("/payload/source"))
             || record
@@ -500,6 +504,7 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
                 .transpose()?
                 .unwrap_or(CodexHistoryMode::Legacy);
             return Ok(CodexSessionSummary {
+                subagent,
                 filtered,
                 metadata: Some(CodexSessionMetadata {
                     id,
@@ -511,6 +516,7 @@ pub(super) fn codex_session_summary(path: &Path) -> Result<CodexSessionSummary> 
         }
     }
     Ok(CodexSessionSummary {
+        subagent,
         filtered,
         metadata: None,
     })

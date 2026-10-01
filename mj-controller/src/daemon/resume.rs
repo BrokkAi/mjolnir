@@ -369,14 +369,20 @@ impl RuntimeState {
             self.reload_controller().await?;
             self.publish_revision();
         }
-        let candidates = blocking(move || {
+        let (candidates, children) = blocking(move || {
             let controller = Controller::load()?;
-            Ok(crate::sessionwiki::sessions_ready_to_archive(
+            let candidates = crate::sessionwiki::sessions_ready_to_archive(
                 &controller.state.sessions,
                 &controller.state.subagents,
                 chrono::Utc::now(),
                 older_than_days,
-            ))
+            );
+            let children: std::collections::BTreeSet<String> = candidates
+                .iter()
+                .filter(|id| controller.state.is_subagent_session(id))
+                .cloned()
+                .collect();
+            Ok((candidates, children))
         })
         .await
         .context("select the stopped sessions old enough to archive")?;
@@ -384,14 +390,18 @@ impl RuntimeState {
             return Ok(0);
         }
         let indexed = blocking({
-            let candidates = candidates.clone();
+            let candidates = candidates
+                .iter()
+                .filter(|id| !children.contains(*id))
+                .cloned()
+                .collect::<Vec<_>>();
             move || crate::sessionwiki::indexed_with_messages(&candidates)
         })
         .await
         .context("check the SessionWiki index before archiving")?;
         let mut archived = 0;
         for session_id in candidates {
-            if !indexed.contains(&session_id) {
+            if !children.contains(&session_id) && !indexed.contains(&session_id) {
                 tracing::warn!(
                     %session_id,
                     "SessionWiki holds no conversation for this stopped session; keeping it"
@@ -404,7 +414,8 @@ impl RuntimeState {
                     tracing::info!(
                         %session_id,
                         older_than_days,
-                        "archived a stopped session: SessionWiki keeps the conversation, and the repository keeps the branch unless another branch already contains it"
+                        child = children.contains(&session_id),
+                        "archived a stopped session; top-level conversations are retained in SessionWiki"
                     );
                 }
                 Err(error) => tracing::warn!(
@@ -424,8 +435,8 @@ impl RuntimeState {
     /// Destroy a stopped session the way the archive job wants: the record,
     /// the checkpoint, and the attachments go, and the session's git branch
     /// goes only when another branch already contains all of its commits.
-    /// The conversation itself stays searchable, and restorable, through
-    /// SessionWiki.
+    /// A top-level conversation stays searchable and restorable through
+    /// SessionWiki; child conversations are excluded.
     async fn archive_stopped_session(self: &Arc<Self>, session_id: String) -> Result<()> {
         self.tear_down_stopped_session(
             session_id,
@@ -445,8 +456,8 @@ impl RuntimeState {
         branch: BranchDisposition,
         checkout: CheckoutDisposition,
     ) -> Result<Option<PathBuf>> {
-        // This indexes the sub-agents too, so they are destroyed below
-        // without indexing each one again.
+        // Preserve the root conversation before tearing down its children.
+        // Children are intentionally excluded from SessionWiki.
         self.index_before_destroy(&session_id).await;
         let children = blocking({
             let session_id = session_id.clone();
@@ -511,9 +522,8 @@ impl RuntimeState {
         Ok(kept)
     }
 
-    /// Put a session about to be destroyed, and its sub-agents, into
-    /// SessionWiki while their records and stored conversations still exist,
-    /// so `mj sessions --session <id>` still finds them afterwards (R2-11).
+    /// Preserve a top-level session before destroy so its conversation remains
+    /// searchable afterwards. Child sessions are excluded from the index.
     ///
     /// Waits at most [`crate::sessionwiki::DESTROY_SYNC_WAIT`] for a sync
     /// pass, then indexes the sessions on their own. A destroy is never

@@ -407,10 +407,7 @@ pub(crate) struct DashboardContext {
     /// produced. Copy redraws first, so it never reads a stale frame.
     selection_text: Option<String>,
 
-    /// The newest archive search this dialog asked for. The debounced task
-    /// reads it when it wakes and gives up when a later keystroke has since
-    /// replaced it.
-    pub(crate) wiki_search_request: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) wiki_search_task: Option<(u64, tokio_util::sync::DropGuard)>,
     /// The newest conversation search the Sessions filter asked for, read by
     /// its debounced task the same way.
     sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
@@ -952,6 +949,13 @@ pub(crate) async fn run_dashboard_for_workspace(
             context
                 .help_search
                 .sync(&context.dashboard, &context.dashboard_io_tx);
+        }
+        if context
+            .wiki_search_task
+            .as_ref()
+            .is_some_and(|(id, _)| context.dashboard.resume_search_request_id() != Some(*id))
+        {
+            context.wiki_search_task = None;
         }
         context.remember_go_selection();
         if context.shutdown_requested && context.refresh_shutdown_notice() {
@@ -1703,7 +1707,7 @@ impl DashboardContext {
             aws_resource_options_tx,
             aws_options: Feed::new(aws_resource_options_rx),
             resolving_aws_resource_options: BTreeSet::new(),
-            wiki_search_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             help_search: help_search::HelpSearch::default(),
             import_updates_tx,

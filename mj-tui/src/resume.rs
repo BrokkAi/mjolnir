@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -50,19 +50,6 @@ use mj_chat::components::{ScrollbarDrag, ScrollbarPointer};
 
 /// Origin shown for a native session that has never run under Hel.
 pub(crate) const LOCAL_ORIGIN: &str = "local";
-
-/// How long the dialog waits before asking again while the first index build
-/// is still running.
-pub(crate) const WIKI_INDEXING_POLL: Duration = Duration::from_secs(5);
-/// How long the dialog waits before repeating the current query while a top-up
-/// sync is running. The wait grows and then settles, so a short sync is
-/// followed closely and a long one is still followed rather than abandoned.
-pub(crate) const WIKI_TOP_UP_BACKOFF: [Duration; 4] = [
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-    Duration::from_secs(10),
-];
 
 /// How many rows one wheel notch moves the preview pane, matching the chat
 /// transcript's step.
@@ -275,15 +262,7 @@ pub(crate) struct ResumeDialog {
     /// The search this dialog last asked for. A result that names an older
     /// request is stale and dropped.
     pub(crate) wiki_request_id: u64,
-    /// What the last answer said about the index: whether it can be searched
-    /// at all, and whether a sync is adding to it right now.
-    pub(crate) wiki_status: WikiStatus,
-    /// How many times the current query has been re-issued because a sync was
-    /// still running. It picks the wait before the next repeat.
-    pub(crate) wiki_top_ups: u32,
-    /// Whether a search answer is still outstanding, so the list can say it is
-    /// searching rather than showing an empty list as a finished answer.
-    pub(crate) wiki_pending: bool,
+    pub(crate) wiki_search: WikiSearchState,
     /// Briefings already fetched, by SessionWiki id, for the dialog's life.
     pub(crate) previews: Arc<BTreeMap<String, String>>,
     /// The briefing being fetched now, so one selection asks only once.
@@ -349,6 +328,47 @@ impl From<mj_client::daemon::ResumeCandidates> for ResumeHistory {
                 .map(|operation| (operation.selection.session_id.clone(), operation))
                 .collect(),
         }
+    }
+}
+
+/// A query stays answered while its task follows an ongoing index sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WikiSearchState {
+    Pending,
+    Answered(WikiStatus),
+    Failed(String),
+}
+
+impl WikiSearchState {
+    fn status(&self) -> Option<WikiStatus> {
+        match self {
+            Self::Answered(status) => Some(*status),
+            Self::Pending | Self::Failed(_) => None,
+        }
+    }
+}
+
+fn resume_dialog(mode: &Mode) -> Option<&ResumeDialog> {
+    match mode {
+        Mode::ResumeDialog(dialog) => Some(dialog),
+        Mode::Help(overlay) => resume_dialog(&overlay.return_to),
+        Mode::Confirm(ConfirmDialog {
+            confirmation: Confirmation::DestroyStopped { reopen, .. },
+            ..
+        }) => reopen.as_deref(),
+        _ => None,
+    }
+}
+
+fn resume_dialog_mut(mode: &mut Mode) -> Option<&mut ResumeDialog> {
+    match mode {
+        Mode::ResumeDialog(dialog) => Some(dialog),
+        Mode::Help(overlay) => resume_dialog_mut(&mut overlay.return_to),
+        Mode::Confirm(ConfirmDialog {
+            confirmation: Confirmation::DestroyStopped { reopen, .. },
+            ..
+        }) => reopen.as_deref_mut(),
+        _ => None,
     }
 }
 
@@ -423,7 +443,11 @@ impl ResumeDialog {
     /// Searches can use already indexed sessions while a build is running.
     /// Only an incompatible index prevents searching the history tabs.
     pub(crate) fn search_enabled(&self) -> bool {
-        self.tab == ResumeTab::Live || self.wiki_status.state != WikiIndexState::VersionMismatch
+        self.tab == ResumeTab::Live
+            || self
+                .wiki_search
+                .status()
+                .is_none_or(|status| status.state != WikiIndexState::VersionMismatch)
     }
 
     /// What stands in the search box while it cannot be typed into.
@@ -431,10 +455,10 @@ impl ResumeDialog {
         if self.tab == ResumeTab::Live {
             return None;
         }
-        match self.wiki_status.state {
-            WikiIndexState::Ready | WikiIndexState::Indexing => None,
-            WikiIndexState::VersionMismatch => Some("SessionWiki index is at a different version"),
-        }
+        self.wiki_search.status().and_then(|status| {
+            (status.state == WikiIndexState::VersionMismatch)
+                .then_some("SessionWiki index is at a different version")
+        })
     }
 
     fn can_open(&self, rows: &[ResumeRow]) -> bool {
@@ -1088,7 +1112,7 @@ impl DashboardState {
     /// newest search answer. Every mutation of those inputs calls this.
     /// Moving the selection only reads the rows.
     pub fn rebuild_resume_rows(&mut self) {
-        let Mode::ResumeDialog(dialog) = &self.mode else {
+        let Some(dialog) = resume_dialog(&self.mode) else {
             self.resume_rows.clear();
             self.resume_hit_counts = [0; ResumeTab::COUNT];
             return;
@@ -1151,7 +1175,7 @@ impl DashboardState {
             // while that tab is the one on screen.
             Mode::ResumeDialog(dialog) => {
                 (dialog.is_scanning() && dialog.tab == ResumeTab::Import)
-                    || dialog.wiki_pending
+                    || dialog.wiki_search == WikiSearchState::Pending
                     || dialog.history == HistoryLoad::Loading
             }
             Mode::Setup(_) | Mode::Help(_) => self.review_settings_discovery_active(),
@@ -1178,6 +1202,7 @@ impl DashboardState {
     }
 
     pub fn show_resume_dialog(&mut self, discovery_id: u64, profiles: Vec<ImportProfileOption>) {
+        self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
         self.mode = Mode::ResumeDialog(ResumeDialog {
             discovery_id,
             profiles: Arc::new(profiles),
@@ -1191,10 +1216,8 @@ impl DashboardState {
             form: RefCell::new(Dialog::default()),
             opened_at: Instant::now(),
             wiki: Arc::new(Vec::new()),
-            wiki_request_id: 0,
-            wiki_status: WikiStatus::default(),
-            wiki_top_ups: 0,
-            wiki_pending: false,
+            wiki_request_id: self.wiki_search_generation,
+            wiki_search: WikiSearchState::Pending,
             previews: Arc::new(BTreeMap::new()),
             preview_pending: None,
             hits: Arc::new(BTreeMap::new()),
@@ -1345,28 +1368,38 @@ impl DashboardState {
         self.resync_resume_selection();
     }
 
-    /// Fold one SessionWiki search result into the open dialog. A result for
-    /// an older request is dropped: the person has typed since.
+    /// The query remains active while a temporary overlay covers its dialog.
+    pub fn resume_search_request_id(&self) -> Option<u64> {
+        resume_dialog(&self.mode).map(|dialog| dialog.wiki_request_id)
+    }
+
     pub fn apply_wiki_search(&mut self, request_id: u64, page: WikiSearchPage) {
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return;
+        self.apply_wiki_search_result(request_id, Ok(page));
+    }
+
+    /// Successes and failures share one admission point, including refreshes.
+    pub fn apply_wiki_search_result(
+        &mut self,
+        request_id: u64,
+        result: Result<WikiSearchPage, String>,
+    ) -> bool {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
+            return false;
         };
         if dialog.wiki_request_id != request_id {
-            return;
+            return false;
         }
-        // Only the answer to the outstanding request ends the wait. A late
-        // answer to a query the person has typed past leaves it running.
-        dialog.wiki_pending = false;
-        // The status moves even when the rows do not: a build that finished
-        // between two identical answers still updates the progress notice.
-        dialog.wiki_status = page.status;
-        if *dialog.wiki == page.rows {
-            self.rebuild_resume_rows();
-            return;
+        match result {
+            Ok(page) => {
+                dialog.wiki_search = WikiSearchState::Answered(page.status);
+                if *dialog.wiki != page.rows {
+                    dialog.wiki = Arc::new(page.rows);
+                }
+            }
+            Err(error) => dialog.wiki_search = WikiSearchState::Failed(error),
         }
-        dialog.wiki = Arc::new(page.rows);
         self.rebuild_resume_rows();
-        self.resync_resume_selection();
+        true
     }
 
     /// The preview the open dialog still needs for the row under its
@@ -1381,7 +1414,7 @@ impl DashboardState {
         let wiki_id = self
             .selected_resume_row()
             .and_then(|row| row.wiki_id().map(ToOwned::to_owned));
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return DashboardAction::None;
         };
         let Some(wiki_id) = wiki_id else {
@@ -1404,41 +1437,9 @@ impl DashboardState {
         DashboardAction::LoadArchivedHits { wiki_id, query }
     }
 
-    /// The query to re-issue, and how long to wait first, after an answer said
-    /// the index is still changing. `None` when the answer was final.
-    ///
-    /// Two reasons to ask again. The first build has not finished, so the
-    /// answer may gain rows: poll every five seconds until it is ready. Or a
-    /// top-up sync is running, so this query may gain rows: repeat it on the
-    /// [`WIKI_TOP_UP_BACKOFF`] schedule for as long as the sync runs, so a long
-    /// sync is followed to its end instead of leaving the pane promising rows
-    /// that never arrive.
-    pub fn next_wiki_refresh(&mut self) -> Option<(u64, String, Duration)> {
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
-            return None;
-        };
-        let delay = match dialog.wiki_status.state {
-            WikiIndexState::VersionMismatch => return None,
-            WikiIndexState::Indexing => WIKI_INDEXING_POLL,
-            WikiIndexState::Ready => {
-                if !dialog.wiki_status.topping_up {
-                    return None;
-                }
-                let step = usize::try_from(dialog.wiki_top_ups)
-                    .unwrap_or(usize::MAX)
-                    .min(WIKI_TOP_UP_BACKOFF.len() - 1);
-                dialog.wiki_top_ups = dialog.wiki_top_ups.saturating_add(1);
-                WIKI_TOP_UP_BACKOFF[step]
-            }
-        };
-        dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
-        dialog.wiki_pending = true;
-        Some((dialog.wiki_request_id, dialog.search.to_string(), delay))
-    }
-
     /// Fold one fetched briefing into the open dialog's preview cache.
     pub fn apply_wiki_brief(&mut self, wiki_id: String, markdown: String) {
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return;
         };
         if dialog.preview_pending.as_deref() == Some(wiki_id.as_str()) {
@@ -1456,7 +1457,7 @@ impl DashboardState {
         query: String,
         transcript: Option<WikiHitTranscript>,
     ) {
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return;
         };
         let key = (wiki_id, query);
@@ -1480,7 +1481,7 @@ impl DashboardState {
             .frame_surfaces
             .surface(SurfaceId::ResumePreview)
             .copied();
-        let Mode::ResumeDialog(dialog) = &self.mode else {
+        let Some(dialog) = resume_dialog(&self.mode) else {
             return false;
         };
         let Some((lines, hit_lines)) = dialog.preview_body(&self.resume_rows) else {
@@ -1502,7 +1503,7 @@ impl DashboardState {
             // next frame shows the excerpt from its top.
             None => 0,
         };
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return false;
         };
         dialog.preview_hit = index;
@@ -1547,16 +1548,15 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &mut self.mode else {
             return None;
         };
-        dialog.wiki_request_id = dialog.wiki_request_id.wrapping_add(1);
-        // A new query starts the backoff again; the old one's is spent.
-        dialog.wiki_top_ups = 0;
-        dialog.wiki_pending = true;
+        self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
+        dialog.wiki_request_id = self.wiki_search_generation;
+        dialog.wiki_search = WikiSearchState::Pending;
         Some((dialog.wiki_request_id, dialog.search.to_string()))
     }
 
     /// Keeps `row_index` pointed at the selected row after the list changed.
     fn resync_resume_selection(&mut self) {
-        let Mode::ResumeDialog(dialog) = &self.mode else {
+        let Some(dialog) = resume_dialog(&self.mode) else {
             return;
         };
         let rows = self.resume_rows();
@@ -1566,7 +1566,7 @@ impl DashboardState {
             .and_then(|key| rows.iter().position(|row| &row.key == key))
             .unwrap_or_else(|| dialog.row_index.min(rows.len().saturating_sub(1)));
         let key = rows.get(index).map(|row| row.key.clone());
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return;
         };
         dialog.row_index = index;
@@ -1580,7 +1580,7 @@ impl DashboardState {
     /// top and then on its first hit.
     fn sync_resume_preview_key(&mut self) {
         let key = {
-            let Mode::ResumeDialog(dialog) = &self.mode else {
+            let Some(dialog) = resume_dialog(&self.mode) else {
                 return;
             };
             dialog.preview_wiki_id(&self.resume_rows).map(|wiki_id| {
@@ -1590,7 +1590,7 @@ impl DashboardState {
                 )
             })
         };
-        let Mode::ResumeDialog(dialog) = &mut self.mode else {
+        let Some(dialog) = resume_dialog_mut(&mut self.mode) else {
             return;
         };
         if dialog.preview_key == key {
@@ -1686,9 +1686,7 @@ impl DashboardState {
 
     /// The row the open dialog points at.
     pub(crate) fn selected_resume_row(&self) -> Option<ResumeRow> {
-        let Mode::ResumeDialog(dialog) = &self.mode else {
-            return None;
-        };
+        let dialog = resume_dialog(&self.mode)?;
         let rows = self.resume_rows();
         let index = selected_index(dialog, rows.len())?;
         rows.get(index).cloned()
@@ -2552,21 +2550,37 @@ fn resume_list_title(
             (ResumeTab::Import, _) => Span::raw("Importable sessions · newest first"),
             (ResumeTab::Archive, _) => Span::raw("Archived sessions · newest first"),
         });
-    } else if dialog.wiki_status.state == WikiIndexState::Indexing {
-        spans.push(Span::raw("Index building…"));
-    } else if dialog.wiki_pending && rows == 0 {
-        spans.push(mj_chat::spinner::compact_span(
-            dashboard.config.spinner,
-            dialog.opened_at.elapsed().as_millis(),
-        ));
-        spans.push(Span::raw(" Searching…"));
-    } else if dialog.wiki_status.topping_up && rows > 0 {
-        spans.push(Span::raw(format!(
-            "{} · index syncing, more may arrive",
-            match_count(rows)
-        )));
     } else {
-        spans.push(Span::raw(match_count(rows)));
+        match &dialog.wiki_search {
+            WikiSearchState::Pending => {
+                spans.push(mj_chat::spinner::compact_span(
+                    dashboard.config.spinner,
+                    dialog.opened_at.elapsed().as_millis(),
+                ));
+                spans.push(Span::raw(" Searching…"));
+            }
+            WikiSearchState::Failed(error) => {
+                spans.push(Span::raw(format!("Search failed: {error}")));
+            }
+            WikiSearchState::Answered(_) => {
+                spans.push(Span::raw(match_count(rows)));
+            }
+        }
+    }
+    match &dialog.wiki_search {
+        WikiSearchState::Failed(error) if dialog.search.is_empty() => {
+            spans.push(Span::raw(format!(" · Search failed: {error}")));
+        }
+        WikiSearchState::Answered(status) => {
+            if status.state == WikiIndexState::Indexing {
+                spans.push(Span::raw(" · index building, more may arrive"));
+            } else if status.state == WikiIndexState::VersionMismatch {
+                spans.push(Span::raw(" · incompatible SessionWiki index"));
+            } else if status.topping_up {
+                spans.push(Span::raw(" · index syncing, more may arrive"));
+            }
+        }
+        _ => {}
     }
     if dialog.tab == ResumeTab::Import && dialog.is_scanning() {
         let (scanned, total) = dialog.scan_progress();

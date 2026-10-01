@@ -1119,7 +1119,7 @@ fn an_index_answer_leaves_the_focused_control_unchanged() {
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert_ne!(dialog.wiki_status.state, WikiIndexState::Ready);
+    assert_eq!(dialog.wiki_search, WikiSearchState::Pending);
     let focus_before = dialog_focus(&dashboard);
 
     apply_ready_rows(&mut dashboard, Vec::new());
@@ -2561,27 +2561,13 @@ fn search_remains_available_while_the_index_builds() {
     assert!(search_line.contains("archived"), "{search_line}");
     assert!(!search_line.contains("Indexing"), "{search_line}");
 
-    // The build says it is still running, so the dialog asks again.
-    let (next_id, query, delay) = dashboard
-        .next_wiki_refresh()
-        .expect("a building index is asked again");
-    assert_eq!(query, "archived");
-    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
-    assert_eq!(delay, WIKI_INDEXING_POLL);
-
-    dashboard.apply_wiki_search(next_id, ready_page(vec![wiki_row("gone", true)]));
+    // Sequential refresh answers retain the same query identity.
+    dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("gone", true)]));
     let Mode::ResumeDialog(dialog) = &dashboard.mode else {
         panic!("expected the resume dialog");
     };
-    assert!(
-        dialog.search_enabled(),
-        "search stays available after the build finishes"
-    );
+    assert!(dialog.search_enabled());
     assert_eq!(dialog.search_placeholder(), None);
-    assert!(
-        dashboard.next_wiki_refresh().is_none(),
-        "a ready, idle index is not polled"
-    );
     assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
 }
 
@@ -2619,59 +2605,80 @@ fn a_version_mismatch_disables_the_box_and_stops_the_polling() {
         dialog.search_placeholder(),
         Some("SessionWiki index is at a different version")
     );
-    assert!(dashboard.next_wiki_refresh().is_none());
 }
 
-/// A sync that is adding rows makes the dialog repeat the query on a
-/// lengthening schedule, and keeps repeating for as long as the sync runs
-/// rather than abandoning a long one part way through.
 #[test]
-fn a_running_top_up_repeats_the_query_on_a_lengthening_schedule() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
+fn an_empty_tab_keeps_its_answer_while_the_index_syncs() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
     open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    let topping_up = |rows: Vec<WikiRow>| WikiSearchPage {
-        rows,
-        status: WikiStatus {
-            state: WikiIndexState::Ready,
-            topping_up: true,
-        },
-    };
-    let mut request_id = match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
-        _ => panic!("expected the resume dialog"),
-    };
-    // The schedule runs out and then repeats its last step: a sync longer
-    // than the schedule is still followed.
-    for attempt in 0..WIKI_TOP_UP_BACKOFF.len() + 3 {
-        dashboard.apply_wiki_search(request_id, topping_up(Vec::new()));
-        let (next_id, _, delay) = dashboard
-            .next_wiki_refresh()
-            .unwrap_or_else(|| panic!("repeat {attempt} was not scheduled"));
-        assert_eq!(
-            delay,
-            WIKI_TOP_UP_BACKOFF[attempt.min(WIKI_TOP_UP_BACKOFF.len() - 1)]
+    replace_search(&mut dashboard, "quokka");
+    switch_to_hel(&mut dashboard);
+    let (request_id, _) = dashboard.next_wiki_search().unwrap();
+    let render = drawn(&mut dashboard, 120, 34).join("\n");
+    assert!(render.contains("Searching…"), "{render}");
+    assert!(!render.contains("index building"), "{render}");
+    for _ in 0..3 {
+        dashboard.apply_wiki_search(
+            request_id,
+            WikiSearchPage {
+                rows: Vec::new(),
+                status: WikiStatus {
+                    state: WikiIndexState::Ready,
+                    topping_up: true,
+                },
+            },
         );
-        request_id = next_id;
+        let render = drawn(&mut dashboard, 120, 34).join("\n");
+        assert!(
+            render.contains("index syncing, more may arrive"),
+            "{render}"
+        );
+        assert!(!render.contains("Searching…"), "{render}");
+        assert!(!dashboard.needs_fast_tick());
     }
-
-    // An answer that says the sync has finished ends the repeats.
     dashboard.apply_wiki_search(request_id, ready_page(Vec::new()));
-    assert!(
-        dashboard.next_wiki_refresh().is_none(),
-        "a finished sync is not polled"
-    );
+    let render = drawn(&mut dashboard, 120, 34).join("\n");
+    assert!(!render.contains("index syncing"), "{render}");
+    assert!(!render.contains("Searching…"), "{render}");
+}
 
-    // Typing starts the schedule again.
-    replace_search(&mut dashboard, "something else");
-    let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
-    assert_eq!(query, "something else");
-    dashboard.apply_wiki_search(request_id, topping_up(Vec::new()));
-    let (_, _, delay) = dashboard.next_wiki_refresh().expect("the sync is followed");
-    assert_eq!(delay, WIKI_TOP_UP_BACKOFF[0]);
+#[test]
+fn search_errors_obey_query_identity_and_end_the_pending_state() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    replace_search(&mut dashboard, "quokka");
+    let (old, _) = dashboard.next_wiki_search().unwrap();
+    let (current, _) = dashboard.next_wiki_search().unwrap();
+    assert!(!dashboard.apply_wiki_search_result(old, Err("stale failure".into())));
+    assert_eq!(
+        resume_dialog(&dashboard.mode).unwrap().wiki_search,
+        WikiSearchState::Pending
+    );
+    assert!(dashboard.apply_wiki_search_result(current, Err("database unavailable".into())));
+    assert_eq!(
+        resume_dialog(&dashboard.mode).unwrap().wiki_search,
+        WikiSearchState::Failed("database unavailable".into())
+    );
+    let render = drawn(&mut dashboard, 120, 34).join("\n");
+    assert!(
+        render.contains("Search failed: database unavailable"),
+        "{render}"
+    );
+    assert!(!render.contains("Searching…"), "{render}");
+}
+
+#[test]
+fn reopening_the_dialog_cannot_accept_the_previous_querys_answer() {
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    let (old, _) = dashboard.next_wiki_search().unwrap();
+    dashboard.mode = Mode::Dashboard;
+    assert_eq!(dashboard.resume_search_request_id(), None);
+    open_resume_dialog(&mut dashboard, 2, Vec::new());
+    let (current, _) = dashboard.next_wiki_search().unwrap();
+    assert_ne!(old, current);
+    assert!(!dashboard.apply_wiki_search_result(old, Ok(ready_page(vec![wiki_row("old", true)]))));
+    assert!(resume_dialog(&dashboard.mode).unwrap().wiki.is_empty());
 }
 
 /// Cost of the merged row list and of one keypress, on a dialog the size a
@@ -3056,7 +3063,7 @@ fn search_reply_clears_pending_for_matching_request_only() {
     replace_search(&mut dashboard, "the phrase");
     let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
     let pending = |dashboard: &DashboardState| match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog.wiki_pending,
+        Mode::ResumeDialog(dialog) => dialog.wiki_search == WikiSearchState::Pending,
         _ => panic!("expected the resume dialog"),
     };
     assert!(pending(&dashboard));
@@ -3416,4 +3423,48 @@ fn the_mjolnir_tab_lists_the_daemons_answer_and_resumes_a_session_the_feed_lacks
     };
     assert_eq!(wizard.session_id, "session-1");
     assert!(dashboard.state.sessions.is_empty());
+}
+
+#[test]
+fn a_search_answer_arriving_under_help_is_kept_when_the_dialog_returns() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    switch_to_archive(&mut dashboard);
+    let request = dashboard.resume_search_request_id().unwrap();
+    dashboard.begin_help();
+    assert_eq!(dashboard.resume_search_request_id(), Some(request));
+    assert!(dashboard.apply_wiki_search_result(
+        request,
+        Ok(WikiSearchPage {
+            status: WikiStatus {
+                state: WikiIndexState::Ready,
+                topping_up: false
+            },
+            rows: vec![wiki_row("answered-under-help", true)],
+        })
+    ));
+    assert_eq!(
+        dashboard.next_wiki_preview(),
+        DashboardAction::LoadArchivedBrief {
+            wiki_id: "answered-under-help".into(),
+        }
+    );
+    dashboard.apply_wiki_brief("answered-under-help".into(), "A retained preview".into());
+    let Mode::Help(overlay) = std::mem::replace(&mut dashboard.mode, Mode::Dashboard) else {
+        panic!("help overlay");
+    };
+    dashboard.mode = *overlay.return_to;
+    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
+        panic!("resume dialog");
+    };
+    assert_eq!(dialog.wiki[0].id, "answered-under-help");
+    assert_eq!(
+        dialog
+            .previews
+            .get("answered-under-help")
+            .map(String::as_str),
+        Some("A retained preview")
+    );
+    assert!(dialog.preview_pending.is_none());
+    assert!(matches!(dialog.wiki_search, WikiSearchState::Answered(_)));
 }

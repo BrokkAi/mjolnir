@@ -1540,43 +1540,77 @@ fn follow_daemon_creation(
     );
 }
 
-/// Search the SessionWiki index for the resume dialog, after `delay`.
-///
-/// The wait is in the task rather than in a timer on the event loop: each
-/// keystroke starts one, and a task whose request id is no longer the newest
-/// when it wakes stops without asking the daemon. The dialog drops any answer
-/// that names an older request as well, because two searches can still
-/// overlap. The same task serves the repeats a still-building or still-syncing
-/// index asks for, with their own longer waits.
+/// Follow one query until the index settles. Dropping its guard cancels both
+/// the debounce and any outstanding network wait; daemon-owned work survives.
 pub(crate) fn spawn_wiki_search(
     request_id: u64,
     query: String,
     delay: Duration,
-    newest_request: Arc<AtomicU64>,
     updates: UnboundedSender<DashboardIoUpdate>,
-) {
-    newest_request.store(request_id, Ordering::Release);
+) -> tokio_util::sync::DropGuard {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let guard = cancel.clone().drop_guard();
     tokio::spawn(async move {
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+        let answers = updates.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(follow_wiki_search(
+            delay,
+            Duration::from_secs(5),
+            move || {
+                let query = query.clone();
+                async move {
+                    daemon::connect_or_start()
+                        .await?
+                        .wiki_search(query, WIKI_SEARCH_LIMIT)
+                        .await
+                }
+            },
+            move |result| {
+                report(
+                    "searching the session archive",
+                    &answers,
+                    DashboardIoUpdate::WikiRows { request_id, result },
+                )
+            },
+        )));
+        tokio::select! {
+            _ = cancel.cancelled() => {},
+            finished = task => {
+                if let Err(error) = finished {
+                    report("searching the session archive", &updates,
+                        DashboardIoUpdate::WikiRows {
+                            request_id,
+                            result: Err(format!("session search task failed: {error}")),
+                        });
+                }
+            }
         }
-        if newest_request.load(Ordering::Acquire) != request_id {
+    });
+    guard
+}
+
+async fn follow_wiki_search<F, Fut>(
+    delay: Duration,
+    refresh: Duration,
+    mut search: F,
+    mut answer: impl FnMut(std::result::Result<mj_client::daemon::WikiSearchPage, String>),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<mj_client::daemon::WikiSearchPage>>,
+{
+    tokio::time::sleep(delay).await;
+    loop {
+        let result = search().await.map_err(|error| format!("{error:#}"));
+        let repeat = result.as_ref().is_ok_and(|page| {
+            use mj_client::daemon::WikiIndexState;
+            page.status.state == WikiIndexState::Indexing
+                || (page.status.state == WikiIndexState::Ready && page.status.topping_up)
+        });
+        answer(result);
+        if !repeat {
             return;
         }
-        let result = async {
-            daemon::connect_or_start()
-                .await?
-                .wiki_search(query, WIKI_SEARCH_LIMIT)
-                .await
-        }
-        .await
-        .map_err(|error| format!("{error:#}"));
-        report(
-            "searching the session archive",
-            &updates,
-            DashboardIoUpdate::WikiRows { request_id, result },
-        );
-    });
+        tokio::time::sleep(refresh).await;
+    }
 }
 
 /// Search the conversations of the live sessions for the Sessions filter's
@@ -1736,4 +1770,70 @@ pub(crate) fn spawn_dashboard_restore_session(
             cancelled,
         );
     });
+}
+
+#[cfg(test)]
+mod wiki_search_tests {
+    use super::*;
+    use mj_client::daemon::{WikiIndexState, WikiSearchPage, WikiStatus};
+
+    fn page(state: WikiIndexState, topping_up: bool) -> WikiSearchPage {
+        WikiSearchPage {
+            status: WikiStatus { state, topping_up },
+            rows: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_query_publishes_each_answer_until_the_index_settles() {
+        let mut replies = std::collections::VecDeque::from([
+            Ok(page(WikiIndexState::Indexing, true)),
+            Ok(page(WikiIndexState::Ready, true)),
+            Ok(page(WikiIndexState::Ready, true)),
+            Ok(page(WikiIndexState::Ready, false)),
+        ]);
+        let started = tokio::time::Instant::now();
+        let mut answers = Vec::new();
+        follow_wiki_search(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            || std::future::ready(replies.pop_front().expect("no searches after ready")),
+            |reply| answers.push((tokio::time::Instant::now() - started, reply.unwrap().status)),
+        )
+        .await;
+        assert!(replies.is_empty());
+        assert_eq!(answers.len(), 4);
+        assert_eq!(answers[0].0, Duration::from_millis(200));
+        assert_eq!(answers[3].0, Duration::from_millis(15_200));
+        assert!(!answers[3].1.topping_up);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_and_incompatible_searches_publish_once_and_stop() {
+        for reply in [
+            Err(anyhow::anyhow!("database failed")),
+            Ok(page(WikiIndexState::VersionMismatch, true)),
+        ] {
+            let mut reply = Some(reply);
+            let mut answers = Vec::new();
+            follow_wiki_search(
+                Duration::ZERO,
+                Duration::from_secs(5),
+                || std::future::ready(reply.take().expect("no retry after failure or mismatch")),
+                |answer| answers.push(answer),
+            )
+            .await;
+            assert_eq!(answers.len(), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_query_during_debounce_stops_its_background_task() {
+        let (updates, mut replies) = tokio::sync::mpsc::unbounded_channel();
+        let query = spawn_wiki_search(17, "quokka".into(), Duration::from_secs(60), updates);
+        tokio::task::yield_now().await;
+        drop(query);
+        // Closure of the sender proves its supervising task and search task exit.
+        assert!(replies.recv().await.is_none());
+    }
 }

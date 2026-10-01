@@ -10,6 +10,7 @@ enum CachedNativeMetadata {
     Claude(Option<(String, PathBuf, String)>),
     /// `codex_session_metadata`, including its "not interactive" verdict.
     Codex(Option<CodexSessionMetadata>),
+    IndexEligible(bool),
 }
 
 #[derive(Debug)]
@@ -42,6 +43,38 @@ impl NativeScanCache {
     /// How many files this cache has actually parsed, for tests and diagnostics.
     pub fn parsed_files(&self) -> u64 {
         self.lock().parsed_files
+    }
+
+    /// Index discovery excludes identified children, preserving parents even
+    /// when their entrypoint or missing working directory prevents importing.
+    pub(crate) fn index_eligible(&self, kind: HarnessKind, path: &Path) -> Result<bool> {
+        if kind == HarnessKind::Claude
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "subagents")
+        {
+            return Ok(false);
+        }
+        let metadata = fs::metadata(path)?;
+        let modified_at = metadata.modified()?;
+        let size_bytes = metadata.len();
+        if let Some(CachedNativeMetadata::IndexEligible(eligible)) =
+            self.cached(path, modified_at, size_bytes)
+        {
+            return Ok(eligible);
+        }
+        let eligible = match kind {
+            HarnessKind::Codex => !codex::codex_session_summary(path)?.subagent,
+            HarnessKind::Claude => !claude::claude_native_summary(path)?.subagent,
+            other => bail!("{other:?} has its own top-level source enumeration"),
+        };
+        self.store(
+            path,
+            modified_at,
+            size_bytes,
+            CachedNativeMetadata::IndexEligible(eligible),
+        );
+        Ok(eligible)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, NativeScanCacheInner> {

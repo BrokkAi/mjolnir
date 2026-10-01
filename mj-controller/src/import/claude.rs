@@ -242,6 +242,8 @@ fn json_field_is_true(line: &str, field: &str) -> bool {
 
 /// What one Claude transcript's own records say about it.
 pub(super) struct ClaudeNativeSummary {
+    /// Positive child ownership, independently of resume eligibility.
+    pub subagent: bool,
     /// The resume picker's verdict: a sidechain, a team session, a daemon
     /// worker, a `/loop` record, or a non-interactive entrypoint. Importing a
     /// session the user named by id ignores this.
@@ -273,6 +275,7 @@ pub(super) fn claude_native_summary(path: &Path) -> Result<ClaudeNativeSummary> 
     let mut git_branch = None;
     let mut entrypoint = None;
     let mut filtered = false;
+    let mut subagent = false;
     for line in BufReader::new(fs::File::open(path)?).lines() {
         let line = line?;
         // Parsing every record of every transcript is what made the import
@@ -290,16 +293,16 @@ pub(super) fn claude_native_summary(path: &Path) -> Result<ClaudeNativeSummary> 
             continue;
         }
         let record: Value = serde_json::from_str(&line)?;
-        if record
+        let child = record
             .get("isSidechain")
             .and_then(Value::as_bool)
             .unwrap_or(false)
             || record
                 .get("teamName")
                 .and_then(Value::as_str)
-                .is_some_and(|name| !name.trim().is_empty())
-            || record.get("sessionKind").and_then(Value::as_str) == Some("daemon-worker")
-        {
+                .is_some_and(|name| !name.trim().is_empty());
+        subagent |= child;
+        if child || record.get("sessionKind").and_then(Value::as_str) == Some("daemon-worker") {
             filtered = true;
         }
         if entrypoint.is_none() {
@@ -364,6 +367,7 @@ pub(super) fn claude_native_summary(path: &Path) -> Result<ClaudeNativeSummary> 
     // particular, its print/SDK entrypoints include the tiny rollouts created
     // by `claude -p /usage`, which must not displace real sessions there.
     Ok(ClaudeNativeSummary {
+        subagent,
         filtered: filtered || entrypoint.as_deref().is_some_and(|value| value != "cli"),
         title: custom_title
             .or(agent_name)

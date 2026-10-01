@@ -13,6 +13,7 @@ mod harness_adapters;
 pub(crate) mod history;
 mod provenance;
 pub mod tags;
+mod top_level;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -64,7 +65,17 @@ impl Sessions {
     fn of(state: &State) -> Self {
         Self {
             records: state.sessions.clone(),
-            subagent_ids: state.subagents.keys().cloned().collect(),
+            subagent_ids: state
+                .subagents
+                .keys()
+                .chain(
+                    state
+                        .sessions
+                        .keys()
+                        .filter(|id| state.is_subagent_session(id)),
+                )
+                .cloned()
+                .collect(),
             live: live_tokens(state),
         }
     }
@@ -145,6 +156,7 @@ impl MjolnirAdapter {
         sessions
             .records
             .iter()
+            .filter(|(id, _)| !sessions.subagent_ids.contains(*id))
             .map(|(session_id, record)| {
                 (
                     session_id.clone(),
@@ -370,7 +382,14 @@ impl Adapter for MjolnirAdapter {
         let (newest, had_error) = self.newest_archives();
         let mut files = Vec::with_capacity(newest.len());
         let mut tokens: BTreeMap<String, i64> = BTreeMap::new();
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (session_id, archive) in newest {
+            if sessions.subagent_ids.contains(&session_id) {
+                continue;
+            }
             tokens.insert(session_id, archive.token);
             files.push(archive.path);
         }
@@ -378,12 +397,13 @@ impl Adapter for MjolnirAdapter {
         // its own token replaces any checkpoint token it has: the conversation
         // has moved on since that checkpoint was written. Listing it also
         // keeps reconciliation from archiving a running session.
-        let sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let live = sessions.live.clone();
-        tokens.extend(live);
+        tokens.extend(
+            sessions
+                .live
+                .iter()
+                .filter(|(id, _)| !sessions.subagent_ids.contains(*id))
+                .map(|(id, token)| (id.clone(), *token)),
+        );
         // A rename changes the record and not the conversation, so the
         // record's own last update is part of the change token. Without it a
         // renamed session would keep its old title in the index for as long as
@@ -430,6 +450,10 @@ impl Adapter for MjolnirAdapter {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        anyhow::ensure!(
+            !sessions.subagent_ids.contains(session_id),
+            "sub-agent sessions are not indexed"
+        );
         let IndexedTranscript {
             messages,
             title: snapshot_title,
@@ -534,6 +558,7 @@ struct Indexer {
     /// user knows more results may arrive.
     in_flight: AtomicBool,
     last_success: std::sync::Mutex<Option<Success>>,
+    native_scan_cache: crate::import::NativeScanCache,
 }
 
 #[derive(Clone, Copy)]
@@ -648,9 +673,10 @@ impl Indexer {
         let started = Instant::now();
         let work = crate::upgrade::activity("SessionWiki sync")?;
         self.in_flight.store(true, Ordering::Release);
+        let cache = self.native_scan_cache.clone();
         let ran = tokio::task::spawn_blocking(move || {
             let _work = work;
-            sync_blocking(since)
+            sync_blocking(since, &cache)
         })
         .await;
         self.in_flight.store(false, Ordering::Release);
@@ -670,7 +696,7 @@ impl Indexer {
 
 /// One synchronous sync pass. Returns false when this process must not touch
 /// the index, so a refused run never records a success it did not have.
-fn sync_blocking(since: Option<i64>) -> Result<bool> {
+fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> Result<bool> {
     if !index_is_writable() {
         return Ok(false);
     }
@@ -678,13 +704,25 @@ fn sync_blocking(since: Option<i64>) -> Result<bool> {
         Controller::load().context("load controller state for the SessionWiki sync")?;
     // Mjolnir's own sessions go first: a cold index walks every other tool's
     // store for many minutes, and a just-closed session should not wait on it.
-    let mjolnir = Arc::new(MjolnirAdapter::reloading(&controller.state));
-    let mut adapters: Vec<Box<dyn sessionwiki::adapters::Adapter>> =
-        vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
-    adapters.extend(native_adapters(&controller.config));
+    // Cleanup and enumeration use one ownership snapshot. Native discovery
+    // happens afterwards, so it cannot make this snapshot stale before use.
+    let mjolnir = Arc::new(MjolnirAdapter::from_state(&controller.state));
+    let owned: Vec<Box<dyn Adapter>> = vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
+    let children = mjolnir
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .subagent_ids
+        .clone();
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
-    sessionwiki::index::sync_with(&mut connection, &adapters, since)
-        .context("sync the SessionWiki index")?;
+    top_level::prune(&mut connection, &BTreeSet::new(), &children)?;
+    sessionwiki::index::sync_with(&mut connection, &owned, since)
+        .context("sync Mjolnir sessions into SessionWiki")?;
+    let (native, excluded) = top_level::prepare(native_adapters(&controller.config), cache);
+    top_level::prune(&mut connection, &excluded, &children)?;
+    sessionwiki::index::sync_with(&mut connection, &native, since)
+        .context("sync native sessions into SessionWiki")?;
+    top_level::prune(&mut connection, &excluded, &children)?;
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
     provenance::backfill(&mut connection, &mjolnir).context("backfill Mjolnir file provenance")?;
@@ -925,8 +963,8 @@ pub enum IndexedBeforeDestroy {
 }
 
 impl WikiIndexer {
-    /// Put a session and its sub-agents into the index while their records
-    /// and stored conversations still exist.
+    /// Put a top-level session into the index while its record and stored
+    /// conversation still exist. Child cleanup never requires an index copy.
     ///
     /// Sessions enter the index only on a sync pass, and destroy deletes the
     /// record and the conversation, so a session created and destroyed
@@ -943,8 +981,7 @@ impl WikiIndexer {
             return IndexedBeforeDestroy::Unavailable(reason);
         }
         let root = session_id.to_owned();
-        let pending = match tokio::task::spawn_blocking(move || unindexed_session_tree(&root)).await
-        {
+        let pending = match tokio::task::spawn_blocking(move || unindexed_session(&root)).await {
             Ok(Ok(pending)) => pending,
             Ok(Err(error)) => {
                 return IndexedBeforeDestroy::Failed(format!(
@@ -1045,14 +1082,16 @@ where
     }
 }
 
-/// A session and every sub-agent below it that has a conversation the index
-/// does not hold as it is now. Empty when the session has no record.
-fn unindexed_session_tree(root: &str) -> Result<Vec<String>> {
+/// A top-level session whose current conversation the index does not hold.
+fn unindexed_session(root: &str) -> Result<Vec<String>> {
     let controller =
         Controller::load().context("load controller state to index a destroyed session")?;
+    if !controller.state.sessions.contains_key(root) {
+        return Ok(Vec::new());
+    }
     unindexed(
         &MjolnirAdapter::from_state(&controller.state),
-        &session_tree(&controller.state, root),
+        &[root.to_owned()],
     )
 }
 
@@ -1082,28 +1121,6 @@ fn unindexed(adapter: &MjolnirAdapter, session_ids: &[String]) -> Result<Vec<Str
         }
     }
     Ok(pending)
-}
-
-/// A session and every sub-agent below it, parents first.
-fn session_tree(state: &State, root: &str) -> Vec<String> {
-    if !state.sessions.contains_key(root) {
-        return Vec::new();
-    }
-    let mut tree = vec![root.to_owned()];
-    let mut seen = BTreeSet::from([root.to_owned()]);
-    let mut next = 0;
-    while let Some(parent) = tree.get(next).cloned() {
-        next += 1;
-        for child in state.subagents.values() {
-            if child.parent_session_id == parent
-                && state.sessions.contains_key(&child.child_session_id)
-                && seen.insert(child.child_session_id.clone())
-            {
-                tree.push(child.child_session_id.clone());
-            }
-        }
-    }
-    tree
 }
 
 /// The change token the index holds for a live row. SessionWiki stores a
@@ -1341,15 +1358,15 @@ pub fn sync_is_stale(last_success: Option<Instant>) -> bool {
 ///
 /// `live` is the set of session ids this daemon still holds, which is what
 /// decides whether a Mjolnir row names a session the user can simply resume.
-/// `include_subagents` decides, for every path below, whether sub-agent
-/// sessions are answered at all; a resume list never wants them.
+/// Only top-level sessions are answered. `include_tool_matches` keeps tool-only
+/// hits for agent history; the resume list requires conversational matches.
 /// Runs SQLite work, so callers on the async runtime wrap it in
 /// `spawn_blocking`.
 pub fn query_rows(
     query: &str,
     limit: usize,
     live: &BTreeSet<String>,
-    include_subagents: bool,
+    include_tool_matches: bool,
 ) -> Result<Vec<WikiRow>> {
     let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     if !index_is_writable() {
@@ -1361,9 +1378,8 @@ pub fn query_rows(
     let connection = open_readonly()?;
     let query = query.trim();
     if query.is_empty() {
-        let rows =
-            sessionwiki::index::recent(&connection, limit, None, None, None, include_subagents)
-                .context("list recent SessionWiki sessions")?;
+        let rows = sessionwiki::index::recent(&connection, limit, None, None, None, false)
+            .context("list recent SessionWiki sessions")?;
         let mut rows: Vec<WikiRow> = rows
             .into_iter()
             .map(|row| wiki_row(row, None, live))
@@ -1371,9 +1387,9 @@ pub fn query_rows(
         fill_session_tags(&connection, &mut rows)?;
         return Ok(rows);
     }
-    // The library search ranks sub-agents too. Ask for enough candidates to
-    // fill the caller's result limit after those unresumable rows are removed.
-    let search_limit = if include_subagents {
+    // Resume filtering may discard tool-only hits. Keep enough candidates to
+    // fill its limit; agent history accepts those hits directly.
+    let search_limit = if include_tool_matches {
         limit
     } else {
         MAX_WIKI_LIMIT
@@ -1390,7 +1406,7 @@ pub fn query_rows(
         if rows.len() >= limit {
             break;
         }
-        if !include_subagents && !is_main_session(&hit.row) {
+        if !is_main_session(&hit.row) {
             continue;
         }
         // A match only in tool text is not one the preview can show: it
@@ -1398,8 +1414,8 @@ pub fn query_rows(
         // reach its parent, as the Task prompt and result Claude Code records
         // in the parent's transcript. Keep such a hit only when the
         // conversation itself matches too. The agents' history search, which
-        // asks for sub-agents, keeps tool matches.
-        if !include_subagents
+        // includes tool-only text, keeps tool matches.
+        if !include_tool_matches
             && !matches!(hit.role.as_str(), "user" | "assistant")
             && !conversation_matches(&connection, &hit.row, query)?
         {
@@ -1412,7 +1428,7 @@ pub fn query_rows(
     // matches follow the full-text ones rather than displacing them.
     if rows.len() < limit {
         let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-        for row in named_like(&connection, query, include_subagents)? {
+        for row in named_like(&connection, query)? {
             if rows.len() >= limit {
                 break;
             }
@@ -1462,7 +1478,7 @@ fn text_matches_in(
         statement = connection.prepare(
             "SELECT f.path, m.role
              FROM messages m JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')
+             WHERE f.tool = ?1 AND f.kind = 'main' AND m.role IN ('user', 'assistant')
                AND m.text LIKE ?2 ESCAPE '\\'
              ORDER BY m.id DESC LIMIT ?3",
         )?;
@@ -1479,7 +1495,7 @@ fn text_matches_in(
              FROM (SELECT rowid AS mid FROM msgs WHERE msgs MATCH ?2 LIMIT ?3) x
              JOIN messages m ON m.id = x.mid
              JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')",
+             WHERE f.tool = ?1 AND f.kind = 'main' AND m.role IN ('user', 'assistant')",
         )?;
         statement
             .query_map(
@@ -1544,18 +1560,12 @@ const NAME_SCAN_LIMIT: usize = 2_000;
 fn named_like(
     connection: &rusqlite::Connection,
     query: &str,
-    include_subagents: bool,
 ) -> Result<Vec<sessionwiki::index::SessionRow>> {
     let needle = query.to_lowercase();
     let sql = format!(
         "SELECT session_id, tool, path, project, title, started, msg_count, kind,
                 archived_at IS NOT NULL
-         FROM files WHERE {} ORDER BY started DESC LIMIT {NAME_SCAN_LIMIT}",
-        if include_subagents {
-            "1=1"
-        } else {
-            "kind = 'main'"
-        }
+         FROM files WHERE kind = 'main' ORDER BY started DESC LIMIT {NAME_SCAN_LIMIT}"
     );
     let mut statement = connection
         .prepare(&sql)
@@ -2480,6 +2490,58 @@ mod tests {
     }
 
     #[test]
+    fn children_have_no_store_keys_metadata_or_pre_destroy_work() {
+        let _held = tags::testing::lock();
+        let (_index, _connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let parent = "0123456789abcdef0123456789abcdef";
+        let child = "fedcba9876543210fedcba9876543210";
+        write_archive(directory.path(), parent, 1);
+        write_archive(directory.path(), child, 1);
+        let source = adapter_with_live(
+            directory.path(),
+            parent,
+            BTreeMap::from([
+                (parent.to_owned(), 1_900_000_000),
+                (child.to_owned(), 1_900_000_001),
+            ]),
+        );
+        {
+            let mut sessions = source.sessions.lock().unwrap();
+            sessions.subagent_ids.insert(child.to_owned());
+            sessions.records.insert(
+                child.to_owned(),
+                SessionRecord {
+                    id: child.into(),
+                    ..record_template()
+                },
+            );
+        }
+        let store = source.store().unwrap();
+        assert_eq!(store.keys.len(), 1);
+        assert_eq!(store.keys[0].0, source.key_for(parent));
+        assert_eq!(store.files.len(), 1);
+        assert_eq!(
+            source.indexed_tags().keys().cloned().collect::<Vec<_>>(),
+            [parent]
+        );
+        assert_eq!(
+            unindexed(&source, &[parent.to_owned(), child.to_owned()]).unwrap(),
+            [parent]
+        );
+        assert!(
+            source
+                .parse_key(&source.key_for(child))
+                .unwrap_err()
+                .to_string()
+                .contains("sub-agent")
+        );
+        // Stopped children are excluded as well, even when their checkpoint remains.
+        source.sessions.lock().unwrap().live.clear();
+        assert_eq!(source.store().unwrap().keys.len(), 1);
+    }
+
+    #[test]
     fn the_newest_checkpoint_of_each_session_is_one_indexed_key() {
         let directory = tempfile::tempdir().unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
@@ -3339,7 +3401,7 @@ mod tests {
     }
 
     #[test]
-    fn one_flag_keeps_sub_agents_out_of_every_query_path() {
+    fn every_query_path_excludes_sub_agents_including_agent_history() {
         let _held = tags::testing::lock();
         let (_directory, connection) = tags::testing::isolated_index();
         for (session_id, kind) in [("main-session", "main"), ("sub-session", "sub")] {
@@ -3364,12 +3426,13 @@ mod tests {
                 )
                 .expect("index the message");
         }
-        let ids = |query: &str, include_subagents: bool| {
-            let mut ids: Vec<String> = query_rows(query, 10, &BTreeSet::new(), include_subagents)
-                .expect("query the index")
-                .into_iter()
-                .map(|row| row.id)
-                .collect();
+        let ids = |query: &str, include_tool_matches: bool| {
+            let mut ids: Vec<String> =
+                query_rows(query, 10, &BTreeSet::new(), include_tool_matches)
+                    .expect("query the index")
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
             ids.sort();
             ids
         };
@@ -3377,11 +3440,7 @@ mod tests {
         // The recent list, full-text search, short-query scan, and title match.
         for query in ["", "bridge derivation", "zq", "an indexed session"] {
             assert_eq!(ids(query, false), ["main-session"], "query {query:?}");
-            assert_eq!(
-                ids(query, true),
-                ["main-session", "sub-session"],
-                "query {query:?}"
-            );
+            assert_eq!(ids(query, true), ["main-session"], "query {query:?}");
         }
     }
 
@@ -3429,12 +3488,13 @@ mod tests {
         message("child", "user", "read the journal");
         message("child", "assistant", "the journal uses a quokka checksum");
 
-        let ids = |query: &str, include_subagents: bool| {
-            let mut ids: Vec<String> = query_rows(query, 10, &BTreeSet::new(), include_subagents)
-                .expect("query the index")
-                .into_iter()
-                .map(|row| row.id)
-                .collect();
+        let ids = |query: &str, include_tool_matches: bool| {
+            let mut ids: Vec<String> =
+                query_rows(query, 10, &BTreeSet::new(), include_tool_matches)
+                    .expect("query the index")
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
             ids.sort();
             ids
         };
@@ -3443,8 +3503,8 @@ mod tests {
             "{:?}",
             ids("quokka", false)
         );
-        // The agents' history search asks for sub-agents and keeps tool text.
-        assert_eq!(ids("quokka", true), ["child", "parent"]);
+        // Agent history keeps the parent's tool text, but never child rows.
+        assert_eq!(ids("quokka", true), ["parent"]);
         assert_eq!(ids("parent zebra", false), ["parent"]);
     }
 
@@ -3651,43 +3711,6 @@ mod tests {
         assert_eq!(unindexed(&source, &ids).unwrap(), [session_id]);
     }
 
-    #[test]
-    fn a_session_tree_holds_the_sub_agents_below_it_and_nothing_else() {
-        let record = |id: &str| {
-            (
-                id.to_owned(),
-                SessionRecord {
-                    project: None,
-                    id: id.into(),
-                    ..record_template()
-                },
-            )
-        };
-        let state = State {
-            sessions: [
-                record("parent"),
-                record("child"),
-                record("grandchild"),
-                record("sibling"),
-            ]
-            .into_iter()
-            .collect(),
-            subagents: [
-                ("child".to_owned(), child("child", "parent")),
-                ("grandchild".to_owned(), child("grandchild", "child")),
-                ("sibling".to_owned(), child("sibling", "other-parent")),
-            ]
-            .into_iter()
-            .collect(),
-            ..State::default()
-        };
-        assert_eq!(
-            session_tree(&state, "parent"),
-            ["parent", "child", "grandchild"]
-        );
-        assert!(session_tree(&state, "unknown").is_empty());
-    }
-
     /// The text search over an in-memory index shaped like SessionWiki's.
     mod text_search {
         use super::super::{SessionTextMatch, SessionTextMatchKind, text_matches_in};
@@ -3698,7 +3721,7 @@ mod tests {
             connection
                 .execute_batch(
                     "CREATE TABLE files(path TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-                                        tool TEXT NOT NULL);
+                                        tool TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'main');
                      CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
                                            role TEXT NOT NULL, text TEXT NOT NULL);
                      CREATE VIRTUAL TABLE msgs USING fts5(
@@ -3708,7 +3731,7 @@ mod tests {
             for (id, messages) in sessions {
                 connection
                     .execute(
-                        "INSERT INTO files VALUES (?1, ?2, 'mjolnir')",
+                        "INSERT INTO files(path, session_id, tool) VALUES (?1, ?2, 'mjolnir')",
                         rusqlite::params![format!("/checkpoints/{id}"), id],
                     )
                     .unwrap();
