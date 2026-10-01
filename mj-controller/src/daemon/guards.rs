@@ -51,9 +51,7 @@ pub(super) fn install_renamed_controller(state: &RuntimeState, controller: Contr
 }
 
 pub(super) fn workspace_snapshot(workspace_id: &str) -> Result<WorkspaceSnapshot> {
-    let workspace = crate::database::list_workspaces()?
-        .into_iter()
-        .find(|workspace| workspace.id == workspace_id)
+    let workspace = crate::database::workspace_record(workspace_id)?
         .with_context(|| format!("unknown workspace {workspace_id:?}"))?;
     let ids = crate::database::session_ids_for_workspace(workspace_id)?
         .into_iter()

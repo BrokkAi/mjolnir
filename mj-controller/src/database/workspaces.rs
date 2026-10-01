@@ -169,8 +169,27 @@ pub fn save_workspace_layout_to(
 }
 
 pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
+    query_workspaces(path, "", &[])
+}
+
+/// One listed workspace, read without aggregating every other workspace's
+/// sessions. `None` means the list would not contain it.
+pub fn workspace_record(workspace_id: &str) -> Result<Option<WorkspaceRecord>> {
+    let mut records = query_workspaces(
+        &database_path(),
+        "WHERE w.workspace_id = ?1",
+        &[&workspace_id],
+    )?;
+    Ok(records.pop())
+}
+
+fn query_workspaces(
+    path: &Path,
+    filter: &str,
+    parameters: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<WorkspaceRecord>> {
     let connection = open_reader(path)?;
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT w.workspace_id, w.name, w.created_at, w.last_opened_at,
                 count(s.session_id) FILTER (
                     WHERE s.state NOT IN ('stopped', 'lost', 'destroyed-with-data-loss')
@@ -178,11 +197,12 @@ pub fn list_workspaces_from(path: &Path) -> Result<Vec<WorkspaceRecord>> {
           FROM workspaces w
            LEFT JOIN session_contexts c USING(workspace_id)
            LEFT JOIN sessions s USING(session_id)
+          {filter}
           GROUP BY w.workspace_id
          HAVING w.workspace_id != 'default' OR count(s.session_id) > 0
-          ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id",
-    )?;
-    let rows = statement.query_map([], |row| {
+          ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id"
+    ))?;
+    let rows = statement.query_map(parameters, |row| {
         Ok(WorkspaceRecord {
             id: row.get(0)?,
             name: row.get(1)?,
