@@ -48,3 +48,43 @@ pub(crate) fn format_resource_bytes(bytes: u64) -> String {
 /// `count` and the noun that agrees with it. It lives in mj-core so the
 /// daemon's and the CLI's messages use it too (launch finding R5-10).
 pub(crate) use mj_core::text::counted;
+
+pub(crate) fn config_choice_label(
+    value: Option<&str>,
+    choices: &[mj_core::acp::SessionConfigChoice],
+    capabilities_discovered: bool,
+) -> String {
+    let Some(value) = value else {
+        return "Profile default".to_owned();
+    };
+    choices
+        .iter()
+        .find(|choice| choice.value == value)
+        .map(|choice| choice.name.clone())
+        .unwrap_or_else(|| {
+            let state = if capabilities_discovered {
+                "unavailable"
+            } else {
+                "unverified"
+            };
+            format!("{value} ({state})")
+        })
+}
+
+pub(crate) fn config_choice_values(
+    value: Option<&str>,
+    choices: &[mj_core::acp::SessionConfigChoice],
+) -> Vec<Option<String>> {
+    let mut values = vec![None];
+    values.extend(choices.iter().map(|choice| Some(choice.value.clone())));
+    if let Some(value) = value
+        && !values
+            .iter()
+            .any(|candidate| candidate.as_deref() == Some(value))
+    {
+        // Keep an invalid value in the form until the user explicitly
+        // changes it. A refresh must never silently pick a new model.
+        values.push(Some(value.to_owned()));
+    }
+    values
+}

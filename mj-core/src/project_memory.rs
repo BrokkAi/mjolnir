@@ -61,6 +61,29 @@ pub enum RepositoryMemoryIdentity {
     },
 }
 
+impl RepositoryMemoryIdentity {
+    /// Reconstruct the identity used by legacy launches from their configured
+    /// sources, independently of names in a newly discovered checkout.
+    pub fn from_configured(repository: &crate::config::ProjectRepository) -> Result<Self> {
+        if let Some(source) = repository.github.as_deref() {
+            let identity = crate::repository::RepositoryIdentity::from_remote(source)
+                .with_context(|| {
+                    format!("parse repository source {source:?} for project memory")
+                })?;
+            return Ok((&identity).into());
+        }
+        let root = repository
+            .local
+            .as_ref()
+            .context("project repository has no source for memory identity")?;
+        Ok(Self::Local {
+            canonical_root: crate::local_git::main_worktree_root(root)
+                .or_else(|_| std::fs::canonicalize(root).map_err(anyhow::Error::from))
+                .unwrap_or_else(|_| root.clone()),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectMemoryIdentity {
@@ -77,6 +100,52 @@ pub enum ProjectMemoryIdentity {
 }
 
 impl ProjectMemoryIdentity {
+    /// The exact identity used before accepted project snapshots were stored.
+    /// Discovery and worker launch share this calculation so raw directories
+    /// cannot borrow memory from an unrelated configured project.
+    pub fn for_legacy_session(
+        session: &crate::state::SessionRecord,
+        bundle: Option<&crate::config::ProjectBundle>,
+        parent_worktree: Option<&crate::state::ManagedWorktree>,
+    ) -> Result<Self> {
+        if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
+            return Ok(Self::Repository {
+                repository: RepositoryMemoryIdentity::Local {
+                    canonical_root: std::fs::canonicalize(&worktree.source_repository)
+                        .unwrap_or_else(|_| worktree.source_repository.clone()),
+                },
+            });
+        }
+        if let Some(bundle) = bundle.filter(|_| session.project_directory.is_none()) {
+            let primary = RepositoryMemoryIdentity::from_configured(
+                bundle.primary().context("bundle primary is missing")?,
+            )?;
+            let members = bundle
+                .repositories
+                .iter()
+                .map(RepositoryMemoryIdentity::from_configured)
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Self::bundle(primary, members));
+        }
+        let project = session
+            .project_directory
+            .as_ref()
+            .context("raw session project directory is missing")?;
+        let repository = match session.target.as_ref() {
+            Some(crate::state::TargetLocator::LocalBare { .. }) => {
+                RepositoryMemoryIdentity::Local {
+                    canonical_root: std::fs::canonicalize(project)
+                        .unwrap_or_else(|_| project.clone()),
+                }
+            }
+            _ => RepositoryMemoryIdentity::Remote {
+                target: session.target_template_id.clone(),
+                canonical_root: project.clone(),
+            },
+        };
+        Ok(Self::Repository { repository })
+    }
+
     /// Stable, non-secret directory key for controller-side memory storage.
     pub fn key(&self) -> Result<String> {
         let encoded = serde_json::to_vec(self).context("encode project memory identity")?;

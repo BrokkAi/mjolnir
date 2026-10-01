@@ -248,7 +248,7 @@ cannot be combined with a session that runs directly in the selected directory.
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
 - `mj new --subagents native|single-model|none` selects delegation
-  for Claude and Codex. Without this option, it uses the selected profile’s setting,
+  for Claude and Codex. Without this option, it uses the selected profile’s creation default,
   which defaults to Native.
   `single-model` requires `--subagent-model` and a corresponding
   `--subagent-effort` when that model offers effort choices. Mjolnir fixes

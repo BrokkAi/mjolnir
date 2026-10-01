@@ -1915,7 +1915,10 @@ exit 0
                 home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                subagents: mj_core::subagent::SubagentPolicy::SingleModel {
+                    model: "creation-default".into(),
+                    effort: Some("low".into()),
+                },
                 guardian_review_model: None,
             },
         );
@@ -1928,6 +1931,7 @@ exit 0
     // The record as `resume_session_controlled` leaves it once the target
     // is provisioned: still provisioning, expecting the archived identity.
     let mut session = checkpoint_test_session(session_id);
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
     session.harness_kind = harness;
     session.last_profile = profile_id.into();
     session.target_template_id = "local-bare".into();
@@ -2019,6 +2023,11 @@ exit 0
             assert_eq!(
                 durable.sessions[session_id].native_session_id.as_deref(),
                 Some("fresh-native")
+            );
+            assert_eq!(
+                durable.sessions[session_id].subagents,
+                Some(mj_core::subagent::SubagentPolicy::AllModels),
+                "Resume retains legacy policy across differing creation defaults"
             );
             if stopped_subagents == StoppedSubagents::One {
                 // The relay holds the note for the first prompt, so the

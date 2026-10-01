@@ -45,6 +45,10 @@ impl Policy {
         stop: &CancellationToken,
     ) -> Self {
         let catalog = ProfileCatalog::new(stop.child_token());
+        assert!(
+            state.profile_catalog.set(catalog.clone()).is_ok(),
+            "daemon catalogue installed once"
+        );
         let reports = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         let rejected = Arc::new(std::sync::Mutex::new(
             mj_core::credentials::RejectedLogins::default(),

@@ -1432,7 +1432,113 @@ function freshDraft() {
   };
 }
 
-const SUBAGENT_MODES = [['native', 'Native'], ['single_model', 'Mjolnir, single model']];
+
+function subagentChoiceApplies(draft = newDraft) {
+  const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
+  return kind === 'claude' || kind === 'codex';
+}
+
+const SUBAGENT_MODES = [
+  ['native', 'Native'],
+  ['single_model', 'Mjolnir, single model'], ['none', 'None'],
+];
+
+function subagentDiscoveryKey(draft) {
+  const inputs = snapshot?.profiles.find(profile => profile.id === draft.profileId)?.subagent_discovery_key || '';
+  return JSON.stringify([draft.profileId, draft.subagents.model || null, inputs]);
+}
+
+function subagentSelectionError(draft) {
+  if (!draft || !subagentChoiceApplies(draft) || !moveSubagentChange(draft) || draft.subagents.mode !== 'single_model') return '';
+  const discovery = draft.subagentDiscovery;
+  if (!discovery || discovery.key !== subagentDiscoveryKey(draft) || discovery.loading) return 'Loading eligible models and efforts…';
+  if (discovery.error) return discovery.error;
+  if (!discovery.options.models.some(choice => choice.value === draft.subagents.model)) return `Select an available subagent model${draft.subagents.model ? ` (${draft.subagents.model} is unavailable)` : ''}.`;
+  const efforts = discovery.options.efforts;
+  if (efforts.length && !efforts.some(choice => choice.value === draft.subagents.effort)) return 'Select an available effort for this model.';
+  if (!efforts.length && draft.subagents.effort != null) return 'The selected effort is unavailable for this model.';
+  return '';
+}
+
+/// `rerender` redraws the form the draft belongs to, if it is still open.
+function discoverSubagentOptions(draft, rerender) {
+  const key = subagentDiscoveryKey(draft);
+  if (draft.subagentDiscovery?.key === key) return;
+  draft.subagentDiscovery?.controller?.abort();
+  const controller = new AbortController();
+  const previous = draft.subagentDiscovery;
+  const sameInputs = previous && JSON.parse(previous.key)[2] === JSON.parse(key)[2]
+    && JSON.parse(previous.key)[0] === draft.profileId;
+  const discovery = { key, loading: true, options: sameInputs ? previous.options : null, error: '', controller };
+  draft.subagentDiscovery = discovery;
+  const model = draft.subagents.model ? `?model=${encodeURIComponent(draft.subagents.model)}` : '';
+  request(`/api/v1/profiles/${encodeURIComponent(draft.profileId)}/subagent-options${model}`, { signal: controller.signal })
+    .then(options => {
+      if (draft.subagentDiscovery !== discovery || subagentDiscoveryKey(draft) !== key) return;
+      discovery.options = options;
+      discovery.loading = false;
+      rerender();
+    }).catch(error => {
+      if (draft.subagentDiscovery !== discovery || controller.signal.aborted || subagentDiscoveryKey(draft) !== key) return;
+      discovery.error = error.message;
+      discovery.loading = false;
+      rerender();
+    });
+}
+
+function subagentSelect(body, label, id, choices, selected, onChange, disabled = false) {
+  const field = el('label', 'field');
+  field.append(document.createTextNode(label));
+  const select = el('select');
+  select.id = id;
+  for (const [value, title] of choices) {
+    const option = el('option', '', title);
+    option.value = value;
+    select.append(option);
+  }
+  select.value = selected;
+  select.disabled = disabled;
+  select.onchange = () => onChange(select.value);
+  field.append(select);
+  body.append(field);
+}
+
+/// The delegation fields for a Move draft. `prefix` keeps the
+/// element ids of the two forms apart; `onChange` runs after an edit, before
+/// `rerender`.
+function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
+  subagentSelect(body, 'Subagents', `${prefix}-subagents`, draft.subagents.mode === 'all_models' ? [...SUBAGENT_MODES, ['all_models', 'Mjolnir, all models (legacy)']] : SUBAGENT_MODES, draft.subagents.mode, mode => {
+    draft.subagentDiscovery?.controller?.abort();
+    draft.subagentDiscovery = null;
+    draft.subagents = mode === 'single_model' ? { mode, model: '', effort: null } : { mode };
+    onChange();
+    rerender();
+  });
+  if (draft.subagents.mode !== 'single_model') return;
+  discoverSubagentOptions(draft, rerender);
+  const discovery = draft.subagentDiscovery;
+  const options = discovery.options;
+  const models = [['', 'Select model'], ...(options?.models || []).map(choice => [choice.value, choice.name])];
+  if (draft.subagents.model && !models.some(([value]) => value === draft.subagents.model)) models.push([draft.subagents.model, `${draft.subagents.model} (unavailable)`]);
+  subagentSelect(body, 'Model', `${prefix}-subagent-model`, models, draft.subagents.model, model => {
+    draft.subagents = { mode: 'single_model', model, effort: null };
+    onChange();
+    rerender();
+  }, !options);
+  const efforts = options?.efforts || [];
+  const choices = [['', efforts.length ? 'Select effort' : 'Harness default'], ...efforts.map(choice => [choice.value, choice.name])];
+  if (draft.subagents.effort && !choices.some(([value]) => value === draft.subagents.effort)) choices.push([draft.subagents.effort, `${draft.subagents.effort} (unavailable)`]);
+  subagentSelect(body, 'Effort', `${prefix}-subagent-effort`, choices, draft.subagents.effort || '', effort => {
+    draft.subagents.effort = effort || null;
+    onChange();
+    rerender();
+  }, discovery.loading || !options || !efforts.length);
+  body.append(el('p', 'dim', 'Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session’s own profile is always eligible.'));
+  const error = subagentSelectionError(draft);
+  if (error) body.append(el('p', 'dim', error));
+  for (const error of options?.unavailable || []) body.append(el('p', 'dim', error));
+
+}
 
 function profileSubagents(profileId) {
   return snapshot?.profiles.find(profile => profile.id === profileId)?.subagents || { mode: 'native' };
@@ -3286,14 +3392,15 @@ function freshMoveDraft(session) {
     // The session's own policy; the prepare request names a policy only
     // when the draft differs from it.
     storedSubagents: session.subagents || { mode: 'native' },
+    subagents: structuredClone(recovery?.subagents || session.subagents || { mode: 'native' }),
+    subagentDiscovery: null,
   };
 }
 
 /// The delegation policy a Move prepare request carries: null keeps the
 /// session's own.
 function moveSubagentChange(draft) {
-  const policy = profileSubagents(draft.profileId);
-  return JSON.stringify(policy) === JSON.stringify(draft.storedSubagents) ? null : policy;
+  return JSON.stringify(draft.subagents) === JSON.stringify(draft.storedSubagents) ? null : draft.subagents;
 }
 
 function moveStoppedChildren(session) {
@@ -3446,6 +3553,11 @@ function renderMoveForm() {
     }
     moveStep.append(targetPicker);
 
+    if (subagentChoiceApplies(draft)) {
+      renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
+        draft.preparation = null;
+      });
+    }
     moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
@@ -3547,16 +3659,21 @@ function renderMoveForm() {
     moveNextButton.textContent = 'Confirm move';
   }
   const busy = draft.preparing || draft.committing;
-  moveNextButton.disabled = busy
+  moveNextButton.disabled = busy || (!preparation && !!subagentSelectionError(draft))
     || (preparation?.active === true && !draft.acknowledge)
     || (preparation?.workspace?.blockers || []).length > 0 || moveStorageProblems(draft).length > 0;
   moveBackButton.disabled = busy;
-  for (const input of moveStep.querySelectorAll('input, select, button')) input.disabled = busy;
+  for (const input of moveStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
 }
 
 async function prepareMove() {
   const draft = moveDraft;
   if (!draft || draft.preparing) return;
+  const subagentError = subagentSelectionError(draft);
+  if (subagentError) {
+    moveError.textContent = subagentError;
+    return;
+  }
   if (!draft.profileId && !draft.targetId) {
     moveError.textContent = 'Choose a profile, a target, or both.';
     return;

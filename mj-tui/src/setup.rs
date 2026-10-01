@@ -34,6 +34,7 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 
 /// Which section of the configuration a detection run fills in. Each scope
@@ -78,7 +79,9 @@ pub(crate) enum SetupControl {
     Clear,
     Apply,
     DetectProfiles,
-    RefreshSubagents,
+    SubagentMode,
+    SubagentModel,
+    SubagentEffort,
     DetectRuntimes,
     Save,
     Cancel,
@@ -184,6 +187,10 @@ pub(crate) struct SetupDialog {
     pub(crate) review_editor: Option<Box<ReviewSettingsDialog>>,
     review_validation: Option<ReviewSettingsValidation>,
     subagent_choices: Option<ProfileSubagentChoices>,
+    subagent_cache: BTreeMap<String, mj_core::subagent::SubagentOptions>,
+    subagent_models: Vec<mj_core::acp::SessionConfigChoice>,
+    subagent_inputs: String,
+    subagent_combo: ComboBoxState<SetupControl>,
     pub(crate) form: RefCell<Dialog<SetupControl>>,
     pub(crate) saving: bool,
     discovering: bool,
@@ -828,6 +835,10 @@ impl SetupDialog {
             review_editor: None,
             review_validation: None,
             subagent_choices: None,
+            subagent_cache: BTreeMap::new(),
+            subagent_models: Vec::new(),
+            subagent_inputs: String::new(),
+            subagent_combo: ComboBoxState::default(),
             form: RefCell::new(Dialog::default()),
             saving: false,
             discovering: false,
@@ -919,17 +930,6 @@ impl SetupDialog {
                 interactive && !self.discovering && !self.saving,
             ));
         }
-        if self.path.len() == 3
-            && self.path[0] == "profiles"
-            && self.path[2] == "subagents"
-            && self.current()["mode"] == "single_model"
-        {
-            let loading = self
-                .subagent_choices
-                .as_ref()
-                .is_some_and(|choices| choices.result.is_none());
-            actions.push((RefreshSubagents, "Refresh models", interactive && !loading));
-        }
         actions.push((Save, self.save_label(), !self.saving));
         actions
     }
@@ -993,6 +993,7 @@ impl SetupDialog {
         self.selected = self.selected.min(len.saturating_sub(1));
         let actions = self.actions();
         let identity = format!("{:?}/{:?}", self.path, self.keys());
+        let subagent_fields = self.subagent_page().then(|| self.subagent_fields());
         let form = self.form.get_mut();
         form.begin_frame();
         let initial = if let Some(editor) = &self.editor {
@@ -1014,6 +1015,19 @@ impl SetupDialog {
                 );
                 Choices
             }
+        } else if let Some(fields) = subagent_fields {
+            for (id, _, values, selected, enabled) in fields {
+                form.declare_with_enabled(
+                    id,
+                    ControlKind::ComboBox {
+                        len: values.len(),
+                        selected: self.subagent_combo.selection(id, selected),
+                        expanded: self.subagent_combo.is_open(id),
+                    },
+                    enabled,
+                );
+            }
+            SubagentMode
         } else {
             let kind = ControlKind::ChoiceList {
                 len,
@@ -1791,12 +1805,126 @@ impl SetupDialog {
         Ok(())
     }
 
+    fn subagent_page(&self) -> bool {
+        self.path.len() == 3
+            && self.path[0] == "profiles"
+            && self.path[2] == "subagents"
+            && self.editor.is_none()
+            && self.search.is_none()
+    }
+
+    fn subagent_fields(&self) -> Vec<(SetupControl, &'static str, Vec<Value>, usize, bool)> {
+        use SetupControl::*;
+        let policy = &self.draft["profiles"][&self.path[1]]["subagents"];
+        let mut mode = schema::choices(&self.subagent_field_path(SubagentMode), &self.draft);
+        if !mode.contains(&policy["mode"]) {
+            mode.push(policy["mode"].clone());
+        }
+        let selected = mode.iter().position(|v| *v == policy["mode"]).unwrap_or(0);
+        let mut fields = vec![(SubagentMode, "Subagents", mode, selected, true)];
+        if policy["mode"] == "single_model" {
+            let models = crate::widgets::config_choice_values(
+                policy["model"].as_str().filter(|s| !s.is_empty()),
+                &self.subagent_models,
+            )
+            .into_iter()
+            .map(|value| json!(value.unwrap_or_default()))
+            .collect::<Vec<_>>();
+            let efforts = self
+                .subagent_choices
+                .as_ref()
+                .and_then(|c| c.result.as_ref())
+                .and_then(|r| r.as_ref().ok());
+            let efforts = crate::widgets::config_choice_values(
+                policy["effort"].as_str(),
+                efforts.map_or(&[], |options| &options.efforts),
+            )
+            .into_iter()
+            .map(|value| json!(value))
+            .collect::<Vec<_>>();
+            let model = models
+                .iter()
+                .position(|v| *v == policy["model"])
+                .unwrap_or(0);
+            let effort = efforts
+                .iter()
+                .position(|v| *v == policy["effort"])
+                .unwrap_or(0);
+            fields.push((
+                SubagentModel,
+                "Model",
+                models,
+                model,
+                !self.subagent_models.is_empty(),
+            ));
+            fields.push((
+                SubagentEffort,
+                "Effort",
+                efforts,
+                effort,
+                self.subagent_choices
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.result, Some(Ok(_)))),
+            ));
+        }
+        fields
+    }
+
+    fn subagent_field_path(&self, id: SetupControl) -> Vec<String> {
+        let mut path = self.path.clone();
+        path.push(
+            match id {
+                SetupControl::SubagentMode => "mode",
+                SetupControl::SubagentModel => "model",
+                _ => "effort",
+            }
+            .into(),
+        );
+        path
+    }
+
+    fn apply_subagent_field(&mut self, id: SetupControl, selected: usize) -> Result<(), String> {
+        let (_, _, choices, _, _) = self
+            .subagent_fields()
+            .into_iter()
+            .find(|(field, ..)| *field == id)
+            .ok_or("field unavailable")?;
+        self.editor = Some(Editor {
+            path: self.subagent_field_path(id),
+            input: EditorInput::Text(TextInput::new()),
+            choices,
+            selected,
+            combo: ComboBoxState::default(),
+            adding: false,
+        });
+        self.apply_editor(false)
+    }
+
     fn subagent_value_label(&self, path: &[String], value: &Value) -> Option<String> {
         if path.len() != 4 || path[0] != "profiles" || path[2] != "subagents" {
             return None;
         }
         match path[3].as_str() {
+            "mode" if value == "all_models" => Some("Mjolnir, all models (legacy)".into()),
+            "mode" if value == "none" => Some("None".into()),
             "model" if value == "" => Some("Select model".into()),
+            "model" | "effort" if value.is_string() => {
+                let options = self
+                    .subagent_choices
+                    .as_ref()
+                    .and_then(|choices| choices.result.as_ref())
+                    .and_then(|result| result.as_ref().ok());
+                let choices = if path[3] == "model" {
+                    self.subagent_models.as_slice()
+                } else {
+                    options.map_or(&[][..], |options| options.efforts.as_slice())
+                };
+                Some(crate::widgets::config_choice_label(
+                    value.as_str(),
+                    choices,
+                    options.is_some(),
+                ))
+            }
             "effort" if value.is_null() => {
                 let requires_effort = self
                     .subagent_choices
@@ -1831,10 +1959,12 @@ impl SetupDialog {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let config = config_from_draft(self.draft.clone()).ok()?;
-        let key = format!(
-            "{profile}:{model:?}:{}",
-            serde_json::to_string(&config).ok()?
-        );
+        let inputs = config.subagent_discovery_key(&profile, None);
+        if self.subagent_inputs != inputs {
+            self.subagent_models.clear();
+            self.subagent_inputs = inputs.clone();
+        }
+        let key = config.subagent_discovery_key(&profile, model.as_deref());
         if self
             .subagent_choices
             .as_ref()
@@ -1842,16 +1972,24 @@ impl SetupDialog {
         {
             return None;
         }
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = crate::wizards::next_subagent_discovery_id();
         self.notice = Some("Loading subagent models and efforts…".into());
         self.subagent_choices = Some(ProfileSubagentChoices {
             id,
-            key,
+            key: key.clone(),
             profile: profile.clone(),
             model: model.clone(),
-            result: None,
+            result: self.subagent_cache.get(&key).cloned().map(Ok),
         });
+        if self
+            .subagent_choices
+            .as_ref()
+            .is_some_and(|choices| choices.result.is_some())
+        {
+            self.subagent_models = self.subagent_cache[&key].models.clone();
+            self.notice = None;
+            return None;
+        }
         Some(DashboardAction::DiscoverSubagentOptions {
             id,
             profile,
@@ -2146,11 +2284,23 @@ impl DashboardState {
         id: u64,
         result: Result<mj_core::subagent::SubagentOptions, String>,
     ) {
+        if matches!(self.mode, Mode::Resume(_)) {
+            self.apply_move_subagent_options(id, result);
+            return;
+        }
         let Mode::Setup(dialog) = &mut self.mode else {
             return;
         };
+        let current_key = dialog.subagent_choices.as_ref().and_then(|choices| {
+            let config = config_from_draft(dialog.draft.clone()).ok()?;
+            let model = dialog.draft["profiles"][&choices.profile]["subagents"]["model"]
+                .as_str()
+                .filter(|s| !s.is_empty());
+            Some(config.subagent_discovery_key(&choices.profile, model))
+        });
         if let Some(choices) = &mut dialog.subagent_choices
             && choices.id == id
+            && current_key.as_ref() == Some(&choices.key)
         {
             dialog.notice = match &result {
                 Err(error) => Some(format!("Subagent model discovery failed: {error}")),
@@ -2159,6 +2309,12 @@ impl DashboardState {
                 }
                 Ok(_) => None,
             };
+            if let Ok(options) = &result {
+                dialog.subagent_models = options.models.clone();
+                dialog
+                    .subagent_cache
+                    .insert(choices.key.clone(), options.clone());
+            }
             choices.result = Some(result);
         }
     }
@@ -2314,6 +2470,8 @@ impl DashboardState {
             } else {
                 interaction
             }
+        } else if dialog.subagent_page() {
+            dialog.subagent_combo.route(interaction)
         } else {
             interaction
         };
@@ -2328,8 +2486,20 @@ impl DashboardState {
             };
         let mut action = DashboardAction::None;
         match interaction {
-            Some(Interaction::Activate(RefreshSubagents)) => {
-                dialog.subagent_choices = None;
+            Some(Interaction::Activate(id @ (SubagentMode | SubagentModel | SubagentEffort))) => {
+                if let Some((_, _, _, selected, _)) = dialog
+                    .subagent_fields()
+                    .into_iter()
+                    .find(|(field, ..)| *field == id)
+                {
+                    dialog.subagent_combo.open(id, selected);
+                }
+            }
+            Some(Interaction::ComboBoxCommit(
+                id @ (SubagentMode | SubagentModel | SubagentEffort),
+                index,
+            )) => {
+                dialog.notice = dialog.apply_subagent_field(id, index).err();
             }
             Some(Interaction::Activate(OpenSearch)) => {
                 dialog.open_search();
@@ -2949,6 +3119,7 @@ pub(crate) fn render_setup(
     // Where a rejected value is reported while a field is being edited: with
     // the field, not on the dialog's bottom rows far below it.
     let mut editor_notice = None;
+    let mut expanded_subagents = None;
     if text_editor {
         let editor = dialog.editor.as_ref().expect("text editor");
         let label = if editor.adding {
@@ -2992,6 +3163,62 @@ pub(crate) fn render_setup(
             ));
         }
         initial = Field;
+    } else if dialog.subagent_page() {
+        let fields = dialog.subagent_fields();
+        let focused_row = fields
+            .iter()
+            .position(|(id, ..)| form.is_focused(*id))
+            .map(|index| index as u16 * 2);
+        let viewport =
+            mj_chat::components::FormViewport::new(body, fields.len() as u16 * 2, 0, focused_row);
+        for (index, (id, label, values, committed, enabled)) in fields.into_iter().enumerate() {
+            let row = viewport.row(index as u16 * 2, 1);
+            let label_width = 11.min(row.width.saturating_sub(4));
+            frame.render_widget(
+                Paragraph::new(label),
+                Rect::new(row.x, row.y, label_width, row.height),
+            );
+            let field = Rect::new(
+                row.x + label_width,
+                row.y,
+                row.width - label_width,
+                row.height,
+            );
+            let path = dialog.subagent_field_path(id);
+            let selected = dialog.subagent_combo.selection(id, committed);
+            let rows = values
+                .iter()
+                .map(|v| {
+                    Line::raw(
+                        dialog
+                            .subagent_value_label(&path, v)
+                            .unwrap_or_else(|| schema::choice_label(&path, v, &dialog.draft)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let value = rows
+                .get(selected)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            ComboBox::render(
+                frame,
+                inner,
+                field,
+                &value,
+                &rows,
+                selected,
+                false,
+                enabled,
+                " Values ",
+                PopupSide::Below,
+                &mut form,
+                id,
+            );
+            if dialog.subagent_combo.is_open(id) {
+                expanded_subagents = Some((id, field, value, rows, selected, enabled));
+            }
+        }
+        initial = SubagentMode;
     } else {
         let keys = dialog.keys();
         let mut rows = Vec::new();
@@ -3212,6 +3439,22 @@ pub(crate) fn render_setup(
                     notice_rows,
                 )
             }),
+        );
+    }
+    if let Some((id, field, value, rows, selected, enabled)) = expanded_subagents {
+        ComboBox::render(
+            frame,
+            inner,
+            field,
+            &value,
+            &rows,
+            selected,
+            true,
+            enabled,
+            " Values ",
+            PopupSide::Below,
+            &mut form,
+            id,
         );
     }
     form.end_frame(initial);

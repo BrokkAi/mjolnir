@@ -5133,15 +5133,93 @@ const assert = (condition, message) => { if (!condition) throw Error(message); }
 const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagents: { mode: "native" } };
 assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
 snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
-assert(JSON.stringify(moveSubagentChange(draft)) === '{"mode":"single_model","model":"chosen","effort":"high"}', "the destination profile policy must be sent");
+assert(moveSubagentChange(draft) === null, "changing profile defaults must retain the session policy");
+draft.subagents = { mode: "single_model", model: "explicit", effort: "low" };
+assert(moveSubagentChange(draft).model === "explicit", "an explicit session edit is submitted");
+draft.subagents = structuredClone(draft.storedSubagents);
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
 draft.storedSubagents = { mode: "all_models" };
-assert(moveSubagentChange(draft).mode === "native", "a native destination resets a previous Mjolnir policy");
+draft.subagents = structuredClone(draft.storedSubagents);
+assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
 "#;
     run_viewer_script(
         "viewer-move-subagents",
         &format!("{setup}\n{source}\n{checks}"),
+    );
+}
+
+#[test]
+fn viewer_move_controls_preserve_legacy_and_keep_models_available_while_efforts_load() {
+    let source = format!(
+        "{}\n{}",
+        viewer_source(
+            "function subagentChoiceApplies(",
+            "function profileSubagents("
+        ),
+        viewer_source(
+            "function moveSubagentChange(",
+            "function moveStoppedChildren("
+        )
+    );
+    run_web_check(
+        "viewer-move-controls",
+        &format!(
+            r#"
+import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
+installDocument();
+let newDraft = null;
+const snapshot = {{ profiles: [{{ id: 'parent', harness_kind: 'codex', subagent_discovery_key: 'installation-1' }}] }};
+function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
+const pending = [];
+function request(url, options) {{ return new Promise((resolve, reject) => pending.push({{ url, resolve, reject, options }})); }}
+{source}
+const draft = {{ profileId: 'parent', storedSubagents: {{mode:'all_models'}}, subagents: {{mode:'all_models'}}, subagentDiscovery: null }};
+let edits = 0;
+function render() {{ const body = el('div'); renderSubagentFields(body, draft, 'move', () => {{}}, () => edits++); return elements(body, 'select'); }}
+let fields = render();
+check(fields[0].childNodes.some(node => node.value === 'all_models'), 'legacy policy is visible when recorded');
+check(moveSubagentChange(draft) === null, 'opening controls preserves legacy policy');
+fields[0].value = 'native'; fields[0].onchange();
+fields = render();
+check(!fields[0].childNodes.some(node => node.value === 'all_models'), 'All models cannot be newly selected');
+fields[0].value = 'single_model'; fields[0].onchange();
+fields = render();
+checkEqual(pending.length, 1, 'one initial model request');
+const choice = value => ({{value, name:value}});
+pending[0].resolve({{models:[choice('a'), choice('b')], efforts:[], unavailable:[]}});
+await Promise.resolve();
+fields = render();
+fields[1].value = 'a'; fields[1].onchange();
+fields = render();
+checkEqual(pending.length, 2, 'model efforts load separately');
+check(!fields[1].disabled, 'model picker remains available while efforts load');
+check(fields[2].disabled, 'effort picker waits for model-specific reply');
+pending[1].resolve({{models:[choice('a'), choice('b')], efforts:[choice('low'), choice('high')], unavailable:[]}});
+await Promise.resolve();
+fields = render();
+fields[2].value = 'high'; fields[2].onchange(); render();
+checkEqual(pending.length, 2, 'effort edit reuses discovery');
+snapshot.profiles[0].subagents = {{ mode:'single_model', model:'creation-default', effort:'low' }};
+render();
+checkEqual(pending.length, 2, 'creation-default edits do not invalidate capabilities');
+checkEqual(draft.subagents.model, 'a', 'saving profile defaults retains session draft');
+snapshot.profiles[0].subagent_discovery_key = 'installation-2';
+fields = render();
+checkEqual(pending.length, 3, 'relevant installation edits invalidate discovery');
+check(fields[1].disabled, 'old installation models are cleared while new inputs load');
+fields[1].value = 'b'; fields[1].onchange(); render();
+checkEqual(pending.length, 4, 'new model request supersedes prior request');
+pending[2].resolve({{models:[choice('stale')], efforts:[], unavailable:[]}});
+await Promise.resolve();
+check(draft.subagentDiscovery.loading, 'retired reply cannot finish current discovery');
+pending[3].resolve({{models:[choice('a'), choice('b')], efforts:[choice('medium')], unavailable:[]}});
+await Promise.resolve();
+checkEqual(draft.subagentDiscovery.options.efforts[0].value, 'medium', 'current model reply supplies efforts');
+checkEqual(moveSubagentChange(draft).model, 'b', 'explicit session choice is submitted');
+check(edits >= 4, 'controls report explicit edits');
+"#
+        ),
     );
 }

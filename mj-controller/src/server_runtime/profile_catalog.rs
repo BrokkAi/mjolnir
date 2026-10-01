@@ -19,8 +19,8 @@
 //! the daemon adopts a configuration before it serves.
 //!
 //! A discovery belongs to a generation, the integer that identifies one
-//! adopted configuration. Changing the profiles or the sub-agent policy bumps
-//! the generation, drops everything the catalogue holds, and starts a new pass;
+//! adopted configuration. Changing discovery inputs or eligibility bumps
+//! the generation, retains unaffected entries, and starts a new pass;
 //! a discovery of a superseded generation is not published, because the profile
 //! it describes may have changed under the same id. Failures are reported and
 //! never cached, so the next call that needs the profile tries again.
@@ -59,7 +59,14 @@ impl ProfilesKey {
     /// every reload lands here — from copying what the catalogue already
     /// holds.
     fn matches(&self, config: &Config) -> bool {
-        self.profiles == config.profiles && self.subagents == config.subagents
+        self.profiles.len() == config.profiles.len()
+            && self.profiles.iter().all(|(id, profile)| {
+                config.profiles.get(id).is_some_and(|updated| {
+                    profile.enabled == updated.enabled
+                        && profile.discovery_inputs() == updated.discovery_inputs()
+                })
+            })
+            && self.subagents.eligible_profiles == config.subagents.eligible_profiles
     }
 
     /// The profiles one parent may delegate to: every enabled profile the
@@ -123,6 +130,12 @@ enum Entry {
     Pending(Attempt),
 }
 
+impl Entry {
+    fn belongs_to(&self, attempt: &Attempt) -> bool {
+        matches!(self, Self::Pending(current) if current.ptr_eq(attempt))
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     /// Identifies the adopted configuration. A discovery publishes only while
@@ -133,6 +146,8 @@ struct Inner {
     key: Option<ProfilesKey>,
     /// What the current generation holds for the profiles it was asked about.
     entries: BTreeMap<String, Entry>,
+    models: BTreeMap<(String, String), Entry>,
+    fingerprints: BTreeMap<String, String>,
 }
 
 impl Inner {
@@ -162,13 +177,14 @@ pub(crate) struct ProfileCatalog {
     probe: Arc<Probe>,
     model_probe: Arc<ModelProbe>,
     inner: Mutex<Inner>,
+    check_home: bool,
 }
 
 impl ProfileCatalog {
     /// Build the catalogue the daemon serves, discovering through the shared
     /// per-profile discovery every other profile-configuration caller uses.
     pub(crate) fn new(cancellation: CancellationToken) -> Arc<Self> {
-        Self::build(
+        let mut catalog = Self::build(
             cancellation,
             Arc::new(|profile| {
                 Box::pin(crate::controller::profile_config::discover(
@@ -182,7 +198,11 @@ impl ProfileCatalog {
                     false,
                 ))
             }),
-        )
+        );
+        Arc::get_mut(&mut catalog)
+            .expect("new catalogue has one owner")
+            .check_home = true;
+        catalog
     }
 
     fn build(
@@ -195,6 +215,7 @@ impl ProfileCatalog {
             probe,
             model_probe,
             inner: Mutex::new(Inner::default()),
+            check_home: false,
         })
     }
 
@@ -204,7 +225,63 @@ impl ProfileCatalog {
         profile: String,
         model: String,
     ) -> Result<ProfileConfig> {
-        (self.model_probe)(profile, model).await
+        let generation = self.lock().generation_for(std::slice::from_ref(&profile))?;
+        let generation = self.check_inputs(generation, &profile).await?;
+        let key = (profile.clone(), model.clone());
+        let entry = {
+            let mut inner = self.lock();
+            anyhow::ensure!(
+                inner.generation == generation,
+                "profile configuration changed during discovery"
+            );
+            // The default probe already supplies its selected model's efforts.
+            if let Some(Entry::Ready(choices)) = inner.entries.get(&profile)
+                && choices.model.as_ref() == Some(&model)
+            {
+                return Ok(choices.clone());
+            }
+            match inner.models.get(&key) {
+                Some(Entry::Ready(choices)) => return Ok(choices.clone()),
+                Some(Entry::Pending(attempt)) => attempt.clone(),
+                None => {
+                    let attempt = (self.model_probe)(profile, model)
+                        .map_err(|error| DiscoveryFailure(format!("{error:#}").into()))
+                        .boxed()
+                        .shared();
+                    inner
+                        .models
+                        .insert(key.clone(), Entry::Pending(attempt.clone()));
+                    attempt
+                }
+            }
+        };
+        let result = tokio::select! {
+            _ = self.cancellation.cancelled() => bail!("profile discovery cancelled by daemon shutdown"),
+            result = entry.clone() => result,
+        };
+        let mut inner = self.lock();
+        anyhow::ensure!(
+            inner.generation == generation,
+            "profile configuration changed during discovery"
+        );
+        let owns_entry = inner
+            .models
+            .get(&key)
+            .is_some_and(|current| current.belongs_to(&entry));
+        match result {
+            Ok(choices) => {
+                if owns_entry {
+                    inner.models.insert(key, Entry::Ready(choices.clone()));
+                }
+                Ok(choices)
+            }
+            Err(error) => {
+                if owns_entry {
+                    inner.models.remove(&key);
+                }
+                Err(error.into())
+            }
+        }
     }
 
     /// Adopt the configuration and warm the catalogue when it changed. The
@@ -229,10 +306,26 @@ impl ProfileCatalog {
         }
         let key = ProfilesKey::of(config);
         inner.generation = inner.generation.wrapping_add(1);
-        // The discoveries of the previous configuration describe profiles
-        // that may have changed under the same id, so they are dropped rather
-        // than reused.
-        inner.entries.clear();
+        let unchanged = |id: &String| {
+            inner
+                .key
+                .as_ref()
+                .and_then(|old| old.profiles.get(id))
+                .zip(key.profiles.get(id))
+                .is_some_and(|(old, new)| {
+                    new.enabled && old.discovery_inputs() == new.discovery_inputs()
+                })
+        };
+        let retained: std::collections::BTreeSet<_> = inner
+            .entries
+            .keys()
+            .chain(inner.models.keys().map(|(id, _)| id))
+            .filter(|id| unchanged(id))
+            .cloned()
+            .collect();
+        inner.entries.retain(|id, _| retained.contains(id));
+        inner.models.retain(|(id, _), _| retained.contains(id));
+        inner.fingerprints.retain(|id, _| retained.contains(id));
         inner.key = Some(key.clone());
         Some((inner.generation, key))
     }
@@ -254,6 +347,10 @@ impl ProfileCatalog {
             let inner = self.lock();
             inner.generation_for(profiles)?
         };
+        let mut generation = generation;
+        for profile in profiles {
+            generation = self.check_inputs(generation, profile).await?;
+        }
         let mut discoveries: Vec<BoxFuture<'_, Result<ProfileConfig>>> =
             Vec::with_capacity(profiles.len());
         for profile in profiles {
@@ -264,13 +361,13 @@ impl ProfileCatalog {
                     let profile = profile.clone();
                     discoveries.push(
                         async move {
-                            match attempt.await {
+                            match attempt.clone().await {
                                 Ok(config) => {
-                                    catalog.remember(generation, &profile, &config);
+                                    catalog.remember(generation, &profile, &attempt, &config);
                                     Ok(config)
                                 }
                                 Err(failure) => {
-                                    catalog.forget(generation, &profile);
+                                    catalog.forget(generation, &profile, &attempt);
                                     Err(anyhow::anyhow!(
                                         "could not discover the capabilities of the \
                                          '{profile}' profile: {failure}"
@@ -294,7 +391,94 @@ impl ProfileCatalog {
             ),
             results = join_all(discoveries) => results,
         };
+        anyhow::ensure!(
+            self.is_current(generation),
+            "profile configuration changed during discovery"
+        );
         results.into_iter().collect()
+    }
+
+    /// Probe a settings draft without adopting it. Unchanged discovery inputs
+    /// share the live catalogue, including model-specific pending work.
+    pub(crate) async fn options_for(
+        &self,
+        config: &Config,
+        parent: &str,
+        model: Option<String>,
+    ) -> Result<mj_core::subagent::SubagentOptions> {
+        crate::controller::profile_config::subagent_options_with(
+            config,
+            parent,
+            model,
+            |id, model| {
+                let live = self
+                    .lock()
+                    .key
+                    .as_ref()
+                    .and_then(|key| key.profiles.get(&id))
+                    .zip(config.profiles.get(&id))
+                    .is_some_and(|(live, draft)| {
+                        live.enabled && live.discovery_inputs() == draft.discovery_inputs()
+                    });
+                async move {
+                    if live {
+                        match model {
+                            Some(model) => self.model_capabilities(id, model).await,
+                            None => Ok(self.capabilities(&[id]).await?.remove(0)),
+                        }
+                    } else {
+                        crate::controller::profile_config::discover_for(config.clone(), id, model)
+                            .await
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    /// Home/provider files and resolved credentials are discovery inputs too.
+    /// Read them in a background task, never on the daemon event loop.
+    async fn check_inputs(&self, generation: u64, id: &str) -> Result<u64> {
+        if !self.check_home {
+            return Ok(generation);
+        }
+        let profile = {
+            let inner = self.lock();
+            anyhow::ensure!(
+                inner.generation == generation,
+                "profile configuration changed during discovery"
+            );
+            inner
+                .adopted()?
+                .profiles
+                .get(id)
+                .context("profile unavailable")?
+                .clone()
+        };
+        let profile_id = id.to_owned();
+        let fingerprint = tokio::task::spawn_blocking(move || {
+            crate::controller::profile_config::discovery_fingerprint(&profile_id, &profile)
+        })
+        .await
+        .context("profile fingerprint task panicked")??;
+        let mut inner = self.lock();
+        anyhow::ensure!(
+            inner.generation == generation,
+            "profile configuration changed during discovery"
+        );
+        if inner
+            .fingerprints
+            .get(id)
+            .is_some_and(|old| old != &fingerprint)
+        {
+            inner.entries.remove(id);
+            inner.models.retain(|(profile, _), _| profile != id);
+            // One serialized owner retires pending replies along with the
+            // cached entry; an older probe cannot republish after invalidation.
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+        inner.fingerprints.insert(id.to_owned(), fingerprint);
+        Ok(inner.generation)
     }
 
     /// The state of one profile of `generation`: what the pass has already
@@ -325,9 +509,14 @@ impl ProfileCatalog {
     /// Keep a discovery the current generation was missing. A configuration
     /// change since the discovery was started made it stale, so it is dropped
     /// rather than published under the wrong configuration.
-    fn remember(&self, generation: u64, profile: &str, config: &ProfileConfig) {
+    fn remember(&self, generation: u64, profile: &str, attempt: &Attempt, config: &ProfileConfig) {
         let mut inner = self.lock();
-        if inner.generation != generation {
+        if inner.generation != generation
+            || !inner
+                .entries
+                .get(profile)
+                .is_some_and(|entry| entry.belongs_to(attempt))
+        {
             return;
         }
         inner
@@ -339,9 +528,14 @@ impl ProfileCatalog {
     /// again. A failure is never published: caching one would freeze a
     /// transient harness failure into the tool's answer until the
     /// configuration changed or the daemon restarted.
-    fn forget(&self, generation: u64, profile: &str) {
+    fn forget(&self, generation: u64, profile: &str, attempt: &Attempt) {
         let mut inner = self.lock();
-        if inner.generation != generation {
+        if inner.generation != generation
+            || !inner
+                .entries
+                .get(profile)
+                .is_some_and(|entry| entry.belongs_to(attempt))
+        {
             return;
         }
         inner.entries.remove(profile);
@@ -350,7 +544,7 @@ impl ProfileCatalog {
     /// Discover every profile the adopted configuration can offer, publishing
     /// each as it lands so a call that arrives between two slow probes still
     /// avoids the discovery the pass already did.
-    async fn warm_pass(self: Arc<Self>, generation: u64, key: ProfilesKey) {
+    async fn warm_pass(self: Arc<Self>, mut generation: u64, key: ProfilesKey) {
         let mut discoveries = FuturesUnordered::new();
         for profile in key.warm_set() {
             // A pass whose configuration is already replaced, or whose server
@@ -358,11 +552,21 @@ impl ProfileCatalog {
             if self.cancellation.is_cancelled() {
                 break;
             }
+            match self.check_inputs(generation, &profile).await {
+                Ok(current) => generation = current,
+                Err(error) => {
+                    tracing::warn!(profile, error = %error, "profile catalogue input discovery failed");
+                    continue;
+                }
+            }
             match self.entry(generation, &profile) {
                 None => break,
                 Some(Entry::Ready(_)) => {}
                 Some(Entry::Pending(attempt)) => {
-                    discoveries.push(async move { (profile, attempt.await) });
+                    discoveries.push(async move {
+                        let result = attempt.clone().await;
+                        (profile, attempt, result)
+                    });
                 }
             }
         }
@@ -371,7 +575,7 @@ impl ProfileCatalog {
                 _ = self.cancellation.cancelled() => break,
                 next = discoveries.next() => next,
             };
-            let Some((profile, result)) = next else {
+            let Some((profile, attempt, result)) = next else {
                 break;
             };
             if !self.is_current(generation) {
@@ -380,11 +584,11 @@ impl ProfileCatalog {
                 break;
             }
             match result {
-                Ok(config) => self.remember(generation, &profile, &config),
+                Ok(config) => self.remember(generation, &profile, &attempt, &config),
                 Err(failure) => {
                     // The failure is reported and dropped rather than
                     // published; the next call that needs the profile retries.
-                    self.forget(generation, &profile);
+                    self.forget(generation, &profile, &attempt);
                     tracing::warn!(
                         profile,
                         error = %failure,
@@ -541,6 +745,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delayed_failed_waiter_cannot_remove_or_replace_the_retry() {
+        let calls = calls();
+        let probes_fail = fails();
+        let catalog = ProfileCatalog::with_probe(flag_probe(probes_fail.clone(), calls.clone()));
+        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        let (generation, _) = catalog.claim_pass(&config).unwrap();
+        let Some(Entry::Pending(failed)) = catalog.entry(generation, "parent") else {
+            panic!("first attempt");
+        };
+        assert!(failed.clone().await.is_err());
+        catalog.forget(generation, "parent", &failed);
+        probes_fail.store(false, Ordering::SeqCst);
+        let Some(Entry::Pending(retry)) = catalog.entry(generation, "parent") else {
+            panic!("retry");
+        };
+        // Another waiter from the first attempt finishes after a new caller
+        // has claimed its retry. Only the retry owns this entry now.
+        catalog.forget(generation, "parent", &failed);
+        catalog.remember(generation, "parent", &failed, &test_choices("stale"));
+        let choices = catalog.capabilities(&["parent".into()]).await.unwrap();
+        assert_eq!(choices[0].model.as_deref(), Some("parent-model"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the retry is shared");
+        catalog.forget(generation, "parent", &failed);
+        catalog.forget(generation, "parent", &retry);
+        catalog.capabilities(&["parent".into()]).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "late waiters cannot discard ready entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_file_changes_retire_pending_model_replies_and_populate_only_affected_entries()
+    {
+        let home = tempfile::tempdir().unwrap();
+        let calls = calls();
+        let model_calls = calls.clone();
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            counting_probe(Arc::new(AtomicUsize::new(0))),
+            Arc::new(move |profile, _model| {
+                let number = model_calls.fetch_add(1, Ordering::SeqCst);
+                let mut gate = gate.clone();
+                let started = started_tx.clone();
+                Box::pin(async move {
+                    if number == 0 {
+                        started.send(()).unwrap();
+                        gate.changed().await.unwrap();
+                    }
+                    let mut choices = test_choices(&profile);
+                    choices.observed_at = number as i64;
+                    Ok(choices)
+                })
+            }),
+        );
+        Arc::get_mut(&mut catalog).unwrap().check_home = true;
+        let mut config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        config.profiles.get_mut("parent").unwrap().home = home.path().into();
+        catalog.sync_now(&config).await;
+        let pending = {
+            let catalog = catalog.clone();
+            tokio::spawn(async move {
+                catalog
+                    .model_capabilities("parent".into(), "other".into())
+                    .await
+            })
+        };
+        started.recv().await.unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model_provider = 'changed'\n",
+        )
+        .unwrap();
+        let fresh = catalog
+            .model_capabilities("parent".into(), "other".into())
+            .await
+            .unwrap();
+        assert_eq!(fresh.observed_at, 1);
+        release.send(true).unwrap();
+        assert!(
+            pending.await.unwrap().is_err(),
+            "retired provider reply is rejected"
+        );
+        assert_eq!(
+            catalog
+                .model_capabilities("parent".into(), "other".into())
+                .await
+                .unwrap()
+                .observed_at,
+            1
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "new provider is populated once and stale reply cannot replace it"
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_eligibility_uses_warmed_entries_without_adopting_draft_configuration() {
+        let calls = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+        let live = test_config(
+            &[
+                ("parent", HarnessKind::Codex),
+                ("helper", HarnessKind::Codex),
+            ],
+            &[],
+        );
+        catalog.sync_now(&live).await;
+        let mut draft = live.clone();
+        draft
+            .subagents
+            .eligible_profiles
+            .insert("helper".into(), true);
+        let options = catalog.options_for(&draft, "parent", None).await.unwrap();
+        assert_eq!(options.models.len(), 2);
+        assert_eq!(
+            catalog.candidates("parent").unwrap(),
+            vec![("parent".into(), HarnessKind::Codex)]
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "draft discovery shares warm live entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_edits_and_cached_models_reuse_probes_while_installation_changes_invalidate() {
+        let calls = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
+        let mut config = test_config(
+            &[
+                ("parent", HarnessKind::Codex),
+                ("helper", HarnessKind::Claude),
+            ],
+            &["helper"],
+        );
+        catalog.sync_now(&config).await;
+        let (left, right) = tokio::join!(
+            catalog.model_capabilities("parent".into(), "another".into()),
+            catalog.model_capabilities("parent".into(), "another".into()),
+        );
+        left.unwrap();
+        right.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "concurrent model misses share one probe"
+        );
+        for effort in ["low", "high"] {
+            config.profiles.get_mut("parent").unwrap().subagents =
+                mj_core::subagent::SubagentPolicy::SingleModel {
+                    model: "parent-model".into(),
+                    effort: Some(effort.into()),
+                };
+            config
+                .profiles
+                .get_mut("parent")
+                .unwrap()
+                .context_window_bytes = Some(1234);
+            config.subagents.max_concurrent = 3;
+            catalog.sync_now(&config).await;
+            catalog
+                .options_for(&config, "parent", Some("parent-model".into()))
+                .await
+                .unwrap();
+            catalog
+                .model_capabilities("parent".into(), "another".into())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "defaults, effort edits, reopening and revisiting a model do not probe"
+        );
+        config.profiles.get_mut("parent").unwrap().home = "/another/home".into();
+        catalog.sync_now(&config).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "only changed installation is probed"
+        );
+        catalog
+            .model_capabilities("parent".into(), "another".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "model efforts for changed installation are rediscovered"
+        );
+    }
+
+    #[tokio::test]
     async fn a_warm_pass_discovers_every_enabled_profile_for_every_parent() {
         let calls = calls();
         let catalog = ProfileCatalog::with_probe(counting_probe(calls.clone()));
@@ -648,8 +1052,8 @@ mod tests {
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            5,
-            "the new configuration is discovered from scratch"
+            3,
+            "unchanged profiles are retained while the added profile is discovered"
         );
         let choices = catalog
             .capabilities(&["sibling".to_owned()])
@@ -702,21 +1106,22 @@ mod tests {
         // A new configuration is adopted while the first discovery is in
         // flight, and its own pass finds every probe failing, so the catalogue
         // holds nothing when the stale discovery below finishes.
-        let second = test_config(
+        let mut second = test_config(
             &[
                 ("parent", HarnessKind::Codex),
                 ("helper", HarnessKind::Claude),
             ],
             &["helper"],
         );
+        second.profiles.get_mut("parent").unwrap().home = "/replacement/home".into();
         catalog.sync_now(&second).await;
         probes_fail.store(false, Ordering::SeqCst);
 
         let Entry::Pending(attempt) = stale_entry else {
             panic!("the pending discovery of the superseded generation is at hand")
         };
-        let config = attempt.await.expect("the probe itself succeeds");
-        catalog.remember(stale, "parent", &config);
+        let config = attempt.clone().await.expect("the probe itself succeeds");
+        catalog.remember(stale, "parent", &attempt, &config);
 
         let before = calls.load(Ordering::SeqCst);
         let choices = catalog

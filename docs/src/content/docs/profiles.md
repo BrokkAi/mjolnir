@@ -12,6 +12,14 @@ Profiles point at controller-side harness homes. They do not pin a model or
 reasoning effort. Choose those per session with `/model` and `/effort`, so the
 available choices can come from the provider's current catalog.
 
+In **Settings → Agent Profiles → a profile → Sub-agents**, choose creation
+defaults for delegation: Native or Mjolnir with a fixed model and effort.
+New sessions copy these defaults. Existing sessions retain their recorded
+policy when defaults are saved, after restarting or resuming, and when moving
+to another profile. **Move…** lets you explicitly edit a session's Subagents,
+Model, and Effort. Legacy All models policies are preserved when untouched;
+All models is unavailable for new selections.
+
 ## Supported harnesses
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |

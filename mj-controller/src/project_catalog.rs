@@ -173,11 +173,20 @@ fn reconcile_config(
                         &state
                             .sessions
                             .values()
-                            .filter(|session| session.bundle_id == *id)
+                            .filter(|session| {
+                                session.bundle_id == *id && session.project_directory.is_none()
+                            })
                             .collect::<Vec<_>>(),
                     )?;
                 }
                 database::store_catalog_project(id, &project, true)?;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<mj_core::repository::RepositoryUnavailable>()
+                    .is_some() =>
+            {
+                tracing::debug!(project = %id, %error, "configured project is unavailable");
             }
             Err(error) => errors.push(format!("Project {id}: {error:#}")),
         }
@@ -212,24 +221,7 @@ fn reconcile_config(
 }
 
 fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
-    let project = if let Some(location) = database::read_project_catalog()?
-        .locations
-        .into_iter()
-        .find(|location| location.host == "local" && location.directory == path)
-    {
-        ensure!(
-            path.is_dir(),
-            "historical project directory is missing: {}",
-            path.display()
-        );
-        directory_snapshot(&ResolvedDirectory {
-            checkout_root: location.checkout_root,
-            repository_root: location.repository_root,
-            identity: location.identity,
-        })
-    } else {
-        accept_directory(&TargetTemplate::LocalBare, path, executor)?.1
-    };
+    let project = accept_directory(&TargetTemplate::LocalBare, path, executor)?.1;
     // A remote-less repository can be suggested for raw launch, but managed
     // launch already requires a network source. Keep its local definition.
     let catalog = database::read_project_catalog()?;
@@ -248,6 +240,17 @@ fn discover_local(path: &Path, executor: &impl CommandExecutor) -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+fn historical_discovery_error(result: Result<()>, path: &Path) -> Option<String> {
+    result.err().and_then(|error| {
+        if error.downcast_ref::<mj_core::repository::RepositoryUnavailable>().is_some() {
+            tracing::debug!(directory = %path.display(), %error, "historical project is unavailable");
+            None
+        } else {
+            Some(format!("{}: {error:#}", path.display()))
+        }
+    })
 }
 
 fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> {
@@ -278,8 +281,9 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                         !executor.cancellation_requested(),
                         "project discovery cancelled"
                     );
-                    if let Err(error) = discover_local(&path, executor) {
-                        let error = format!("{}: {error:#}", path.display());
+                    if let Some(error) =
+                        historical_discovery_error(discover_local(&path, executor), &path)
+                    {
                         database::seed_failure(&harness, &home, &path, false, Some(error.clone()))?;
                         errors.push(error);
                     }
@@ -310,9 +314,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
             } else {
                 discover_local(&path, executor)
             };
-            let error = result
-                .err()
-                .map(|error| format!("{}: {error:#}", path.display()));
+            let error = historical_discovery_error(result, &path);
             if let Some(error) = &error {
                 errors.push(error.clone());
             }
@@ -367,7 +369,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                     accept_directory(target, path, executor)?
                 };
                 if let Some(session) = known.as_ref().filter(|session| session.project.is_none()) {
-                    migrate_memory(&project, session.project_bundle(&config), &[session])?;
+                    migrate_memory(&project, None, &[session])?;
                 }
                 database::bind_session_project(&change.session_id, &id, &project)?;
                 if matches!(target, TargetTemplate::LocalBare) {
@@ -379,9 +381,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 !executor.cancellation_requested(),
                 "project discovery cancelled"
             );
-            let error = result
-                .err()
-                .map(|error| format!("{}: {error:#}", path.display()));
+            let error = historical_discovery_error(result, path);
             if let Some(error) = &error {
                 errors.push(error.clone());
             }
@@ -414,59 +414,17 @@ fn migrate_memory(
     };
     let mut legacy = Vec::new();
     if let Some(bundle) = bundle {
-        let identity = |repo: &ProjectRepository| -> Result<Repository> {
-            if let Some(local) = &repo.local {
-                Ok(Repository::Local {
-                    canonical_root: mj_core::local_git::main_worktree_root(local)
-                        .unwrap_or_else(|_| local.clone()),
-                })
-            } else {
-                Ok(project
-                    .identities
-                    .get(&repo.id)
-                    .context("legacy memory repository is missing")?
-                    .into())
-            }
-        };
+        let identity = Repository::from_configured;
         let primary = identity(bundle.primary().context("legacy primary is missing")?)?;
-        let mut members = bundle
+        let members = bundle
             .repositories
             .iter()
             .map(identity)
             .collect::<Result<Vec<_>>>()?;
-        members.sort_by_key(|member| {
-            serde_json::to_string(member).expect("memory identity serializes")
-        });
-        members.dedup();
-        legacy.push(Project::Bundle { primary, members }.key()?);
+        legacy.push(Project::bundle(primary, members).key()?);
     }
     for session in sessions {
-        if let Some(path) = session
-            .managed_worktree
-            .as_ref()
-            .map(|worktree| &worktree.source_repository)
-            .or(session.project_directory.as_ref())
-        {
-            let identity = if session.target_runtime.as_ref().is_some_and(|runtime| {
-                matches!(runtime.connection, mj_core::state::TargetConnection::Local)
-            }) || session.target_template_id == "localhost"
-            {
-                Repository::Local {
-                    canonical_root: std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
-                }
-            } else {
-                Repository::Remote {
-                    target: session.target_template_id.clone(),
-                    canonical_root: path.clone(),
-                }
-            };
-            legacy.push(
-                Project::Repository {
-                    repository: identity,
-                }
-                .key()?,
-            );
-        }
+        legacy.push(Project::for_legacy_session(session, bundle, None)?.key()?);
     }
     for key in legacy {
         for conflict in
@@ -520,7 +478,9 @@ impl Catalog {
     }
 
     pub(crate) async fn run(self: Arc<Self>, shutdown: CancellationToken) {
-        self.request(false);
+        // Reconcile durable failures once at startup: an upgraded resolver or
+        // restored checkout must recover without requiring a manual retry.
+        self.request(true);
         loop {
             tokio::select! { _=shutdown.cancelled()=>break, _=self.notify.notified()=>{} }
             if !self.requested.swap(false, Ordering::AcqRel) {
@@ -583,6 +543,246 @@ mod tests {
     use super::*;
     use mj_core::config::{HarnessKind, HarnessProfile};
     use mj_core::targets::{CommandSpec, ProcessExecutor};
+
+    #[test]
+    fn unavailable_history_is_retired_and_renamed_repositories_keep_memory() {
+        const CHILD: &str = "MJ_DISCOVERY_RECOVERY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut command = CommandSpec::new(std::env::current_exe().unwrap().to_string_lossy(), ["--exact", "project_catalog::tests::unavailable_history_is_retired_and_renamed_repositories_keep_memory", "--nocapture"])
+                .purpose("isolated discovery recovery regression");
+            command.env.extend([
+                (CHILD.into(), "1".into()),
+                (
+                    "MJ_CONFIG_DIR".into(),
+                    directory
+                        .path()
+                        .join("config")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "MJ_DATA_DIR".into(),
+                    directory.path().join("data").to_string_lossy().into_owned(),
+                ),
+            ]);
+            let output = ProcessExecutor.execute(&command).unwrap();
+            assert_eq!(
+                output.status,
+                0,
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use mj_core::project_memory::{
+            ProjectMemoryIdentity, ProjectMemorySnapshot, ProjectMemoryStore,
+            RepositoryMemoryIdentity,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let _writer = database::install_isolated_test_writer();
+        let checkout = root.path().join("healthy-checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Example/new-name.git",
+            ],
+        ] {
+            let mut command = CommandSpec::new("git", ["-C", &checkout.to_string_lossy()])
+                .purpose("initialize discovery recovery checkout");
+            command.args.extend(args.into_iter().map(str::to_owned));
+            assert_eq!(ProcessExecutor.execute(&command).unwrap().status, 0);
+        }
+        let legacy_bundle = ProjectBundle {
+            primary_repo: "old-id".into(),
+            repositories: vec![ProjectRepository {
+                id: "old-id".into(),
+                github: Some("Example/legacy-repository".into()),
+                local: None,
+                destination: "old-id".into(),
+                git_ref: None,
+            }],
+        };
+        Config::update(|config| {
+            config.profiles.clear();
+            config.bundles = BTreeMap::from([("old-project".into(), legacy_bundle.clone())]);
+            config.targets = BTreeMap::from([("localhost".into(), TargetTemplate::LocalBare)]);
+            Ok(())
+        })
+        .unwrap();
+        let legacy_key = ProjectMemoryIdentity::bundle(
+            RepositoryMemoryIdentity::from_configured(&legacy_bundle.repositories[0]).unwrap(),
+            vec![
+                RepositoryMemoryIdentity::from_configured(&legacy_bundle.repositories[0]).unwrap(),
+            ],
+        )
+        .key()
+        .unwrap();
+        let legacy_root = mj_core::config::data_dir()
+            .join("projects")
+            .join(&legacy_key)
+            .join("memory");
+        let bundle_memory = ProjectMemorySnapshot {
+            files: BTreeMap::from([(
+                "/bundle.md".into(),
+                "Unrelated configured project memory".into(),
+            )]),
+        };
+        ProjectMemoryStore::new(&legacy_root)
+            .install_snapshot(&bundle_memory)
+            .unwrap();
+        let mut record = crate::database::test_session("healthy", "old-project");
+        record.project_directory = Some(checkout.clone());
+        record.target_template_id = "localhost".into();
+        record.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join("workers").join(&record.id),
+        });
+        let raw_key =
+            ProjectMemoryIdentity::for_legacy_session(&record, Some(&legacy_bundle), None)
+                .unwrap()
+                .key()
+                .unwrap();
+        let raw_root = mj_core::config::data_dir()
+            .join("projects")
+            .join(raw_key)
+            .join("memory");
+        let memory = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/notes.md".into(), "Keep this raw-session memory".into())]),
+        };
+        ProjectMemoryStore::new(&raw_root)
+            .install_snapshot(&memory)
+            .unwrap();
+        database::save_session(&record).unwrap();
+
+        let missing = root.path().join("deleted-checkout");
+        let nongit = root.path().join("not-a-repository");
+        std::fs::create_dir(&nongit).unwrap();
+        for (index, path) in [&missing, &nongit].into_iter().enumerate() {
+            database::seed_failure(
+                "\"codex\"",
+                root.path(),
+                path,
+                false,
+                Some("old unavailable error".into()),
+            )
+            .unwrap();
+            let mut record =
+                crate::database::test_session(&format!("stale-{index}"), "old-project");
+            record.project_directory = Some(path.clone());
+            record.target_template_id = "localhost".into();
+            database::save_session(&record).unwrap();
+        }
+        let executor = CancellableProcessExecutor::with_timeout(Duration::from_secs(30));
+        for change in database::project_discovery_changes(false).unwrap() {
+            database::finish_project_discovery(
+                change.sequence,
+                Some("previous discovery failure".into()),
+            )
+            .unwrap();
+        }
+        // All candidates are behind the durable progress frontier. Starting a
+        // new daemon's catalog must retry them without a user pressing Retry.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let catalog = Arc::new(Catalog::default());
+            let shutdown = CancellationToken::new();
+            let task = tokio::spawn(catalog.clone().run(shutdown.clone()));
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    let status = catalog.view().unwrap().status;
+                    if !matches!(status, ProjectCatalogStatus::Refreshing) {
+                        assert_eq!(status, ProjectCatalogStatus::Ready);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            shutdown.cancel();
+            task.await.unwrap();
+        });
+        assert!(database::discovery_errors().unwrap().is_empty());
+        assert!(database::seed_failures().unwrap().is_empty());
+        assert!(
+            database::project_discovery_changes(false)
+                .unwrap()
+                .is_empty()
+        );
+        let state = database::load_state().unwrap();
+        assert_eq!(
+            state.sessions.len(),
+            3,
+            "retiring candidates preserves session history"
+        );
+        let accepted = state.sessions["healthy"].project.as_ref().unwrap();
+        assert_eq!(accepted.bundle.primary_repo, "new-name");
+        let canonical_root = mj_core::config::data_dir()
+            .join("projects")
+            .join(accepted.memory_identity().unwrap().key().unwrap())
+            .join("memory");
+        assert_eq!(
+            ProjectMemoryStore::new(&canonical_root).snapshot().unwrap(),
+            memory
+        );
+        assert_eq!(
+            mj_core::project_memory::resolve_canonical_root(&raw_root).unwrap(),
+            canonical_root
+        );
+        assert_eq!(
+            ProjectMemoryStore::new(&legacy_root).snapshot().unwrap(),
+            bundle_memory
+        );
+        // An explicit configured-project migration uses its old source,
+        // even when the new snapshot has a different repository ID.
+        migrate_memory(accepted, Some(&legacy_bundle), &[]).unwrap();
+        let mut merged = memory.clone();
+        merged.files.extend(bundle_memory.files);
+        assert_eq!(
+            ProjectMemoryStore::new(&canonical_root).snapshot().unwrap(),
+            merged
+        );
+        assert_eq!(
+            mj_core::project_memory::resolve_canonical_root(&legacy_root).unwrap(),
+            canonical_root
+        );
+
+        // A location already accepted into the catalog must be checked again:
+        // deleting its Git metadata cannot leave it falsely discoverable.
+        std::fs::remove_dir_all(checkout.join(".git")).unwrap();
+        let error = discover_local(&checkout, &executor).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<mj_core::repository::RepositoryUnavailable>()
+                .is_some()
+        );
+        assert!(
+            historical_discovery_error(Err(anyhow::anyhow!("permission denied")), &checkout)
+                .is_some()
+        );
+        let malformed = root.path().join("malformed-native-session.jsonl");
+        std::fs::write(&malformed, "{\"cwd\": broken JSON\n").unwrap();
+        database::seed_failure(
+            "\"codex\"",
+            root.path(),
+            &malformed,
+            true,
+            Some("old parse failure".into()),
+        )
+        .unwrap();
+        let errors = refresh(&executor, true).unwrap();
+        assert_eq!(
+            errors.len(),
+            1,
+            "real discovery failures must remain visible: {errors:?}"
+        );
+        assert!(errors[0].contains("malformed-native-session.jsonl"));
+    }
 
     #[test]
     fn discovery_seeds_ten_sessions_once_and_refreshes_only_mjolnir_changes() {

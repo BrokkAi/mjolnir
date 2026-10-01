@@ -2195,6 +2195,7 @@ impl State {
                 let mut comparable = profile.clone();
                 if let Some(updated) = after.profiles.get(&session.last_profile) {
                     comparable.enabled = updated.enabled;
+                    comparable.subagents = updated.subagents.clone();
                 }
                 // A mismatched harness is already broken; allow repairing it.
                 profile.kind == session.harness_kind

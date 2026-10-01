@@ -670,6 +670,10 @@ impl WizardDraft for ResumeWizard {
     fn set_profile_step_skipped(&mut self, skipped: bool) {
         self.profile_step_skipped = skipped;
     }
+    fn skips_review(&self) -> bool {
+        !self.moving && self.profile_step_skipped && self.target_step_skipped
+    }
+
     fn target_step_skipped(&self) -> bool {
         self.target_step_skipped
     }
@@ -794,6 +798,9 @@ impl WizardDraft for ResumeWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
+        if self.step == WizardStep::Review && self.subagents.activate(id) {
+            return Ok(dashboard.keep(self));
+        }
         if id == WizardControl::ChooseMoveFiles
             && self
                 .preparation
@@ -866,11 +873,27 @@ impl WizardDraft for ResumeWizard {
             .is_none()
     }
 
+    fn route_extra_interaction(
+        &mut self,
+        interaction: Option<Interaction<WizardControl>>,
+    ) -> Option<Interaction<WizardControl>> {
+        self.subagents.combo.route(interaction)
+    }
+
     fn apply_extra_interaction(
         &mut self,
-        _dashboard: &mut DashboardState,
+        dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     ) {
+        if self.subagent_choice_applies(dashboard)
+            && let Some(changed) = self.subagents.apply(interaction)
+        {
+            if changed {
+                invalidate_move_preparation(self);
+            }
+            dashboard.record_event_handled();
+            return;
+        }
         if let Interaction::Toggle(WizardControl::MoveFile(index)) = interaction
             && let Some(assessment) = self.preparation.as_ref().and_then(|p| p.workspace.as_ref())
             && let Some((node, _)) = self.files.rows(assessment).get(*index)
@@ -948,29 +971,15 @@ impl WizardDraft for ResumeWizard {
         if self.has_queued_work(dashboard) {
             form.declare_with_enabled(WizardControl::DiscardQueue, ControlKind::Checkbox, true);
         }
-        !self.moving || self.preparation.is_some() || self.preparation_error.is_some()
+        if self.subagent_choice_applies(dashboard) {
+            self.subagents.declare(form);
+        }
+        (self.subagent_change(dashboard).is_none() || self.subagents.error().is_none())
+            && (!self.moving || self.preparation.is_some() || self.preparation_error.is_some())
     }
 }
 
 impl ResumeWizard {
-    pub(crate) fn subagent_change(
-        &self,
-        dashboard: &DashboardState,
-    ) -> Option<mj_core::subagent::SubagentPolicy> {
-        if !self.moving {
-            return None;
-        }
-        let policy = &dashboard.config.profiles[&self.destination_profile(dashboard)].subagents;
-        let stored = dashboard
-            .state
-            .sessions
-            .get(&self.session_id)
-            .and_then(|session| session.subagents.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        (policy != &stored).then(|| policy.clone())
-    }
-
     /// The profile this resume or move lands on.
     pub(crate) fn destination_profile(&self, dashboard: &DashboardState) -> String {
         dashboard

@@ -3625,3 +3625,192 @@ fn profile_subagent_discovery_uses_unsaved_draft_and_rejects_stale_replies() {
     };
     assert!(dialog.notice.as_ref().unwrap().contains("offline"));
 }
+
+fn subagent_choice(value: &str) -> mj_core::acp::SessionConfigChoice {
+    mj_core::acp::SessionConfigChoice {
+        value: value.into(),
+        name: value.into(),
+        description: None,
+    }
+}
+
+fn setup_click(dashboard: &mut DashboardState, width: u16, height: u16, column: u16, row: u16) {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        dashboard.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        drawn(dashboard, width, height);
+    }
+}
+
+#[test]
+fn profile_subagent_comboboxes_open_on_one_click_select_and_dismiss_after_redraw_at_narrow_widths()
+{
+    for (width, height) in [(140, 40), (70, 24), (60, 24)] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_settings_section("profiles", Some("claude-1"));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.path.push("subagents".into());
+        dialog.prepare();
+        let lines = drawn(&mut dashboard, width, height);
+        let (label_x, row) = point(&lines, "Subagents");
+        setup_click(&mut dashboard, width, height, label_x + 12, row);
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .subagent_combo
+                .is_open(SetupControl::SubagentMode),
+            "{width}: {lines:#?}"
+        );
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "Mjolnir, single model");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert_eq!(
+            dialog.draft["profiles"]["claude-1"]["subagents"]["mode"],
+            "single_model"
+        );
+        assert!(dialog.editor.is_none());
+        let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
+            dashboard.take_prerequisite_check()
+        else {
+            panic!("discovery");
+        };
+        dashboard.apply_subagent_options(
+            id,
+            Ok(mj_core::subagent::SubagentOptions {
+                models: vec![subagent_choice("model-a"), subagent_choice("model-b")],
+                ..Default::default()
+            }),
+        );
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "Select model");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "model-a");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
+            dashboard.take_prerequisite_check()
+        else {
+            panic!("model efforts");
+        };
+        dashboard.apply_subagent_options(
+            id,
+            Ok(mj_core::subagent::SubagentOptions {
+                models: vec![subagent_choice("model-a"), subagent_choice("model-b")],
+                efforts: vec![subagent_choice("low"), subagent_choice("high")],
+                ..Default::default()
+            }),
+        );
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "Select effort");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "high");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        assert_eq!(
+            setup_dialog_mut(&mut dashboard.mode).unwrap().draft["profiles"]["claude-1"]["subagents"]
+                ["effort"],
+            "high"
+        );
+        let lines = drawn(&mut dashboard, width, height);
+        let (x, y) = point(&lines, "model-a");
+        setup_click(&mut dashboard, width, height, x + 1, y);
+        dashboard.handle_key(key(KeyCode::Down));
+        drawn(&mut dashboard, width, height);
+        dashboard.handle_key(key(KeyCode::Esc));
+        drawn(&mut dashboard, width, height);
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(dialog.subagent_combo.open_id().is_none());
+        assert_eq!(
+            dialog.draft["profiles"]["claude-1"]["subagents"]["model"], "model-a",
+            "dismiss keeps committed selection"
+        );
+        assert!(
+            dashboard.take_prerequisite_check().is_none(),
+            "effort edits do not discover"
+        );
+    }
+}
+
+#[test]
+fn profile_discovery_reuses_effort_edits_unrelated_drafts_and_previously_visited_models() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", Some("claude-1"));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.path.push("subagents".into());
+    dialog.draft["profiles"]["claude-1"]["subagents"] =
+        json!({"mode":"single_model","model":"a","effort":null});
+    for model in ["a", "b"] {
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["profiles"]["claude-1"]["subagents"]
+            ["model"] = json!(model);
+        let Some(DashboardAction::DiscoverSubagentOptions { id, .. }) =
+            dashboard.take_prerequisite_check()
+        else {
+            panic!("model {model}");
+        };
+        dashboard.apply_subagent_options(
+            id,
+            Ok(mj_core::subagent::SubagentOptions {
+                models: vec![subagent_choice("a"), subagent_choice("b")],
+                efforts: vec![subagent_choice("low"), subagent_choice("high")],
+                ..Default::default()
+            }),
+        );
+    }
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.draft["profiles"]["claude-1"]["subagents"]["model"] = json!("a");
+    dialog.draft["profiles"]["claude-1"]["subagents"]["effort"] = json!("high");
+    dialog.draft["notify"]["delay_seconds"] = json!(5);
+    assert!(
+        dashboard.take_prerequisite_check().is_none(),
+        "cached effort choices are reused"
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert_eq!(
+        dialog
+            .subagent_choices
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .efforts[1]
+            .value,
+        "high"
+    );
+    dialog.draft["profiles"]["claude-1"]["home"] = json!("/another/home");
+    assert!(
+        matches!(
+            dashboard.take_prerequisite_check(),
+            Some(DashboardAction::DiscoverSubagentOptions { .. })
+        ),
+        "changing discovery inputs starts fresh work"
+    );
+}
+
+#[test]
+fn profile_comboboxes_display_recorded_model_and_effort_before_discovery() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("profiles", Some("claude-1"));
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    dialog.path.push("subagents".into());
+    dialog.draft["profiles"]["claude-1"]["subagents"] =
+        json!({"mode":"single_model","model":"recorded-model","effort":"recorded-effort"});
+    dialog.prepare();
+    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    assert!(screen.contains("recorded-model (unverified)"), "{screen}");
+    assert!(screen.contains("recorded-effort (unverified)"), "{screen}");
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["profiles"]["claude-1"]["subagents"]["model"],
+        "recorded-model"
+    );
+}
