@@ -545,7 +545,12 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
             .await
             .unwrap(),
     );
-    assert!(named.contains(&LABEL.to_owned()), "{named:?}");
+    assert!(
+        named.iter().any(|blocker| blocker
+            .strip_prefix(&format!("{LABEL} ("))
+            .is_some_and(|age| age.ends_with("s)"))),
+        "the blocker is named with its age: {named:?}"
+    );
     drop(held);
     let released = labels(
         handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
@@ -553,7 +558,7 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
             .unwrap(),
     );
     assert!(
-        !released.contains(&LABEL.to_owned()),
+        !released.iter().any(|blocker| blocker.starts_with(LABEL)),
         "released work is still named: {released:?}"
     );
 }

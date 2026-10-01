@@ -111,13 +111,43 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
             return Ok(guard);
         }
         if Instant::now() >= notice_at {
-            startup_notice(
-                "Mjolnir is waiting for another client to finish the daemon handoff.".to_owned(),
-            );
+            startup_notice(shared_handoff_notice(running_daemon_blockers().await));
             notice_at = Instant::now() + Duration::from_secs(30);
         }
         tokio::time::sleep(RETRY_DELAY).await;
     }
+}
+
+/// The line shown while another client holds the startup lock. When that
+/// client is replacing the daemon, the running daemon names what the handoff
+/// is waiting for, so this client can say it too.
+fn shared_handoff_notice(blockers: Option<Vec<String>>) -> String {
+    match blockers {
+        Some(blockers) => format!(
+            "Mjolnir is waiting for another client to finish the daemon handoff; the running daemon is finishing: {}.",
+            blockers.join(", ")
+        ),
+        None => "Mjolnir is waiting for another client to finish the daemon handoff.".to_owned(),
+    }
+}
+
+/// Whether daemon `pid` has exited or is no longer the published daemon,
+/// as after an automatic upgrade replaced it.
+pub(crate) async fn daemon_was_replaced(pid: u32) -> bool {
+    tokio::task::spawn_blocking(move || {
+        !process_is_alive(pid) || read_metadata_any().map_or(true, |current| current.pid != pid)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// What the running daemon, if any, reports as holding a handoff open.
+async fn running_daemon_blockers() -> Option<Vec<String>> {
+    let metadata = tokio::task::spawn_blocking(read_metadata_any)
+        .await
+        .ok()?
+        .ok()?;
+    upgrade_blockers(&metadata).await
 }
 
 pub async fn connect_or_start() -> Result<DaemonClient> {

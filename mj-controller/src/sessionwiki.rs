@@ -671,16 +671,11 @@ impl Indexer {
                 .map(|success| success.epoch_seconds - 60)
         };
         let started = Instant::now();
-        let work = crate::upgrade::activity("SessionWiki sync")?;
         self.in_flight.store(true, Ordering::Release);
         let cache = self.native_scan_cache.clone();
-        let ran = tokio::task::spawn_blocking(move || {
-            let _work = work;
-            sync_blocking(since, &cache)
-        })
-        .await;
+        let ran = run_abandonable(move || sync_blocking(since, &cache)).await;
         self.in_flight.store(false, Ordering::Release);
-        let ran = ran.context("run the SessionWiki sync")??;
+        let ran = ran?;
         if ran {
             *self
                 .last_success
@@ -694,12 +689,41 @@ impl Indexer {
     }
 }
 
+/// Run one sync pass on a thread of its own, outside daemon upgrade admission
+/// and outside the runtime's blocking pool.
+///
+/// A pass walks every native session store and can take minutes. It is safe to
+/// stop at any point: SessionWiki writes its index in SQLite transactions,
+/// which roll back when the process exits, and every daemon syncs again when
+/// it starts. So a daemon handoff must not wait for it. Holding admission made
+/// the handoff wait for the whole pass, and the daemon process waits for its
+/// blocking pool when it exits, so a pass there would hold up the exit
+/// instead. On this thread the exiting process abandons the pass.
+async fn run_abandonable<T: Send + 'static>(
+    pass: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("sessionwiki-sync".to_owned())
+        .spawn(move || {
+            // The receiver is gone only when the caller was dropped; the
+            // pass has nobody left to report to.
+            let _ = sender.send(pass());
+        })
+        .context("start the SessionWiki sync thread")?;
+    receiver
+        .await
+        .context("the SessionWiki sync thread stopped without an answer")?
+}
+
 /// One synchronous sync pass. Returns false when this process must not touch
 /// the index, so a refused run never records a success it did not have.
 fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> Result<bool> {
     if !index_is_writable() {
         return Ok(false);
     }
+    // Isolated tests park a pass here to stand for one that takes minutes.
+    mj_core::test_hooks::reach_test_hook("sessionwiki_sync_pass")?;
     let controller =
         Controller::load().context("load controller state for the SessionWiki sync")?;
     // Mjolnir's own sessions go first: a cold index walks every other tool's

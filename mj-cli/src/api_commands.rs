@@ -43,39 +43,57 @@ pub(crate) async fn events(args: EventsArgs, requested_workspace: Option<String>
         (None, Some(name)) => Some(crate::resolve_store_workspace(Some(&name)).await?),
         (None, None) => None,
     };
-    let client = ApiClient::connect().await?;
+    let mut client = ApiClient::connect().await?;
     let filter = mj_controller::database::ApiEventFilter {
         session_id: args.session,
         workspace_id,
     };
-    let mut response = client.events(&filter, args.after_seq).await?;
-    let mut decoder = crate::api_client::events::EventDecoder::default();
-    let mut stdout = tokio::io::stdout();
     let mut last_seq = args.after_seq;
+    let mut stdout = tokio::io::stdout();
     loop {
-        let chunk = tokio::select! {
-            signal = tokio::signal::ctrl_c() => { signal?; return Ok(()); },
-            chunk = response.chunk() => chunk.with_context(|| format!("event stream interrupted; resume with --after-seq {}", last_seq.unwrap_or(0)))?,
+        let mut response = match client.events(&filter, last_seq).await {
+            // Reached the old daemon again while it exits: ask once more.
+            Err(error) if crate::api_client::is_daemon_handoff(&error) => {
+                client = ApiClient::connect_after_handoff().await?;
+                continue;
+            }
+            response => response?,
         };
-        let Some(chunk) = chunk else {
-            bail!(
-                "event stream ended; resume with --after-seq {}",
-                last_seq.unwrap_or(0)
-            );
+        let mut decoder = crate::api_client::events::EventDecoder::default();
+        let resume = loop {
+            let chunk = tokio::select! {
+                signal = tokio::signal::ctrl_c() => { signal?; return Ok(()); },
+                chunk = response.chunk() => chunk.with_context(|| format!("event stream interrupted; resume with --after-seq {}", last_seq.unwrap_or(0)))?,
+            };
+            let Some(chunk) = chunk else {
+                bail!(
+                    "event stream ended; resume with --after-seq {}",
+                    last_seq.unwrap_or(0)
+                );
+            };
+            let events = decoder.push(&chunk).with_context(|| {
+                format!(
+                    "decode event stream; resume with --after-seq {}",
+                    last_seq.unwrap_or(0)
+                )
+            })?;
+            for event in events {
+                let mut line = serde_json::to_vec(&event)?;
+                line.push(b'\n');
+                stdout.write_all(&line).await?;
+                stdout.flush().await?;
+                last_seq = Some(event.seq);
+            }
+            if let Some(cursor) = decoder.handoff() {
+                break cursor;
+            }
         };
-        let events = decoder.push(&chunk).with_context(|| {
-            format!(
-                "decode event stream; resume with --after-seq {}",
-                last_seq.unwrap_or(0)
-            )
-        })?;
-        for event in events {
-            let mut line = serde_json::to_vec(&event)?;
-            line.push(b'\n');
-            stdout.write_all(&line).await?;
-            stdout.flush().await?;
-            last_seq = Some(event.seq);
-        }
+        // The daemon is being replaced. It named the cursor its stream
+        // reached, so the next daemon's stream continues from there and no
+        // event is lost or printed twice.
+        eprintln!("The Mjolnir daemon is being replaced by an upgrade; following the new daemon.");
+        last_seq = Some(resume);
+        client = ApiClient::connect_after_handoff().await?;
     }
 }
 
@@ -896,32 +914,73 @@ pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
             }
         };
     }
-    let response = client
-        .wait(
-            &args.session,
-            &WaitRequest {
-                return_on_input: args.return_on_input,
-                turn_id: Some(accepted.turn_id),
-                timeout_secs: args.timeout,
-            },
-        )
-        .await?;
+    // Only the wait follows the daemon across an upgrade; the prompt was
+    // accepted once and is never sent again.
+    let response = wait_following_handoffs(
+        client,
+        &args.session,
+        WaitRequest {
+            return_on_input: args.return_on_input,
+            turn_id: Some(accepted.turn_id),
+            timeout_secs: args.timeout,
+        },
+        ApiClient::connect_after_handoff,
+    )
+    .await?;
     report_wait(&response, args.json)
 }
 
 pub(crate) async fn wait(args: WaitArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let response = client
-        .wait(
-            &args.session,
-            &WaitRequest {
-                return_on_input: args.return_on_input,
-                turn_id: args.turn,
-                timeout_secs: args.timeout,
-            },
-        )
-        .await?;
+    let response = wait_following_handoffs(
+        client,
+        &args.session,
+        WaitRequest {
+            return_on_input: args.return_on_input,
+            turn_id: args.turn,
+            timeout_secs: args.timeout,
+        },
+        ApiClient::connect_after_handoff,
+    )
+    .await?;
     report_wait(&response, args.json)
+}
+
+/// Wait on a session, following the daemon across automatic upgrades.
+///
+/// A handoff ends the wait the old daemon was serving. A wait is a read, so
+/// the next daemon is asked again for the same turn, with what is left of the
+/// time budget: the handoff neither extends the wait nor resends a prompt.
+/// Each retry follows a daemon that closed admission and is exiting, and
+/// `reconnect` waits for the daemon that replaces it.
+async fn wait_following_handoffs<Reconnect, Connecting>(
+    first: ApiClient,
+    session: &str,
+    mut request: WaitRequest,
+    mut reconnect: Reconnect,
+) -> Result<WaitResponse>
+where
+    Reconnect: FnMut() -> Connecting,
+    Connecting: std::future::Future<Output = Result<ApiClient>>,
+{
+    let started = std::time::Instant::now();
+    let budget = request
+        .timeout_secs
+        .unwrap_or(mj_controller::server::api::DEFAULT_WAIT_SECS);
+    let mut client = first;
+    loop {
+        match client.wait(session, &request).await {
+            Err(error) if crate::api_client::is_daemon_handoff(&error) => {
+                eprintln!(
+                    "The Mjolnir daemon is being replaced by an upgrade; waiting on the new daemon."
+                );
+                request.timeout_secs =
+                    Some(budget.saturating_sub(started.elapsed().as_secs()).max(1));
+                client = reconnect().await?;
+            }
+            answered => return answered,
+        }
+    }
 }
 
 /// Print a wait result, and fail the process when the turn did not finish so a
@@ -1909,6 +1968,91 @@ mod tests {
             object.insert(key.clone(), value.clone());
         }
         serde_json::from_value(body).expect("wait response")
+    }
+
+    /// Serve `app` on a loopback port and return its base URL.
+    async fn serve_api(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        url
+    }
+
+    /// A daemon being replaced ends a wait with the handoff mark. The wait
+    /// asks the next daemon for the same turn, with what is left of its
+    /// budget, and reports that daemon's answer instead of failing.
+    #[tokio::test]
+    async fn a_wait_follows_the_daemon_across_an_upgrade_handoff() {
+        use axum::http::StatusCode;
+        use std::sync::{Arc, Mutex};
+        let old = serve_api(axum::Router::new().route(
+            "/api/v1/sessions/{session_id}/wait",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [
+                        (mj_controller::server::UPGRADE_HEADER, "pending"),
+                        ("retry-after", "1"),
+                    ],
+                    axum::Json(serde_json::json!({
+                        "error": "the Mjolnir daemon is being replaced by an upgrade; ask again",
+                        "code": mj_controller::server::api::DAEMON_HANDOFF_CODE,
+                    })),
+                )
+            }),
+        ))
+        .await;
+        let asked: Arc<Mutex<Vec<WaitRequest>>> = Arc::default();
+        let new = serve_api(
+            axum::Router::new()
+                .route(
+                    "/api/v1/sessions/{session_id}/wait",
+                    axum::routing::post(
+                        |axum::extract::State(asked): axum::extract::State<
+                            Arc<Mutex<Vec<WaitRequest>>>,
+                        >,
+                         axum::Json(request): axum::Json<WaitRequest>| async move {
+                            asked.lock().unwrap().push(request);
+                            (
+                                [(mj_controller::server::api::API_VERSION_HEADER, "1")],
+                                axum::Json(wait_response("finished", serde_json::json!({}))),
+                            )
+                        },
+                    ),
+                )
+                .with_state(asked.clone()),
+        )
+        .await;
+        let reconnects = Arc::new(Mutex::new(0_usize));
+        let response = wait_following_handoffs(
+            ApiClient::new(old, "token".into()).unwrap(),
+            "s1",
+            WaitRequest {
+                return_on_input: true,
+                turn_id: Some(4),
+                timeout_secs: Some(3600),
+            },
+            || {
+                *reconnects.lock().unwrap() += 1;
+                let new = new.clone();
+                async move { ApiClient::new(new, "token".into()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.outcome, WaitOutcome::Finished);
+        assert_eq!(*reconnects.lock().unwrap(), 1);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].return_on_input);
+        assert_eq!(asked[0].turn_id, Some(4), "the same turn, not a new prompt");
+        let remaining = asked[0].timeout_secs.unwrap();
+        assert!(
+            (3590..=3600).contains(&remaining),
+            "the next daemon gets what is left of the budget: {remaining}"
+        );
     }
 
     #[test]

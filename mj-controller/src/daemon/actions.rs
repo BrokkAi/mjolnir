@@ -17,9 +17,14 @@ pub(super) async fn handle_action(
             }
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
-        DaemonAction::UpgradeBlockers => {
-            Ok(DaemonReply::UpgradeBlockers(crate::upgrade::active_labels()))
-        }
+        // Each blocker carries its count and age, so the waiting client can say
+        // what the upgrade waits for and for how long.
+        DaemonAction::UpgradeBlockers => Ok(DaemonReply::UpgradeBlockers(
+            crate::upgrade::blockers()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        )),
         DaemonAction::Status => {
             state.prune_dead_clients();
             Ok(DaemonReply::Status(DaemonStatus {

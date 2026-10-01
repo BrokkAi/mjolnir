@@ -33,6 +33,16 @@ pub(super) struct ServerState {
     pub(super) worker_source_check: Option<WorkerSourceCheck>,
     /// Prompts held until their starting session can take them.
     pub(super) held_prompts: Arc<api::HeldPrompts>,
+    pub(super) upgrade_gate: Arc<crate::upgrade::Gate>,
+}
+
+impl ServerState {
+    /// Whether the shutdown now under way is an automatic upgrade handoff: the
+    /// gate closes only for one, never for an explicit stop. A long request the
+    /// shutdown ends answers so that its client follows the next daemon.
+    pub(super) fn handing_off(&self) -> bool {
+        !self.upgrade_gate.is_open()
+    }
 }
 
 /// Online-guessing defence for the deliberately small viewer code.
@@ -114,7 +124,9 @@ pub(super) fn router(options: ServerOptions) -> Router {
         engine_checks: options.engine_checks,
         worker_source_check: options.worker_source_check,
         held_prompts: Arc::new(api::HeldPrompts::default()),
+        upgrade_gate: options.upgrade_gate,
     };
+    let upgrade_gate = state.upgrade_gate.clone();
     let protected = Router::new()
         .route("/api/snapshot", get(snapshot))
         .route("/api/conversations/{session_id}", get(conversation))
@@ -189,7 +201,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn_with_state(
-            crate::upgrade::gate().clone(),
+            upgrade_gate,
             upgrade_admission,
         ))
         .with_state(state)
@@ -206,7 +218,7 @@ pub(super) async fn upgrade_admission(
     if !gate.is_open() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            [("retry-after", "1"), ("x-mj-upgrade", "pending")],
+            [("retry-after", "1"), (UPGRADE_HEADER, "pending")],
             "Mjolnir is completing an upgrade",
         )
             .into_response();

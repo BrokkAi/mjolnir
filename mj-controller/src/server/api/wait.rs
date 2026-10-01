@@ -179,8 +179,10 @@ pub(super) async fn wait(
                     relay,
                 )));
             }
+            // A wait is a read. When an upgrade handoff ends it, the answer
+            // tells the client to ask the next daemon, which waits on.
             () = state.shutdown.cancelled() => {
-                return Err(ApiFailure::unavailable("the server is shutting down"));
+                return Err(ApiFailure::shutdown(&state));
             }
         }
         // A stopped actor stops publishing; re-acquire so a session that was

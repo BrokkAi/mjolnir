@@ -568,11 +568,12 @@ pub(crate) async fn run_server(
                         Some(days) if archive_jobs.is_empty() => {
                             // A pass can take minutes, so it does not start
                             // while a daemon upgrade is waiting; a later tick
-                            // runs it.
-                            if let Ok(upgrade_task) = crate::upgrade::activity_unless_draining("SessionWiki archive") {
+                            // runs it. The pass takes upgrade admission itself,
+                            // after its SessionWiki sync, which a handoff does
+                            // not wait for.
+                            if !crate::upgrade::is_draining() {
                                 let runtime = daemon_runtime.clone();
                                 archive_jobs.spawn(async move {
-                                    let _upgrade_task = upgrade_task;
                                     runtime.archive_aged_sessions(days).await
                                 });
                             }

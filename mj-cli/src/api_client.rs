@@ -69,9 +69,40 @@ pub(crate) struct ApiClient {
 impl ApiClient {
     /// Resolve the daemon's viewer URL and the bearer token, starting the
     /// daemon if it is not running.
+    ///
+    /// Every step here is a read. When an automatic upgrade replaces the
+    /// daemon between them, the steps are asked of the new daemon: a client
+    /// that started during a handoff then works instead of failing on the
+    /// old daemon's closed connection.
     pub(crate) async fn connect() -> Result<Self> {
-        let mut client = daemon::connect_or_start().await?;
-        let viewer_url = daemon::wait_for_web_viewer(&mut client).await?;
+        let deadline = std::time::Instant::now() + HANDOFF_FOLLOW_LIMIT;
+        let mut replaced = 0;
+        loop {
+            let mut client = daemon::connect_or_start().await?;
+            let pid = client.daemon_pid();
+            let error = match Self::connect_to(&mut client).await {
+                Ok(connected) => return Ok(connected),
+                Err(error) => error,
+            };
+            // A daemon handing off refuses until it exits; one that went away
+            // under this client was replaced, or failed, in which case the
+            // retries are few.
+            let follow = if is_daemon_handoff(&error) {
+                std::time::Instant::now() < deadline
+            } else {
+                replaced += 1;
+                replaced <= 3 && daemon::daemon_was_replaced(pid).await
+            };
+            if !follow {
+                return Err(error);
+            }
+            tracing::info!(%error, pid, "the daemon was replaced while this client connected; connecting to its replacement");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn connect_to(client: &mut daemon::DaemonClient) -> Result<Self> {
+        let viewer_url = daemon::wait_for_web_viewer(client).await?;
         // The viewer may serve a self-signed certificate; the daemon publishes
         // its SHA-256 beside the URL so this client trusts exactly that one.
         let certificate_sha256 = match client.web_access().await? {
@@ -194,8 +225,18 @@ impl ApiClient {
             .send()
             .await
             .context("reach the Mjolnir API")?;
-        check_version(&response)?;
         let status = response.status();
+        // Checked before the version: the admission layer refuses a request
+        // during a handoff before the API's own layers would mark it.
+        if is_handoff_refusal(&response) {
+            return Ok(Err(ApiError {
+                status,
+                message: "the Mjolnir daemon is being replaced by an upgrade".to_owned(),
+                busy: None,
+                code: Some(mj_controller::server::api::DAEMON_HANDOFF_CODE.to_owned()),
+            }));
+        }
+        check_version(&response)?;
         if status.is_success() {
             return Ok(Ok(response));
         }
@@ -669,6 +710,9 @@ async fn probe_api(http: &reqwest::Client, base_url: &str) -> Result<()> {
         .send()
         .await
         .context("reach the daemon API; check `mj daemon status`")?;
+    if is_handoff_refusal(&response) {
+        return Err(anyhow::Error::new(DaemonHandoff));
+    }
     if response.status() == reqwest::StatusCode::NOT_FOUND
         && !response.headers().contains_key(API_VERSION_HEADER)
     {
@@ -696,8 +740,53 @@ struct ApiError {
     code: Option<String>,
 }
 
+/// The daemon answered that an automatic upgrade is replacing it. The request
+/// was refused before it was accepted, or was a read the handoff ended, so a
+/// caller that can follow the daemon asks the next one.
+#[derive(Debug)]
+pub(crate) struct DaemonHandoff;
+
+impl std::fmt::Display for DaemonHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the Mjolnir daemon is being replaced by an upgrade")
+    }
+}
+
+impl std::error::Error for DaemonHandoff {}
+
+/// Whether `error` is a [`DaemonHandoff`].
+pub(crate) fn is_daemon_handoff(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<DaemonHandoff>())
+}
+
+/// Whether the daemon refused `response` because an upgrade is replacing it.
+fn is_handoff_refusal(response: &reqwest::Response) -> bool {
+    response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && response
+            .headers()
+            .get(mj_controller::server::UPGRADE_HEADER)
+            .is_some_and(|value| value == "pending")
+}
+
+/// How long a client follows one daemon replacement before it reports it. A
+/// daemon that closed admission exits in seconds; this only bounds a fault.
+const HANDOFF_FOLLOW_LIMIT: Duration = Duration::from_secs(300);
+
+impl ApiClient {
+    /// Connect to the daemon that replaces one being upgraded. Until the old
+    /// daemon has exited, connecting can still reach it; [`ApiClient::connect`]
+    /// asks again until the new one answers.
+    pub(crate) async fn connect_after_handoff() -> Result<Self> {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        Self::connect().await
+    }
+}
+
 impl ApiError {
     fn into_error(self) -> anyhow::Error {
+        if self.code.as_deref() == Some(mj_controller::server::api::DAEMON_HANDOFF_CODE) {
+            return anyhow::Error::new(DaemonHandoff);
+        }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
                 " To change it for one session, pass --subagent-model and --subagent-effort to `mj new`; to change the profile's default, use Settings → Agent Profiles → the profile → Sub-agents."

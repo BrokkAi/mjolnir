@@ -1279,6 +1279,11 @@ impl DaemonClient {
         })
     }
 
+    /// The process this client is connected to.
+    pub fn daemon_pid(&self) -> u32 {
+        self.metadata.pid
+    }
+
     /// Speak the daemon's advertised dialect, not this build's: management
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
