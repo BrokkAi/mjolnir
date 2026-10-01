@@ -1,7 +1,31 @@
 use super::*;
+use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionId};
 
-pub(super) type PendingElicitations =
-    Arc<Mutex<BTreeMap<String, oneshot::Sender<ElicitationResponse>>>>;
+pub(super) type PendingElicitations = Arc<Mutex<BTreeMap<String, PendingElicitation>>>;
+
+/// A question the worker published and is waiting to have answered. It keeps
+/// the question so an answer is checked against what was actually offered.
+pub(super) struct PendingElicitation {
+    pub(super) question: ElicitationRequest,
+    pub(super) answer: oneshot::Sender<ElicitationResponse>,
+}
+
+#[cfg(test)]
+impl PendingElicitation {
+    /// A pending question with no fields, for tests that only need it open.
+    pub(super) fn open(id: &str, answer: oneshot::Sender<ElicitationResponse>) -> Self {
+        Self {
+            question: ElicitationRequest {
+                id: id.to_owned(),
+                message: String::new(),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+            },
+            answer,
+        }
+    }
+}
 
 /// A permission callback captures the current command's sender, so a late
 /// answer cannot attach an implementation to a subsequent prompt or bridge.
@@ -55,6 +79,123 @@ pub(super) enum PlanPermissionAnswer {
     ContinueInBypass,
 }
 
+/// The Claude permission mode the session's execution policy enforces: Auto
+/// for Guardian, bypassPermissions for YOLO. Approving a plan continues in
+/// this mode, as `RestoreExecutionMode` does when Plan mode is left by hand.
+fn claude_policy_mode(policy: ExecutionPolicy) -> &'static str {
+    HarnessKind::Claude
+        .execution_enforcement(policy)
+        .and_then(ExecutionEnforcement::acp_mode)
+        .expect("Claude enforces an ACP mode under every execution policy")
+}
+
+/// The permission mode a Claude plan-approval option continues in, and whether
+/// it first clears the context. claude-agent-acp 0.84 names the options
+/// `exit-plan-*`; earlier bridges named them by the mode itself.
+fn claude_plan_option_mode(option_id: &str) -> Option<(&'static str, bool)> {
+    Some(match option_id {
+        "exit-plan-bypass" | "bypassPermissions" => ("bypassPermissions", false),
+        "exit-plan-auto" | "auto" => ("auto", false),
+        "exit-plan-accept-edits" | "acceptEdits" => ("acceptEdits", false),
+        "exit-plan-default" | "default" => ("default", false),
+        "exit-plan-clear-bypass" => ("bypassPermissions", true),
+        "exit-plan-clear-auto" => ("auto", true),
+        "exit-plan-clear-accept-edits" => ("acceptEdits", true),
+        _ => return None,
+    })
+}
+
+/// The option that approves a Claude plan and continues under the session's
+/// own execution policy. Plan review's Implement and the approval form's Yes
+/// both select it.
+fn claude_policy_plan_option(
+    request: &RequestPermissionRequest,
+    policy: ExecutionPolicy,
+) -> Option<&PermissionOption> {
+    let mode = claude_policy_mode(policy);
+    request.options.iter().find(|option| {
+        claude_plan_option_mode(&option.option_id.to_string()) == Some((mode, false))
+            && matches!(
+                option.kind,
+                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+            )
+    })
+}
+
+/// Whether this is Claude's own ExitPlanMode approval in the claude-agent-acp
+/// 0.84 shape. Its tool call carries no kind for an AIR client, so the option
+/// ids are what identify it.
+pub(super) fn is_claude_plan_approval(
+    request: &RequestPermissionRequest,
+    harness: HarnessKind,
+) -> bool {
+    harness == HarnessKind::Claude
+        && request
+            .options
+            .iter()
+            .any(|option| option.option_id.to_string().starts_with("exit-plan-"))
+}
+
+/// One answer a permission form offers, and the harness option it selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PermissionChoice {
+    pub(super) option_id: PermissionOptionId,
+    pub(super) title: String,
+}
+
+/// The answers a person may give to a permission request shown as a form.
+///
+/// This is the only place that decides them: the worker publishes exactly
+/// these choices and accepts only these answers, so every surface (terminal,
+/// web, `mj respond`, automation) sees and can select the same set.
+///
+/// Claude's own plan approval (claude-agent-acp 0.84 `exit-plan-*` options,
+/// which reach this form when Claude wrote no plan file) must not change the
+/// session's execution policy. The option that continues under that policy
+/// becomes a plain "Yes"; an option that would raise a Guardian session to
+/// bypassPermissions is not offered at all. Lower modes stay available.
+pub(super) fn permission_choices(
+    request: &RequestPermissionRequest,
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+) -> Vec<PermissionChoice> {
+    if !is_claude_plan_approval(request, harness) {
+        return request
+            .options
+            .iter()
+            .map(|option| PermissionChoice {
+                option_id: option.option_id.clone(),
+                title: option.name.clone(),
+            })
+            .collect();
+    }
+    let policy_mode = claude_policy_mode(policy);
+    let yes = claude_policy_plan_option(request, policy);
+    let mut choices: Vec<_> = yes
+        .map(|option| PermissionChoice {
+            option_id: option.option_id.clone(),
+            title: "Yes".into(),
+        })
+        .into_iter()
+        .collect();
+    for option in &request.options {
+        if yes.is_some_and(|yes| yes.option_id == option.option_id) {
+            continue;
+        }
+        let mode = claude_plan_option_mode(&option.option_id.to_string());
+        let title = match mode {
+            Some(("bypassPermissions", _)) if policy_mode != "bypassPermissions" => continue,
+            Some((mode, true)) if mode == policy_mode => "Yes, clear context".to_owned(),
+            _ => option.name.clone(),
+        };
+        choices.push(PermissionChoice {
+            option_id: option.option_id.clone(),
+            title,
+        });
+    }
+    choices
+}
+
 pub(super) fn policy_plan_permission_answer(
     request: &RequestPermissionRequest,
     response: ElicitationResponse,
@@ -66,21 +207,8 @@ pub(super) fn policy_plan_permission_answer(
             request, response,
         )));
     }
-    let (mode, ids) = if policy.is_unconstrained() {
-        (
-            "bypassPermissions",
-            ["bypassPermissions", "exit-plan-bypass"],
-        )
-    } else {
-        ("auto", ["auto", "exit-plan-auto"])
-    };
-    if let Some(option) = request.options.iter().find(|option| {
-        ids.contains(&option.option_id.to_string().as_str())
-            && matches!(
-                option.kind,
-                PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
-            )
-    }) {
+    let mode = claude_policy_mode(policy);
+    if let Some(option) = claude_policy_plan_option(request, policy) {
         return Ok(PlanPermissionAnswer::Native(
             RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
                 SelectedPermissionOutcome::new(option.option_id.clone()),
@@ -234,15 +362,18 @@ pub(super) fn resolve_pending_elicitation(
     elicitation_id: &str,
     response: ElicitationResponse,
 ) -> std::result::Result<(), String> {
-    let Some(answer) = pending
-        .lock()
-        .expect("pending elicitation lock poisoned")
-        .remove(elicitation_id)
-    else {
+    let mut pending = pending.lock().expect("pending elicitation lock poisoned");
+    let Some(question) = pending.get(elicitation_id) else {
         return Err(format!(
             "elicitation {elicitation_id:?} is no longer pending"
         ));
     };
+    // The worker accepts only an answer to the question it published. A
+    // refused answer leaves the question pending for a valid one.
+    question.question.validate_response(&response)?;
+    let PendingElicitation { answer, .. } = pending
+        .remove(elicitation_id)
+        .expect("the pending entry was just found");
     answer
         .send(response)
         .map_err(|_| format!("elicitation {elicitation_id:?} was cancelled before it was answered"))

@@ -894,10 +894,10 @@ mod tests {
             .reset("Ask me two questions with AskUserQuestion before doing anything.");
         let open_requests = super::super::PendingElicitations::default();
         let (answer, mut form) = tokio::sync::oneshot::channel();
-        open_requests
-            .lock()
-            .unwrap()
-            .insert("elicitation-1".into(), answer);
+        open_requests.lock().unwrap().insert(
+            "elicitation-1".into(),
+            super::super::PendingElicitation::open("elicitation-1", answer),
+        );
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(400),
@@ -939,10 +939,10 @@ mod tests {
         spec.turn_context.reset("Which option should I use?");
         let open_requests = super::super::PendingElicitations::default();
         let (answer, _form) = tokio::sync::oneshot::channel();
-        open_requests
-            .lock()
-            .unwrap()
-            .insert("elicitation-1".into(), answer);
+        open_requests.lock().unwrap().insert(
+            "elicitation-1".into(),
+            super::super::PendingElicitation::open("elicitation-1", answer),
+        );
         let withdraw = open_requests.clone();
         let withdrawn = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;

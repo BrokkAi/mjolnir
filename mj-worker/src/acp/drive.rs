@@ -402,7 +402,7 @@ where
                     permission_elicitations
                         .lock()
                         .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), answer);
+                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
                     let pending = permission_elicitations.clone();
                     let events = permission_events.clone();
                     let cancellation = responder.cancellation();
@@ -518,7 +518,10 @@ where
                 // An unconstrained harness must never ask. Report the
                 // misconfiguration, then still let the user answer instead of
                 // failing the tool call.
-                if permission_policy.is_unconstrained() {
+                // Claude's plan approval is an expected question in any policy.
+                if permission_policy.is_unconstrained()
+                    && !is_claude_plan_approval(&request, permission_harness)
+                {
                     permission_events
                         .send(RuntimeEvent::Warning {
                             message: UNEXPECTED_PERMISSION_REQUEST_WARNING.to_owned(),
@@ -527,8 +530,11 @@ where
                         .map_err(|_| relay_event_channel_error())?;
                 }
                 let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
-                let options: Vec<_> = request.options.iter().map(|option| serde_json::json!({
-                    "const": option.option_id.to_string(), "title": option.name,
+                // The worker alone decides which answers this form offers, and
+                // accepts only those (see `permission_choices`).
+                let choices = permission_choices(&request, permission_harness, permission_policy);
+                let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
+                    "const": choice.option_id.to_string(), "title": choice.title,
                 })).collect();
                 // Prefer the tool call's own title so the card reads like the
                 // action being approved; fall back to the raw payload when a
@@ -563,7 +569,8 @@ where
                     }}
                 })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
                 let (answer, answer_rx) = oneshot::channel();
-                permission_elicitations.lock().expect("pending elicitation lock poisoned").insert(id.clone(), answer);
+                permission_elicitations.lock().expect("pending elicitation lock poisoned")
+                    .insert(id.clone(), PendingElicitation { question: form.clone(), answer });
                 let pending = permission_elicitations.clone();
                 let events = permission_events.clone();
                 let cancellation = responder.cancellation();
@@ -575,14 +582,14 @@ where
                     let selected = match &response {
                         Some(ElicitationResponse::Accept { content }) if !cancellation.is_cancelled() => {
                             match content.get("choice") {
-                                Some(ElicitationValue::String(value)) => request.options.iter().find(|option| option.option_id.to_string() == *value),
+                                Some(ElicitationValue::String(value)) => choices.iter().find(|choice| choice.option_id.to_string() == *value),
                                 _ => None,
                             }
                         }
                         _ => None,
                     };
-                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option|
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_id.clone())));
+                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |choice|
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(choice.option_id.clone())));
                     if let Err(error) = responder.respond(RequestPermissionResponse::new(outcome)) {
                         tracing::debug!(%error, "harness permission responder closed");
                     }
@@ -794,7 +801,7 @@ where
                     handler_elicitations
                         .lock()
                         .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), answer);
+                        .insert(id.clone(), PendingElicitation { question: request.clone(), answer });
                     let pending = handler_elicitations.clone();
                     let events = elicitation_events.clone();
                     let cancellation = responder.cancellation();
@@ -898,7 +905,7 @@ where
                     handler_elicitations
                         .lock()
                         .expect("pending elicitation lock poisoned")
-                        .insert(id.clone(), answer);
+                        .insert(id.clone(), PendingElicitation { question: review.clone(), answer });
                     let pending = handler_elicitations.clone();
                     let events = ext_events.clone();
                     let cancellation = responder.cancellation();

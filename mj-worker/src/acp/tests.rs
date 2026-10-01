@@ -7674,8 +7674,15 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     let (question, mut question_rx) = oneshot::channel();
     {
         let mut map = pending.lock().unwrap();
-        map.insert(format!("{TOOL_PERMISSION_ID_PREFIX}1"), permission);
-        map.insert("elicitation-1".to_owned(), question);
+        let permission_id = format!("{TOOL_PERMISSION_ID_PREFIX}1");
+        map.insert(
+            permission_id.clone(),
+            PendingElicitation::open(&permission_id, permission),
+        );
+        map.insert(
+            "elicitation-1".to_owned(),
+            PendingElicitation::open("elicitation-1", question),
+        );
     }
     withdraw_tool_permissions(&pending);
     assert!(

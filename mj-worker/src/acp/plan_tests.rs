@@ -1013,3 +1013,184 @@ async fn a_non_plan_permission_request_is_answered_by_the_user() {
     assert_eq!(answer["result"]["outcome"]["optionId"], "allow_once");
     probe.close().await;
 }
+
+/// Claude's ExitPlanMode request exactly as claude-agent-acp 0.84.0 sends it
+/// to Mjolnir, an AIR client, when Claude wrote no plan file: the tool call has
+/// no kind and the input no plan, so it is not a plan review. The Guardian
+/// shape without a plan was captured from a live worker.log. The options are
+/// what `buildExitPlanModePermissionOptions` builds, stably sorted by kind
+/// (allow once, allow always, reject): the mode the session was in before
+/// Plan leads the elevated ones (Auto for Guardian, bypass for YOLO), and a
+/// plan text adds a clear-context option for that mode before them.
+fn bridge_exit_plan_request(policy: ExecutionPolicy, plan: bool) -> Value {
+    let mut options = vec![
+        json!({"optionId": "exit-plan-default", "name": "Yes, manually approve edits", "kind": "allow_once"}),
+    ];
+    if plan {
+        options.push(if policy.is_unconstrained() {
+            json!({"optionId": "exit-plan-clear-bypass", "name": "Yes, clear context (12% used) and bypass permissions", "kind": "allow_always"})
+        } else {
+            json!({"optionId": "exit-plan-clear-auto", "name": "Yes, clear context (12% used) and use auto mode", "kind": "allow_always"})
+        });
+    }
+    let auto = json!({"optionId": "exit-plan-auto", "name": "Yes, and use auto mode", "kind": "allow_always"});
+    let bypass = json!({"optionId": "exit-plan-bypass", "name": "Yes, and bypass permissions", "kind": "allow_always"});
+    if policy.is_unconstrained() {
+        options.extend([bypass, auto]);
+    } else {
+        options.extend([auto, bypass]);
+    }
+    options.push(json!({"optionId": "reject", "name": "No, keep planning", "kind": "reject_once"}));
+    json!({
+        "sessionId": "plan-session",
+        "toolCall": {
+            "toolCallId": "toolu_exit_plan",
+            "title": "Approve Plan",
+            "rawInput": if plan {json!({"plan": "Add one line."})} else {json!({})}
+        },
+        "options": options,
+        "_meta": {"jetbrains": {"air": {"version": 1, "permission": {"version": 1, "title": "Ready to code?"}}}}
+    })
+}
+
+fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
+    let request: RequestPermissionRequest = serde_json::from_value(request.clone()).unwrap();
+    permission_choices(&request, HarnessKind::Claude, policy)
+        .into_iter()
+        .map(|choice| (choice.option_id.to_string(), choice.title))
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(id, title)| ((*id).to_owned(), (*title).to_owned()))
+        .collect()
+}
+
+#[test]
+fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_guardian() {
+    let guardian = ExecutionPolicy::ConfiguredApprovals;
+    let yolo = ExecutionPolicy::Unconstrained;
+    assert!(!is_plan_permission(
+        &serde_json::from_value(bridge_exit_plan_request(guardian, false)).unwrap()
+    ));
+    assert_eq!(
+        offered(&bridge_exit_plan_request(guardian, false), guardian),
+        pairs(&[
+            ("exit-plan-auto", "Yes"),
+            ("exit-plan-default", "Yes, manually approve edits"),
+            ("reject", "No, keep planning"),
+        ])
+    );
+    assert_eq!(
+        offered(&bridge_exit_plan_request(guardian, true), guardian),
+        pairs(&[
+            ("exit-plan-auto", "Yes"),
+            ("exit-plan-default", "Yes, manually approve edits"),
+            ("exit-plan-clear-auto", "Yes, clear context"),
+            ("reject", "No, keep planning"),
+        ])
+    );
+    // A YOLO session keeps Auto as a deliberate step down.
+    assert_eq!(
+        offered(&bridge_exit_plan_request(yolo, false), yolo),
+        pairs(&[
+            ("exit-plan-bypass", "Yes"),
+            ("exit-plan-default", "Yes, manually approve edits"),
+            ("exit-plan-auto", "Yes, and use auto mode"),
+            ("reject", "No, keep planning"),
+        ])
+    );
+    assert_eq!(
+        offered(&bridge_exit_plan_request(yolo, true), yolo),
+        pairs(&[
+            ("exit-plan-bypass", "Yes"),
+            ("exit-plan-default", "Yes, manually approve edits"),
+            ("exit-plan-clear-bypass", "Yes, clear context"),
+            ("exit-plan-auto", "Yes, and use auto mode"),
+            ("reject", "No, keep planning"),
+        ])
+    );
+    // A Guardian session whose bridge led with bypass (Plan entered from a
+    // mode set by hand) still gets no option above its policy.
+    assert_eq!(
+        offered(&bridge_exit_plan_request(yolo, true), guardian),
+        pairs(&[
+            ("exit-plan-auto", "Yes"),
+            ("exit-plan-default", "Yes, manually approve edits"),
+            ("reject", "No, keep planning"),
+        ])
+    );
+}
+
+/// The published form and the accepted answers come from the same decision:
+/// Yes selects the bridge option for the session's policy, and an answer
+/// naming the hidden bypass option is refused without reaching Claude.
+#[tokio::test]
+async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_bypass() {
+    for (policy, yes) in [
+        (ExecutionPolicy::ConfiguredApprovals, "exit-plan-auto"),
+        (ExecutionPolicy::Unconstrained, "exit-plan-bypass"),
+    ] {
+        let mut probe = PlanProbe::new(policy).await;
+        probe
+            .send(json!({
+                "jsonrpc": "2.0", "id": "exit-plan", "method": "session/request_permission",
+                "params": bridge_exit_plan_request(policy, false)
+            }))
+            .await;
+        let request = loop {
+            match probe.event().await {
+                RuntimeEvent::ElicitationRequested { request } => break request,
+                RuntimeEvent::Warning { message } => assert_ne!(
+                    message, UNEXPECTED_PERMISSION_REQUEST_WARNING,
+                    "plan approval is an expected question"
+                ),
+                _ => {}
+            }
+        };
+        let ElicitationFieldKind::SingleSelect { options, .. } = &request.fields[0].kind else {
+            panic!("the approval is a select")
+        };
+        assert_eq!(options[0].value, yes);
+        assert_eq!(options[0].title, "Yes");
+        assert!(
+            options
+                .iter()
+                .all(|option| !option.title.contains("bypass"))
+        );
+        let choose = |value: &str| ElicitationResponse::Accept {
+            content: BTreeMap::from([("choice".into(), ElicitationValue::String(value.into()))]),
+        };
+        if !policy.is_unconstrained() {
+            let (resolved, response) = oneshot::channel();
+            probe
+                .commands
+                .send(CommandRequest::ResolveElicitation {
+                    elicitation_id: request.id.clone(),
+                    response: choose("exit-plan-bypass"),
+                    resolved,
+                })
+                .await
+                .unwrap();
+            assert!(response.await.unwrap().is_err());
+            probe.no_message().await;
+        }
+        let (resolved, response) = oneshot::channel();
+        probe
+            .commands
+            .send(CommandRequest::ResolveElicitation {
+                elicitation_id: request.id,
+                response: choose(yes),
+                resolved,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap(), Ok(()));
+        let answer = probe.message().await;
+        assert_eq!(answer["id"], "exit-plan");
+        assert_eq!(answer["result"]["outcome"]["optionId"], yes);
+        probe.close().await;
+    }
+}
