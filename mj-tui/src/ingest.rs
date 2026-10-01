@@ -79,6 +79,8 @@ pub(crate) struct SessionDetail {
     /// What the last projection derived, so the next one only rescans the
     /// transcript items that changed.
     pub(crate) projection: MaterializedProjectionCache,
+    /// The Sessions row's rendering of the message it shows.
+    pub(crate) output_preview: crate::render::OutputPreviewCache,
 }
 
 impl SessionDetail {

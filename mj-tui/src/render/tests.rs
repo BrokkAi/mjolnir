@@ -1437,6 +1437,79 @@ fn current_agent_excerpt_never_repeats_an_old_answer() {
     assert_eq!(current_agent_excerpt(&old_only), None);
 }
 
+/// A long reply is rendered for its Sessions row once, not on every frame.
+/// Later frames reuse its rows until the reply or the room for it changes,
+/// and the rows are the reply's first two rows as a fresh rendering gives.
+#[test]
+fn a_long_reply_is_rendered_for_its_session_row_once_across_frames() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let id = dashboard.state.sessions.keys().next().unwrap().clone();
+    let reply = |tag: &str| {
+        (0..80)
+            .map(|index| {
+                format!(
+                    "### {tag} finding {index}\n\n- the daemon publishes a revision and \
+                     every waiter wakes to reload `file_{index}.rs`\n\n"
+                )
+            })
+            .collect::<String>()
+    };
+    let set_reply = |dashboard: &mut DashboardState, text: &str| {
+        let detail = dashboard.session_details.entry(id.clone()).or_default();
+        detail.last_agent_message = Some(text.into());
+        detail.last_agent_message_follows_last_user = true;
+    };
+    let renders =
+        |dashboard: &DashboardState| dashboard.session_details[&id].output_preview.renders.get();
+    // The rows a fresh rendering of `text` gives for the frame just drawn.
+    let expected_rows = |dashboard: &DashboardState, text: &str| {
+        let content_width = dashboard.pane_areas.expect("a drawn frame")[0].width - 2;
+        let output_width = usize::from(content_width) - "  │".chars().count();
+        mj_chat::chat::render_agent_message_head(&text.replace('\n', " "), output_width, 2)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    // A full row's ellipsis can fall past the pane's edge.
+                    .trim_end_matches('…')
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first = reply("first");
+    set_reply(&mut dashboard, &first);
+    let screen = drawn(&mut dashboard, 140, 40);
+    let rows = expected_rows(&dashboard, &first);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert!(
+            screen.iter().any(|line| line.contains(row.as_str())),
+            "{row:?} is on screen: {screen:#?}"
+        );
+    }
+    for _ in 0..3 {
+        assert_eq!(drawn(&mut dashboard, 140, 40), screen);
+    }
+    assert_eq!(renders(&dashboard), 1, "later frames reuse the rows");
+
+    let second = reply("second");
+    set_reply(&mut dashboard, &second);
+    let screen = drawn(&mut dashboard, 140, 40).join("\n");
+    assert_eq!(renders(&dashboard), 2, "a new reply is rendered again");
+    for row in expected_rows(&dashboard, &second) {
+        assert!(screen.contains(&row), "{row:?} is on screen: {screen}");
+    }
+
+    let screen = drawn(&mut dashboard, 200, 40).join("\n");
+    assert_eq!(renders(&dashboard), 3, "a new width is rendered again");
+    for row in expected_rows(&dashboard, &second) {
+        assert!(screen.contains(&row), "{row:?} is on screen: {screen}");
+    }
+}
+
 #[test]
 fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
     let asking = SessionDetail {

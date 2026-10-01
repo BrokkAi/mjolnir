@@ -18,11 +18,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
-    MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, TerminalSizeRequirement,
-    capacity_table_width, minimized_pane_size_controls, minimized_quota_line,
-    minimized_sessions_content_height, minimized_targets_line, pane_size_control_areas,
+    MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, SessionsLayout,
+    TerminalSizeRequirement, capacity_table_width, minimized_pane_size_controls,
+    minimized_quota_line, minimized_targets_line, pane_size_control_areas,
     pane_title_content_width, quota_table_width, render_capacity, render_footer, render_modal,
-    render_quotas, render_sessions, render_terminal_too_small, sessions_content_height,
+    render_quotas, render_sessions, render_terminal_too_small,
 };
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
@@ -596,19 +596,20 @@ fn render_combined_themed(
         ),
         (SupportPane::Quota, dashboard.pane_size(SupportPane::Quota)),
     ];
+    // The Sessions pane is as wide as the sidebar; its rows are laid out
+    // once, for both the sizes asked here and the draw below.
+    let sessions_layout = SessionsLayout::new(dashboard, sessions_area.width.saturating_sub(2));
     let dimensions = [
         (
             SupportPane::Sessions,
             PaneDimensions {
                 minimized: minimized_session_rows(
                     area.height,
-                    minimized_sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
-                        .into(),
+                    sessions_layout.minimized_content_height().into(),
                 )
                 .saturating_add(SESSION_ACTIONS_HEIGHT)
                 .saturating_add(2),
-                full: sessions_content_height(dashboard, sidebar_width.saturating_sub(2))
-                    .saturating_add(2),
+                full: sessions_layout.content_height().saturating_add(2),
                 standard_cap: area.height / 3,
             },
         ),
@@ -786,7 +787,7 @@ fn render_combined_themed(
             .extend(pane_size_control_areas(pane_area, pane, maximize_enabled));
     }
 
-    let rendered = render_sessions(frame, sessions_area, dashboard);
+    let rendered = render_sessions(frame, sessions_area, dashboard, &sessions_layout);
     dashboard.session_row_areas = rendered.session_row_areas;
     dashboard.project_heading_areas = rendered.project_heading_areas;
     crate::surface_controls::render_session_row_actions(frame, dashboard);

@@ -1753,7 +1753,8 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
     terminal
         .draw(|frame| {
-            crate::render::render_sessions(frame, frame.area(), &dashboard);
+            let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+            crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
         })
         .unwrap();
     let rows = terminal.backend().to_string();
@@ -5642,7 +5643,8 @@ fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
     let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
     terminal
         .draw(|frame| {
-            crate::render::render_sessions(frame, frame.area(), &dashboard);
+            let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
+            crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
         })
         .unwrap();
     let rows = terminal.backend().to_string();

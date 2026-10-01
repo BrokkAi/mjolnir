@@ -153,17 +153,38 @@ pub(crate) const ROLE_GUTTER_WIDTH: usize = 2;
 /// carries its own prefix, so a gutter there is a second marker for nothing.
 /// The wrap width is widened by the gutter it drops, so the caller gets the
 /// `width` columns of text it asked for.
-pub(crate) fn preview_rows(source: &str, width: usize) -> Vec<Line<'static>> {
+///
+/// Only the first `limit` rows are produced: wrapping stops there, so a
+/// summary of a long message costs what its first rows cost.
+pub(crate) fn preview_rows(source: &str, width: usize, limit: usize) -> Vec<Line<'static>> {
     let entry = ChatEntry::plain(0, ChatRole::Agent, source);
-    entry_body_rows(
-        &entry,
-        width.saturating_add(ROLE_GUTTER_WIDTH),
-        TranscriptRenderMode::Rich,
-    )
-    .into_iter()
-    .filter(|line| !line_is_empty(line))
-    .map(without_role_gutter)
-    .collect()
+    let mode = TranscriptRenderMode::Rich;
+    // The same rows `entry_body_rows` gives for the widened width.
+    let visual = entry_visual(&entry);
+    let content_width = width.max(1);
+    let mut rows = Vec::new();
+    for logical in entry_logical_lines(&entry, mode, &visual, content_width, false) {
+        if rows.len() >= limit {
+            break;
+        }
+        wrap_styled_line_until(
+            logical.line,
+            content_width,
+            logical.continuation_indent,
+            |row| {
+                let row = with_role_gutter(row, visual.rail_style);
+                if !line_is_empty(&row) {
+                    rows.push(without_role_gutter(row));
+                }
+                if rows.len() >= limit {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+    }
+    rows
 }
 
 /// The last rows of an agent message for a small preview viewport, rendered
@@ -176,7 +197,7 @@ pub fn render_agent_message_tail(
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }
-    let lines = preview_rows(source, width);
+    let lines = preview_rows(source, width, usize::MAX);
     let start = lines.len().saturating_sub(maximum_lines);
     lines.into_iter().skip(start).collect()
 }
@@ -191,7 +212,8 @@ pub fn render_agent_message_head(
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }
-    let mut lines = preview_rows(source, width);
+    // One row past the limit says whether anything was left out.
+    let mut lines = preview_rows(source, width, maximum_lines.saturating_add(1));
     let truncated = lines.len() > maximum_lines;
     lines.truncate(maximum_lines);
     if truncated && let Some(last) = lines.last_mut() {

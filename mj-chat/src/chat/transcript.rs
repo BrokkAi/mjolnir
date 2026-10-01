@@ -59,7 +59,7 @@ use super::ChatState;
 use super::rendering::{
     LinkSpan, LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, display_width,
     markdown_lines, raw_lines, sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
-    wrap_styled_line_with_sources,
+    wrap_styled_line_until, wrap_styled_line_with_sources,
 };
 
 #[derive(Debug, Clone)]
