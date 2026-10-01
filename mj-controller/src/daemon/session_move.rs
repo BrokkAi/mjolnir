@@ -119,46 +119,19 @@ impl RuntimeState {
                     elapsed_ms = stopping.elapsed().as_millis() as u64,
                     "move phase finished"
                 );
-                let result = blocking({
-                    let state = state.clone();
-                    let session_id = session_id.clone();
-                    move || {
-                        let reserving = std::time::Instant::now();
-                        let _reservation = reserve_recovery_or_cancel(
-                            &state.recovery_observer,
-                            &session_id,
-                            &cancelled,
-                        )?;
-                        tracing::info!(
-                            %session_id,
-                            phase = "recovery reservation",
-                            elapsed_ms = reserving.elapsed().as_millis() as u64,
-                            "move phase finished"
-                        );
-                        let loading = std::time::Instant::now();
-                        let mut controller = Controller::load()?;
-                        tracing::info!(
-                            %session_id,
-                            phase = "load controller state",
-                            elapsed_ms = loading.elapsed().as_millis() as u64,
-                            "move phase finished"
-                        );
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled),
-                            state.clone(),
-                            session_id,
-                        );
-                        let outcome = mj_core::runtime::block_on(
-                            controller.move_session_managed_controlled(
-                                request,
-                                &executor,
-                                &state.session_manager,
-                            ),
-                        )??;
-                        Ok(DaemonLifecycleResult::Move(outcome))
-                    }
-                })
-                .await;
+                let result = state
+                    .clone()
+                    .run_move_controller_work(
+                        session_id.clone(),
+                        cancelled,
+                        |mut controller, executor, manager| async move {
+                            controller
+                                .move_session_managed_controlled(request, &executor, &manager)
+                                .await
+                        },
+                    )
+                    .await
+                    .map(DaemonLifecycleResult::Move);
                 if result.is_err() {
                     state
                         .tell_live_parent_about_stopped_subagents(&session_id)
@@ -238,26 +211,18 @@ impl RuntimeState {
                     move_operation_id: None,
                 },
                 move |state, session_id, cancelled| async move {
-                    blocking(move || {
-                        let _reservation = reserve_recovery_or_cancel(
-                            &state.recovery_observer,
-                            &session_id,
-                            &cancelled,
-                        )?;
-                        let mut controller = Controller::load()?;
-                        let executor = DaemonStageReportingExecutor::new(
-                            CancellableProcessExecutor::new(cancelled),
-                            state.clone(),
+                    state
+                        .run_move_controller_work(
                             session_id,
-                        );
-                        mj_core::runtime::block_on(controller.recover_move_managed_controlled(
-                            operation,
-                            &executor,
-                            &state.session_manager,
-                        ))?
+                            cancelled,
+                            |mut controller, executor, manager| async move {
+                                controller
+                                    .recover_move_managed_controlled(operation, &executor, &manager)
+                                    .await
+                            },
+                        )
+                        .await
                         .map(DaemonLifecycleResult::Move)
-                    })
-                    .await
                 },
             )?;
             owned.insert(id.clone());
@@ -284,5 +249,308 @@ impl RuntimeState {
             });
         }
         Ok(owned)
+    }
+
+    /// The controller half of every Move lifecycle, started or recovered.
+    ///
+    /// It takes no upgrade admission of its own; the lifecycle's hold is the
+    /// only one. That is what lets the slow path work as intended: it
+    /// releases the lifecycle's hold around each resumable workspace copy
+    /// (`begin_resumable_move_work`), so a handoff does not wait for a copy,
+    /// the closing daemon cancels it, and the next daemon resumes the Move
+    /// from its durable phase. An in-place Move copies nothing and never
+    /// releases the hold, so a handoff waits for it to finish.
+    ///
+    /// The Move's controller future holds a standard mutex guard across an
+    /// await, so it is not `Send` and cannot be the lifecycle future itself.
+    /// It is built and awaited on a blocking-pool thread of its own.
+    pub(super) async fn run_move_controller_work<W, Fut>(
+        self: Arc<Self>,
+        session_id: String,
+        cancelled: Arc<AtomicBool>,
+        work: W,
+    ) -> Result<MoveOutcome>
+    where
+        W: FnOnce(
+                Controller,
+                DaemonStageReportingExecutor<CancellableProcessExecutor>,
+                SessionManagerControl,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = Result<MoveOutcome>>,
+    {
+        tokio::task::spawn_blocking(move || {
+            let reserving = std::time::Instant::now();
+            let _reservation =
+                reserve_recovery_or_cancel(&self.recovery_observer, &session_id, &cancelled)?;
+            tracing::info!(
+                %session_id,
+                phase = "recovery reservation",
+                elapsed_ms = reserving.elapsed().as_millis() as u64,
+                "move phase finished"
+            );
+            let loading = std::time::Instant::now();
+            let controller = (self.controller_loader)()?;
+            tracing::info!(
+                %session_id,
+                phase = "load controller state",
+                elapsed_ms = loading.elapsed().as_millis() as u64,
+                "move phase finished"
+            );
+            let manager = self.session_manager.clone();
+            let executor = DaemonStageReportingExecutor::new(
+                CancellableProcessExecutor::new(cancelled),
+                self,
+                session_id,
+            );
+            mj_core::runtime::block_on(Box::pin(work(controller, executor, manager)))?
+        })
+        .await
+        .context("Move controller task failed")?
+    }
+}
+
+#[cfg(all(test, unix))]
+mod admission_tests {
+    use super::*;
+    use crate::controller::test_support::{IsolatedTest, test_name};
+
+    const BOUND: Duration = Duration::from_secs(5);
+
+    fn metadata() -> DaemonMetadata {
+        DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: 1,
+            address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            token: "right-token".into(),
+            started_at: "now".into(),
+            build_version: "test".into(),
+        }
+    }
+
+    fn outcome(status: &str) -> MoveOutcome {
+        MoveOutcome {
+            operation_id: "move-operation".into(),
+            session_id: "moving-session".into(),
+            profile_id: String::new(),
+            target_template_id: String::new(),
+            outcome: status.into(),
+            error: None,
+            recovery: None,
+        }
+    }
+
+    /// A command that records its process id and waits for `release`.
+    fn held_command(directory: &Path, purpose: &str) -> CommandSpec {
+        CommandSpec::new(
+            "sh",
+            [
+                "-c".to_owned(),
+                format!(
+                    "echo $$ > '{0}/pid'; while [ ! -e '{0}/release' ]; do sleep 0.05; done",
+                    directory.display()
+                ),
+            ],
+        )
+        .purpose(purpose)
+    }
+
+    /// Releases a held command when a test ends, so a failing assertion does
+    /// not leave the runtime waiting for it forever.
+    struct ReleaseOnDrop(PathBuf);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+
+    async fn wait_for_file(path: &Path) {
+        let deadline = std::time::Instant::now() + BOUND;
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} never appeared",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn process_is_running(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    async fn handoff(state: &Arc<RuntimeState>) -> DaemonReply {
+        super::super::actions::handle_action(
+            DaemonAction::PrepareUpgrade,
+            &metadata(),
+            state,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A slow-path Move holds no handoff admission while it copies a
+    /// workspace: a handoff completes without waiting for the copy, the stop
+    /// that follows kills the copy, and the Move reports that it was
+    /// interrupted for the next daemon to resume, as `finish_move_result`
+    /// does for a Move with a workspace transfer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_handoff_does_not_wait_for_a_slow_path_move_copy() {
+        const NAME: &str = "a_handoff_does_not_wait_for_a_slow_path_move_copy";
+        const CHILD: &str = "MJ_TEST_SLOW_MOVE_HANDOFF";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(CHILD, "1")
+                .env("MJ_INSTANCE", "slow-move-handoff")
+                .isolated_store(root.path())
+                .run();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(directory.path().join("release"));
+        let copy = held_command(directory.path(), "copy Move workspace");
+        let state = super::super::tests::test_runtime_state();
+        let result = state
+            .start_or_join_lifecycle(
+                "moving-session".into(),
+                LifecycleKind::Move,
+                move |state, session_id, cancelled| async move {
+                    state
+                        .run_move_controller_work(
+                            session_id,
+                            cancelled,
+                            |_, executor, _| async move {
+                                executor.begin_resumable_move_work()?;
+                                let copied = executor.execute(&copy);
+                                let resumed = executor.end_resumable_move_work();
+                                if copied.is_ok() && resumed.is_ok() {
+                                    return Ok(outcome("completed"));
+                                }
+                                ensure!(
+                                    !crate::upgrade::gate().is_open(),
+                                    "the copy stopped without a handoff"
+                                );
+                                Ok(outcome("interrupted"))
+                            },
+                        )
+                        .await
+                        .map(DaemonLifecycleResult::Move)
+                },
+            )
+            .unwrap();
+        wait_for_file(&directory.path().join("pid")).await;
+        let pid: i32 = std::fs::read_to_string(directory.path().join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        let labels = crate::upgrade::active_labels();
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label == "session lifecycle" || label == "database operation"),
+            "the copy holds handoff admission: {labels:?}"
+        );
+        let deadline = std::time::Instant::now() + BOUND;
+        while !matches!(handoff(&state).await, DaemonReply::Done) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the handoff waited for the copy: {:?}",
+                crate::upgrade::active_labels()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            process_is_running(pid),
+            "the handoff itself cancels nothing"
+        );
+
+        // The closing daemon cancels the lifecycles it leaves behind.
+        let stopping = std::time::Instant::now();
+        state.cancel_and_wait_lifecycles().await.unwrap();
+        assert!(stopping.elapsed() < BOUND);
+        match RuntimeState::wait_lifecycle_result(result).await.unwrap() {
+            DaemonLifecycleResult::Move(outcome) => assert_eq!(outcome.outcome, "interrupted"),
+            _ => panic!("a Move lifecycle returns a Move outcome"),
+        }
+        let deadline = std::time::Instant::now() + BOUND;
+        while process_is_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled copy kept running"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!directory.path().join("release").exists());
+    }
+
+    /// An in-place Move copies nothing and keeps its admission for its whole
+    /// run, so a handoff waits for it and then proceeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_handoff_waits_for_a_fast_path_move() {
+        const NAME: &str = "a_handoff_waits_for_a_fast_path_move";
+        const CHILD: &str = "MJ_TEST_FAST_MOVE_HANDOFF";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), NAME))
+                .env(CHILD, "1")
+                .env("MJ_INSTANCE", "fast-move-handoff")
+                .isolated_store(root.path())
+                .run();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(directory.path().join("release"));
+        let swap = held_command(directory.path(), "swap the harness in place");
+        let state = super::super::tests::test_runtime_state();
+        let result = state
+            .start_or_join_lifecycle(
+                "moving-session".into(),
+                LifecycleKind::Move,
+                move |state, session_id, cancelled| async move {
+                    state
+                        .run_move_controller_work(
+                            session_id,
+                            cancelled,
+                            |_, executor, _| async move {
+                                executor.execute(&swap)?;
+                                Ok(outcome("completed"))
+                            },
+                        )
+                        .await
+                        .map(DaemonLifecycleResult::Move)
+                },
+            )
+            .unwrap();
+        wait_for_file(&directory.path().join("pid")).await;
+        assert!(
+            crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label == "session lifecycle")
+        );
+        assert!(matches!(handoff(&state).await, DaemonReply::UpgradePending));
+        std::fs::write(directory.path().join("release"), b"").unwrap();
+        match RuntimeState::wait_lifecycle_result(result).await.unwrap() {
+            DaemonLifecycleResult::Move(outcome) => assert_eq!(outcome.outcome, "completed"),
+            _ => panic!("a Move lifecycle returns a Move outcome"),
+        }
+        let deadline = std::time::Instant::now() + BOUND;
+        loop {
+            if matches!(handoff(&state).await, DaemonReply::Done) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the finished Move still holds the handoff"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
