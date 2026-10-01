@@ -226,7 +226,7 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
 }
 
 #[test]
-fn a_codex_profile_may_not_supply_its_own_model_catalog() {
+fn a_codex_profile_may_name_its_own_model_catalog() {
     let home = tempfile::tempdir().expect("temporary home");
     let mut profile = zai_profile(
         home.path(),
@@ -241,11 +241,20 @@ fn a_codex_profile_may_not_supply_its_own_model_catalog() {
     )
     .expect("write");
     profile.enabled = true;
-    let error = profile
+    // Mjolnir stages its own catalog and replaces the key there, so a
+    // profile-authored file is not a reason to refuse.
+    profile
         .validate("glm")
-        .expect_err("Mjolnir owns the catalog")
-        .to_string();
-    assert!(error.contains("model_catalog_json"), "{error}");
+        .expect("a profile-authored catalog validates");
+    assert_eq!(
+        profile
+            .codex_provider()
+            .expect("read the profile's provider")
+            .expect("a custom provider")
+            .model_catalog_json,
+        Some(std::path::PathBuf::from("mine.json")),
+        "the file the profile names is recorded, though Mjolnir stages its own"
+    );
 }
 
 #[test]

@@ -103,10 +103,11 @@ What changes for such a profile:
 - **Models come from the provider.** Mjolnir fetches the provider's model catalog
   from `{base_url}/models` before each launch and stages it as `models.json`
   beside the staged `config.toml`. Without it Codex would offer OpenAI's built-in
-  model names and send them to your provider. Do not set `model_catalog_json`
-  yourself; Mjolnir owns that file and rejects a profile that writes one. If the
-  provider is unreachable, the last catalog Mjolnir fetched for the profile is
-  staged instead.
+  model names and send them to your provider. If the provider is unreachable, the
+  last catalog Mjolnir fetched for the profile is staged instead. If
+  `config.toml` sets `model_catalog_json`, Mjolnir ignores the file it names and
+  points the staged configuration at its own catalog; your file is never
+  modified. Use `models.json` to shape the catalog.
 - **Guardian reviews run on the newest flash model** the catalog lists. Mjolnir
   stamps that choice on every catalog entry, so a heavyweight session model is
   not also its own reviewer. When the catalog lists no flash model, Codex reviews
@@ -179,8 +180,9 @@ catalog. For example, to give DeepSeek's reasoning model its two effort levels:
 
 Mjolnir merges this file into the fetched catalog for every launch and writes
 the merged result as the staged `models.json`. Your own file is never edited.
-This is the supported way to shape the catalog; `model_catalog_json` in the
-Codex `config.toml` is still rejected, because Mjolnir writes that key itself.
+A `model_catalog_json` key in the Codex `config.toml` is ignored: the staged
+configuration is pointed at Mjolnir's catalog instead, so the key never reaches
+a target as a path into your own home.
 
 ### Choose the guardian review model
 

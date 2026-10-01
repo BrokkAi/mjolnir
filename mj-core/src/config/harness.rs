@@ -790,25 +790,17 @@ impl HarnessProfile {
         let provider = self
             .codex_provider()
             .with_context(|| format!("profile {id:?}"))?;
-        if let Some(provider) = provider.as_ref() {
-            if provider.model_catalog_json.is_some() {
-                bail!(
-                    "profile {id:?}: remove `model_catalog_json` from {}; Mjolnir fetches the model catalog from {} and stages it for every launch",
-                    self.home.join("config.toml").display(),
-                    provider.base_url
-                );
-            }
-            if let Some(env_key) = provider.env_key.as_deref()
-                && self
-                    .environment
-                    .get(env_key)
-                    .is_none_or(|value| value.trim().is_empty())
-            {
-                bail!(
-                    "profile {id:?}: {} authenticates with {env_key}, so set it under [profiles.{id}.environment] in Mjolnir's config.toml",
-                    self.home.join("config.toml").display()
-                );
-            }
+        if let Some(provider) = provider.as_ref()
+            && let Some(env_key) = provider.env_key.as_deref()
+            && self
+                .environment
+                .get(env_key)
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            bail!(
+                "profile {id:?}: {} authenticates with {env_key}, so set it under [profiles.{id}.environment] in Mjolnir's config.toml",
+                self.home.join("config.toml").display()
+            );
         }
         if let Some(reviewer) = self.guardian_review_model.as_deref() {
             if reviewer.trim().is_empty() {

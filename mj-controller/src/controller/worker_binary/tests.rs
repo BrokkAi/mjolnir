@@ -2533,14 +2533,20 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
             "Guardian reviews run on the newest flash model"
         );
     }
-    // The key must be top-level, so it precedes the provider table, and the
-    // user's own lines survive unchanged.
+    // The key is top-level, so Codex reads it, and the user's own lines survive.
     let config = std::fs::read_to_string(staged.path().join("config.toml")).unwrap();
+    assert_eq!(
+        config.matches("model_catalog_json").count(),
+        1,
+        "exactly one top-level key names the catalog: {config}"
+    );
     assert!(
-        config.starts_with("model_catalog_json = \"models.json\"\n"),
+        config.contains("model_catalog_json = \"models.json\""),
         "{config}"
     );
-    assert!(config.ends_with(ZAI_CONFIG), "{config}");
+    for line in ZAI_CONFIG.lines().filter(|line| !line.is_empty()) {
+        assert!(config.contains(line), "missing {line:?} in {config}");
+    }
     assert_eq!(
         mj_core::codex_provider::codex_provider(staged.path())
             .unwrap()
@@ -2554,6 +2560,66 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
     assert!(
         !home.path().join("models.json").exists(),
         "the user's own profile home stays untouched"
+    );
+}
+
+#[test]
+fn a_profile_authored_catalog_is_discarded_and_the_staged_key_replaces_its_own() {
+    let home = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let profile = deepseek_profile(home.path());
+    // A catalog of the profile's own, named the way Codex names one.
+    std::fs::write(
+        home.path().join("mine.models.json"),
+        r#"{"models":[
+            {"slug":"deepseek-v4-pro","supported_reasoning_levels":["low","high","max"]},
+            {"slug":"deepseek-private","display_name":"DeepSeek Private"}
+        ]}"#,
+    )
+    .unwrap();
+    let authored = format!(
+        "model_catalog_json = \"mine.models.json\"\n{}",
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap()
+    );
+    std::fs::write(home.path().join("config.toml"), &authored).unwrap();
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_codex_catalog(
+        "deepseek",
+        &profile,
+        staged.path(),
+        &|_, _| Ok(DEEPSEEK_LIST.as_bytes().to_vec()),
+        &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
+    )
+    .expect("a profile-authored catalog is merged, not refused");
+
+    let catalog =
+        mj_core::codex_catalog::parse(&std::fs::read(staged.path().join("models.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        catalog.slugs(),
+        ["deepseek-flash", "deepseek-v4-pro"],
+        "the file named by model_catalog_json is ignored; only the provider's list and the profile's models.json shape the staged catalog"
+    );
+    let config = std::fs::read_to_string(staged.path().join("config.toml")).unwrap();
+    assert_eq!(
+        config.matches("model_catalog_json").count(),
+        1,
+        "the staged copy has one key, not a duplicate Codex would reject: {config}"
+    );
+    assert!(
+        config.contains("model_catalog_json = \"models.json\""),
+        "{config}"
+    );
+    assert!(
+        !config.contains("mine.models.json"),
+        "no staged key points into the profile's own home: {config}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        authored,
+        "the profile's own file is never modified"
     );
 }
 

@@ -720,6 +720,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml",
+ "toml_edit 0.20.2",
  "tower",
  "tracing",
  "url",

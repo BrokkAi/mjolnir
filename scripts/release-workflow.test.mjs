@@ -111,8 +111,13 @@ esac
   const missing = run();
   assert.notEqual(missing.status, 0);
 });
-for (const fail of ['', 'linux-x64-gnu']) {
-  test(`npm uploads run concurrently and ${fail ? 'a failure blocks the wrapper' : 'all platforms precede the wrapper'}`, t => {
+for (const { fail = '', neverReadable = false } of [{}, { fail: 'linux-x64-gnu' }, { neverReadable: true }]) {
+  const outcome = fail
+    ? 'a failure blocks the wrapper'
+    : neverReadable
+      ? 'the wrapper publishes while the registry still 404s the platform versions'
+      : 'all platforms precede the wrapper';
+  test(`npm uploads run concurrently and ${outcome}`, t => {
     const dir = fixture(t);
     mkdirSync(join(dir, 'bin'));
     writeFileSync(join(dir, 'Cargo.toml'), '[workspace.package]\nversion = "1.2.3"\n');
@@ -136,12 +141,17 @@ else
 fi
 touch "$FIXTURE/$name.ready"
 `, { mode: 0o755 });
-    writeFileSync(join(dir, 'bin/curl'), `#!/bin/bash
-url="\${@: -1}"
+    const curlBody = neverReadable
+      // The registry's read path lags its write path, so a just-published
+      // version can keep returning 404 long after npm publish succeeded.
+      ? 'exit 1\n'
+      : `url="\${@: -1}"
 package="\${url#*%2F}"
 package="\${package%/*}"
 test -f "$FIXTURE/brokkai-$package-1.2.3.ready"
-`, { mode: 0o755 });
+`;
+    writeFileSync(join(dir, 'bin/curl'), `#!/bin/bash
+${curlBody}`, { mode: 0o755 });
     const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(npmWorkflow, 'Publish missing platform packages before the root wrapper')], {
       cwd: dir, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FIXTURE: dir, FAIL_PLATFORM: fail },
