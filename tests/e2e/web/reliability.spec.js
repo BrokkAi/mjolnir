@@ -129,8 +129,8 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     // The New flow asks one thing per screen and reviews before committing.
     await page.getByRole('button', { name: 'New session' }).click();
     await expect(page).toHaveURL(/\/new$/);
-    await expect(page.locator('#new-progress')).toContainText('Account');
-    await page.getByRole('button', { name: 'Next' }).click();
+    // The lab configures a single profile, so the form skips the Account step
+    // and opens on Where to run.
     await expect(page.locator('#new-progress')).toContainText('Where to run');
     // Config::with_local_targets also offers container candidates. Select the
     // bare host explicitly so this scenario exercises the directory flow.

@@ -6011,6 +6011,22 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
 
 #[tokio::test]
 async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() {
+    const TEST: &str = "shutdown_joins_independent_startup_teardown_before_closing_the_store";
+    const CHILD: &str = "MJ_TEST_SHUTDOWN_JOINS_STARTUP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Failed startup cleanup is deferrable, and admission is process-wide,
+        // so a handoff another test is draining refuses it here. Run alone with
+        // a fresh gate so this measures the shutdown join and not that refusal.
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), TEST),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     assert!(!lifecycle_cancellable(
         LifecycleKind::StartupCleanup,
         Some(SessionState::StartupCleanup)
