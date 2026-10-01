@@ -12,6 +12,9 @@ pub struct ApiFailure {
     pub message: String,
     /// Names a refusal's reason for a client that chooses its own remedy.
     pub code: Option<&'static str>,
+    /// `(running, limit)` when the refusal is a full action pool; see
+    /// [`ApiError::with_busy`], the one place that sets it.
+    busy: Option<(usize, usize)>,
 }
 
 impl ApiFailure {
@@ -20,6 +23,7 @@ impl ApiFailure {
             status,
             message: message.into(),
             code: None,
+            busy: None,
         }
     }
 
@@ -54,7 +58,9 @@ impl std::fmt::Display for ApiFailure {
 
 impl From<ApiError> for ApiFailure {
     fn from(error: ApiError) -> Self {
-        Self::new(error.status, error.message).with_code(error.code)
+        let mut failure = Self::new(error.status, error.message).with_code(error.code);
+        failure.busy = error.busy;
+        failure
     }
 }
 
@@ -76,6 +82,10 @@ pub(super) struct FailureBody {
     pub(super) error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) running_actions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) action_limit: Option<usize>,
 }
 
 impl IntoResponse for ApiFailure {
@@ -85,6 +95,8 @@ impl IntoResponse for ApiFailure {
             Json(FailureBody {
                 error: self.message,
                 code: self.code,
+                running_actions: self.busy.map(|(running, _)| running),
+                action_limit: self.busy.map(|(_, limit)| limit),
             }),
         )
             .into_response()
