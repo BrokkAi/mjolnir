@@ -28,6 +28,8 @@ const PTY_COLUMNS: usize = 80;
 /// A local-target fixture's first launch waits in the daemon until this file
 /// exists.
 const LAUNCH_RELEASE: &str = "release-launch";
+/// A first-run fixture's prerequisite checks wait until this file exists.
+const DOCTOR_RELEASE: &str = "release-doctor";
 
 /// Keep the terminal's current cells independently of the captured byte log.
 /// Ratatui can retain an unchanged space and move the cursor over it, so the
@@ -682,12 +684,20 @@ image = "ubuntu:24.04"
         mj_core::test_hooks::install_fake_command(
             &tools,
             "claude",
-            "#!/bin/sh\nif [ \"$1\" = auth ]; then /bin/sleep 2; exit 1; fi\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = auth ]; then exit 1; fi\nexit 0\n",
         );
+        // The prerequisite checks end by asking Bifrost for its version, on
+        // every platform and in no other startup work. Waiting there until
+        // the test releases it keeps the checks running while the test
+        // dismisses the welcome, whatever the load. A Bifrost that fails is
+        // only a warning, which the welcome does not show.
         mj_core::test_hooks::install_fake_command(
             &tools,
-            "podman",
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 2; fi\nexit 1\n",
+            "bifrost",
+            &format!(
+                "#!/bin/sh\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 1\n",
+                storage.path().join(DOCTOR_RELEASE).display()
+            ),
         );
         for name in ["node", "npm"] {
             mj_core::test_hooks::install_fake_command(&tools, name, "#!/bin/sh\necho 24.0.0\n");
@@ -773,6 +783,7 @@ image = "ubuntu:24.04"
             .env("PATH", storage.path().join("first-run-tools"))
             .env("CODEX_HOME", storage.path().join(".codex"))
             .env("CLAUDE_CONFIG_DIR", storage.path().join(".claude"))
+            .env_remove("MJ_BIFROST_BIN")
             .env_remove("KIMI_CODE_HOME")
             .env_remove("GROK_HOME")
             .env_remove("MUSE_HOME");
@@ -892,7 +903,7 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     } = spawn_dashboard_pty_with_local_target(false, false, true);
     // Declared after the fixture so that it drops first: the daemon's held
     // launch must finish before teardown stops it, even when this fails.
-    let held_launch = ReleaseHeldLaunch(storage.path().join(LAUNCH_RELEASE));
+    let held_launch = ReleaseOnDrop(storage.path().join(LAUNCH_RELEASE));
     let database = storage.path().join("data/hel/mj.sqlite3");
     let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
@@ -1045,10 +1056,10 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
     drop(held_launch);
 }
 
-/// Lets the fixture's held launch finish.
-struct ReleaseHeldLaunch(std::path::PathBuf);
+/// Lets a fake command that the fixture holds finish.
+struct ReleaseOnDrop(std::path::PathBuf);
 
-impl Drop for ReleaseHeldLaunch {
+impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         let _ = fs::write(&self.0, b"");
     }
@@ -1350,12 +1361,24 @@ fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
 #[test]
 fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
     let mut fixture = spawn_dashboard_pty_with_setup(false, false, false, None, true);
+    // Declared after the fixture so that it drops first: the held checks
+    // must finish before teardown, even when this fails.
+    let held_doctor = ReleaseOnDrop(fixture._storage.path().join(DOCTOR_RELEASE));
     let mut output = PtyOutput::new();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
         &mut output,
         b"Welcome to Mjolnir",
+    );
+    // Results that arrive while the welcome is open are shown in it, and
+    // dismissing it dismisses them too. The held checks make sure this
+    // dismissal happens while they run.
+    wait_for_screen(
+        &mut fixture.master,
+        &mut output,
+        "Checking prerequisites\u{2026}".as_bytes(),
+        Instant::now() + STARTUP_TIMEOUT,
     );
     fixture.master.write_all(b"\r").unwrap();
     wait_for_output_until(
@@ -1365,6 +1388,8 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
         Instant::now() + TIMEOUT,
         None,
     );
+    drop(held_doctor);
+    // Results that arrive after dismissal become failure notices.
     wait_for_screen(
         &mut fixture.master,
         &mut output,
@@ -1386,7 +1411,15 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
             .sessions
             .is_empty()
     );
-    // The daemon feed must publish discovered profiles before the creation wizard opens.
+    // The creation wizard uses the profiles the daemon feed has published,
+    // and the daemon reads the saved configuration on its own schedule.
+    // The Profiles pane lists them once the feed has them.
+    wait_for_screen(
+        &mut fixture.master,
+        &mut output,
+        b"Claude Code",
+        Instant::now() + STARTUP_TIMEOUT,
+    );
     fixture.master.write_all(NEW_SESSION_KEY).unwrap();
     wait_for_screen(
         &mut fixture.master,
