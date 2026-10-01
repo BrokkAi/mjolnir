@@ -275,6 +275,14 @@ impl DashboardState {
                 return Some(check);
             }
         }
+        // The project step marks configured projects whose directory is gone.
+        // The checks start with the first step, like the target checks.
+        if matches!(&self.mode, Mode::New(wizard)
+            if matches!(wizard.step, WizardStep::Profile | WizardStep::Target | WizardStep::Bundle))
+            && let Some(check) = self.begin_project_directory_checks()
+        {
+            return Some(check);
+        }
         let Mode::New(wizard) = &self.mode else {
             return None;
         };

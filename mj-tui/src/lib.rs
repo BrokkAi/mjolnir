@@ -435,6 +435,12 @@ pub enum DashboardAction {
         generation: u64,
         target_ids: Vec<String>,
     },
+    /// Find out, off the render loop, which of these configured project
+    /// directories exist; answers return through
+    /// `DashboardState::apply_project_directory_check`.
+    CheckProjectDirectories {
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Read the stored mount and project-directory history on a worker and
     /// hand it back through `DashboardState::apply_mount_history`.
     LoadMountHistory,
@@ -845,6 +851,11 @@ pub struct DashboardState {
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
+    /// Whether the local directories of configured projects exist, so the
+    /// project picker can mark the ones that are gone without touching the
+    /// filesystem while it draws.
+    pub(crate) project_directory_checks:
+        BTreeMap<std::path::PathBuf, wizards::ProjectDirectoryCheck>,
     /// The New wizard opened and the stored mount and project history should
     /// be read again, since sessions created after startup add to it.
     pub(crate) mount_history_refresh_pending: bool,
@@ -1117,6 +1128,7 @@ impl DashboardState {
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
+            project_directory_checks: BTreeMap::new(),
             mount_history_refresh_pending: false,
 
             command_session_override: None,

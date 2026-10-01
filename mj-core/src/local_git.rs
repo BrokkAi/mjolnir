@@ -422,6 +422,14 @@ pub fn repository_remote_repairs(
     let mut repairs = Vec::new();
     for repository in &bundle.repositories {
         if let Some(path) = &repository.local {
+            if !path.is_dir() {
+                return Err(crate::refusal::Refusal::precondition(format!(
+                    "Project {:?}: the directory {} does not exist.",
+                    repository.id,
+                    path.display()
+                ))
+                .into());
+            }
             match resolve_local_repository(path, executor) {
                 Ok(_) => {}
                 Err(error) => match error.downcast_ref::<LocalRemoteRepair>() {
@@ -936,6 +944,22 @@ mod tests {
                 git_ref: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_missing_project_directory_is_reported_in_plain_language() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("gone");
+        let mut bundle = repair_bundle(&missing);
+        bundle.repositories[0].id = "missingpath".into();
+        let error = repository_remote_repairs(&bundle, &ProcessExecutor).unwrap_err();
+        assert_eq!(
+            crate::refusal::Refusal::of(&error).unwrap().message(),
+            format!(
+                "Project \"missingpath\": the directory {} does not exist.",
+                missing.display()
+            )
+        );
     }
 
     #[test]

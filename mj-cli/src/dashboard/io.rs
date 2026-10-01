@@ -198,6 +198,12 @@ pub(crate) enum DashboardIoUpdate {
         /// engine's command not installed.
         absent_engine: Option<mj_core::config::TargetTemplate>,
     },
+    /// Whether a configured project's local directory exists; `None` when
+    /// the check could not tell.
+    ProjectDirectory {
+        path: std::path::PathBuf,
+        exists: Option<bool>,
+    },
     ProjectCatalog {
         context: Option<String>,
         result: std::result::Result<mj_core::project_catalog::ProjectCatalogView, String>,
@@ -1127,6 +1133,9 @@ impl DashboardContext {
                         .dashboard
                         .apply_target_readiness(generation, target_id, result),
                 }
+            }
+            DashboardIoUpdate::ProjectDirectory { path, exists } => {
+                self.dashboard.apply_project_directory_check(path, exists);
             }
             DashboardIoUpdate::TargetTest { target_id, result } => {
                 self.target_test_cancel = None;

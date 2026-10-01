@@ -1868,6 +1868,7 @@ impl DashboardState {
                 // wizard sitting on its target step sees fresh readiness. A
                 // cleared entry is re-probed on the next render.
                 self.target_readiness.clear();
+                self.project_directory_checks.clear();
                 DashboardAction::RefreshAll
             }
             CommandId::ManageProfiles => {

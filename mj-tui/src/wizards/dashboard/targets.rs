@@ -88,6 +88,80 @@ impl DashboardState {
         self.begin_target_readiness_checks(target_ids)
     }
 
+    /// Start checks for the local directories of configured projects that
+    /// have no current answer. A check in flight is never repeated.
+    pub(in crate::wizards) fn begin_project_directory_checks(&mut self) -> Option<DashboardAction> {
+        let now = Instant::now();
+        let paths: Vec<std::path::PathBuf> = self
+            .config
+            .bundles
+            .values()
+            .flat_map(|bundle| bundle.repositories.iter())
+            .filter_map(|repository| repository.local.clone())
+            .filter(|path| {
+                self.project_directory_checks.get(path).is_none_or(|check| {
+                    check.state != ProjectDirectoryState::Checking
+                        && now.saturating_duration_since(check.recorded_at)
+                            >= PROJECT_DIRECTORY_CHECK_TTL
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if paths.is_empty() {
+            return None;
+        }
+        for path in &paths {
+            self.project_directory_checks.insert(
+                path.clone(),
+                ProjectDirectoryCheck {
+                    state: ProjectDirectoryState::Checking,
+                    recorded_at: now,
+                },
+            );
+        }
+        Some(DashboardAction::CheckProjectDirectories { paths })
+    }
+
+    /// Record the answer for `path`: whether it is a directory, or `None`
+    /// when the check could not tell.
+    pub fn apply_project_directory_check(
+        &mut self,
+        path: std::path::PathBuf,
+        exists: Option<bool>,
+    ) {
+        let state = match exists {
+            Some(true) => ProjectDirectoryState::Present,
+            Some(false) => ProjectDirectoryState::Missing,
+            None => ProjectDirectoryState::Unknown,
+        };
+        self.project_directory_checks.insert(
+            path,
+            ProjectDirectoryCheck {
+                state,
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+
+    /// The configured local directories of `bundle` that the last check
+    /// found missing. A directory not yet checked is not called missing.
+    pub(crate) fn missing_project_directories<'a>(
+        &self,
+        bundle: &'a mj_core::config::ProjectBundle,
+    ) -> Vec<&'a std::path::Path> {
+        bundle
+            .repositories
+            .iter()
+            .filter_map(|repository| repository.local.as_deref())
+            .filter(|path| {
+                self.project_directory_checks
+                    .get(*path)
+                    .is_some_and(|check| check.state == ProjectDirectoryState::Missing)
+            })
+            .collect()
+    }
+
     /// Whether the last readiness check of `target_id` failed. A target not
     /// yet checked is not called unavailable.
     pub(crate) fn target_known_unavailable(&self, target_id: &str) -> bool {
