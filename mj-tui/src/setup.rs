@@ -2047,10 +2047,9 @@ impl SetupDialog {
                     }
                     subagent_page = None;
                 }
-                config
-                    .validate()
-                    .map(|()| config)
-                    .map_err(|error| format!("{error:#}"))
+                // Full validation reads profile files and needs resolved secrets.
+                // The background save owns it; this is only a sources projection.
+                Ok(config)
             });
         match result {
             Ok(config) => {
@@ -2079,7 +2078,9 @@ impl SetupDialog {
     /// expanded schema and all navigation/discovery fields are transient UI
     /// state and must not make a freshly opened Setup dialog dirty.
     pub(crate) fn is_dirty(&self) -> bool {
-        let original = serde_json::from_str::<Config>(&self.original);
+        let original = mj_core::config::with_environment_sources_only(|| {
+            serde_json::from_str::<Config>(&self.original)
+        });
         let current = config_from_draft(self.draft.clone());
         match (original, current) {
             (Ok(original), Ok(current)) => original != current,
