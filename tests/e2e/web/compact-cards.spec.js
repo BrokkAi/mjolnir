@@ -239,7 +239,7 @@ test('dashboard adapts from a phone column to workstation session columns', asyn
       title: `Session ${index}: investigate the desktop layout and validate responsive behavior`,
       capabilities: { rename: true },
     })),
-    session('other-project', 'other', 'Other project'),
+    session('other-project', 'other', 'Other project', { activity: SERVER_TIME_MS - 60_000 }),
   ]);
 
   for (const width of [390, 900, 1024, 1440, 1920, 2560, 390]) {
@@ -354,15 +354,15 @@ test('compact cards sort initial activity, expose metadata, clocks, attention, a
     }),
   ]);
 
-  const groups = page.locator('#sessions > .project');
-  await expect(groups.locator('.project-heading')).toHaveText([
-    'Beta 2',
-    'Alpha 3',
-    'Lifecycle 1',
-    'Unknown 1',
+  await expect(page.locator('#sessions .session h3')).toHaveText([
+    longTitle,
+    'beta-step',
+    'alpha-background',
+    'alpha-idle',
+    'alpha-yesterday',
+    'lifecycle',
+    'unknown-idle',
   ]);
-  await expect(groups.nth(0).locator('.session h3')).toHaveText([longTitle, 'beta-step']);
-  await expect(groups.nth(1).locator('.session h3')).toHaveText(['alpha-background', 'alpha-idle', 'alpha-yesterday']);
 
   const attention = card(page, 'beta-turn').locator('.session-attention-item');
   await expect(attention).toHaveText(['!', '?', '2']);
@@ -377,11 +377,12 @@ test('compact cards sort initial activity, expose metadata, clocks, attention, a
     /needs attention: error, input needed, 2 queued prompts/,
   );
 
-  const meta = await card(page, 'beta-turn').locator('.session-location, .session-profile').evaluateAll(nodes =>
+  const meta = await card(page, 'beta-turn').locator('.session-project, .session-location, .session-profile').evaluateAll(nodes =>
     nodes.map(node => ({ text: node.textContent, left: node.getBoundingClientRect().left, right: node.getBoundingClientRect().right })));
-  expect(meta.map(node => node.text)).toEqual(['/work/attention', 'codex']);
+  expect(meta.map(node => node.text)).toEqual(['Beta', '/work/attention', 'codex']);
   expect(meta[0].left).toBeLessThan(meta[1].left);
-  expect(meta[1].right).toBeGreaterThan(meta[0].right - 2);
+  expect(meta[1].left).toBeLessThan(meta[2].left);
+  expect(meta[2].right).toBeGreaterThan(meta[0].right - 2);
 
   const titleMetrics = await card(page, 'beta-turn').locator('h3').evaluate(node => {
     const style = getComputedStyle(node);
@@ -619,7 +620,7 @@ test('refresh, workspace navigation, and reconnect preserve card identity, focus
   await refresh(page, state);
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
   expect(await page.evaluate(() => document.activeElement?.dataset.sessionMenu)).toBe('alpha-new');
-  await expect(groupsFrom(page).locator('.project-heading')).toHaveText(['Alpha 2', 'Beta 1']);
+  await expect(page.locator('#sessions .session h3')).toHaveText(['alpha-new', 'alpha-old', 'beta']);
 
   const box = await alphaCard.boundingBox();
   await page.mouse.move(box.x + 16, box.y + box.height / 2);
@@ -640,47 +641,40 @@ test('refresh, workspace navigation, and reconnect preserve card identity, focus
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
   await expect(alphaCard).toBeVisible();
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
-  await expect(groupsFrom(page).locator('.project-heading')).toHaveText(['Alpha 2', 'Beta 1']);
+  await expect(page.locator('#sessions .session h3')).toHaveText(['alpha-new', 'alpha-old', 'beta']);
 
   state.snapshot.sessions.find(item => item.id === 'beta').last_activity_at_ms = SERVER_TIME_MS - 10;
   await reconnect(page, state);
-  await expect(groupsFrom(page).locator('.project-heading')).toHaveText(['Alpha 2', 'Beta 1']);
-  await expect(groupsFrom(page).locator('> .project').first().locator('.session h3')).toHaveText(['alpha-new', 'alpha-old']);
+  // The list re-sorts live as newer activity arrives; identity survives it.
+  await expect(page.locator('#sessions .session h3')).toHaveText(['beta', 'alpha-new', 'alpha-old']);
+  expect(await original.evaluate(node => node.isConnected)).toBe(true);
 });
 
-function groupsFrom(page) {
-  return page.locator('#sessions');
-}
-
-test('later sessions and projects append, while removed and reappeared ranks remain stable', async ({ page }) => {
+test('later sessions insert in sorted position, and a reappearing session re-sorts', async ({ page }) => {
   const state = await mount(page, [
     session('alpha-first', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 1_000 }),
     session('alpha-second', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 2_000 }),
     session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 3_000 }),
   ]);
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['Alpha 2', 'Beta 1']);
+  const titles = page.locator('#sessions .session h3');
+  await expect(titles).toHaveText(['alpha-first', 'alpha-second', 'beta']);
 
   state.snapshot.sessions.push(
-    session('alpha-late', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 10 }),
-    session('gamma-late', 'project-gamma', 'Gamma', { activity: SERVER_TIME_MS - 20 }),
+    session('alpha-late', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 500 }),
+    session('gamma-late', 'project-gamma', 'Gamma', { activity: SERVER_TIME_MS - 1_500 }),
   );
   await refresh(page, state);
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['Alpha 3', 'Beta 1', 'Gamma 1']);
-  await expect(page.locator('#sessions > .project').first().locator('.session h3')).toHaveText([
-    'alpha-first',
-    'alpha-second',
-    'alpha-late',
-  ]);
+  await expect(titles).toHaveText(['alpha-late', 'alpha-first', 'gamma-late', 'alpha-second', 'beta']);
 
   await card(page, 'gamma-late').focus();
   state.snapshot.sessions = state.snapshot.sessions.filter(item => item.id !== 'beta');
   await refresh(page, state);
   await expect(card(page, 'gamma-late')).toBeFocused();
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['Alpha 3', 'Gamma 1']);
+  await expect(titles).toHaveText(['alpha-late', 'alpha-first', 'gamma-late', 'alpha-second']);
   state.snapshot.sessions.push(session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 1_000 }));
   await refresh(page, state);
   await expect(card(page, 'gamma-late')).toBeFocused();
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['Alpha 3', 'Beta 1', 'Gamma 1']);
+  await expect(titles).toHaveText(['beta', 'alpha-late', 'alpha-first', 'gamma-late', 'alpha-second']);
 
   await card(page, 'alpha-late').focus();
   state.snapshot.sessions = state.snapshot.sessions.filter(item => item.id !== 'alpha-second');
@@ -689,24 +683,21 @@ test('later sessions and projects append, while removed and reappeared ranks rem
   state.snapshot.sessions.push(session('alpha-second', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS + 2_000 }));
   await refresh(page, state);
   await expect(card(page, 'alpha-late')).toBeFocused();
-  await expect(page.locator('#sessions > .project').first().locator('.session h3')).toHaveText([
-    'alpha-first',
-    'alpha-second',
-    'alpha-late',
-  ]);
+  await expect(titles).toHaveText(['alpha-second', 'beta', 'alpha-late', 'alpha-first', 'gamma-late']);
 });
 
-test('a reload seeds a fresh order from last_activity_at_ms', async ({ page }) => {
+test('a reload sorts by the latest activity', async ({ page }) => {
   const state = await mount(page, [
     session('first', 'project-first', 'First', { activity: SERVER_TIME_MS - 1_000 }),
     session('second', 'project-second', 'Second', { activity: SERVER_TIME_MS - 2_000 }),
   ]);
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['First 1', 'Second 1']);
+  const titles = page.locator('#sessions .session h3');
+  await expect(titles).toHaveText(['first', 'second']);
   state.snapshot.sessions.find(item => item.id === 'first').last_activity_at_ms = SERVER_TIME_MS - 4_000;
   state.snapshot.sessions.find(item => item.id === 'second').last_activity_at_ms = SERVER_TIME_MS - 100;
   await page.reload();
   await expect(page.locator('#app')).toBeVisible();
-  await expect(page.locator('#sessions > .project .project-heading')).toHaveText(['Second 1', 'First 1']);
+  await expect(titles).toHaveText(['second', 'first']);
 });
 
 test('menus follow capabilities, long press cancellation, right click, keyboard, confirmation, and errors', async ({ page }) => {
@@ -730,10 +721,10 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Rename', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
-  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
+  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('copy-session-id');
   await page.keyboard.press('ArrowUp');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('rename');
   await page.keyboard.press('Tab');
@@ -747,7 +738,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   state.snapshot.sessions.find(item => item.id === 'openable').capabilities.rename = false;
   await refresh(page, state);
   await expect(openMenu.getByRole('menuitem', { name: 'Rename' })).toHaveCount(0);
-  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('cancel');
+  expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('changed-files');
   await page.keyboard.press('Escape');
   await expect(openMenu).toBeHidden();
   expect(await page.evaluate(() => document.activeElement?.dataset.sessionMenu)).toBe('openable');

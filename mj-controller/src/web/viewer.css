@@ -340,27 +340,24 @@ button:disabled {
 }
 
 .session-meta {
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
   color: var(--dim);
   font-size: 13px;
   line-height: 1.35;
 }
 
+.session-project,
 .session-location,
 .session-profile {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 0 1 auto;
 }
 
-.session-location {
-  flex: 1 1 auto;
-}
-
-.session-profile {
-  flex: 0 1 42%;
-  text-align: right;
+.session-meta-separator {
+  flex: 0 0 auto;
+  color: var(--border-strong);
 }
 
 .session-activity {
@@ -1000,19 +997,6 @@ details.block-fold > pre {
   margin-top: 0;
 }
 
-.project-heading {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  font-size: 14px;
-  margin: 0 0 8px;
-  padding: 0 0 5px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
 .field {
   /* The suggestion list hangs off the field, so the field is its origin. */
   position: relative;
@@ -1020,6 +1004,14 @@ details.block-fold > pre {
   flex-direction: column;
   gap: 4px;
   margin: 12px 0;
+}
+
+/* A select sizes itself to its longest option; in a field it takes the
+ * field's width like the text inputs do. */
+.field select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* Live path suggestions, drawn over whatever follows the field and sharing
@@ -1445,10 +1437,26 @@ article > h3 {
 
 .conversation-header {
   display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* One row at every width: the title gives, the controls never wrap. */
+.conversation-header > .pill,
+.conversation-header > select,
+.conversation-header > button {
+  flex: none;
+}
+
+.model-select {
+  max-width: 12rem;
+  min-height: 36px;
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .conversation-transition {
@@ -1471,7 +1479,8 @@ article > h3 {
 }
 
 .conversation-name {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1669,14 +1678,14 @@ body[data-connection='reconnecting'] .connection {
     margin-inline: auto;
   }
 
-  .project-sessions {
+  .session-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
     gap: 12px;
     align-items: start;
   }
 
-  .project-sessions .session {
+  .session-grid .session {
     margin: 0;
   }
 
@@ -1743,6 +1752,12 @@ body[data-connection='reconnecting'] .connection {
 
   #shell-title {
     font-size: 18px;
+  }
+
+  /* The header row never wraps, so the model dropdown narrows to what a
+   * phone can spare beside the pill and the interrupt button. */
+  .model-select {
+    max-width: 6rem;
   }
 
   .review,
@@ -1889,6 +1904,60 @@ body[data-connection='reconnecting'] .connection {
 .session-destroy-dialog { max-width: min(32rem, 90vw); color: var(--text); background: var(--surface); border-radius: .5rem; padding: 1.5rem; }
 .session-destroy-dialog::backdrop { background: #0008; }
 .session-destroy-dialog input[type="checkbox"] { width: auto; margin-right: .5rem; }
+
+/* The session menu's dialogs (changed files, workspace, container settings). */
+.session-dialog {
+  width: min(34rem, 92vw);
+  max-height: 85dvh;
+  overflow: auto;
+  color: var(--text);
+  background: var(--surface);
+  border-radius: .5rem;
+  padding: 1.5rem;
+}
+
+.session-dialog::backdrop { background: #0008; }
+
+.changed-files-dialog { width: min(64rem, 92vw); }
+
+.changed-files-diff {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  margin: 8px 0;
+  max-height: 55vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-size: 13px;
+  white-space: pre;
+}
+
+.mount-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.mount-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+}
+
+.mount-path { overflow-wrap: anywhere; }
+
+.mount-add input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+
+.mount-add select { flex: 0 1 auto; }
 
 
 /* A question page preserves authored line breaks and wraps on phone widths. */

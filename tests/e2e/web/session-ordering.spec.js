@@ -5,6 +5,7 @@ test.use({ viewport: { width: 390, height: 844 } });
 
 const WEB_ROOT = path.resolve(__dirname, '../../../mj-controller/src/web');
 const WORKSPACE_ID = 'workspace-1';
+const BASE_MS = Date.parse('2026-09-05T00:00:00Z');
 const ASSETS = new Set([
   'viewer.html',
   'viewer.js',
@@ -20,14 +21,17 @@ function session(id, projectKey, projectLabel, options = {}) {
   return {
     id,
     workspace_id: options.workspaceId || WORKSPACE_ID,
-    title: id,
+    title: options.title || id,
     harness_kind: 'codex',
     profile_id: 'codex',
     bundle_id: `bundle-${id}`,
     target_id: 'local',
+    display_location: '/work/project',
     state: lifecycle === 'live' ? 'running' : lifecycle,
-    created_at: '2026-09-05T00:00:00Z',
+    created_at: options.createdAt || '2026-09-05T00:00:00Z',
     updated_at: '2026-09-05T00:00:00Z',
+    last_activity_at_ms: options.activity,
+    last_message_at_ms: options.message,
     has_error: false,
     preview: [],
     queued_prompts: [],
@@ -69,17 +73,25 @@ function snapshot() {
     revision: 1,
     generated_at: '2026-09-05T00:00:00Z',
     workspaces: [{ id: WORKSPACE_ID, name: 'Browser tests' }],
-    // Deliberately arrive out of identity order. With equal creation times
-    // and no activity history, stable project IDs break the initial tie.
+    // Deliberately arrive out of order: the flat list is sorted live, never
+    // by arrival.
     sessions: [
-      session('beta-session', 'project-beta', 'Beta'),
-      session('alpha-first', 'project-alpha', 'Alpha'),
-      session('alpha-second', 'project-alpha', 'Alpha'),
-      // A visible label is not an identity: this must remain its own group.
-      session('other-alpha', 'project-other-alpha', 'Alpha'),
-      session('stopped-alpha', 'project-alpha', 'Alpha', { lifecycle: 'suspended' }),
-      session('other-workspace', 'project-other-workspace', 'Other', {
+      // The message stamp wins over this session's own newer activity stamp,
+      // so it sorts below beta-activity despite having the newest activity.
+      session('gamma-message', 'project-gamma', 'Gamma', { message: BASE_MS + 3_000, activity: BASE_MS + 9_000 }),
+      // No message and no activity: created_at is the last-resort key.
+      session('alpha-created', 'project-alpha', 'Alpha', { createdAt: '2026-09-04T00:00:00Z' }),
+      // The newest message in the fixture, but a suspended session never
+      // enters the live dashboard.
+      session('stopped', 'project-stopped', 'Stopped', { lifecycle: 'suspended', message: BASE_MS + 20_000 }),
+      session('beta-activity', 'project-beta', 'Beta', { activity: BASE_MS + 5_000 }),
+      // Equal keys break on the title, then the id.
+      session('echo-tie', 'project-echo', 'Echo', { activity: BASE_MS + 1_000 }),
+      session('delta-tie', 'project-delta', 'Delta', { activity: BASE_MS + 1_000 }),
+      // Another workspace's session must not appear under this tab.
+      session('other-workspace', 'project-other', 'Other', {
         workspaceId: 'workspace-2',
+        message: BASE_MS + 30_000,
       }),
     ],
     profiles: [],
@@ -114,53 +126,50 @@ async function mount(page) {
 
   await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}`);
   await expect(page.locator('#app')).toBeVisible();
-  await expect(page.locator('#sessions .project')).toHaveCount(3);
+  await expect(page.locator('#sessions > .session-grid')).toHaveCount(1);
+  await expect(page.locator('#sessions .session')).toHaveCount(5);
 }
 
-test('the live session list separates projected projects with visible divider headings', async ({ page }) => {
+test('the live dashboard is one flat list ordered by the last top-level message', async ({ page }) => {
   await mount(page);
 
-  const groups = page.locator('#sessions > .project');
-  await expect(groups.locator('.project-heading')).toHaveText(['Alpha 2', 'Beta 1', 'Alpha 1']);
-  await expect(groups.nth(0).locator('.session h3')).toHaveText(['alpha-first', 'alpha-second']);
-  await expect(groups.nth(1).locator('.session h3')).toHaveText(['beta-session']);
-  await expect(groups.nth(2).locator('.session h3')).toHaveText(['other-alpha']);
+  await expect(page.locator('#sessions .project')).toHaveCount(0);
+  await expect(page.locator('#sessions .project-heading')).toHaveCount(0);
+  await expect(page.locator('#sessions .session h3')).toHaveText([
+    'beta-activity',
+    'gamma-message',
+    'delta-tie',
+    'echo-tie',
+    'alpha-created',
+  ]);
 
-  // A stopped session and a session from another workspace never enter the
-  // live dashboard, so their project names cannot create false headings.
-  await expect(page.locator('#sessions')).not.toContainText('stopped-alpha');
+  await expect(page.locator('#sessions')).not.toContainText('stopped');
   await expect(page.locator('#sessions')).not.toContainText('other-workspace');
-
-  const headingStyle = await page.locator('.project-heading').first().evaluate(node => {
-    const style = getComputedStyle(node);
-    return {
-      tag: node.tagName,
-      role: node.getAttribute('role'),
-      borderBottomStyle: style.borderBottomStyle,
-      borderBottomWidth: style.borderBottomWidth,
-      color: style.color,
-      textTransform: style.textTransform,
-      fontWeight: style.fontWeight,
-    };
-  });
-  expect(headingStyle).toEqual({
-    tag: 'H2',
-    role: null,
-    borderBottomStyle: 'solid',
-    borderBottomWidth: '1px',
-    color: 'rgb(230, 235, 224)',
-    textTransform: 'none',
-    fontWeight: '700',
-  });
-  await expect(page.locator('.project-heading button')).toHaveCount(0);
 
   const metrics = await page.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
     viewportWidth: document.documentElement.clientWidth,
-    headingWidths: [...document.querySelectorAll('.project-heading')].map(
-      node => node.getBoundingClientRect().width,
-    ),
   }));
   expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth);
-  expect(metrics.headingWidths.every(width => width > 0)).toBe(true);
+});
+
+test('each card names its project first in the meta row', async ({ page }) => {
+  await mount(page);
+
+  const expected = {
+    'beta-activity': 'Beta',
+    'gamma-message': 'Gamma',
+    'delta-tie': 'Delta',
+    'echo-tie': 'Echo',
+    'alpha-created': 'Alpha',
+  };
+  for (const [id, label] of Object.entries(expected)) {
+    const meta = page.locator(`#sessions .session[data-session-id="${id}"] .session-meta`);
+    await expect(meta.locator('> span:first-child')).toHaveText(label);
+  }
+
+  const beta = page.locator('#sessions .session[data-session-id="beta-activity"] .session-meta');
+  await expect(beta.locator('.session-location')).toHaveText('/work/project');
+  await expect(beta.locator('.session-profile')).toHaveText('codex');
+  await expect(beta).toHaveText('Beta·/work/project·codex');
 });

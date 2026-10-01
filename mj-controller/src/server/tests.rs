@@ -1657,7 +1657,7 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 fn embedded_viewer_lists_no_sub_agent_among_live_sessions() {
     let source = format!(
         "{}\n{}",
-        viewer_source("function isSubagentSession(", "/// Sessions grouped by"),
+        viewer_source("function isSubagentSession(", "function renderSessions("),
         viewer_source("class ViewerRuntimeState", "const viewerState =")
     );
     let setup = r#"

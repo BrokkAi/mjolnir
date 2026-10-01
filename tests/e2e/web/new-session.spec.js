@@ -131,21 +131,37 @@ async function projectStep(page, target = 'container') {
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {
   const state = await mount(page);
-  const beta = page.locator('#new-profile').getByRole('radio', { name: /^beta/ });
-  const row = beta.locator('..');
-  const original = await beta.elementHandle();
+  // The Account step is a native select: the choice is made there, and both
+  // the element and its value survive an unrelated live update.
+  const profile = page.locator('#new-profile');
+  const originalProfile = await profile.elementHandle();
+  await profile.selectOption('beta');
+  state.snapshot.profiles[0].quota = { summary: 'new live reading' };
+  await refresh(page, state);
+  expect(await originalProfile.evaluate(node => node.isConnected)).toBe(true);
+  await expect(profile).toHaveValue('beta');
+  await refresh(page, state);
+  await expect(profile).toHaveValue('beta');
+
+  // The Where-to-run step keeps radio rows; a whole-row tap is one target,
+  // and an in-progress gesture survives an unrelated live update.
+  await page.locator('#new-next').click();
+  const local = page.locator('#new-target').getByRole('radio', { name: /^local/ });
+  const row = local.locator('..');
+  const original = await local.elementHandle();
   const box = await row.boundingBox();
   expect(box.height).toBeGreaterThanOrEqual(44);
   await page.mouse.move(box.x + box.width - 8, box.y + box.height / 2);
   await page.mouse.down();
-  state.snapshot.profiles[0].quota = { summary: 'new live reading' };
+  state.snapshot.profiles[0].quota = { summary: 'another live reading' };
   await refresh(page, state);
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
   await page.mouse.up();
-  await expect(beta).toBeChecked();
+  await expect(local).toBeChecked();
   await refresh(page, state);
-  await expect(beta).toBeChecked();
-  await projectStep(page, 'local');
+  await expect(local).toBeChecked();
+
+  await page.locator('#new-next').click();
   const directory = page.locator('#new-project-directory');
   await directory.fill('/work/typed');
   await refresh(page, state);
@@ -504,7 +520,7 @@ for (const [policy, label] of [
 
 test('a harness that cannot receive Mjolnir sub-agents shows no Subagents row', async ({ page }) => {
   const state = await mount(page);
-  await page.locator('#new-profile').getByRole('radio', { name: /^gamma/ }).check();
+  await page.locator('#new-profile').selectOption('gamma');
   await projectStep(page, 'container');
   await page.getByRole('button', { name: 'existing', exact: true }).click();
   await expect(page.locator('#new-step')).toContainText('Accountgamma');

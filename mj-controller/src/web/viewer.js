@@ -64,6 +64,7 @@ const login = document.querySelector('#login'),
   conversationTransitionCancel = document.querySelector('#conversation-transition-cancel'),
   jumpToLatest = document.querySelector('#jump-to-latest'),
   cancelTurnButton = document.querySelector('#cancel-turn'),
+  modelSelect = document.querySelector('#model-select'),
   commandPalette = document.querySelector('#command-palette'),
   sendButton = document.querySelector('#send-button'),
   queue = document.querySelector('#conversation-queue'),
@@ -502,15 +503,12 @@ function renderWorkspaces() {
 // The session list
 // ---------------------------------------------------------------------------
 
-// Dashboard order is deliberately a view concern.  A live snapshot may
-// report a newer activity watermark for an existing session, but moving that
-// row under a reader's finger makes the dashboard feel broken.  Each
-// workspace gets one seed order per document; ranks are retained after a row
-// disappears so a reconnect cannot make it jump when it returns.
-const dashboardOrders = new Map();
+// Cards keep their identity across snapshots; only their position in the one
+// flat list changes, so a re-sort never rebuilds a row under the reader.
 const sessionCards = new Map();
 const sessionItems = new Map();
-const sessionGroups = new Map();
+const sessionList = el('div', 'session-grid');
+sessionList.setAttribute('role', 'list');
 let openSessionMenuId = null;
 let openSessionMenuTrigger = null;
 let suppressedSessionClickId = null;
@@ -519,7 +517,6 @@ let snapshotReceivedAtMs = 0;
 /// Set while the login form is up because the server refused this browser,
 /// so waking the page does not send protected requests that can only fail.
 let signedOut = false;
-let dashboardOrderSeeded = false;
 
 function reconcileChildren(parent, desired) {
   // Remove departed siblings before inserting arrivals, so removing an earlier
@@ -553,52 +550,10 @@ function sessionActivityMs(session) {
   return epochMs(session.last_activity_at_ms) ?? epochMs(session.created_at) ?? 0;
 }
 
-function projectKeyFor(session) {
-  return session.project_key || session.bundle_id || session.id;
-}
-
-function orderState(workspaceId, live) {
-  let state = dashboardOrders.get(workspaceId);
-  if (!state) {
-    state = { sessions: new Map(), groups: new Map(), nextSession: 0, nextGroup: 0 };
-    dashboardOrders.set(workspaceId, state);
-    const initial = [...live].sort((left, right) =>
-      sessionActivityMs(right) - sessionActivityMs(left) || left.id.localeCompare(right.id),
-    );
-    for (const session of initial) {
-      if (!state.sessions.has(session.id)) state.sessions.set(session.id, state.nextSession++);
-    }
-    const maxima = new Map();
-    for (const session of initial) {
-      const key = projectKeyFor(session);
-      maxima.set(key, Math.max(maxima.get(key) ?? 0, sessionActivityMs(session)));
-    }
-    [...maxima.entries()]
-      .sort((left, right) =>
-        right[1] - left[1] ||
-        left[0].localeCompare(right[0]),
-      )
-      .forEach(([key]) => state.groups.set(key, state.nextGroup++));
-  }
-  // New ids append to the remembered order.  Deliberately never delete a
-  // rank: a stopped session can return after a reconnect without reordering
-  // every row below it.
-  for (const session of live) {
-    if (!state.sessions.has(session.id)) state.sessions.set(session.id, state.nextSession++);
-    const key = projectKeyFor(session);
-    if (!state.groups.has(key)) state.groups.set(key, state.nextGroup++);
-  }
-  return state;
-}
-
-function seedDashboardOrders(data) {
-  if (dashboardOrderSeeded) return;
-  dashboardOrderSeeded = true;
-  const workspaceIds = new Set((data.workspaces || []).map(workspace => workspace.id));
-  for (const workspace of viewerState.workspaces.keys()) workspaceIds.add(workspace);
-  for (const workspace of workspaceIds) {
-    orderState(workspace, [...(viewerState.live.get(workspace)?.values() || [])]);
-  }
+/// What the dashboard sorts on: the newest top-level message in the session,
+/// falling back to any recorded activity and then to when it was created.
+function sessionMessageMs(session) {
+  return epochMs(session.last_message_at_ms) ?? sessionActivityMs(session);
 }
 
 function isTransitioningSession(session) {
@@ -633,11 +588,13 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
+/// Most recent top-level message first. Title and id keep rows that have not
+/// said anything yet in a stable order as new messages re-sort the list.
 function orderedSessions(live) {
-  const workspaceId = selectedWorkspaceId();
-  const state = orderState(workspaceId || '', live);
   return [...live].sort((left, right) =>
-    state.sessions.get(left.id) - state.sessions.get(right.id) || left.id.localeCompare(right.id),
+    sessionMessageMs(right) - sessionMessageMs(left)
+    || String(left.title || '').localeCompare(String(right.title || ''))
+    || left.id.localeCompare(right.id),
   );
 }
 
@@ -655,36 +612,14 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
-/// Sessions grouped by the controller's projected project identity.
-///
-/// The controller publishes an opaque `project_key` and the same short
-/// `project_label` the TUI uses. Keep those fields separate: labels can be
-/// shared by different projects, while keys must never merge them. Group and
-/// session ranks are seeded from activity, then frozen for this document.
-function byProject(list) {
-  const groups = new Map();
-  for (const session of list) {
-    // `bundle_id` keeps older snapshots renderable; current snapshots always
-    // provide the opaque project key. The session id is only a last-resort
-    // boundary for malformed legacy data, never a project label.
-    const key = projectKeyFor(session);
-    if (!groups.has(key)) groups.set(key, { key, label: session.project_label || key, sessions: [] });
-    groups.get(key).sessions.push(session);
-  }
-  const state = orderState(route.subagentParentId || selectedWorkspaceId() || '', list);
-  return [...groups.values()].sort((left, right) =>
-    state.groups.get(left.key) - state.groups.get(right.key) || left.key.localeCompare(right.key),
-  );
-}
-
 function renderSessions() {
-  const groups = byProject(orderedSessions(liveSessions()));
-  if (openSessionMenuId && !groups.some(group => group.sessions.some(session => session.id === openSessionMenuId))) {
+  const ordered = orderedSessions(liveSessions());
+  if (openSessionMenuId && !ordered.some(session => session.id === openSessionMenuId)) {
     closeSessionMenu();
   }
   const parent = sessionById(route.subagentParentId);
   const nativeGroups = renderNativeSubagents(parent);
-  if (!groups.length && !nativeGroups.length) {
+  if (!ordered.length && !nativeGroups.length) {
     sessions.replaceChildren(el(
       'p',
       'dim',
@@ -694,46 +629,25 @@ function renderSessions() {
     ));
     return;
   }
-  const renderedGroups = groups.map(group => {
-    const groupId = `${selectedWorkspaceId() || ''}\u001f${group.key}`;
-    let section = sessionGroups.get(groupId);
-    if (!section) {
-      section = el('section', 'project');
-      const heading = el('h2', 'project-heading');
-      const label = el('span');
-      const count = el('span', 'dim');
-      heading.append(label, count);
-      const list = el('div', 'project-sessions');
-      list.setAttribute('role', 'list');
-      section.append(heading, list);
-      section._headingLabel = label;
-      section._headingCount = count;
-      section._sessionList = list;
-      sessionGroups.set(groupId, section);
+  const items = ordered.map(session => {
+    let card = sessionCards.get(session.id);
+    if (!card) {
+      card = sessionCard(session);
+      sessionCards.set(session.id, card);
+    } else {
+      updateSessionCard(card, session);
     }
-    section._headingLabel.textContent = group.label;
-    section._headingCount.textContent = ` ${group.sessions.length}`;
-    const items = group.sessions.map(session => {
-      let card = sessionCards.get(session.id);
-      if (!card) {
-        card = sessionCard(session);
-        sessionCards.set(session.id, card);
-      } else {
-        updateSessionCard(card, session);
-      }
-      let item = sessionItems.get(session.id);
-      if (!item) {
-        item = el('div');
-        item.setAttribute('role', 'listitem');
-        sessionItems.set(session.id, item);
-      }
-      if (item.firstChild !== card) item.replaceChildren(card);
-      return item;
-    });
-    reconcileChildren(section._sessionList, items);
-    return section;
+    let item = sessionItems.get(session.id);
+    if (!item) {
+      item = el('div');
+      item.setAttribute('role', 'listitem');
+      sessionItems.set(session.id, item);
+    }
+    if (item.firstChild !== card) item.replaceChildren(card);
+    return item;
   });
-  reconcileChildren(sessions, [...renderedGroups, ...nativeGroups]);
+  reconcileChildren(sessionList, items);
+  reconcileChildren(sessions, [...(items.length ? [sessionList] : []), ...nativeGroups]);
 }
 
 function renderNativeSubagents(parent) {
@@ -880,15 +794,22 @@ function sessionCard(session) {
   titleRow.append(heading, attention, menuTrigger, menu);
 
   const meta = el('div', 'session-meta');
+  const project = el('span', 'session-project');
+  const locationSeparator = el('span', 'session-meta-separator', '·');
+  locationSeparator.setAttribute('aria-hidden', 'true');
   const location = el('span', 'session-location');
+  const profileSeparator = el('span', 'session-meta-separator', '·');
+  profileSeparator.setAttribute('aria-hidden', 'true');
   const profile = el('span', 'session-profile');
-  meta.append(location, profile);
+  meta.append(project, locationSeparator, location, profileSeparator, profile);
   const activity = el('p', 'session-activity');
   card.append(titleRow, meta, activity);
   card._heading = heading;
   card._attention = attention;
   card._menuTrigger = menuTrigger;
   card._menu = menu;
+  card._project = project;
+  card._metaSeparators = [locationSeparator, profileSeparator];
   card._location = location;
   card._profile = profile;
   card._activity = activity;
@@ -911,12 +832,18 @@ function sessionMenuActions(session) {
   const can = session.capabilities || {};
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
+  if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
+  if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
+  if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
+  if (can.move_session) actions.push(['Move…', '', 'move']);
+  if (can.restart) actions.push(['Restart', 'secondary', 'restart']);
+  if (can.interrupt_all) actions.push(['Interrupt all', 'secondary', 'interrupt-all']);
+  actions.push(['Copy session ID', 'secondary', 'copy-session-id']);
   if (can.cancel_operation) actions.push(['Cancel operation', 'danger', 'cancel']);
   if (can.suspend) actions.push(['Suspend session…', 'secondary', 'suspend']);
   if (can.destroy) actions.push(['Destroy session…', 'danger', 'destroy']);
   if (can.resume) actions.push(['Resume', '', 'resume']);
-  if (can.move_session) actions.push(['Move…', '', 'move']);
   return actions;
 }
 
@@ -948,10 +875,19 @@ function updateSessionCard(card, session) {
       return node;
     }),
   );
-  card._location.textContent = session.display_location || session.target_id || '';
-  card._location.title = card._location.textContent;
-  card._profile.textContent = session.profile_id || '';
-  card._profile.title = card._profile.textContent;
+  const segments = [
+    [card._project, session.project_label || ''],
+    [card._location, session.display_location || session.target_id || ''],
+    [card._profile, session.profile_id || ''],
+  ];
+  for (const [node, text] of segments) {
+    node.textContent = text;
+    node.title = text;
+    node.hidden = !text;
+  }
+  const shown = segments.map(([, text]) => Boolean(text));
+  card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
+  card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
   updateSessionMenu(card, session);
 }
@@ -1661,11 +1597,29 @@ function renderNewForm() {
   const body = document.createDocumentFragment();
   switch (step.key) {
     case 'profile': {
-      body.append(
-        pickerField('Account', 'new-profile', snapshot.profiles, newDraft.profileId, value => {
-          newDraft.profileId = value;
-        }),
-      );
+      const field = el('label', 'field');
+      field.append(el('span', '', 'Account'));
+      const select = el('select');
+      select.id = 'new-profile';
+      for (const profile of snapshot.profiles) {
+        const option = el('option', '', profile.label ?? profile.id);
+        option.value = profile.id;
+        select.append(option);
+      }
+      select.value = newDraft.profileId;
+      const description = el('div', 'dim');
+      const describe = id => {
+        const profile = snapshot.profiles.find(item => item.id === id);
+        description.textContent = profile?.kind || profile?.harness_kind || '';
+      };
+      describe(select.value);
+      select.onchange = () => {
+        newDraft.profileId = select.value;
+        describe(select.value);
+      };
+      field.append(select, description);
+      body.append(field);
+      if (!snapshot.profiles.length) body.append(el('p', 'dim', 'No accounts configured.'));
       break;
     }
     case 'target': {
@@ -4406,12 +4360,279 @@ function confirmSessionDestruction(session) {
   });
 }
 
+/// The session menu's dialogs share one shell: a native `<dialog>` that is
+/// appended on open and removed on close, so Escape (the platform cancel) and
+/// the Close control leave nothing behind.
+function openSessionDialog(className, label) {
+  const dialog = el('dialog', `session-dialog ${className}`);
+  dialog.setAttribute('aria-label', label);
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+function dialogControls(confirmLabel) {
+  const controls = el('div', 'row');
+  const cancel = button('Cancel', 'secondary');
+  cancel.type = 'button';
+  const confirm = button(confirmLabel);
+  confirm.type = 'button';
+  controls.append(cancel, confirm);
+  return { controls, cancel, confirm };
+}
+
+/// The files one unified diff touches, named by each section's `+++` header.
+/// A deletion has no `b/` name, so it falls back to the `a/` one.
+function changedFilePaths(diff) {
+  const paths = [];
+  let pending = false, removed = null;
+  for (const line of String(diff || '').split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      pending = true;
+      removed = null;
+    } else if (pending && line.startsWith('--- ')) {
+      removed = line.slice(4).replace(/^a\//, '');
+    } else if (pending && line.startsWith('+++ ')) {
+      const name = line.slice(4);
+      paths.push(name === '/dev/null' ? removed || name : name.replace(/^b\//, ''));
+      pending = false;
+    }
+  }
+  return paths;
+}
+
+async function openChangedFiles(session) {
+  if (!session) return;
+  const dialog = openSessionDialog('changed-files-dialog', 'Changed files');
+  dialog.append(el('h2', '', 'Changed files'), el('p', 'dim', session.title || session.id));
+  const status = el('p', 'dim', 'Loading…');
+  status.setAttribute('role', 'status');
+  const error = el('p', 'error');
+  error.setAttribute('role', 'alert');
+  const list = el('ul', 'diffstat');
+  const diffView = el('pre', 'changed-files-diff');
+  const controls = el('div', 'row');
+  const close = button('Close', 'secondary');
+  close.type = 'button';
+  close.onclick = () => dialog.close();
+  controls.append(close);
+  dialog.append(status, error, list, diffView, controls);
+  try {
+    const result = await request(`/api/v1/sessions/${encodeURIComponent(session.id)}/diff?json=true`);
+    if (!dialog.open) return;
+    const paths = changedFilePaths(result?.diff);
+    if (!paths.length) {
+      status.textContent = 'No changes';
+      diffView.remove();
+      list.remove();
+      return;
+    }
+    status.remove();
+    list.replaceChildren(...paths.map(path => {
+      const item = el('li');
+      item.append(el('span', 'diffstat-path', path));
+      return item;
+    }));
+    diffView.textContent = result.diff;
+  } catch (failure) {
+    if (!dialog.open) return;
+    status.remove();
+    error.textContent = failure.message;
+  }
+}
+
+function openChangeWorkspace(session) {
+  if (!session) return;
+  const workspaces = (snapshot?.workspaces || []).filter(workspace => workspace.id !== session.workspace_id);
+  const dialog = openSessionDialog('change-workspace-dialog', 'Change workspace');
+  dialog.append(el('h2', '', 'Change workspace'), el('p', 'dim', session.title || session.id));
+  const field = el('label', 'field');
+  field.append(el('span', '', 'Workspace'));
+  const select = el('select');
+  for (const workspace of workspaces) {
+    const option = el('option', '', workspace.name);
+    option.value = workspace.id;
+    select.append(option);
+  }
+  field.append(select);
+  const error = el('p', 'error');
+  error.setAttribute('role', 'alert');
+  const { controls, cancel, confirm } = dialogControls('Change workspace');
+  cancel.onclick = () => dialog.close();
+  dialog.append(workspaces.length ? field : el('p', 'dim', 'There is no other workspace to move this session to.'), error, controls);
+  confirm.disabled = !workspaces.length;
+  confirm.onclick = async () => {
+    confirm.disabled = true;
+    error.textContent = '';
+    try {
+      await request('/api/actions', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'change-workspace', session_id: session.id, workspace_id: select.value }),
+      });
+      dialog.close();
+      await refresh();
+    } catch (failure) {
+      if (dialog.open) error.textContent = failure.message;
+      confirm.disabled = false;
+    }
+  };
+}
+
+/// The destination an empty mount field gets, mirroring the terminal's
+/// `default_mount_destination`: the source's basename under /mnt, numbered
+/// when that is taken.
+function defaultMountDestination(source, mounts) {
+  const basename = source.replace(/\/+$/, '').split('/').pop() || 'mount';
+  const base = `/mnt/${basename}`;
+  if (!mounts.some(mount => mount.destination === base)) return base;
+  for (let number = 2; ; number += 1) {
+    const candidate = `/mnt/${basename}-${number}`;
+    if (!mounts.some(mount => mount.destination === candidate)) return candidate;
+  }
+}
+
+function openContainerSettings(session) {
+  if (!session) return;
+  const dialog = openSessionDialog('container-settings-dialog', 'Container settings');
+  dialog.append(el('h2', '', 'Container settings'), el('p', 'dim', session.title || session.id));
+  const cpusField = el('label', 'field');
+  cpusField.append(el('span', '', 'CPUs'));
+  const cpusInput = el('input');
+  cpusInput.value = session.container_cpus || '';
+  cpusInput.placeholder = '2';
+  cpusField.append(cpusInput);
+  const memoryField = el('label', 'field');
+  memoryField.append(el('span', '', 'Memory'));
+  const memoryInput = el('input');
+  memoryInput.value = session.container_memory || '';
+  memoryInput.placeholder = '8g';
+  memoryField.append(memoryInput);
+
+  // The wire keeps the archive-compatible repr: ro is `read_only: true`, cow
+  // is `read_only: false`, and only rw adds `access`.
+  const mounts = (session.additional_mounts || []).map(mount => ({
+    source: mount.source,
+    destination: mount.destination,
+    access: mount.access || (mount.read_only ? 'ro' : 'cow'),
+  }));
+  const mountList = el('div', 'mount-list');
+  const renderMounts = () => {
+    mountList.replaceChildren(...mounts.map((mount, index) => {
+      const row = el('div', 'mount-row');
+      row.append(el('span', 'mount-path', `${mount.source} → ${mount.destination} (${mount.access})`));
+      const remove = button('Remove', 'danger');
+      remove.type = 'button';
+      remove.onclick = () => {
+        mounts.splice(index, 1);
+        renderMounts();
+      };
+      row.append(remove);
+      return row;
+    }));
+  };
+  renderMounts();
+
+  const addRow = el('div', 'mount-add row');
+  const sourceInput = el('input');
+  sourceInput.placeholder = 'Host directory';
+  sourceInput.setAttribute('aria-label', 'Mount source');
+  const destinationInput = el('input');
+  destinationInput.placeholder = 'Container path (optional)';
+  destinationInput.setAttribute('aria-label', 'Mount destination');
+  const access = el('select');
+  access.setAttribute('aria-label', 'Mount access');
+  for (const [value, label] of [['ro', 'read-only'], ['cow', 'copy-on-write'], ['rw', 'read-write']]) {
+    const option = el('option', '', label);
+    option.value = value;
+    access.append(option);
+  }
+  const add = button('Add mount', 'secondary');
+  add.type = 'button';
+  addRow.append(sourceInput, destinationInput, access, add);
+
+  const error = el('p', 'error');
+  error.setAttribute('role', 'alert');
+  add.onclick = () => {
+    const source = sourceInput.value.trim();
+    if (!source) {
+      error.textContent = 'Enter a host directory to attach.';
+      return;
+    }
+    mounts.push({
+      source,
+      destination: destinationInput.value.trim() || defaultMountDestination(source, mounts),
+      access: access.value,
+    });
+    sourceInput.value = '';
+    destinationInput.value = '';
+    access.value = 'ro';
+    error.textContent = '';
+    renderMounts();
+  };
+
+  const { controls, cancel, confirm } = dialogControls('Save');
+  cancel.onclick = () => dialog.close();
+  dialog.append(
+    cpusField,
+    memoryField,
+    el('h3', '', 'Additional mounts'),
+    mountList,
+    addRow,
+    error,
+    el('p', 'dim', 'These settings apply when the container is next created.'),
+    controls,
+  );
+  confirm.onclick = async () => {
+    confirm.disabled = true;
+    error.textContent = '';
+    try {
+      await request('/api/actions', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'set-container-settings',
+          session_id: session.id,
+          cpus: cpusInput.value.trim(),
+          memory: memoryInput.value.trim(),
+          mounts: mounts.map(mount => ({
+            source: mount.source,
+            destination: mount.destination,
+            read_only: mount.access === 'ro',
+            ...(mount.access === 'rw' ? { access: 'rw' } : {}),
+          })),
+        }),
+      });
+      dialog.close();
+      await refresh();
+    } catch (failure) {
+      if (dialog.open) error.textContent = failure.message;
+      confirm.disabled = false;
+    }
+  };
+}
+
+function copySessionId(sessionId) {
+  const copied = () => {
+    announce('Session ID copied to the clipboard.');
+    const trigger = sessionCards.get(sessionId)?._menuTrigger;
+    if (!trigger) return;
+    trigger.textContent = '✓';
+    setTimeout(() => {
+      if (trigger.isConnected) trigger.textContent = '⋯';
+    }, 1200);
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(sessionId).then(copied, () => announce(`Session ID: ${sessionId}`));
+  } else {
+    announce(`Session ID: ${sessionId}`);
+  }
+}
+
 function presentSnapshot() {
   snapshot = viewerState.metadata;
   signedOut = false;
   snapshotReceivedAtMs = Date.now();
   reconcileLifecycleActions();
-  seedDashboardOrders(snapshot);
   renderMenuVersion();
   login.classList.add('hidden');
   app.classList.remove('hidden');
@@ -6811,6 +7032,58 @@ function renderPromptSettings(session) {
   promptSettings.classList.toggle('hidden', settings.length === 0);
 }
 
+/// The header's one writable setting. Like the prompt settings it re-reads
+/// the session on every snapshot, so a change made elsewhere (or refused)
+/// shows up here without any local bookkeeping; the options are only rebuilt
+/// when what the harness advertises actually changes.
+function renderModelSelect(session) {
+  const option = session?.capabilities?.set_config === true
+    ? session.config_options?.find(item => item.key === 'model')
+    : null;
+  const choices = option?.choices || [];
+  modelSelect.classList.toggle('hidden', !choices.length);
+  if (!choices.length) {
+    if (modelSelect._signature) {
+      modelSelect.replaceChildren();
+      modelSelect._signature = '';
+    }
+    return;
+  }
+  const current = String(option.current ?? option.value ?? '');
+  const listed = current && !choices.some(choice => String(choice.value) === current)
+    ? [{ value: current, name: current }, ...choices]
+    : choices;
+  const signature = JSON.stringify(listed.map(choice => [String(choice.value), choice.name ?? choice.label]));
+  if (modelSelect._signature !== signature) {
+    modelSelect.replaceChildren(...listed.map(choice => {
+      const item = el('option', '', String(choice.name ?? choice.label ?? choice.value));
+      item.value = String(choice.value);
+      return item;
+    }));
+    modelSelect._signature = signature;
+  }
+  modelSelect.value = current;
+}
+
+async function submitModelChange(session, value) {
+  const error = document.querySelector('#conversation-error');
+  modelSelect.disabled = true;
+  try {
+    await request('/api/actions', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'set-config', session_id: session.id, key: 'model', value }),
+    });
+    error.textContent = '';
+    await refresh();
+  } catch (failure) {
+    error.textContent = failure.message;
+  } finally {
+    modelSelect.disabled = false;
+    const latest = sessionById(session.id);
+    if (latest && currentSession === session.id) renderModelSelect(latest);
+  }
+}
+
 // Operation delivery survives reconnect in the server snapshot. Local state only
 // prevents duplicate clicks before the server accepts a request.
 const pendingTurnControls = new Set();
@@ -6886,6 +7159,7 @@ function renderConversationHeader(session) {
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
+  renderModelSelect(session);
   const children = session?.subagent_session_ids || [];
   const native = session?.native_subagents || [];
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
@@ -7164,6 +7438,28 @@ async function runSessionAction(dataset, errorNode, extra) {
     });
     return true;
   }
+  if (dataset.action === 'changed-files') {
+    openChangedFiles(sessionById(dataset.id));
+    return true;
+  }
+  if (dataset.action === 'change-workspace') {
+    openChangeWorkspace(sessionById(dataset.id));
+    return true;
+  }
+  if (dataset.action === 'container-settings') {
+    openContainerSettings(sessionById(dataset.id));
+    return true;
+  }
+  if (dataset.action === 'copy-session-id') {
+    copySessionId(dataset.id);
+    return true;
+  }
+  if (dataset.action === 'restart') {
+    if (!confirm('Restart session?\n\nStop and resume with the same profile, target, and mounts. Any running turn will be interrupted.')) return false;
+  }
+  if (dataset.action === 'interrupt-all') {
+    if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;
+  }
   if (dataset.action === 'suspend') {
     const session = sessionById(dataset.id);
     // A suspend stops the sub-agents without a checkpoint. Only the ones
@@ -7364,6 +7660,14 @@ cancelTurnButton.onclick = async () => {
   if (control.pending || control.uncertain) return;
   if (control.command) await submitTurnControl(session, control.command);
   else await sendAction({ action: 'interrupt-turn', session_id: currentSession });
+};
+modelSelect.onchange = () => {
+  const session = activeSession();
+  if (!session) return;
+  const option = session.config_options?.find(item => item.key === 'model');
+  const current = String(option?.current ?? option?.value ?? '');
+  if (modelSelect.value === current) return;
+  submitModelChange(session, modelSelect.value);
 };
 conversationTransitionCancel.onclick = async () => {
   const id = conversationTransitionCancel.dataset.id || currentSession;
