@@ -131,6 +131,15 @@ impl DashboardContext {
     /// terminal output. That is why the loop draws once per wakeup instead of
     /// tracking which mutations were visible.
     pub(crate) fn draw(&mut self) -> Result<()> {
+        if let Some(splash) = &self.splash {
+            if !splash.finished() {
+                // Nothing behind the splash has been seen, so nothing is
+                // acknowledged as drawn.
+                self.terminal.terminal.draw(|frame| splash.render(frame))?;
+                return Ok(());
+            }
+            self.splash = None;
+        }
         self.drawn_notice_generation = self.notices.generation();
         let Self {
             terminal,

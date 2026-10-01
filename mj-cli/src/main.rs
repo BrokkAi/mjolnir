@@ -1163,15 +1163,20 @@ async fn run_workspace_dashboard(
     // terminal resuming after an upgrade goes straight back to work.
     let (startup, screen) = if interactive && resume.is_none() && splash::wanted() {
         let mut screen = dashboard::DashboardScreen::enter()?;
-        let outcome = splash::play_while(&mut screen, startup, |startup: &DashboardStartup| {
-            startup
-                .loaded
-                .as_ref()
-                .map_or(ratatui::style::Color::Reset, |loaded| loaded.background())
-        })
-        .await?;
+        let outcome =
+            splash::play_until_loaded(&mut screen, startup, |startup: &DashboardStartup| {
+                startup
+                    .loaded
+                    .as_ref()
+                    .map_or(ratatui::style::Color::Reset, |loaded| loaded.background())
+            })
+            .await?;
         match outcome {
-            splash::SplashOutcome::Ready(startup) => (startup, Some(screen)),
+            // The dashboard plays the rest of the splash while it starts.
+            splash::SplashOutcome::Ready((startup, playback)) => {
+                screen.splash = Some(playback);
+                (startup, Some(screen))
+            }
             // Dropping the screen first puts the error in the normal scrollback.
             splash::SplashOutcome::Failed(error) => {
                 drop(screen);

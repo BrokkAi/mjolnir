@@ -23,22 +23,22 @@ use ratatui::style::Color;
 
 use canvas::{Canvas, Dissolve, Rgb};
 
-/// Scene times, in seconds.
-const DESCENT_START: f32 = 0.35;
-const IMPACT: f32 = 0.95;
-const TITLE_START: f32 = 1.12;
-const HOLD_START: Duration = Duration::from_millis(1750);
+/// Scene times, in seconds. The splash opens with the hammer already
+/// falling above the screen; it comes into view about 0.16s later.
+const DESCENT_START: f32 = -0.16;
+const IMPACT: f32 = 0.44;
+const TITLE_START: f32 = 0.61;
+const HOLD_START: Duration = Duration::from_millis(1240);
 const DISSOLVE: Duration = Duration::from_millis(250);
 
 /// The horizon, in scene units below the centre of the screen.
 const GROUND_Y: f32 = 0.40;
 
-/// When the splash may end. Loading readiness and the user's skip are the
-/// only inputs; every phase decision is derived here.
+/// When the splash may end. Loading readiness is the only input; every
+/// phase decision is derived here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SplashTimeline {
     ready_at: Option<Duration>,
-    skipped_at: Option<Duration>,
 }
 
 impl SplashTimeline {
@@ -47,23 +47,13 @@ impl SplashTimeline {
         self.ready_at.get_or_insert(at);
     }
 
-    /// The user asked to skip at `at`: the animation jumps to its held
-    /// final scene and ends as soon as loading is ready.
-    pub fn skip(&mut self, at: Duration) {
-        self.skipped_at.get_or_insert(at);
-    }
-
     pub fn is_ready(&self) -> bool {
         self.ready_at.is_some()
     }
 
     /// When the dissolve into the dashboard begins, once loading is ready.
     pub fn dissolve_start(&self) -> Option<Duration> {
-        let ready = self.ready_at?;
-        let shown = self
-            .skipped_at
-            .map_or(HOLD_START, |skipped| skipped.min(HOLD_START));
-        Some(ready.max(shown))
+        Some(self.ready_at?.max(HOLD_START))
     }
 
     /// Whether the last frame has been shown and the dashboard can draw.
@@ -78,13 +68,8 @@ impl SplashTimeline {
             && self.dissolve_progress(elapsed) == 0.0
     }
 
-    /// The animation clock: real time, advanced to the hold after a skip.
     fn scene_time(&self, elapsed: Duration) -> f32 {
-        let jump = match self.skipped_at {
-            Some(skipped) if elapsed >= skipped => HOLD_START.saturating_sub(skipped),
-            _ => Duration::ZERO,
-        };
-        (elapsed + jump).as_secs_f32()
+        elapsed.as_secs_f32()
     }
 
     fn dissolve_progress(&self, elapsed: Duration) -> f32 {
@@ -343,28 +328,8 @@ mod tests {
         let mut timeline = SplashTimeline::default();
         timeline.mark_ready(MS(300));
         assert_eq!(timeline.dissolve_start(), Some(HOLD_START));
-        assert!(!timeline.finished(MS(1_900)));
-        assert!(timeline.finished(MS(2_000)));
-    }
-
-    #[test]
-    fn skipping_before_loading_holds_until_ready() {
-        let mut timeline = SplashTimeline::default();
-        timeline.skip(MS(500));
-        assert!(timeline.holding(MS(600)));
-        assert!(!timeline.finished(MS(3_000)));
-
-        timeline.mark_ready(MS(3_000));
-        assert!(timeline.finished(MS(3_250)));
-    }
-
-    #[test]
-    fn skipping_after_loading_ends_the_splash_promptly() {
-        let mut timeline = SplashTimeline::default();
-        timeline.mark_ready(MS(200));
-        timeline.skip(MS(600));
-        assert_eq!(timeline.dissolve_start(), Some(MS(600)));
-        assert!(timeline.finished(MS(850)));
+        assert!(!timeline.finished(HOLD_START + DISSOLVE - MS(1)));
+        assert!(timeline.finished(HOLD_START + DISSOLVE));
     }
 
     #[test]
@@ -377,7 +342,7 @@ mod tests {
             30,
             &SplashFrame {
                 background,
-                ..frame(MS(2_000), timeline)
+                ..frame(HOLD_START + DISSOLVE, timeline)
             },
         );
         assert!(

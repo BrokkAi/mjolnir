@@ -265,6 +265,9 @@ pub(crate) struct DashboardContext {
     daemon_running_again_since: Option<std::time::Instant>,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
+    /// The startup splash, drawn in place of the dashboard until it has
+    /// played out. Everything behind it is already running.
+    splash: Option<crate::splash::SplashPlayback>,
     /// Every warm conversation, keyed by session id: one for each pane that
     /// shows a session. All of them are pumped on every loop iteration, so a
     /// conversation stays current whether or not it is the one with the
@@ -511,8 +514,10 @@ pub(crate) async fn run_dashboard_for_workspace(
         terminal,
         events,
         termination,
+        splash,
     } = screen;
     let mut context = DashboardContext::open(loaded, terminal, events, daemon_presence)?;
+    context.splash = splash;
     let automatic_setup = resume.is_none() && go.is_none() && !open_workspace_manager;
     if let Some(resume) = resume {
         context.restore_upgrade(resume).await;
@@ -591,6 +596,8 @@ pub(crate) async fn run_dashboard_for_workspace(
     // an idle dashboard never ticks on it.
     let mut autoscroll_tick = tokio::time::interval(SELECTION_AUTOSCROLL_TICK);
     autoscroll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut splash_tick = tokio::time::interval(crate::splash::FRAME);
+    splash_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // One wakeup is one frame. `ratatui` writes only the cells that differ
     // from the previous frame, so an unconditional rebuild costs CPU time and
@@ -628,12 +635,18 @@ pub(crate) async fn run_dashboard_for_workspace(
             _ = termination.cancelled(), if !context.shutdown_requested => {
                 context.begin_shutdown(false);
             }
+            _ = splash_tick.tick(), if context.splash.is_some() => {}
             event = next_terminal_event(&mut context.events) => {
                 let Some(event) = event else { break };
                 if context.shutdown_requested {
                     continue;
                 }
                 let mut event = event?;
+                // Nothing behind the splash has been seen, so nothing there
+                // should act on input yet.
+                if context.splash.is_some() {
+                    continue;
+                }
                 // The user acting is the strongest signal there is about which
                 // conversation they want, so it takes the choice away from the
                 // startup pick before that pick can override their input.
@@ -1050,7 +1063,8 @@ impl DashboardContext {
     /// and nothing is covering the footer. Until then the bar belongs to what
     /// the launch itself is doing.
     fn ready_for_a_hint(&self) -> bool {
-        !self.startup.pick_pending()
+        self.splash.is_none()
+            && !self.startup.pick_pending()
             && self.opening_chat_sessions.is_empty()
             && !self.dashboard.modal_open()
             && !self.shutdown_requested
@@ -1325,6 +1339,8 @@ impl DashboardContext {
             self.record_chat_detach(&session_id);
         }
         self.shutdown_requested = true;
+        // Shutdown progress belongs on screen, not behind the splash.
+        self.splash = None;
         for (session_id, through) in self.read_receipts.retry_failed() {
             self.spawn_read_receipt(session_id, through);
         }
@@ -1568,6 +1584,7 @@ impl DashboardContext {
             notices,
             daemon_running_again_since: None,
             events: Some(events),
+            splash: None,
             chats: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),
@@ -1718,6 +1735,8 @@ pub(crate) struct DashboardScreen {
     pub(crate) terminal: TerminalGuard,
     pub(crate) events: event::EventStream,
     pub(crate) termination: tokio_util::sync::CancellationToken,
+    /// A startup splash still playing, which the dashboard finishes.
+    pub(crate) splash: Option<crate::splash::SplashPlayback>,
 }
 
 impl DashboardScreen {
@@ -1726,6 +1745,7 @@ impl DashboardScreen {
             terminal: TerminalGuard::enter()?,
             events: event::EventStream::new(),
             termination: mj_controller::termination::Coordinator::install().token(),
+            splash: None,
         })
     }
 }
