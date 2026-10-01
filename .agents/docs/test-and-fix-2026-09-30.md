@@ -108,3 +108,15 @@ Surface. Wizard with the `macbook` target; one prompt; suspend; resume; destroy.
 As in the 09-29 runbook's *After the campaign*, with two changes: findings are triaged as they arrive, and each validated fix is pushed to `origin/master` once it lands (`cargo test` for the affected crates, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, dev profile, outside the sandbox). Fix agents work in isolated worktrees branched from the current `master` tip, write a failing test from the finding's reproduction first, and commit; the coordinator cherry-picks. Design questions go to the user.
 
 ## Run of 2026-09-30 (binaries from `6a2a0713`)
+
+Seven Sonnet workers dispatched at about 22:00 CDT (T, W, U, L, X, P, M). Darwin worker built on the Mac in `~/Projects/mjolnir-tf-2026-09-30` at `6a2a0713`.
+
+### Track M (Mac over SSH, `claude2`) — done
+
+Passed: launch with the Darwin worker "beside the mj binary" (selection logged once at daemon start); checkpoint, suspend, resume with project memory kept (a codeword told before the suspend was recalled after it); `mj daemon restart` during a 60 s turn finished it once on the same worker PID; Plan mode returned to `auto` (Guardian), not Manual; with the instance's own SSH ControlMaster stopped for 30 s the daemon logged "still waiting", "abandoning its sequential connection", a relay sync failure and a capacity probe timeout, and the queued prompt completed after it resumed.
+
+Findings, with verdicts:
+
+- **M-1** (wrong, product): a fresh named instance's first dashboard launch wrote four `[bundles.*]` blocks pointing at the user's real projects (`mjolnir3`, `brokkbench26`, `autocull`, `bifrost-dev`) into its `config.toml`, although the config already had profiles. Opus fix agent dispatched to find the writer; if it is intended design it comes back to the user.
+
+Runbook errors: `--model claude-sonnet-5-5` is refused (400); the profile offers the alias `sonnet` (Sonnet 5.5). A fixture project needs a network `origin` and its default branch ref present locally, or `mj new` refuses (422, then "origin default branch … is not in the source repository; fetch it"). The worker root on an SSH host is `~/.local/share/hel/workers/<session>` and profile data `~/.local/share/hel/profiles/<session>` regardless of `workspace_prefix`, so the card's isolation and cleanup by prefix does not apply to worker roots; match the session id. Cleanup complete, 0 leftovers.
