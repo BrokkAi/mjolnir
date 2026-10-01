@@ -358,6 +358,19 @@ impl JevConfig {
 }
 
 impl Config {
+    /// Identity of the configured profile list, excluding policies and UI defaults.
+    pub fn profiles_discovery_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let inputs: Vec<_> = self
+            .profiles
+            .iter()
+            .map(|(id, profile)| profile.capabilities_key(id))
+            .collect();
+        crate::hex::lower_hex(Sha256::digest(
+            serde_json::to_vec(&inputs).expect("profile identities serialize"),
+        ))
+    }
+
     /// An opaque identity safe to send to control surfaces without exposing
     /// profile environments. Policies and unrelated preferences are absent.
     pub fn subagent_discovery_key(&self, parent: &str, model: Option<&str>) -> String {

@@ -220,14 +220,13 @@ pub enum DashboardAction {
     RestartSession {
         session_id: String,
     },
-    /// Read the session checkout's branch and changed files on its target.
-    /// The host runs it off the loop and answers with `set_git_status`.
-    DiscoverSubagentOptions {
-        id: u64,
-        profile: String,
-        model: Option<String>,
+    /// Start shared background hydration for unsaved profile definitions.
+    WarmProfileCapabilities {
+        key: String,
         config: String,
     },
+    /// Read the session checkout's branch and changed files on its target.
+    /// The host runs it off the loop and answers with `set_git_status`.
     ProbeGitStatus {
         session_id: String,
     },
@@ -802,6 +801,9 @@ pub struct DashboardState {
     pub(crate) native_by_owner: BTreeMap<String, BTreeSet<String>>,
     session_order_cache: RefCell<SessionOrderCache>,
     pub(crate) config: Config,
+    pub(crate) profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    pub(crate) profile_hydration_requests: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) profile_hydration_errors: BTreeMap<String, String>,
     /// The resolved `[keys]` bindings, refreshed whenever configuration is
     /// replaced so a `config.toml` edit takes effect without a restart.
     pub(crate) keybinds: mj_core::config::Keybinds,
@@ -1110,6 +1112,9 @@ impl DashboardState {
             keybinds: config.keybinds(),
             prefix_pending: false,
             resize_mode: false,
+            profile_capabilities: Default::default(),
+            profile_hydration_requests: Default::default(),
+            profile_hydration_errors: Default::default(),
             config,
             state,
             quotas,

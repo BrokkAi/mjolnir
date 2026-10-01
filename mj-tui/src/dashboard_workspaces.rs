@@ -366,7 +366,7 @@ impl DashboardState {
     }
 
     pub fn prompt_has_focus(&self) -> bool {
-        self.focus == Focus::Prompt
+        matches!(self.mode, crate::Mode::Dashboard) && self.focus == Focus::Prompt
     }
 
     pub(crate) fn set_session_action_focus(&mut self, action: Option<CommandId>) {

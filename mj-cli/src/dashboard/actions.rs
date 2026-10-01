@@ -438,23 +438,17 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::RestartDaemon => {
             spawn_daemon_restart(context);
         }
-        DashboardAction::DiscoverSubagentOptions {
-            id,
-            profile,
-            model,
-            config,
-        } => {
+        DashboardAction::WarmProfileCapabilities { key, config } => {
             super::io::spawn_background_async(
-                "discovering subagent models",
+                "starting profile capability hydration",
                 context.dashboard_io_tx.clone(),
-                // Each profile can need two probes, each with a 300s deadline.
-                std::time::Duration::from_secs(660),
+                std::time::Duration::from_secs(30),
                 async move {
                     let config = serde_json::from_str(&config)?;
                     let mut client = daemon::connect_existing().await?;
-                    client.subagent_options(profile, model, Some(config)).await
+                    client.warm_profile_capabilities(config).await
                 },
-                move |result| DashboardIoUpdate::SubagentOptions { id, result },
+                move |result| DashboardIoUpdate::ProfileHydration { key, result },
             );
         }
         DashboardAction::ProbeGitStatus { session_id } => {

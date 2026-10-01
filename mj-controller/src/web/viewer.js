@@ -1479,30 +1479,31 @@ function subagentSelectionError(draft) {
   return '';
 }
 
-/// `rerender` redraws the form the draft belongs to, if it is still open.
-function discoverSubagentOptions(draft, rerender) {
+// Project the daemon's shared catalog. Rendering never issues discovery.
+function updateSubagentOptions(draft) {
   const key = subagentDiscoveryKey(draft);
-  if (draft.subagentDiscovery?.key === key) return;
-  draft.subagentDiscovery?.controller?.abort();
-  const controller = new AbortController();
-  const previous = draft.subagentDiscovery;
-  const sameInputs = previous && JSON.parse(previous.key)[2] === JSON.parse(key)[2]
-    && JSON.parse(previous.key)[0] === draft.profileId;
-  const discovery = { key, loading: true, options: sameInputs ? previous.options : null, error: '', controller };
-  draft.subagentDiscovery = discovery;
-  const model = draft.subagents.model ? `?model=${encodeURIComponent(draft.subagents.model)}` : '';
-  request(`/api/v1/profiles/${encodeURIComponent(draft.profileId)}/subagent-options${model}`, { signal: controller.signal })
-    .then(options => {
-      if (draft.subagentDiscovery !== discovery || subagentDiscoveryKey(draft) !== key) return;
-      discovery.options = options;
-      discovery.loading = false;
-      rerender();
-    }).catch(error => {
-      if (draft.subagentDiscovery !== discovery || controller.signal.aborted || subagentDiscoveryKey(draft) !== key) return;
-      discovery.error = error.message;
-      discovery.loading = false;
-      rerender();
-    });
+  const parent = snapshot?.profiles.find(profile => profile.id === draft.profileId);
+  const candidates = parent?.subagent_profile_ids || [draft.profileId];
+  const options = { models: [], efforts: [], unavailable: [] };
+  let modelsReady = true, loading = false;
+  const merge = (into, choices) => {
+    for (const choice of choices || []) if (!into.some(existing => existing.value === choice.value)) into.push(choice);
+  };
+  for (const id of candidates) {
+    const profile = snapshot?.profiles.find(profile => profile.id === id);
+    const entry = snapshot?.profile_capabilities?.profiles?.[profile?.capabilities_key];
+    if (!entry || entry.choices.status === 'pending') { modelsReady = false; loading = true; continue; }
+    if (entry.choices.status === 'failed') { options.unavailable.push(`${id}: ${entry.choices.value}`); continue; }
+    const choices = entry.choices.value;
+    merge(options.models, choices.models);
+    if (draft.subagents.model && choices.models.some(choice => choice.value === draft.subagents.model)) {
+      const efforts = entry.efforts[draft.subagents.model];
+      if (!efforts || efforts.status === 'pending') loading = true;
+      else if (efforts.status === 'failed') options.unavailable.push(`${id}: ${efforts.value}`);
+      else merge(options.efforts, efforts.value);
+    }
+  }
+  draft.subagentDiscovery = { key, loading, modelsReady, options, error: '' };
 }
 
 function subagentSelect(body, label, id, choices, selected, onChange, disabled = false) {
@@ -1527,14 +1528,13 @@ function subagentSelect(body, label, id, choices, selected, onChange, disabled =
 /// `rerender`.
 function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
   subagentSelect(body, 'Subagents', `${prefix}-subagents`, draft.subagents.mode === 'all_models' ? [...SUBAGENT_MODES, ['all_models', 'Mjolnir, all models (legacy)']] : SUBAGENT_MODES, draft.subagents.mode, mode => {
-    draft.subagentDiscovery?.controller?.abort();
     draft.subagentDiscovery = null;
     draft.subagents = mode === 'single_model' ? { mode, model: '', effort: null } : { mode };
     onChange();
     rerender();
   });
   if (draft.subagents.mode !== 'single_model') return;
-  discoverSubagentOptions(draft, rerender);
+  updateSubagentOptions(draft);
   const discovery = draft.subagentDiscovery;
   const options = discovery.options;
   const models = [['', 'Select model'], ...(options?.models || []).map(choice => [choice.value, choice.name])];
@@ -1543,7 +1543,7 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     draft.subagents = { mode: 'single_model', model, effort: null };
     onChange();
     rerender();
-  }, !options);
+  }, !discovery.modelsReady);
   const efforts = options?.efforts || [];
   const choices = [['', efforts.length ? 'Select effort' : 'Harness default'], ...efforts.map(choice => [choice.value, choice.name])];
   if (draft.subagents.effort && !choices.some(([value]) => value === draft.subagents.effort)) choices.push([draft.subagents.effort, `${draft.subagents.effort} (unavailable)`]);

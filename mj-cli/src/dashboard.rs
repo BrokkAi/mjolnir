@@ -328,6 +328,8 @@ pub(crate) struct DashboardContext {
     /// What the daemon says about quota. The daemon is the only prober; this
     /// process never asks a provider.
     quota: Feed<watch::Receiver<mj_client::quota::QuotaSnapshot>>,
+    profile_capabilities:
+        Feed<watch::Receiver<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>>,
     /// The daemon's finished-cycle count when the person last pressed
     /// Refresh, until a later cycle ends.
     pub(crate) manual_quota_refresh_cycles: Option<u64>,
@@ -761,6 +763,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
             update = context.quota.wait(), if context.quota.is_open() => {
                 context.quota.accept(update);
+            }
+            update = context.profile_capabilities.wait(), if context.profile_capabilities.is_open() => {
+                context.profile_capabilities.accept(update);
             }
             update = context.worker.wait(), if context.worker.is_open() => {
                 context.worker.accept(update);
@@ -1556,6 +1561,8 @@ impl DashboardContext {
             .map(|notice| notice.id)
             .max();
         let quota_rx = remote_worker.quotas;
+        let capabilities_rx = remote_worker.profile_capabilities;
+        dashboard.set_profile_capabilities(capabilities_rx.borrow().clone());
         dashboard.set_quota_snapshot(quota_rx.borrow().clone());
         let runtime_config_rx = remote_worker.config;
         let (lifecycle_updates_tx, lifecycle_updates_rx) =
@@ -1639,6 +1646,7 @@ impl DashboardContext {
             reported_notice_id,
             runtime_review_views,
             runtime_config: Feed::new(runtime_config_rx),
+            profile_capabilities: Feed::new(capabilities_rx),
             pending_runtime_updates: Vec::new(),
             remote_lifecycle_sessions: BTreeSet::new(),
             remote_lifecycle_operations: BTreeMap::new(),

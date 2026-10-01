@@ -5201,7 +5201,7 @@ fn viewer_move_controls_preserve_legacy_and_keep_models_available_while_efforts_
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ profiles: [{{ id: 'parent', harness_kind: 'codex', subagent_discovery_key: 'installation-1' }}] }};
+const snapshot = {{ profiles: [{{ id: 'parent', harness_kind: 'codex', subagent_discovery_key: 'installation-1', capabilities_key:'installation-1', subagent_profile_ids:['parent'] }}], profile_capabilities: {{ profiles: {{}} }} }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
 const pending = [];
 function request(url, options) {{ return new Promise((resolve, reject) => pending.push({{ url, resolve, reject, options }})); }}
@@ -5217,37 +5217,36 @@ fields = render();
 check(!fields[0].childNodes.some(node => node.value === 'all_models'), 'All models cannot be newly selected');
 fields[0].value = 'single_model'; fields[0].onchange();
 fields = render();
-checkEqual(pending.length, 1, 'one initial model request');
+checkEqual(pending.length, 0, 'opening during hydration issues no query');
+check(fields[1].disabled, 'model picker waits on published hydration');
 const choice = value => ({{value, name:value}});
-pending[0].resolve({{models:[choice('a'), choice('b')], efforts:[], unavailable:[]}});
-await Promise.resolve();
+snapshot.profile_capabilities.profiles['installation-1'] = {{
+  choices: {{status:'ready', value:{{model:'a', models:[choice('a'), choice('b')], efforts:[choice('low')]}}}},
+  efforts: {{a:{{status:'pending'}}, b:{{status:'ready',value:[choice('medium')]}}}}
+}};
 fields = render();
-fields[1].value = 'a'; fields[1].onchange();
-fields = render();
-checkEqual(pending.length, 2, 'model efforts load separately');
-check(!fields[1].disabled, 'model picker remains available while efforts load');
-check(fields[2].disabled, 'effort picker waits for model-specific reply');
-pending[1].resolve({{models:[choice('a'), choice('b')], efforts:[choice('low'), choice('high')], unavailable:[]}});
-await Promise.resolve();
+fields[1].value = 'a'; fields[1].onchange(); fields = render();
+checkEqual(pending.length, 0, 'model selection joins background effort hydration');
+check(!fields[1].disabled, 'models stay available while efforts hydrate');
+check(fields[2].disabled, 'efforts wait for their publication');
+snapshot.profile_capabilities.profiles['installation-1'].efforts.a = {{status:'ready',value:[choice('low'),choice('high')]}};
 fields = render();
 fields[2].value = 'high'; fields[2].onchange(); render();
-checkEqual(pending.length, 2, 'effort edit reuses discovery');
+checkEqual(pending.length, 0, 'effort edit uses published cache');
 snapshot.profiles[0].subagents = {{ mode:'single_model', model:'creation-default', effort:'low' }};
 render();
-checkEqual(pending.length, 2, 'creation-default edits do not invalidate capabilities');
 checkEqual(draft.subagents.model, 'a', 'saving profile defaults retains session draft');
+fields[0].value = 'native'; fields[0].onchange(); fields = render();
+fields[0].value = 'single_model'; fields[0].onchange(); fields = render();
+check(!fields[1].disabled, 'policy round trip retains globally warmed models');
+fields[1].value = 'b'; fields[1].onchange(); fields = render();
+checkEqual(draft.subagentDiscovery.options.efforts[0].value, 'medium', 'all model efforts were warmed');
+checkEqual(pending.length, 0, 'toggles and model changes never discover');
+snapshot.profiles[0].capabilities_key = 'installation-2';
 snapshot.profiles[0].subagent_discovery_key = 'installation-2';
 fields = render();
-checkEqual(pending.length, 3, 'relevant installation edits invalidate discovery');
-check(fields[1].disabled, 'old installation models are cleared while new inputs load');
-fields[1].value = 'b'; fields[1].onchange(); render();
-checkEqual(pending.length, 4, 'new model request supersedes prior request');
-pending[2].resolve({{models:[choice('stale')], efforts:[], unavailable:[]}});
-await Promise.resolve();
-check(draft.subagentDiscovery.loading, 'retired reply cannot finish current discovery');
-pending[3].resolve({{models:[choice('a'), choice('b')], efforts:[choice('medium')], unavailable:[]}});
-await Promise.resolve();
-checkEqual(draft.subagentDiscovery.options.efforts[0].value, 'medium', 'current model reply supplies efforts');
+check(fields[1].disabled, 'new installation waits for its own shared hydration');
+checkEqual(pending.length, 0, 'changed installation is hydrated by the daemon');
 checkEqual(moveSubagentChange(draft).model, 'b', 'explicit session choice is submitted');
 check(edits >= 4, 'controls report explicit edits');
 "#

@@ -34,6 +34,8 @@ impl ViewerPublication {
         self.inputs_changed |= self.runtime.records != next.records
             || self.runtime.subagents != next.subagents
             || self.runtime.metadata.config != next.metadata.config;
+        self.inputs_changed |=
+            self.runtime.metadata.profile_capabilities != next.metadata.profile_capabilities;
         for (id, summary) in self.runtime.native_agents.changes(&next.native_agents) {
             if self.runtime.native_agents.get(id).map(|old| &old.agent)
                 == summary.map(|next| &next.agent)
@@ -171,6 +173,11 @@ impl ViewerPublication {
             }
         }
         snapshot.sessions = self.rows.clone();
+        snapshot.profile_capabilities = self
+            .runtime
+            .metadata
+            .profile_capabilities
+            .for_config(&controller.config);
         self.records = controller.state.sessions.clone();
         self.subagents = controller.state.subagents.clone();
         self.config = Some(controller.config.clone());

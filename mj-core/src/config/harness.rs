@@ -649,7 +649,7 @@ pub struct HarnessProfile {
 pub struct ProfileDiscoveryInputs {
     pub kind: HarnessKind,
     pub home: PathBuf,
-    pub environment: BTreeMap<String, String>,
+    pub environment: BTreeMap<String, super::secrets::EnvironmentValue>,
 }
 
 /// The transcript budget a profile without an explicit `context_window_bytes`
@@ -667,8 +667,22 @@ impl HarnessProfile {
         ProfileDiscoveryInputs {
             kind: self.kind,
             home: self.home.clone(),
-            environment: self.environment.resolved().clone(),
+            environment: self.environment.sources().clone(),
         }
+    }
+
+    /// Stable identity of configured capabilities, independent of defaults,
+    /// refreshed credentials and files the harness writes inside its home.
+    pub fn capabilities_key(&self, id: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let inputs = serde_json::to_vec(&(
+            "profile-capabilities-v1",
+            id,
+            self.enabled,
+            self.discovery_inputs(),
+        ))
+        .expect("profile capability inputs serialize");
+        crate::hex::lower_hex(Sha256::digest(inputs))
     }
 
     /// Discovery identifies an installation independently of user settings.

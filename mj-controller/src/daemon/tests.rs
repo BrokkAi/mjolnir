@@ -732,7 +732,7 @@ fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeSt
     Arc::new(runtime)
 }
 
-fn test_metadata(address: SocketAddr) -> DaemonMetadata {
+pub(super) fn test_metadata(address: SocketAddr) -> DaemonMetadata {
     DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
         pid: 1,

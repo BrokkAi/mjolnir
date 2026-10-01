@@ -595,6 +595,11 @@ pub enum DaemonAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<Box<Config>>,
     },
+    /// Ensure valid unsaved profile definitions are hydrating. Results arrive
+    /// through runtime publications; this request does no discovery itself.
+    WarmProfileCapabilities {
+        config: Box<Config>,
+    },
     RenameProfile {
         old_id: String,
         new_id: String,
@@ -1371,6 +1376,18 @@ impl DaemonClient {
         {
             DaemonReply::SubagentOptions(options) => Ok(options),
             reply => bail!("unexpected subagent options reply {reply:?}"),
+        }
+    }
+
+    pub async fn warm_profile_capabilities(&mut self, config: Config) -> Result<()> {
+        match self
+            .request(DaemonAction::WarmProfileCapabilities {
+                config: Box::new(config),
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected capability hydration reply {reply:?}"),
         }
     }
 
@@ -2324,8 +2341,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
          Put the daemon's directory first on PATH, or reinstall this client from that build."
     )
 }
-// The resume dialog lists preview rows and fetches the record it resumes.
-pub const PROTOCOL_VERSION: u32 = 51;
+// Settings can warm draft profile capabilities through the daemon-owned catalog.
+pub const PROTOCOL_VERSION: u32 = 52;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

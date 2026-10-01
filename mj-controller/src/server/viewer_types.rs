@@ -14,6 +14,8 @@ pub(crate) fn take_viewer_row_visits() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
     #[serde(default)]
+    pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    #[serde(default)]
     pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
     pub revision: u64,
     pub generated_at: String,
@@ -300,6 +302,12 @@ impl ViewerSnapshot {
                 harness_kind: profile.kind.id().into(),
                 subagents: profile.subagents.clone(),
                 subagent_discovery_key: config.subagent_discovery_key(id, None),
+                capabilities_key: profile.capabilities_key(id),
+                subagent_profile_ids: config
+                    .enabled_profiles()
+                    .filter(|(candidate, _)| config.subagents.profile_is_eligible(id, candidate))
+                    .map(|(candidate, _)| candidate.to_owned())
+                    .collect(),
                 quota: None,
             })
             .collect();
@@ -346,6 +354,7 @@ impl ViewerSnapshot {
             })
             .collect();
         Self {
+            profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
             revision,
             generated_at: now_unix().to_string(),
@@ -830,6 +839,10 @@ pub struct ViewerProfile {
     pub id: String,
     #[serde(default)]
     pub subagent_discovery_key: String,
+    #[serde(default)]
+    pub capabilities_key: String,
+    #[serde(default)]
+    pub subagent_profile_ids: Vec<String>,
     pub harness_kind: String,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,

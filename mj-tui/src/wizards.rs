@@ -11,7 +11,6 @@ pub(crate) use render::*;
 use resources::{
     ResourceEditor, ResourcePicker, declare_resource_controls, memory_gib_text, target_resources,
 };
-pub(crate) use subagents::next_subagent_discovery_id;
 
 use mj_chat::path_input::PathInput;
 

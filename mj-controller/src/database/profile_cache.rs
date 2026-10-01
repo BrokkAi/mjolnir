@@ -26,8 +26,8 @@ pub(crate) fn load_profile_config_cache_from(
     fingerprint: &str,
 ) -> Result<Option<String>> {
     Ok(open_reader(path)?.query_row(
-        "SELECT body FROM profile_config_cache WHERE profile = ?1 AND model = ?2 AND fingerprint = ?3 AND observed_at > ?4",
-        params![profile, model, fingerprint, Utc::now().timestamp() - 86400], |row| row.get(0),
+        "SELECT body FROM profile_config_cache WHERE profile = ?1 AND model = ?2 AND fingerprint = ?3",
+        params![profile, model, fingerprint], |row| row.get(0),
     ).optional()?)
 }
 
