@@ -3,36 +3,6 @@ use super::*;
 use mj_core::native_agent::{NativeAgent, NativeAgentEvent, NativeAgentState, NativeAgentView};
 use mj_core::relay::{RelayEvent, RelayObservation};
 
-/// Only metadata crosses the shared runtime snapshot transport.
-pub fn load_native_agent_summaries(
-    owner: &str,
-) -> Result<Vec<mj_core::native_agent::NativeAgentSummary>> {
-    if let Some(committed) = committed_state()? {
-        return Ok(committed
-            .native_agents
-            .get(owner)
-            .map(|children| children.values().cloned().collect())
-            .unwrap_or_default());
-    }
-    let connection = open_reader(&database_path())?;
-    load_native_agent_summaries_from(&connection, owner)
-}
-
-fn load_native_agent_summaries_from(
-    connection: &Connection,
-    owner: &str,
-) -> Result<Vec<mj_core::native_agent::NativeAgentSummary>> {
-    let mut statement = connection
-        .prepare("SELECT body FROM native_agents WHERE owner=?1 AND staging=0 ORDER BY child")?;
-    let bodies = statement.query_map([owner], |row| row.get::<_, String>(0))?;
-    bodies
-        .map(|body| {
-            let view: NativeAgentView = serde_json::from_str(&body?)?;
-            Ok(mj_core::native_agent::NativeAgentSummary::of(&view))
-        })
-        .collect()
-}
-
 /// Read identity and tail from one snapshot so replay cannot mix generations.
 pub fn load_native_agent_view(
     owner: &str,
@@ -727,86 +697,5 @@ mod tests {
         assert_eq!(older.generation_ordinal, page.generation_ordinal);
         assert_eq!(older.items.last().unwrap().position + 1, first.position);
         assert_eq!(older.items[0].position, 2);
-    }
-    #[tokio::test]
-    async fn native_transcripts_larger_than_a_frame_leave_runtime_snapshots_deliverable() {
-        use mj_client::daemon::{
-            DaemonReply, MAX_FRAME_BYTES, PROTOCOL_VERSION, ResponseEnvelope, RuntimeSnapshot,
-            read_frame,
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("test.sqlite3");
-        save_session_to(&path, &super::super::tests::session("owner", "project")).unwrap();
-        let connection = open(&path).unwrap();
-        let large = "完整 transcript ".repeat(40_000);
-        for index in 0..16 {
-            let child = format!("child-{index}");
-            apply_native_agent_event(
-                &connection,
-                "owner",
-                &event(index * 2 + 1, spawn(&child, None)),
-            )
-            .unwrap();
-            apply_native_agent_event(
-                &connection,
-                "owner",
-                &event(index * 2 + 2, text(&child, &large)),
-            )
-            .unwrap();
-        }
-        let views = load_native_agents_from(&connection, "owner", 200).unwrap();
-        assert!(serde_json::to_vec(&views).unwrap().len() > MAX_FRAME_BYTES);
-        let summaries = load_native_agent_summaries_from(&connection, "owner").unwrap();
-        for summary in &summaries {
-            let view =
-                load_native_agent_view_from(&connection, "owner", &summary.agent.session_id, 200)
-                    .unwrap()
-                    .unwrap();
-            assert!(summary.is_satisfied_by(&view));
-            assert_eq!(
-                &view,
-                views
-                    .iter()
-                    .find(|v| v.agent.session_id == summary.agent.session_id)
-                    .unwrap()
-            );
-        }
-        let snapshot = RuntimeSnapshot {
-            last_subagent_policy: Default::default(),
-            native_agents: summaries,
-            workspace_names: Default::default(),
-            moves: Vec::new(),
-            revision: 1,
-            config: mj_core::config::Config::default(),
-            records: Vec::new(),
-            sessions: Vec::new(),
-            lifecycles: Vec::new(),
-            reviews: Vec::new(),
-            notices: Vec::new(),
-            subagents: Vec::new(),
-        };
-        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 32 * 1024);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let send = tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            mj_client::daemon::write_frame(
-                &mut stream,
-                &ResponseEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
-                    request_id: 1,
-                    result: Ok(DaemonReply::RuntimeSnapshot(Box::new(snapshot))),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let reply: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
-        let Ok(DaemonReply::RuntimeSnapshot(snapshot)) = reply.result else {
-            panic!("runtime reply");
-        };
-        assert_eq!(snapshot.native_agents.len(), 16);
-        send.await.unwrap();
     }
 }

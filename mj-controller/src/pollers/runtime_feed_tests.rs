@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mj_core::config::{Config, HarnessKind};
+use mj_core::config::HarnessKind;
 use mj_core::state::{MaterializedSession, ProjectionWindow, SessionRecord, SessionState};
 
 use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
@@ -155,20 +155,15 @@ fn snapshot(
     revision: u64,
     sessions: Vec<daemon::RuntimeSessionView>,
     records: Vec<SessionRecord>,
-) -> daemon::RuntimeSnapshot {
-    daemon::RuntimeSnapshot {
-        last_subagent_policy: Default::default(),
-        native_agents: Vec::new(),
-        workspace_names: Default::default(),
+) -> mj_client::runtime_feed::RuntimeProjection {
+    mj_client::runtime_feed::RuntimeProjection {
         revision,
-        config: Config::default(),
-        records,
-        sessions,
-        lifecycles: Vec::new(),
-        moves: Vec::new(),
-        reviews: Vec::new(),
-        notices: Vec::new(),
-        subagents: Vec::new(),
+        records: records.into_iter().map(|r| (r.id.clone(), r)).collect(),
+        sessions: sessions
+            .into_iter()
+            .map(|r| (r.session_id.clone(), r))
+            .collect(),
+        ..Default::default()
     }
 }
 
@@ -186,7 +181,7 @@ async fn wait_for_drop(flag: &AtomicBool) {
 async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
     type PollRequest = (
         u64,
-        tokio::sync::oneshot::Sender<anyhow::Result<daemon::RuntimeSnapshot>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
     );
     let (poll_started_tx, mut poll_started_rx) =
         tokio::sync::mpsc::unbounded_channel::<PollRequest>();
@@ -247,7 +242,7 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
 async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections() {
     type PollRequest = (
         u64,
-        tokio::sync::oneshot::Sender<anyhow::Result<daemon::RuntimeSnapshot>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
     );
     let (poll_started_tx, mut poll_started_rx) =
         tokio::sync::mpsc::unbounded_channel::<PollRequest>();
@@ -345,7 +340,7 @@ async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections
 async fn a_session_leaving_the_snapshot_is_announced_and_republished_on_return() {
     type PollRequest = (
         u64,
-        tokio::sync::oneshot::Sender<anyhow::Result<daemon::RuntimeSnapshot>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
     );
     let (poll_started_tx, mut poll_started_rx) =
         tokio::sync::mpsc::unbounded_channel::<PollRequest>();
@@ -391,7 +386,7 @@ async fn a_session_leaving_the_snapshot_is_announced_and_republished_on_return()
 async fn runtime_feed_reports_poll_failure_and_recovers() {
     type PollRequest = (
         u64,
-        tokio::sync::oneshot::Sender<anyhow::Result<daemon::RuntimeSnapshot>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<mj_client::runtime_feed::RuntimeProjection>>,
     );
     let (poll_started_tx, mut poll_started_rx) =
         tokio::sync::mpsc::unbounded_channel::<PollRequest>();
@@ -442,7 +437,7 @@ async fn runtime_feed_reports_poll_failure_and_recovers() {
 #[tokio::test]
 async fn a_worker_without_a_projection_is_not_retried_until_its_view_changes() {
     let (poll_tx, mut polls) = tokio::sync::mpsc::unbounded_channel::<
-        tokio::sync::oneshot::Sender<Result<daemon::RuntimeSnapshot>>,
+        tokio::sync::oneshot::Sender<Result<mj_client::runtime_feed::RuntimeProjection>>,
     >();
     let poll = move |_: String, _: u64| {
         let poll_tx = poll_tx.clone();
@@ -495,7 +490,7 @@ async fn dropping_runtime_feed_cancels_a_delayed_poll() {
             async move {
                 poll_started_tx.send(()).expect("poll starts");
                 let _guard = DropFlag(poll_dropped);
-                std::future::pending::<Result<daemon::RuntimeSnapshot>>().await
+                std::future::pending::<Result<mj_client::runtime_feed::RuntimeProjection>>().await
             }
         }
     };

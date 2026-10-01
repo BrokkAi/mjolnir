@@ -31,7 +31,6 @@ use mj_core::config::Config;
 use mj_core::refusal::Refusal;
 use mj_core::relay::RelayCommand;
 use mj_core::state::{RecoveryObservation, SessionRecord, SessionState};
-use mj_core::subagent::SubagentRecord;
 
 use crate::controller::{
     BeforeClose, BranchDisposition, CheckoutDisposition, Controller, ControllerStoreGuard,
