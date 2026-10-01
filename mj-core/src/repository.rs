@@ -178,6 +178,31 @@ pub struct ResolvedDirectory {
     pub identity: RepositoryIdentity,
 }
 
+/// Expected absence when discovering historical directories. Other resolver
+/// failures still indicate an error that discovery must report and retry.
+#[derive(Debug)]
+pub enum RepositoryUnavailable {
+    Directory(PathBuf),
+    NotRepository(PathBuf),
+}
+
+impl std::fmt::Display for RepositoryUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory(path) => write!(
+                formatter,
+                "project directory {} is unavailable",
+                path.display()
+            ),
+            Self::NotRepository(path) => {
+                write!(formatter, "{} is not a Git repository", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RepositoryUnavailable {}
+
 /// The executor can run on the controller or translate Git commands to SSH.
 /// Preserve the selected checkout while collapsing its identity to the owner
 /// of the common Git directory.
@@ -188,6 +213,12 @@ pub fn resolve_directory(
 ) -> Result<ResolvedDirectory> {
     let directory = if host.is_none() {
         std::fs::canonicalize(path)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => {
+                    anyhow::Error::new(RepositoryUnavailable::Directory(path.to_owned()))
+                }
+                _ => anyhow::Error::new(error),
+            })
             .with_context(|| format!("resolve project directory {}", path.display()))?
     } else {
         anyhow::ensure!(
@@ -196,19 +227,34 @@ pub fn resolve_directory(
         );
         path.to_owned()
     };
-    let output = executor.execute(
-        &CommandSpec::new(
-            "git",
-            [
-                "-C".to_owned(),
-                directory.to_string_lossy().into_owned(),
-                "rev-parse".into(),
-                "--show-toplevel".into(),
-                "--git-common-dir".into(),
-            ],
-        )
-        .purpose("resolve project repository and checkout"),
-    )?;
+    if host.is_none()
+        && !std::fs::metadata(&directory)
+            .with_context(|| format!("inspect project directory {}", directory.display()))?
+            .is_dir()
+    {
+        return Err(RepositoryUnavailable::Directory(path.to_owned()).into());
+    }
+    let mut command = CommandSpec::new(
+        "git",
+        [
+            "-C".to_owned(),
+            directory.to_string_lossy().into_owned(),
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+            "--git-common-dir".into(),
+        ],
+    )
+    .purpose("resolve project repository and checkout");
+    command.env.insert("LC_ALL".into(), "C".into());
+    let output = executor.execute(&command)?;
+    if output.status != 0
+        && host.is_none()
+        && String::from_utf8_lossy(&output.stderr)
+            .trim_start()
+            .starts_with("fatal: not a git repository")
+    {
+        return Err(RepositoryUnavailable::NotRepository(path.to_owned()).into());
+    }
     anyhow::ensure!(
         output.status == 0,
         "{} is not a Git repository with a readable checkout: {}",
@@ -268,6 +314,39 @@ pub fn resolve_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_local_history_is_distinct_from_git_failures() {
+        use crate::targets::{CommandOutput, ProcessExecutor};
+
+        struct RefusedGit;
+        impl CommandExecutor for RefusedGit {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                assert_eq!(command.env.get("LC_ALL").map(String::as_str), Some("C"));
+                Ok(CommandOutput {
+                    status: 128,
+                    stdout: Vec::new(),
+                    stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let missing = resolve_directory(&directory.path().join("missing"), None, &ProcessExecutor)
+            .unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref::<RepositoryUnavailable>(),
+            Some(RepositoryUnavailable::Directory(_))
+        ));
+        let not_repository =
+            resolve_directory(directory.path(), None, &ProcessExecutor).unwrap_err();
+        assert!(matches!(
+            not_repository.downcast_ref::<RepositoryUnavailable>(),
+            Some(RepositoryUnavailable::NotRepository(_))
+        ));
+        let refused = resolve_directory(directory.path(), None, &RefusedGit).unwrap_err();
+        assert!(refused.downcast_ref::<RepositoryUnavailable>().is_none());
+        assert!(refused.to_string().contains("dubious ownership"));
+    }
 
     struct OldGit {
         roots: &'static str,

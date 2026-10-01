@@ -27,40 +27,8 @@ pub(super) fn project_memory_launch(
     // the parent's memory (R10-4).
     let identity = if let Some(project) = &session.project {
         project.memory_identity()?
-    } else if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
-        ProjectMemoryIdentity::Repository {
-            repository: RepositoryMemoryIdentity::Local {
-                canonical_root: std::fs::canonicalize(&worktree.source_repository)
-                    .unwrap_or_else(|_| worktree.source_repository.clone()),
-            },
-        }
-    } else if let Some(bundle) = bundle {
-        let primary =
-            configured_memory_identity(bundle.primary().context("bundle primary is missing")?)?;
-        let members = bundle
-            .repositories
-            .iter()
-            .map(configured_memory_identity)
-            .collect::<Result<Vec<_>>>()?;
-        ProjectMemoryIdentity::bundle(primary, members)
     } else {
-        let project = session
-            .project_directory
-            .as_ref()
-            .context("raw session project directory is missing")?;
-        let repository = match session.target.as_ref() {
-            Some(mj_core::state::TargetLocator::LocalBare { .. }) => {
-                RepositoryMemoryIdentity::Local {
-                    canonical_root: std::fs::canonicalize(project)
-                        .unwrap_or_else(|_| project.clone()),
-                }
-            }
-            _ => RepositoryMemoryIdentity::Remote {
-                target: session.target_template_id.clone(),
-                canonical_root: project.clone(),
-            },
-        };
-        ProjectMemoryIdentity::Repository { repository }
+        ProjectMemoryIdentity::for_legacy_session(session, bundle, parent_worktree)?
     };
     let project_key = identity.key()?;
     let replica_slug = project_memory_replica_slug(&project_key, &session.id);
@@ -111,28 +79,6 @@ pub(super) fn project_memory_mcp_delivery(
     } else {
         ProjectMemoryMcpDelivery::Acp
     }
-}
-
-pub(super) fn configured_memory_identity(
-    repository: &ProjectRepository,
-) -> Result<RepositoryMemoryIdentity> {
-    if let Some(source) = repository.github.as_deref() {
-        let github = crate::setup::github_repository_from_origin(source)
-            .with_context(|| format!("parse repository source {source:?} for project memory"))?;
-        return Ok(RepositoryMemoryIdentity::Github {
-            owner: github.owner.to_ascii_lowercase(),
-            repository: github.repository.to_ascii_lowercase(),
-        });
-    }
-    let root = repository
-        .local
-        .as_ref()
-        .context("project repository has no source for memory identity")?;
-    Ok(RepositoryMemoryIdentity::Local {
-        canonical_root: mj_core::local_git::main_worktree_root(root)
-            .or_else(|_| std::fs::canonicalize(root).map_err(anyhow::Error::from))
-            .unwrap_or_else(|_| root.clone()),
-    })
 }
 
 pub(super) fn canonical_memory_root(project_key: &str) -> PathBuf {
