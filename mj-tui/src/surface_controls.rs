@@ -1,7 +1,7 @@
 //! Visible entry points for the same commands the keyboard dispatches.
 
 use crossterm::event::{Event, MouseEvent};
-use mj_chat::components::{ButtonRow, ControlKind, Interaction, TextField};
+use mj_chat::components::{ControlKind, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -517,21 +517,6 @@ pub(crate) fn render_pane_zoom_control(
         theme::actionable()
     };
     frame.render_widget(Paragraph::new(" Z ").style(style), area);
-}
-
-pub(crate) fn render_onboarding_actions(frame: &mut Frame, area: Rect, dashboard: &DashboardState) {
-    let buttons = [
-        (CommandId::OpenConfig, "Settings"),
-        (CommandId::Palette, "Commands"),
-        (CommandId::Workspaces, "Workspaces"),
-    ]
-    .map(|(id, label)| (SurfaceControl::Command(id), label, true));
-    ButtonRow::render(
-        frame,
-        area,
-        &buttons,
-        &mut dashboard.surface_form.borrow_mut(),
-    );
 }
 
 pub(crate) fn render_footer_command(
