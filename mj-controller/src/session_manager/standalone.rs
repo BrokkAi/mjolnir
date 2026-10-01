@@ -71,6 +71,31 @@ impl StandaloneSession {
         Ok(self.snapshot())
     }
 
+    /// Whether the actor should follow this worker at the fast cadence.
+    ///
+    /// True while the worker owns work whose events stream in, while it
+    /// classifies a turn that just ended (`mj prompt --wait` returns on that
+    /// verdict and automatic continuation acts on it, and it lands a moment
+    /// after the turn goes quiet), or while a history search this
+    /// connection runs still has a result to deliver on its next sync. A
+    /// classification that is still pending well after its turn ended is left
+    /// to the slow sweep, so no worker state can hold the fast cadence forever.
+    pub(super) fn follows_closely(&self) -> bool {
+        const FRESH_CLASSIFICATION_MS: i64 = 60_000;
+        let now = mj_core::clock::epoch_millis();
+        !self.history_active.is_empty()
+            || self.operational.has_work_in_flight()
+            || self
+                .operational
+                .assessment
+                .as_ref()
+                .is_some_and(|assessment| {
+                    assessment.current()
+                        && assessment.needs_classification(now)
+                        && now.saturating_sub(assessment.completed_at_ms) < FRESH_CLASSIFICATION_MS
+                })
+    }
+
     pub(super) async fn sync_in_place(&mut self) -> Result<bool> {
         self.sync_history().await?;
         let original_ordinal = self.materialized.applied_event_ordinal;

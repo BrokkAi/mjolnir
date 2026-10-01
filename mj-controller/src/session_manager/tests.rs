@@ -1310,7 +1310,13 @@ const EXPLICIT_MEMORY_SYNC_TEST_CHILD: &str = "MJ_TEST_EXPLICIT_MEMORY_SYNC_CHIL
 const SUBMIT_WITHOUT_SYNC_TEST_CHILD: &str = "MJ_TEST_SUBMIT_WITHOUT_SYNC_CHILD";
 #[cfg(unix)]
 const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
+#[cfg(unix)]
+const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
 const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+/// File in the relay root where the stdio relay child logs each request.
+const RELAY_REQUEST_LOG: &str = "requests.log";
+/// Makes the stdio relay child report an open harness session.
+const RELAY_SESSION_CONFIGURED: &str = "MJ_TEST_RELAY_SESSION_CONFIGURED";
 
 /// Relay server half of the leased-submission tests. It does nothing unless
 /// a parent test points it at a relay journal root.
@@ -1329,6 +1335,15 @@ fn leased_relay_child_serves_stdio() {
         "1.0.0",
     )
     .expect("open the test relay journal");
+    if std::env::var_os(RELAY_SESSION_CONFIGURED).is_some() {
+        // What a worker records once its harness session is open, so the
+        // relay reports no work in flight.
+        relay
+            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                config_options: vec![],
+            })
+            .expect("record the configured harness session");
+    }
     {
         let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
         let mut input = std::io::stdin().lock();
@@ -1337,6 +1352,16 @@ fn leased_relay_child_serves_stdio() {
             use mj_core::relay::{
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
             };
+            // One line per request, so a parent test can count round trips.
+            {
+                use std::io::Write as _;
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(PathBuf::from(&root).join(RELAY_REQUEST_LOG))
+                    .unwrap();
+                writeln!(log, "{}", request.request.method_name()).unwrap();
+            }
             let history = match &request.request {
                 RelayRequest::SubagentRequests => {
                     let path = PathBuf::from(&root).join("subagent-request.json");
@@ -2275,6 +2300,112 @@ async fn returned_lease_publishes_what_it_learned_while_it_held_the_connection()
         snapshot.materialized.applied_event_ordinal >= ordinal,
         "published frontier {} is behind the leased submission at {ordinal}",
         snapshot.materialized.applied_event_ordinal
+    );
+}
+
+#[cfg(unix)]
+fn relay_requests_logged(relay_root: &std::path::Path) -> usize {
+    std::fs::read_to_string(relay_root.join(RELAY_REQUEST_LOG))
+        .map(|log| log.lines().count())
+        .unwrap_or(0)
+}
+
+/// T-5: a quiet session must not cost its worker a sync round trip every
+/// 150 ms. Fifty idle sessions on remote hosts paid that over SSH all day.
+/// Once work is in flight, the actor follows it at the fast cadence again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
+    if std::env::var_os(SYNC_CADENCE_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            SYNC_CADENCE_TEST_CHILD,
+            "a_quiet_session_stops_polling_its_worker_until_work_is_in_flight",
+        );
+        return;
+    }
+    // Alone in this child process, so it installs the one writer.
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("the sync cadence test stalled");
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let (commands, commands_rx) = mpsc::channel(4);
+    let (_releases, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement, retirement_rx) = watch::channel(false);
+    let (view_tx, mut views) = watch::channel(ManagedSessionView::default());
+    let (updates_tx, _updates) = coalesced_update_channel();
+    let mut target = leased_relay_target(relay_root.path());
+    target
+        .spec
+        .env
+        .insert(RELAY_SESSION_CONFIGURED.to_owned(), "1".to_owned());
+    tokio::spawn(run_session_actor(
+        target,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates_tx,
+    ));
+    views
+        .wait_for(|view| view.connected && view.snapshot.is_some())
+        .await
+        .unwrap();
+    let quiet = views
+        .borrow()
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .operational
+        .quiet();
+    assert!(
+        !quiet.work_in_flight(),
+        "the fixture relay must start quiet: {}",
+        quiet.reason()
+    );
+
+    let before = relay_requests_logged(relay_root.path());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let idle = relay_requests_logged(relay_root.path()) - before;
+    assert!(
+        idle <= 6,
+        "a quiet session made {idle} relay requests in 3 s; it should make at most one sync"
+    );
+
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(ActorCommand::Submit {
+            queued_at: Instant::now(),
+            command_id: new_command_id("prompt").unwrap(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
+            },
+            admission: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    response
+        .await
+        .unwrap()
+        .expect("the relay accepted the prompt");
+    // The submit answers before it catches the projection up.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        views.wait_for(|view| {
+            view.snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.has_work_in_flight())
+        }),
+    )
+    .await
+    .expect("an accepted prompt with no harness to run it is work in flight")
+    .unwrap();
+    let before = relay_requests_logged(relay_root.path());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let working = relay_requests_logged(relay_root.path()) - before;
+    assert!(
+        working >= 12,
+        "a session with work in flight made only {working} relay requests in 1 s"
     );
 }
 
