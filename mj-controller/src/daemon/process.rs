@@ -239,8 +239,7 @@ pub(super) async fn run_daemon_runtime(
             );
         })
     };
-    let (mut manager_updates, continuation_task) =
-        continuation::spawn(state.clone(), manager_updates, cancellation.clone());
+    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
 
     let (delegation_services, mut delegation_task) = super::delegation::spawn(
         state.clone(),
@@ -589,11 +588,12 @@ pub(super) async fn run_daemon_runtime(
                         tracing::warn!(%error, "daemon client task failed");
                     }
                 }
-                update = manager_updates.recv() => {
+                update = update_feed.next() => {
                     progress.phase(ServingPhase::SessionUpdate);
-                    let Some(update) = update else {
-                        bail!("controller daemon session manager stopped");
-                    };
+                    // The feed says why it ended. A shutdown also stops the
+                    // continuation service and closes this channel, so a
+                    // closed channel is not evidence of a failure.
+                    let Some(update) = update? else { break };
                     if let Some((detail, observed_updated_at)) =
                         state.missing_target_record(&update.session_id, &update.view)
                     {
@@ -659,11 +659,11 @@ pub(super) async fn run_daemon_runtime(
         "shut down recovery coordinator",
         recovery.shutdown().await,
     );
-    match continuation_task.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::error!(%error, "continuation service failed"),
-        Err(error) => tracing::error!(%error, "continuation service task failed"),
-    }
+    record_daemon_cleanup(
+        &mut outcome,
+        "join continuation service",
+        update_feed.join().await,
+    );
     record_daemon_cleanup(
         &mut outcome,
         "join delegation coordinator",
