@@ -2094,6 +2094,58 @@ mod tests {
     }
 
     #[test]
+    fn setup_save_resolves_api_key_references_and_rejects_missing_keys_before_writing() {
+        use mj_core::config::{SecretResolver, with_secret_resolver};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let home = directory.path().join("codex");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\nbase_url = 'https://api.deepseek.com/v1'\nenv_key = 'DEEPSEEK_API_KEY'\nwire_api = 'responses'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("secrets.toml"),
+            "DEEPSEEK_API_KEY = 'test-secret'\n",
+        )
+        .unwrap();
+        with_secret_resolver(SecretResolver::beside(&path), || {
+            let mut value = serde_json::to_value(Config::default()).unwrap();
+            value["profiles"] = serde_json::json!({"deepseek": {
+                "kind": "codex", "home": home,
+                "environment": {"DEEPSEEK_API_KEY": {"from_secret": "DEEPSEEK_API_KEY"}}
+            }});
+            let original: Config = serde_json::from_value(value.clone()).unwrap();
+            original.save_to(&path).unwrap();
+            let original_json = serde_json::to_string(&original).unwrap();
+            value["notify"] = serde_json::json!({"bell": !original.notify.bell});
+            let saved = save_setup_at(&path, &original_json, &value.to_string(), &State::default())
+                .unwrap();
+            assert_eq!(saved.notify.bell, !original.notify.bell);
+            assert_eq!(
+                saved.profiles["deepseek"].environment["DEEPSEEK_API_KEY"],
+                "test-secret"
+            );
+            let before = std::fs::read_to_string(&path).unwrap();
+            assert!(!before.contains("test-secret"));
+            assert!(before.contains("from_secret"));
+
+            value["profiles"]["deepseek"]["environment"] = serde_json::json!({});
+            let error = save_setup_at(&path, &original_json, &value.to_string(), &State::default())
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("authenticates with DEEPSEEK_API_KEY"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        });
+    }
+
+    #[test]
     fn setup_save_refuses_to_remove_an_active_sessions_target_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");

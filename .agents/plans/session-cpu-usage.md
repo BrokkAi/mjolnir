@@ -117,9 +117,9 @@ To see it working: start an isolated daemon and TUI with `--instance cpu-test`, 
 
 ## Outcomes & Retrospective
 
-Implemented the worker sampler, protocol 29, generation-owned CPU publications, keyed feed deltas and the live TUI report. Full dev-profile tests (four test threads) and strict Clippy pass on the final combined tree, as do formatting, the five Python reliability-helper tests and macOS CI path checks. The temporary mbx fixture lease was released after the successful full run. No database or stored-state changes are needed.
+Implemented the worker sampler, protocol 29, generation-owned CPU publications, keyed feed deltas and the live TUI report. Full dev-profile tests (four test threads) passed for CPU implementation commit `b7d5c839`, as did strict Clippy, formatting, the five Python reliability-helper tests and macOS CI path checks. After merging concurrent master commits, strict Clippy, formatting and isolated live acceptance passed again on the integrated tree. The temporary mbx fixture lease was released after the successful full run. No database or stored-state changes are needed.
 
-The isolated cpu-test acceptance run measured two busy cores on a 120-CPU host as 1.6% recent CPU. The row appeared after 10.03 seconds and cleared after 16.41 seconds. Worker coverage advanced from 19 to 29 seconds across a daemon restart, then to 69 seconds after idle, with the hourly history preserved. The test opened the report through the actual Targets menu and verified its live updates through that restart.
+The isolated cpu-test acceptance run measured two busy cores on a 120-CPU host as 1.6% recent CPU. The final integrated run showed the row after 10.03 seconds and cleared it after 16.57 seconds. Worker coverage advanced from 20 to 29 seconds across a daemon restart, then to 70 seconds after idle, with the hourly history preserved. The test opened the report through the actual Targets menu and verified its live updates through that restart.
 
 The acceptance run exposed two ownership problems beyond basic sampling: independent publication timer phases added latency, and comparing daemon revisions across incarnations froze the TUI after restart. Watch-driven coalescing and the existing serialized runtime cursor now own these decisions. Actor producer generations similarly prevent a retiring actor from removing or overwriting a replacement actor's CPU data. Processes that leave the worker's tree remain outside the measurement, as agreed in the design. macOS behavior still needs its CI result.
 
@@ -314,12 +314,12 @@ Every step is additive and can be repeated. There is no database migration and n
 
 Final validation evidence (2026-10-01):
 
-- `cargo test -- --test-threads=4`: exit 0 on the final combined tree, `/tmp/mj-cpu-test-final.log`. The existing mbx fixture lease covered regeneration and the full run, then was released. An earlier default-concurrency full run also passed (`/tmp/mj-cpu-test-validated.log`).
-- `cargo clippy --all-targets -- -D warnings`: exit 0 on the final Rust tree, `/tmp/mj-cpu-clippy-delivery.log`.
+- `cargo test -- --test-threads=4`: exit 0 for CPU implementation commit `b7d5c839`, `/tmp/mj-cpu-test-final.log`. The existing mbx fixture lease covered regeneration and the full run, then was released. An earlier default-concurrency full run also passed (`/tmp/mj-cpu-test-validated.log`).
+- `cargo clippy --all-targets -- -D warnings`: exit 0 for the CPU implementation (`/tmp/mj-cpu-clippy-delivery.log`) and again after the final master merge (`/tmp/mj-cpu-clippy-merged.log`).
 - `cargo fmt --all -- --check`: exit 0.
 - Python reliability helper: five tests passed, `/tmp/mj-cpu-python-test.log`; syntax checks also passed.
 - `bash scripts/test-macos-ci-paths.sh`: exit 0, `/tmp/mj-cpu-macos-paths.log`.
-- `python3 tests/e2e/session_cpu_usage.py --mj target/debug/mj`: exit 0, `/tmp/mj-cpu-e2e-passing.log`. Detailed measurements are in `target/reliability-artifacts/session-cpu-seed-1-3121699/cpu-evidence.json`.
+- `python3 tests/e2e/session_cpu_usage.py --mj target/debug/mj`: exit 0 before and after the final master merge (`/tmp/mj-cpu-e2e-passing.log` and `/tmp/mj-cpu-e2e-merged.log`). Final measurements are in `target/reliability-artifacts/session-cpu-seed-1-1956639/cpu-evidence.json`. The merged CLI and worker build also passed (`/tmp/mj-cpu-build-merged.log`).
 
 Evidence gathered while writing this plan:
 
@@ -361,3 +361,5 @@ In `mj-tui`: `CommandId::SessionCpuReport`, `Mode::SessionCpuReport(SessionCpuRe
 Implementation note (2026-10-01): added the worker, relay, feed and TUI paths and their regression tests. CPU lifecycle ownership reuses actor producer generations to prevent replacement races. Added `tests/e2e/session_cpu_usage.py` to exercise the feature in cpu-test, including daemon-restart retention. Full checks and isolated acceptance passed.
 
 Integration note (2026-10-01): fast-forwarded the current master branch to `83d1aad8` before final validation. Both the new transcript-tail publications and CPU map are retained. Git stash conflicts were resolved without changing branches or rebasing. Subsequently fast-forwarded to `dc76520a`, retaining its conversation-search changes without conflicts. The full checks passed against that combined tree with the final fixture corrections.
+
+Final integration note (2026-10-01): after committing the fully tested CPU implementation as `b7d5c839`, a normal push found two concurrent master commits, `4ce83357` and `8d16bf96`. Merged them on the current branch without conflicts, retaining daemon replacement timing and background Settings credential validation. The CPU sampler, feed and TUI paths were retained. Strict Clippy, formatting and the rebuilt isolated load/idle/daemon-restart acceptance check passed on the integrated code before delivery; the complete suite passed for the CPU implementation commit. No rebase, branch change or force push was used.

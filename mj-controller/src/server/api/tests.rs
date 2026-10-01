@@ -2681,6 +2681,55 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
     }
 }
 
+/// A handoff tears the daemon down in no fixed order. When the session feed
+/// closes before the shutdown signal reaches a wait, the wait still sends its
+/// client to the next daemon; in a lab one of eight waiters failed this way.
+#[tokio::test]
+async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
+    let backend = Arc::new(FakeBackend {
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "prompt-1".into(),
+                accepted_ordinal: Some(5),
+                turn_start_position: 6,
+                started_at_ms: 10,
+                steered_into: None,
+            }),
+            last_turn_outcome: None,
+        })]),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let waiting = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"turn_id":5,"timeout_secs":3600}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!waiting.is_finished(), "the turn is still running");
+    assert!(backend.upgrade_gate.try_close());
+    // The feed closes first; the shutdown signal has not arrived.
+    drop(snapshot_tx);
+    let response = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("a closed feed ends the wait")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(crate::server::UPGRADE_HEADER)
+            .unwrap(),
+        "pending"
+    );
+    assert_eq!(json_body(response).await["code"], DAEMON_HANDOFF_CODE);
+}
+
 /// An event stream that an upgrade handoff ends names the cursor it reached,
 /// so its client resumes on the next daemon without losing an event.
 #[tokio::test]

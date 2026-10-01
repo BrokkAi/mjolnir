@@ -6,6 +6,50 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+#[test]
+fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\nbase_url = 'https://api.deepseek.com/v1'\nenv_key = 'DEEPSEEK_API_KEY'\nwire_api = 'responses'\n",
+    )
+    .unwrap();
+    let path = directory.path().join("config.toml");
+    let secrets = directory.path().join("secrets.toml");
+    std::fs::write(&secrets, "DEEPSEEK_API_KEY = 'test-secret'\n").unwrap();
+    let mut stored = serde_json::to_value(Config::default()).unwrap();
+    stored["profiles"] = json!({"deepseek": {
+        "kind": "codex", "home": home,
+        "environment": {"DEEPSEEK_API_KEY": {"from_secret": "DEEPSEEK_API_KEY"}}
+    }});
+    let config: Config = mj_core::config::with_secret_resolver(
+        mj_core::config::SecretResolver::beside(&path),
+        || serde_json::from_value(stored),
+    )
+    .unwrap();
+    config.validate().unwrap();
+    // Opening and saving must work even when credentials are unavailable to
+    // the UI. The background saver resolves and validates before writing.
+    std::fs::remove_file(secrets).unwrap();
+    let mut dialog = SetupDialog::new(&config);
+    assert!(!dialog.is_dirty());
+    dialog.draft["notify"]["bell"] = json!(!config.notify.bell);
+    assert!(dialog.is_dirty());
+    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
+        panic!("expected background save: {:?}", dialog.notice);
+    };
+    assert!(dialog.saving);
+    assert!(!updated.contains("test-secret"));
+    let updated: Value = serde_json::from_str(&updated).unwrap();
+    assert_eq!(updated["notify"]["bell"], !config.notify.bell);
+    assert_eq!(
+        updated["profiles"]["deepseek"]["environment"]["DEEPSEEK_API_KEY"],
+        json!({"from_secret": "DEEPSEEK_API_KEY"})
+    );
+}
+
 /// Every on/off setting uses the same checkbox, whichever section holds it.
 /// Launch campaign finding C-3.
 #[test]
@@ -963,7 +1007,16 @@ fn setup_adds_a_remote_runtime_and_reports_invalid_fields_without_losing_the_dra
         KeyCode::Char('s'),
         KeyModifiers::CONTROL,
     ));
-    assert_eq!(action, DashboardAction::None);
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!("expected background validation, got {action:?}");
+    };
+    let invalid: Config = serde_json::from_str(&updated).unwrap();
+    dashboard.setup_saved(generation, Err(invalid.validate().unwrap_err().to_string()));
     let Mode::Setup(dialog) = &dashboard.mode else {
         panic!("settings");
     };
@@ -3511,14 +3564,13 @@ fn profile_setup_edits_native_or_one_model_and_saves_policy() {
     );
     dialog.editor.as_mut().unwrap().selected = 1;
     dialog.apply_editor(false).unwrap();
-    assert!(matches!(dialog.save(), DashboardAction::None));
-    assert!(
-        dialog
-            .notice
-            .as_ref()
-            .unwrap()
-            .contains("select a subagent model")
-    );
+    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
+        panic!("expected background validation: {:?}", dialog.notice);
+    };
+    let invalid: Config = serde_json::from_str(&updated).unwrap();
+    let error = format!("{:#}", invalid.validate().unwrap_err());
+    assert!(error.contains("select a subagent model"), "{error}");
+    dialog.saving = false;
     let choice = |value: &str| mj_core::acp::SessionConfigChoice {
         value: value.into(),
         name: value.into(),
