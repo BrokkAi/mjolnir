@@ -231,7 +231,14 @@ pub(super) fn session_capabilities(
             )
         }),
         rename: !session.transitioning,
-        resume: !session.lifecycle.is_dashboard_visible() && !mutation_busy,
+        // A Move that holds the source environment refuses Resume; it is
+        // retried or the session is destroyed.
+        resume: !session.lifecycle.is_dashboard_visible()
+            && !mutation_busy
+            && !session
+                .move_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.environment_retained),
         move_session: live && !busy,
         set_config: live && attached && facts.is_some() && !mutation_busy,
         // Plan mode is a turn boundary: the terminal offers it only while the

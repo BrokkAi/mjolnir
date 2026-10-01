@@ -1321,10 +1321,7 @@ impl Controller {
         let transferring_workspace = move_operation.is_some();
         if let Some(operation) = crate::database::load_move_operation(session_id)? {
             ensure!(
-                transferring_workspace
-                    || !((operation.in_place || operation.workspace_transfer.is_some())
-                        && operation.phase != mj_core::state::MovePhase::Completed
-                        && operation.recovery_session.is_some()),
+                transferring_workspace || !operation.holds_source_environment(),
                 "a profile switch retains this environment; retry Move instead of recreating it with Resume"
             );
         }

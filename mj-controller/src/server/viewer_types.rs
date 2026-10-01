@@ -585,7 +585,15 @@ pub struct ViewerMoveRecovery {
     pub destination_additional_mounts: Vec<AdditionalMount>,
     #[serde(default)]
     pub destination_resource_allocation: Option<SessionResourceAllocation>,
+    /// The Move still has the checkpoint a retry restores, so Retry Move is
+    /// possible. Read from [`MoveOperation::checkpoint_retained`], the fact
+    /// the published recovery guidance is written from.
     pub checkpoint_retained: bool,
+    /// The Move holds the source environment for a retry, so Resume is
+    /// refused: only Retry Move (when the checkpoint is retained) or Destroy
+    /// can act on the session.
+    #[serde(default)]
+    pub environment_retained: bool,
     pub destination_ready: bool,
     pub queue_admission_started: bool,
     pub queue_admission_finished: bool,
@@ -631,7 +639,8 @@ impl ViewerMoveRecovery {
                 .clone()
                 .unwrap_or_default(),
             destination_resource_allocation: operation.selection.resource_allocation.clone(),
-            checkpoint_retained: operation.checkpoint.is_some(),
+            checkpoint_retained: operation.checkpoint_retained(),
+            environment_retained: operation.holds_source_environment(),
             destination_ready: operation.destination_target.is_some()
                 && operation.destination_native_session_id.is_some(),
             queue_admission_started: operation.queue_admission_started,

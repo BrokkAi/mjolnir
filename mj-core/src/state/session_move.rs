@@ -260,6 +260,46 @@ impl MoveOperation {
             || (self.queue_admission_started && !self.queue_admission_finished)
     }
 
+    /// Every checkpoint archive this Move keeps on disk: its handoff and the
+    /// source's last full checkpoint. The startup archive sweep and the
+    /// superseded-checkpoint prune both ask this one question, so neither can
+    /// delete an archive the Move still restores from.
+    pub fn retained_archives(&self) -> impl Iterator<Item = &CheckpointMetadata> {
+        self.retains_checkpoint()
+            .then_some([self.handoff.as_ref(), self.checkpoint.as_ref()])
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
+
+    /// Whether an unfinished Move still has the checkpoint a retry restores.
+    ///
+    /// The Move record owns this fact. When its archive is found missing, the
+    /// reference is removed from the record, so the recovery guidance, the API
+    /// and the retry admission all read the loss from here.
+    pub fn checkpoint_retained(&self) -> bool {
+        self.phase != MovePhase::Completed && self.restore_artifact().is_some()
+    }
+
+    /// Whether a surface should offer to retry this failed or cancelled Move:
+    /// it still has its checkpoint, or queued work already began on the
+    /// destination and only this Move may finish admitting it.
+    pub fn offers_retry(&self) -> bool {
+        matches!(self.phase, MovePhase::Failed | MovePhase::Cancelled)
+            && (self.checkpoint_retained()
+                || (self.queue_admission_started && !self.queue_admission_finished))
+    }
+
+    /// Whether this unfinished Move holds the source environment (the target,
+    /// its worker root and the checkout) for an explicit retry. While it does,
+    /// Resume would recreate what the Move promised to keep, so only a retried
+    /// Move or Destroy may act on the session.
+    pub fn holds_source_environment(&self) -> bool {
+        self.retains_source_environment()
+            && self.phase != MovePhase::Completed
+            && self.recovery_session.is_some()
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(
             self.phase,

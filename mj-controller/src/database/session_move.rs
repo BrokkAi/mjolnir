@@ -189,10 +189,9 @@ pub(super) fn load_move_operations_with(connection: &Connection) -> Result<Vec<M
 
 pub fn move_checkpoint_is_retained(path: &Path) -> Result<bool> {
     Ok(load_move_operations()?.iter().any(|operation| {
-        operation.retains_checkpoint()
-            && operation
-                .restore_artifact()
-                .is_some_and(|checkpoint| checkpoint.archive_path == path)
+        operation
+            .retained_archives()
+            .any(|checkpoint| checkpoint.archive_path == path)
     }))
 }
 

@@ -2530,13 +2530,43 @@ async function commitNew() {
   }
 }
 
-/// Resume is a workspace-scoped list. Retained move recoveries remain
-/// discoverable even when the normal resume capability is temporarily false.
+/// Resume is a workspace-scoped list. A failed or cancelled Move stays
+/// discoverable even when Resume is refused: its card is where the person
+/// retries it, or reads why it cannot be retried and destroys the session.
 function isResumeSession(session) {
   const recovery = session?.move_recovery;
-  const retainedMove = recovery?.checkpoint_retained
-    && ['failed', 'cancelled'].includes(recovery.phase);
-  return Boolean(session?.capabilities?.resume || retainedMove);
+  const settledMove = ['failed', 'cancelled'].includes(recovery?.phase);
+  return Boolean(session?.capabilities?.resume || settledMove);
+}
+
+/// What the resume card says and offers for a session's Move recovery. Every
+/// answer comes from the daemon's Move record (`move_recovery`) and the
+/// published capabilities, the same facts the daemon's own guidance text is
+/// written from, so the card never offers an action that guidance rules out.
+function resumeMoveRecovery(session) {
+  const recovery = session?.move_recovery;
+  const active = ['live', 'starting', 'suspending'].includes(session?.lifecycle);
+  const queuePinned = Boolean(recovery?.queue_admission_started && !recovery.queue_admission_finished);
+  const settled = ['failed', 'cancelled'].includes(recovery?.phase);
+  const retry = Boolean(recovery?.checkpoint_retained && settled);
+  const resume = session?.capabilities?.resume === true && !queuePinned && !active;
+  let status = '';
+  if (recovery) {
+    status = recovery.phase === 'cancelled' ? 'Move cancelled.'
+      : recovery.phase === 'failed' ? 'Move failed.'
+        : 'Move interrupted.';
+  }
+  let explanation = '';
+  if (retry && queuePinned) {
+    explanation = 'Queued work already began on the destination. Retry the move using its retained destination and queue choice.';
+  } else if (retry && recovery.environment_retained) {
+    explanation = 'The environment and a verified checkpoint are retained. Retry the move; the checkout is kept.';
+  } else if (retry) {
+    explanation = 'Retry the move with the retained destination, or resume with the source settings.';
+  } else if (settled && recovery.environment_retained) {
+    explanation = 'This move cannot be retried and the session cannot be resumed. Read the reported error below.';
+  }
+  return { active, queuePinned, retry, resume, status, explanation };
 }
 
 function resumeActivityMs(session) {
@@ -3281,26 +3311,23 @@ function updateResumeCard(card, session, rebuild = false) {
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
   else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
   else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
-  if (recovery) {
-    const phase = recovery.phase === 'cancelled' ? 'cancelled' : recovery.phase === 'failed' ? 'failed' : 'interrupted';
-    body.append(el('p', '', `Move was ${phase}.`));
-    if (recovery.checkpoint_retained) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
+  const move = resumeMoveRecovery(session);
+  if (move.status) {
+    body.append(el('p', '', move.status));
+    if (recovery.checkpoint_retained && !move.explanation) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
   }
-  const queuePinned = recovery?.queue_admission_started && !recovery.queue_admission_finished;
-  const moveRow = el('div', 'row');
-  if (recovery?.checkpoint_retained && ['failed', 'cancelled'].includes(recovery.phase)) {
-    const retry = button('Retry move', 'secondary', { action: 'move', id: session.id });
-    moveRow.append(retry);
-  }
-  if (moveRow.children.length) {
-    body.append(el('p', 'dim', queuePinned
-      ? 'Queued work already began on the destination. Retry the move using its retained destination and queue choice.'
-      : 'Retry the move with the retained destination, or resume with the source settings.'));
+  const queuePinned = move.queuePinned;
+  if (move.explanation) body.append(el('p', 'dim', move.explanation));
+  if (move.retry) {
+    const moveRow = el('div', 'row');
+    moveRow.append(button('Retry move', 'secondary', { action: 'move', id: session.id }));
     body.append(moveRow);
   }
   const noRecovery = !recovery?.checkpoint_retained && ['lost', 'destroyed-with-data-loss'].includes(session.state);
-  const canResume = session.capabilities?.resume === true && !queuePinned && !noRecovery;
-  const stale = session.capabilities?.open === true || ['live', 'starting', 'suspending'].includes(session.lifecycle);
+  const canResume = move.resume && !noRecovery;
+  // `capabilities.open` only says the conversation can be read; a failed or
+  // stopped session has one too. Only the lifecycle says it is active.
+  const stale = move.active || isTransitioningSession(session);
   card._invalid = false;
   if (stale) {
     body.append(el('p', 'dim', 'This session is active now and cannot be resumed.'));

@@ -21,14 +21,25 @@ use super::{
 use crate::controller::removable_profile_root;
 use crate::targets::CommandExecutor;
 
+/// What an in-place swap verified before it changes the record.
+struct InPlaceRestorePlan {
+    verified_archive: super::VerifiedResumeArchive,
+    profile: mj_core::config::HarnessProfile,
+    target_template: mj_core::config::TargetTemplate,
+    previous_profile_root: String,
+}
+
 impl Controller {
     /// Replace the harness of a sealed session without rebuilding its target.
     ///
     /// The session must be the one [`Controller::suspend_session_for_move`] left
     /// behind for an in-place swap: `Closing`, with its verified checkpoint and
-    /// its target still on the record. On success the session is `Running` on
-    /// `profile_id` in the same environment, recorded under `target_template_id`. Failures stop only the worker and keep
-    /// the environment and checkpoint for an explicit retry.
+    /// its target still on the record, or, on a retry, the `Error` record a
+    /// failed attempt retained. On success the session is `Running` on
+    /// `profile_id` in the same environment, recorded under
+    /// `target_template_id`. Every failure stops only the worker and leaves
+    /// the record `Error`, keeping the environment and checkpoint for an
+    /// explicit retry.
     // The target gate below is an ordinary lock held across the restore on
     // purpose; see the comment where it is taken.
     #[allow(
@@ -48,77 +59,43 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        let move_operation = crate::database::load_move_operation(session_id)?;
+        // A first attempt finds the source sealed (`Closing`); a retry finds
+        // the environment its failed attempt retained (`Error`).
         ensure!(
-            previous.state == SessionState::Closing,
+            previous.state == SessionState::Closing
+                || (previous.state == SessionState::Error
+                    && move_operation
+                        .as_ref()
+                        .is_some_and(mj_core::state::MoveOperation::holds_source_environment)),
             "session {session_id} is not sealed for an in-place harness replacement"
         );
-        let locator = previous
-            .target
-            .as_ref()
-            .context("an in-place harness replacement has no target to replace it in")?;
-        let move_operation = crate::database::load_move_operation(session_id)?;
-        let checkpoint = move_operation
-            .as_ref()
-            .and_then(|op| op.handoff.as_ref())
-            .or(previous.checkpoint.as_ref())
-            .context("session has no checkpoint")?;
-        let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
-            .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-        let target_template = self
-            .config
-            .targets
-            .get(target_template_id)
-            .with_context(|| format!("unknown target template {target_template_id:?}"))?
-            .clone();
-        self.validate_muse_resume_destination(&previous, profile.kind, target_template_id)?;
         ensure!(
-            profile.kind != mj_core::config::HarnessKind::Muse
-                || previous.additional_mounts.is_empty(),
-            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+            previous.target.is_some(),
+            "an in-place harness replacement has no target to replace it in"
         );
-        // Resolving the worker binary is local and costs microseconds. A swap
-        // that could never install a worker fails before the old harness is
-        // removed from the target.
-        crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
-        // The directory the *source* profile owns inside the target. It is
-        // read from the record's own profile, before the record names the
-        // destination one.
-        let backend = backend_locator(locator, &previous, &self.config)?;
-        let worker_root = crate::targets::worker_root(&backend, session_id)?;
-        super::super::execute_checked(
+        // From here the environment belongs to this swap. Every failure,
+        // before or after the record transition below, stops only the worker
+        // and leaves the record `Error` with the environment retained, so no
+        // failure can leave the session suspending without an owner.
+        let plan = match self.plan_in_place_restore(
+            &previous,
+            move_operation.as_ref(),
+            profile_id,
+            target_template_id,
             executor,
-            crate::targets::command_on_locator(
-                &backend,
-                session_id,
-                vec!["test".into(), "-d".into(), worker_root],
-                "verify retained worker root",
-            )?,
-        )?;
-        if let Some(checkout) = &previous.managed_worktree {
-            ensure!(
-                super::managed_worktree_checkout_exists(executor, checkout)?,
-                "retained checkout is missing; refusing to recreate it"
-            );
-        } else if let Some(path) = &previous.project_directory {
-            self.validate_project_directory(target_template_id, path, executor)?;
-        }
-        let source_profile = self
-            .config
-            .profiles
-            .get(&previous.last_profile)
-            .with_context(|| {
-                format!(
-                    "session profile {:?} is missing; it names the profile home to remove",
-                    previous.last_profile
-                )
-            })?;
-        let previous_profile_root = removable_profile_root(&backend, session_id, source_profile);
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Err(self.retain_failed_in_place_move(session_id, &previous, error)?);
+            }
+        };
+        let InPlaceRestorePlan {
+            verified_archive,
+            profile,
+            target_template,
+            previous_profile_root,
+        } = plan;
 
         let archive_manifest = &verified_archive.manifest;
         let canonical_session = std::sync::Arc::clone(&verified_archive.canonical_session);
@@ -251,6 +228,90 @@ impl Controller {
                 Err(self.retain_failed_in_place_move(session_id, &previous, error)?)
             }
         }
+    }
+
+    /// Everything an in-place swap checks before it changes the record. It
+    /// reads the target but changes nothing on it.
+    fn plan_in_place_restore(
+        &self,
+        previous: &mj_core::state::SessionRecord,
+        move_operation: Option<&mj_core::state::MoveOperation>,
+        profile_id: &str,
+        target_template_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<InPlaceRestorePlan> {
+        let session_id = previous.id.as_str();
+        let locator = previous
+            .target
+            .as_ref()
+            .context("an in-place harness replacement has no target to replace it in")?;
+        let checkpoint = move_operation
+            .and_then(|op| op.handoff.as_ref())
+            .or(previous.checkpoint.as_ref())
+            .context("session has no checkpoint")?;
+        let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
+        let profile = self
+            .config
+            .profiles
+            .get(profile_id)
+            .with_context(|| format!("unknown profile {profile_id:?}"))?
+            .clone();
+        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let target_template = self
+            .config
+            .targets
+            .get(target_template_id)
+            .with_context(|| format!("unknown target template {target_template_id:?}"))?
+            .clone();
+        self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
+        ensure!(
+            profile.kind != mj_core::config::HarnessKind::Muse
+                || previous.additional_mounts.is_empty(),
+            "Muse Code ACP supports one workspace root; attached directories are unsupported"
+        );
+        // Resolving the worker binary is local and costs microseconds. A swap
+        // that could never install a worker fails before the old harness is
+        // removed from the target.
+        crate::controller::worker_binary::preflight_worker_binary(&target_template, executor)?;
+        // The directory the *source* profile owns inside the target. It is
+        // read from the record's own profile, before the record names the
+        // destination one.
+        let backend = backend_locator(locator, previous, &self.config)?;
+        let worker_root = crate::targets::worker_root(&backend, session_id)?;
+        super::super::execute_checked(
+            executor,
+            crate::targets::command_on_locator(
+                &backend,
+                session_id,
+                vec!["test".into(), "-d".into(), worker_root],
+                "verify retained worker root",
+            )?,
+        )?;
+        if let Some(checkout) = &previous.managed_worktree {
+            ensure!(
+                super::managed_worktree_checkout_exists(executor, checkout)?,
+                "retained checkout is missing; refusing to recreate it"
+            );
+        } else if let Some(path) = &previous.project_directory {
+            self.validate_project_directory(target_template_id, path, executor)?;
+        }
+        let source_profile = self
+            .config
+            .profiles
+            .get(&previous.last_profile)
+            .with_context(|| {
+                format!(
+                    "session profile {:?} is missing; it names the profile home to remove",
+                    previous.last_profile
+                )
+            })?;
+        let previous_profile_root = removable_profile_root(&backend, session_id, source_profile);
+        Ok(InPlaceRestorePlan {
+            verified_archive,
+            profile,
+            target_template,
+            previous_profile_root,
+        })
     }
 
     /// The Move owns this environment; cleanup may stop its worker, never retire

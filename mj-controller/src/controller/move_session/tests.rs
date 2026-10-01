@@ -2756,6 +2756,401 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
     }
 }
 
+/// Where the daemon died in W-2: while the source was being sealed
+/// (`suspending`), or while the destination harness was being installed
+/// (`starting`).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum DaemonKill {
+    Suspending,
+    Starting,
+}
+
+/// One daemon lifetime that seals an in-place Move's source and then dies at
+/// `kill`, leaving exactly the durable state the killed daemon left. The
+/// source has no earlier full checkpoint, like the campaign's session, so the
+/// Move's handoff is the only archive it can restore from.
+#[cfg(unix)]
+fn in_place_move_killed_at(
+    kill: DaemonKill,
+    fixture: &mut InPlaceFixture,
+    source_relay: &Path,
+) -> MoveOperation {
+    let controller = &mut fixture.controller;
+    controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap()
+        .checkpoint = None;
+    crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
+    let mut operation = in_place_operation(controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::ClosingSource;
+    // The campaign's Move was confirmed with `--allow-large-transfer`, which
+    // an in-place Move never uses.
+    operation.selection.workspace.acknowledge_large_transfer = true;
+    crate::database::save_move_operation(&operation).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(source_relay);
+        let deferred = controller
+            .suspend_session_for_move(
+                LATCH_RELAY_SESSION,
+                &RecordingProcessExecutor::default(),
+                &channels.control,
+                &mut operation,
+                None,
+                crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+                MoveSourceRelay::default(),
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        assert!(!deferred.unwrap());
+    });
+    let handoff = operation
+        .handoff
+        .clone()
+        .expect("the seal records a handoff");
+    assert!(handoff.archive_path.exists());
+    assert!(
+        handoff
+            .archive_path
+            .starts_with(mj_core::config::sessions_dir())
+    );
+    if let DaemonKill::Starting = kill {
+        // What `execute_move` and `restore_session_in_place` persisted before
+        // the kill: the destination phase, the sealed source identity, and the
+        // record's swap to the destination profile.
+        operation.phase = MovePhase::ResumingDestination;
+        operation.recovery_session = Some(controller.state.sessions[LATCH_RELAY_SESSION].clone());
+        crate::database::save_move_operation(&operation).unwrap();
+        let record = controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap();
+        record.state = SessionState::Provisioning;
+        record.last_profile = IN_PLACE_DESTINATION_PROFILE.into();
+        crate::database::save_session(record).unwrap();
+    }
+    operation
+}
+
+/// The next daemon's startup for a killed Move: the archive sweep it runs
+/// before anything else, then recovery of the Move from the durable record.
+#[cfg(unix)]
+fn restart_daemon_and_recover_move(
+    controller: &mut Controller,
+    source_relay: &Path,
+) -> mj_core::state::MoveOutcome {
+    crate::controller::reconcile_managed_checkpoint_archives().unwrap();
+    let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(source_relay);
+        let outcome = controller
+            .recover_move_managed_controlled(
+                operation,
+                &RecordingProcessExecutor::default(),
+                &channels.control,
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        outcome.unwrap()
+    })
+}
+
+/// W-2: a daemon killed in the middle of an in-place Move leaves a Move the
+/// next daemon can finish. Its startup sweep keeps the handoff the Move
+/// restores from, the published guidance and the API agree that the
+/// checkpoint is retained, and the retry the guidance names succeeds and
+/// clears the failure.
+#[cfg(unix)]
+#[test]
+fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
+    let name =
+        test_name("in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart");
+    if std::env::var_os("MJ_MOVE_KILLED_RETRY_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_KILLED_RETRY_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    for kill in [DaemonKill::Suspending, DaemonKill::Starting] {
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let source_relay = seed_source_relay(&fixture.worker_root);
+        let killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
+        let handoff = killed.handoff.clone().unwrap();
+
+        let outcome = restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+        assert_eq!(outcome.outcome, "failed", "{kill:?}");
+        assert!(
+            handoff.archive_path.exists(),
+            "{kill:?}: the startup sweep deleted the Move's handoff {}",
+            handoff.archive_path.display()
+        );
+        let recovered =
+            crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+        assert_eq!(recovered.state, SessionState::Error, "{kill:?}");
+        assert!(recovered.target.is_some(), "{kill:?}");
+        let published = recovered.last_error.clone().unwrap();
+        assert!(
+            published.contains("Retry Move on the same target"),
+            "{kill:?}: {published}"
+        );
+        let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        assert!(
+            api.checkpoint_retained,
+            "{kill:?}: the guidance promises a retry the API denies"
+        );
+        assert!(api.environment_retained, "{kill:?}");
+
+        // The retry the guidance names, as the web sends it: without the
+        // large-transfer acknowledgement, which an in-place Move does not use.
+        let mut operation = operation;
+        let mut requested = operation.selection.clone();
+        requested.workspace.acknowledge_large_transfer = false;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let channels = crate::session_manager::spawn_session_manager().unwrap();
+            let preparation = fixture
+                .controller
+                .prepare_move_session_controlled(requested, &ProcessExecutor)
+                .await
+                .unwrap();
+            assert_eq!(preparation.selection, operation.selection, "{kill:?}");
+            assert!(preparation.in_place, "{kill:?}");
+            let result = fixture
+                .controller
+                .execute_move(
+                    &mut operation,
+                    Some(&preparation),
+                    &RecordingProcessExecutor::default(),
+                    &channels.control,
+                    MoveSourceRelay::default(),
+                )
+                .await;
+            channels.shutdown.shutdown().await.unwrap();
+            result
+        });
+        let outcome = fixture
+            .controller
+            .finish_move_result(&mut operation, result, &RecordingProcessExecutor::default())
+            .unwrap();
+        assert_eq!(
+            outcome.outcome, "completed",
+            "{kill:?}: {:?}",
+            outcome.error
+        );
+        let finished = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+        assert_eq!(finished.state, SessionState::Running, "{kill:?}");
+        assert_eq!(finished.last_profile, IN_PLACE_DESTINATION_PROFILE);
+        assert_eq!(finished.last_error, None, "{kill:?}");
+        assert_eq!(
+            fs::read(fixture.worker_root.join("build-cache.txt")).unwrap(),
+            b"warm cache"
+        );
+    }
+}
+
+/// W-2: when the archive a sealed Move restores from is gone, the Move record
+/// says so, and every reader follows it. The published guidance and the API
+/// stop promising a retry, the retry is refused with the reason before it
+/// touches the session, and the session lands in `Error` where Destroy works,
+/// never in `Closing` (suspending) with nothing to finish it.
+#[cfg(unix)]
+#[test]
+fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state() {
+    let name =
+        test_name("in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state");
+    if std::env::var_os("MJ_MOVE_LOST_HANDOFF_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_LOST_HANDOFF_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    for kill in [DaemonKill::Suspending, DaemonKill::Starting] {
+        let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let source_relay = seed_source_relay(&fixture.worker_root);
+        let killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
+        fs::remove_file(&killed.handoff.as_ref().unwrap().archive_path).unwrap();
+
+        let outcome = restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+        assert_eq!(outcome.outcome, "failed", "{kill:?}");
+        assert!(
+            !outcome.recovery.as_deref().unwrap().contains("Retry Move"),
+            "{kill:?}: {:?}",
+            outcome.recovery
+        );
+        let recovered =
+            crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+        assert_eq!(recovered.state, SessionState::Error, "{kill:?}");
+        let published = recovered.last_error.clone().unwrap();
+        assert!(
+            published.contains("checkpoint archive is missing"),
+            "{kill:?}: {published}"
+        );
+        assert!(
+            !published.contains("checkpoint retained"),
+            "{kill:?}: {published}"
+        );
+        let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        assert!(!api.checkpoint_retained, "{kill:?}");
+        assert!(api.environment_retained, "{kill:?}");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let refusal = runtime
+            .block_on(
+                fixture
+                    .controller
+                    .prepare_move_session_controlled(operation.selection.clone(), &ProcessExecutor),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("checkpoint archive is missing"),
+            "{kill:?}: {refusal:#}"
+        );
+        assert_eq!(
+            fixture.controller.state.sessions[LATCH_RELAY_SESSION].state,
+            SessionState::Error
+        );
+    }
+}
+
+/// A retry that finds its archive gone mid-flight (removed while the daemon
+/// runs) records the loss on the Move and leaves the session in `Error`.
+#[cfg(unix)]
+#[test]
+fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyable() {
+    let name =
+        test_name("in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyable");
+    if std::env::var_os("MJ_MOVE_RETRY_LOST_HANDOFF_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_RETRY_LOST_HANDOFF_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    in_place_move_killed_at(DaemonKill::Suspending, &mut fixture, &source_relay);
+    restart_daemon_and_recover_move(&mut fixture.controller, &source_relay);
+    let mut operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let preparation = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(operation.selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    fs::remove_file(&operation.handoff.as_ref().unwrap().archive_path).unwrap();
+    let result = runtime.block_on(async {
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        let result = fixture
+            .controller
+            .execute_move(
+                &mut operation,
+                Some(&preparation),
+                &RecordingProcessExecutor::default(),
+                &channels.control,
+                MoveSourceRelay::default(),
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        result
+    });
+    let outcome = fixture
+        .controller
+        .finish_move_result(&mut operation, result, &RecordingProcessExecutor::default())
+        .unwrap();
+    assert_eq!(outcome.outcome, "failed");
+    let record = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(
+        record.state,
+        SessionState::Error,
+        "the retry left the session suspending"
+    );
+    assert!(
+        record
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("checkpoint archive is missing")),
+        "{:?}",
+        record.last_error
+    );
+    let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(!stored.checkpoint_retained());
+}
+
+#[test]
+fn a_refused_sealed_move_retry_names_what_differs_and_what_to_pass() {
+    let sealed = mj_core::state::MoveSelection {
+        subagents: None,
+        workspace: mj_core::move_workspace::WorkspaceSelection {
+            exclusions: Vec::new(),
+            acknowledge_large_transfer: true,
+        },
+        clear_resource_allocation: false,
+        session_id: MOVE_QUEUE_SESSION_ID.into(),
+        profile_id: Some("fake".into()),
+        target_template_id: Some("localhost".into()),
+        additional_mounts: Some(Vec::new()),
+        resource_allocation: None,
+    };
+    let mut requested = sealed.clone();
+    requested.workspace.acknowledge_large_transfer = false;
+    let refusal = super::sealed_selection_difference(&sealed, &requested);
+    assert!(refusal.contains("large-transfer"), "{refusal}");
+    assert!(refusal.contains("--allow-large-transfer"), "{refusal}");
+    requested = sealed.clone();
+    requested.target_template_id = Some("podman".into());
+    let refusal = super::sealed_selection_difference(&sealed, &requested);
+    assert!(refusal.contains("--target localhost"), "{refusal}");
+    assert!(!refusal.contains("large-transfer"), "{refusal}");
+}
+
 #[test]
 fn move_execution_hands_ownership_to_pending_queue_until_released() {
     let session = "move-ownership-handoff";

@@ -4,21 +4,13 @@ use super::*;
 /// database transaction committed. Call this only while holding the
 /// machine-wide controller-store guard and before starting background work.
 pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
-    let mut state = crate::database::load_state()?;
-    // Include operation-owned recovery copies even after a ready destination
-    // installs a newer ordinary checkpoint.
-    for operation in crate::database::load_move_operations()? {
-        if operation.retains_checkpoint()
-            && let Some(checkpoint) = operation.checkpoint
-            && let Some(mut session) = state.sessions.get(&operation.selection.session_id).cloned()
-        {
-            session.checkpoint = Some(checkpoint);
-            state
-                .sessions
-                .insert(format!("move:{}", operation.operation_id), session);
-        }
-    }
-    let removed = reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state)?;
+    let state = crate::database::load_state()?;
+    let operations = crate::database::load_move_operations()?;
+    let removed = reconcile_managed_checkpoint_archives_in(&sessions_dir(), &state, &operations)?;
+    // An archive a Move refers to can still be missing (removed by hand, or
+    // by a daemon that predates this sweep keeping Move handoffs). The Move
+    // record owns that fact; record it before anything reads the Move.
+    crate::controller::move_session::record_missing_move_archives(&state, operations)?;
     // This scan is the last thing that removes an archive nothing references, so
     // it is also where a finished move's row stops being able to act. Sweeping
     // here means the startup load below this call already sees a clean store.
@@ -26,9 +18,13 @@ pub fn reconcile_managed_checkpoint_archives() -> Result<usize> {
     Ok(removed)
 }
 
+/// Every archive a session record or an unfinished Move refers to is kept.
+/// The Move's references come from [`MoveOperation::retained_archives`], the
+/// same answer the superseded-checkpoint prune reads.
 pub(super) fn reconcile_managed_checkpoint_archives_in(
     directory: &Path,
     state: &State,
+    operations: &[mj_core::state::MoveOperation],
 ) -> Result<usize> {
     if !directory.exists() {
         return Ok(0);
@@ -37,6 +33,11 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
         .sessions
         .values()
         .filter_map(|session| session.checkpoint.as_ref())
+        .chain(
+            operations
+                .iter()
+                .flat_map(mj_core::state::MoveOperation::retained_archives),
+        )
         .filter_map(|checkpoint| checkpoint.archive_path.file_name())
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
