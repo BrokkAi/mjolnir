@@ -14,6 +14,14 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 
 const RETAINED_LOGS: usize = 10;
+/// Logs started within this window are kept beyond [`RETAINED_LOGS`], up to
+/// [`RECENT_LOG_LIMIT`] of a kind. Scripts and agents start a CLI command every
+/// second or so; a newest-ten window then lost the log of a command that ran a
+/// minute ago, such as the one whose slow daemon upgrade needed explaining.
+const RECENT_LOG_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+const RECENT_LOG_LIMIT: usize = 1000;
+/// The timestamp format in log filenames. It sorts as text in time order.
+const LOG_TIMESTAMP: &str = "%Y%m%dT%H%M%S%.3fZ";
 const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The kind of process writing a Mjolnir log, recorded in the log filename so
@@ -231,7 +239,7 @@ fn log_filename(kind: ProcessKind) -> String {
     format!(
         "mj-{}-{}-{}.log",
         kind.label(),
-        Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
+        Utc::now().format(LOG_TIMESTAMP),
         std::process::id()
     )
 }
@@ -272,6 +280,16 @@ fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
     }
 }
 
+/// The start timestamp in a managed log filename, in either format.
+fn log_timestamp(name: &str) -> Option<&str> {
+    let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    match parts.as_slice() {
+        [_, timestamp, _] | [timestamp, _] => Some(timestamp),
+        _ => None,
+    }
+}
+
 pub(crate) fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {
     let directory = data_dir.join("logs");
     let entries = match fs::read_dir(&directory) {
@@ -295,6 +313,21 @@ pub(crate) fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBu
 }
 
 fn prune_logs(directory: &Path, retain: usize, protected_pid: Option<u32>) -> Result<()> {
+    let recent = (Utc::now() - RECENT_LOG_WINDOW)
+        .format(LOG_TIMESTAMP)
+        .to_string();
+    prune_logs_since(directory, retain, protected_pid, &recent)
+}
+
+/// Prune each kind to its newest `retain` logs, keeping as well those whose
+/// filename timestamp is at or after `recent` (up to [`RECENT_LOG_LIMIT`]) and
+/// those of processes still running, which may still be writing.
+fn prune_logs_since(
+    directory: &Path,
+    retain: usize,
+    protected_pid: Option<u32>,
+    recent: &str,
+) -> Result<()> {
     let mut logs_by_kind: HashMap<ProcessKind, Vec<PathBuf>> = HashMap::new();
     for entry in fs::read_dir(directory)
         .with_context(|| format!("read Mjolnir log directory {}", directory.display()))?
@@ -316,11 +349,25 @@ fn prune_logs(directory: &Path, retain: usize, protected_pid: Option<u32>) -> Re
             // or age; it may still be writing to it.
             continue;
         }
+        if pid.is_some_and(mj_client::daemon::process_is_alive) {
+            // A process that is still running may still be writing its log.
+            continue;
+        }
         logs_by_kind.entry(kind).or_default().push(entry.path());
     }
     for mut logs in logs_by_kind.into_values() {
         logs.sort_unstable();
-        let remove = logs.len().saturating_sub(retain);
+        let started_recently = logs
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(log_timestamp)
+                    .is_some_and(|started| started >= recent)
+            })
+            .count();
+        let keep = retain.max(started_recently.min(RECENT_LOG_LIMIT));
+        let remove = logs.len().saturating_sub(keep);
         for path in logs.into_iter().take(remove) {
             remove_expired_log(&path)?;
         }
@@ -475,6 +522,38 @@ mod tests {
     fn current_daemon_pid_is_none_without_a_daemon_json() {
         let data_dir = tempfile::tempdir().unwrap();
         assert_eq!(current_daemon_pid(data_dir.path()), None);
+    }
+
+    /// Under a script that runs a command every second, the newest ten logs
+    /// cover ten seconds. A command still running, or one that ran within the
+    /// hour, keeps its log.
+    #[test]
+    fn prune_logs_keeps_recent_logs_and_logs_of_running_processes() {
+        let directory = tempfile::tempdir().unwrap();
+        let running = format!("mj-cli-20260101T000000.000Z-{}.log", std::process::id());
+        fs::write(directory.path().join(&running), "running").unwrap();
+        for index in 0..30 {
+            let name = format!("mj-cli-20260105T0000{index:02}.000Z-{OTHER_PID}.log");
+            fs::write(directory.path().join(&name), "recent").unwrap();
+        }
+        let old = format!("mj-cli-20260102T000000.000Z-{OTHER_PID}.log");
+        fs::write(directory.path().join(&old), "old").unwrap();
+
+        prune_logs_since(directory.path(), 2, None, "20260105T000000.000Z").unwrap();
+
+        assert!(directory.path().join(&running).exists());
+        assert!(!directory.path().join(&old).exists());
+        let recent = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains("20260105"))
+            })
+            .count();
+        assert_eq!(recent, 30, "every log started in the window is kept");
     }
 
     #[test]

@@ -113,8 +113,9 @@ pub(super) async fn events(
             // The daemon is being replaced: name the cursor to resume from,
             // so the client follows the stream onto the next daemon without
             // losing or repeating an event. Shutdown never waits on a reader
-            // that stopped reading, so this is sent only if it fits.
-            Stop::Shutdown if stream_state.handing_off() => {
+            // that stopped reading, so this is sent only if it fits. A read
+            // that failed during the handoff is part of the same teardown.
+            Stop::Shutdown | Stop::Failed if stream_state.handing_off() => {
                 let _ = tx.try_send(Ok(Event::default()
                     .event(DAEMON_HANDOFF_CODE)
                     .id(delivered.to_string())

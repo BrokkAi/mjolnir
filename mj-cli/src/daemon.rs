@@ -82,7 +82,8 @@ impl Drop for DaemonStartGuard {
 }
 
 async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
-    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
+    let asked = Instant::now();
+    let mut notice_at = asked + START_NOTICE_DELAY;
     loop {
         let path = path.clone();
         let guard = tokio::task::spawn_blocking(move || -> Result<Option<DaemonStartGuard>> {
@@ -108,6 +109,13 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
         .await
         .context("daemon startup lock task failed")??;
         if let Some(guard) = guard {
+            let waited = asked.elapsed();
+            if waited >= LOGGED_PHASE {
+                tracing::info!(
+                    waited_ms = waited.as_millis(),
+                    "waited for the daemon startup lock another client held"
+                );
+            }
             return Ok(guard);
         }
         if Instant::now() >= notice_at {
@@ -150,6 +158,10 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
     upgrade_blockers(&metadata).await
 }
 
+/// Startup phases shorter than this are not logged; longer ones always are,
+/// so a slow replacement leaves a record of where its time went.
+const LOGGED_PHASE: Duration = Duration::from_millis(250);
+
 pub async fn connect_or_start() -> Result<DaemonClient> {
     // Serialize replacement and publication across clients, then re-read the
     // endpoint. A client waiting here must reuse the winner's daemon.
@@ -179,13 +191,21 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
 
     // Metadata disappears before shutdown releases the sole-writer lock.
     // Do not launch a child that can only fail to acquire that lock.
-    let handoff_deadline = Instant::now() + STOP_TIMEOUT;
+    let released = Instant::now();
+    let handoff_deadline = released + STOP_TIMEOUT;
     loop {
         if let Some(guard) = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
             .await
             .context("probe controller ownership task failed")??
         {
             drop(guard);
+            let waited = released.elapsed();
+            if waited >= LOGGED_PHASE {
+                tracing::info!(
+                    waited_ms = waited.as_millis(),
+                    "waited for the previous daemon to release the store"
+                );
+            }
             break;
         }
         // A daemon started outside this client's startup lock may be becoming ready.
@@ -229,6 +249,8 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
     })
     .await
     .context("spawn daemon task failed")??;
+    let launched_at = Instant::now();
+    tracing::info!(pid = launched.pid, "launched the daemon");
 
     let outcome = wait_for_ready_daemon(
         || process_is_alive(launched.pid),
@@ -248,7 +270,14 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
     )
     .await;
     let reason = match outcome {
-        StartupOutcome::Ready(client) => return Ok(client),
+        StartupOutcome::Ready(client) => {
+            tracing::info!(
+                pid = launched.pid,
+                ready_ms = launched_at.elapsed().as_millis(),
+                "the launched daemon is ready"
+            );
+            return Ok(client);
+        }
         // A daemon that fails to initialize explains itself in its log and
         // exits without ever publishing an endpoint. That explanation is the
         // answer; the client's own failure to reach the absent endpoint is not.
@@ -378,6 +407,12 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
             !build.daemon_is_newer(),
             "refusing to replace a newer daemon with this client: {}",
             daemon_build_notice(&metadata, "Run the daemon's build instead.")
+        );
+        tracing::info!(
+            daemon_protocol = metadata.protocol_version,
+            client_protocol = PROTOCOL_VERSION,
+            daemon_build = %metadata.build_version,
+            "the daemon is an older protocol or release; replacing it"
         );
         replace_daemon(&metadata).await?;
         return Ok(None);
@@ -764,7 +799,16 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         ),
     )?;
     ensure_config_loads(&mj_core::config::config_path(), "replaced")?;
-    let mut notice_at = Instant::now() + START_NOTICE_DELAY;
+    let asked = Instant::now();
+    let mut notice_at = asked + START_NOTICE_DELAY;
+    let mut attempts = 0_u32;
+    // The latest reason the daemon has not accepted, reported with each notice.
+    let mut not_yet = String::new();
+    tracing::info!(
+        pid = metadata.pid,
+        build = %metadata.build_version,
+        "asking the daemon to hand off to this build"
+    );
     loop {
         let previous = metadata.clone();
         let still_current = tokio::task::spawn_blocking(move || {
@@ -776,8 +820,14 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         .await
         .context("inspect daemon handoff owner")?;
         if !still_current {
+            tracing::info!(
+                pid = metadata.pid,
+                waited_ms = asked.elapsed().as_millis(),
+                "the daemon was replaced by another client"
+            );
             return Ok(());
         }
+        attempts += 1;
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
             let mut client = DaemonClient::connect(metadata.clone()).await?;
             match client.request(DaemonAction::PrepareUpgrade).await? {
@@ -789,21 +839,44 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         .await;
         match ready {
             Ok(Ok(true)) => {
+                let accepted = Instant::now();
+                tracing::info!(
+                    pid = metadata.pid,
+                    attempts,
+                    waited_ms = asked.elapsed().as_millis(),
+                    "the daemon accepted the handoff"
+                );
                 // An acknowledged handoff is not permission to impose a kill
                 // deadline. Keep following this process until it exits.
-                if wait_for_exit(metadata.pid).await.is_ok() {
+                let exited = wait_for_exit(metadata.pid).await;
+                tracing::info!(
+                    pid = metadata.pid,
+                    exited = exited.is_ok(),
+                    exit_ms = accepted.elapsed().as_millis(),
+                    "waited for the handed-off daemon to exit"
+                );
+                if exited.is_ok() {
                     return Ok(());
                 }
             }
             Ok(Err(error)) => {
+                not_yet = format!("{error:#}");
                 tracing::debug!(%error, "automatic upgrade cannot establish safe handoff yet")
             }
             Err(error) => {
+                not_yet = format!("the daemon did not answer within 5s ({error})");
                 tracing::debug!(%error, "automatic upgrade is waiting for the daemon to answer")
             }
-            Ok(Ok(false)) => {}
+            Ok(Ok(false)) => not_yet = "the daemon is finishing accepted work".to_owned(),
         }
         if Instant::now() >= notice_at {
+            tracing::info!(
+                pid = metadata.pid,
+                attempts,
+                waited_ms = asked.elapsed().as_millis(),
+                reason = %not_yet,
+                "the daemon has not accepted the handoff yet"
+            );
             startup_notice(upgrade_wait_notice(upgrade_blockers(metadata).await));
             notice_at = Instant::now() + Duration::from_secs(30);
         }
@@ -995,7 +1068,49 @@ pub struct UpgradeTarget {
     pub generation: String,
 }
 
-fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+/// Finish a one-shot command under the daemon's newer build, as a dashboard
+/// does when an upgrade replaces its daemon. `args` name only what is left to
+/// do, so nothing the command already did is repeated. Returns only when the
+/// newer build could not be started.
+pub(crate) fn continue_under_upgraded_build(
+    target: &UpgradeTarget,
+    args: &[String],
+) -> anyhow::Error {
+    tracing::info!(
+        executable = %target.executable.display(),
+        ?args,
+        "continuing this command under the daemon's newer build"
+    );
+    eprintln!(
+        "Mjolnir upgraded; continuing with {}.",
+        target.executable.display()
+    );
+    let mut command = std::process::Command::new(&target.executable);
+    command
+        .args(args)
+        .env("MJ_UPGRADE_DAEMON", &target.generation)
+        .env("MJOLNIR_NO_UPDATE_CHECK", "1");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        anyhow::Error::new(command.exec()).context(format!(
+            "continue under the upgraded build {}",
+            target.executable.display()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        match mj_core::subprocess::run_interactive(&mut command) {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => error.context(format!(
+                "continue under the upgraded build {}",
+                target.executable.display()
+            )),
+        }
+    }
+}
+
+pub(crate) fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };

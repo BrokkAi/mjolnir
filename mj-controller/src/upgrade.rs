@@ -288,6 +288,9 @@ impl Gate {
     /// starts or extends draining.
     pub(crate) fn try_close(&self) -> bool {
         let mut state = self.lock();
+        if state.closed {
+            return true;
+        }
         if !state.holds_only_destroys_or_nothing()
             || (!state.destroying.is_empty() && state.destroy_wait_holds())
         {
@@ -295,12 +298,15 @@ impl Gate {
             state.drain_requested = Some(Instant::now());
             return false;
         }
-        if let Some((started, _)) = state.handoff_wait.take() {
-            tracing::info!(
-                waited_seconds = started.elapsed().as_secs_f64(),
-                "daemon upgrade handoff closed admission"
-            );
-        }
+        // Logged on every close, so a handoff's start is on record even when
+        // nothing made it wait.
+        tracing::info!(
+            waited_seconds = state
+                .handoff_wait
+                .take()
+                .map_or(0.0, |(started, _)| started.elapsed().as_secs_f64()),
+            "daemon upgrade handoff closed admission; the daemon is shutting down"
+        );
         state.closed = true;
         true
     }
