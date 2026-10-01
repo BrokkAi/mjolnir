@@ -224,9 +224,11 @@ for line in sys.stdin:
     let stopped = BoundedProcessExecutor::new(Duration::from_secs(8))
         .execute(&CommandSpec::new("sh", ["-c", &stop]));
     let owner = worker.join().expect("worker owner panicked");
+    let worker_log = std::fs::read_to_string(root.join("worker.log"))
+        .expect("read the owning worker's diagnostics");
     let methods = observation.unwrap_or_else(|error| {
         panic!(
-            "{error:#}; worker: {}; stop: {stopped:?}",
+            "{error:#}; worker: {}; worker log: {worker_log}; stop: {stopped:?}",
             owner
                 .as_ref()
                 .map(|output| String::from_utf8_lossy(&output.stderr).into_owned())
@@ -241,11 +243,7 @@ for line in sys.stdin:
     );
     if used {
         assert_ne!(output.status, 0);
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("has no native history"),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(worker_log.contains("has no native history"), "{worker_log}");
         assert!(!methods.contains("session/new"), "{methods}");
         if origin == RelayOrigin::Journal {
             let relay = DurableRelay::open(&root, SESSION_ID, "recovered-worker").unwrap();
