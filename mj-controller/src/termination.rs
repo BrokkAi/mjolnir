@@ -9,8 +9,6 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-#[cfg(unix)]
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -24,9 +22,6 @@ enum SignalAction {
 }
 
 static SUPPRESSED_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(unix)]
-const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Keeps a foreground child process's Ctrl-C from also terminating Hel.
 ///
@@ -122,10 +117,35 @@ impl Coordinator {
 
 #[cfg(unix)]
 fn install_unix_signals(coordinator: &Coordinator) {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    // Self-pipe that wakes the listener thread. `std::io::pipe` creates both
+    // ends close-on-exec, so spawned programs do not inherit them. The write
+    // end is non-blocking so a signal handler never stalls on a full pipe; a
+    // full pipe already holds a wake-up the listener has not read yet.
+    let (mut wake_reader, wake_writer) =
+        std::io::pipe().expect("create termination signal wake pipe");
+    // SAFETY: F_GETFL and F_SETFL on a descriptor this function owns.
+    let nonblocking = unsafe {
+        let fd = wake_writer.as_raw_fd();
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags != -1 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) != -1
+    };
+    assert!(
+        nonblocking,
+        "make the termination signal wake pipe non-blocking: {}",
+        std::io::Error::last_os_error()
+    );
+    // The registered handlers own the write end for the rest of the process,
+    // so the listener never sees end-of-file.
+    let wake_writer = Arc::new(wake_writer);
+
     let requested = Arc::new(AtomicBool::new(false));
     for signal in [libc::SIGINT, libc::SIGTERM] {
         // Registration order matters: the first handler exits only when a
-        // previous signal armed the flag; the second one arms it.
+        // previous signal armed the flag; the second one arms it. A signal
+        // that arrives after the flag is armed exits before any pipe write.
         signal_hook::flag::register_conditional_shutdown(
             signal,
             exit_code(signal),
@@ -133,13 +153,18 @@ fn install_unix_signals(coordinator: &Coordinator) {
         )
         .expect("install forced termination signal handler");
         let requested = requested.clone();
-        // SAFETY: the handler only reads and writes lock-free atomics, which
-        // are async-signal-safe. Polling outside the handler avoids relying on
-        // a self-pipe write to wake the graceful-shutdown listener.
+        let wake_writer = wake_writer.clone();
+        // SAFETY: the handler only touches lock-free atomics and calls
+        // `write(2)`, all async-signal-safe, and signal-hook preserves errno.
+        // The suppression decision is made here, when the signal is
+        // delivered. The flag is stored before the write, so the listener
+        // sees it once the byte arrives. The write result is ignored: EAGAIN
+        // means the pipe is full, so the listener has an unread wake-up.
         unsafe {
             signal_hook::low_level::register(signal, move || {
                 if signal != libc::SIGINT || SUPPRESSED_INTERRUPTS.load(Ordering::Acquire) == 0 {
                     requested.store(true, Ordering::SeqCst);
+                    libc::write(wake_writer.as_raw_fd(), b"x".as_ptr().cast(), 1);
                 }
             })
         }
@@ -157,8 +182,30 @@ fn install_unix_signals(coordinator: &Coordinator) {
     std::thread::Builder::new()
         .name("hel-termination".to_string())
         .spawn(move || {
+            // The flag decides, not the byte. A child forked from this process
+            // runs these handlers until it execs, and its write to the
+            // inherited pipe wakes this thread without setting this process's
+            // flag. Checking the flag before the first read also covers a
+            // signal that arrived before this thread started.
+            let mut wake = [0_u8; 64];
             while !requested.load(Ordering::Acquire) {
-                std::thread::sleep(SIGNAL_POLL_INTERVAL);
+                match wake_reader.read(&mut wake) {
+                    Ok(0) => {
+                        tracing::error!(
+                            "termination wake pipe closed; a signal can no longer start graceful shutdown"
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "termination wake pipe failed; a signal can no longer start graceful shutdown"
+                        );
+                        return;
+                    }
+                }
             }
             listener.received_signal(0);
         })
