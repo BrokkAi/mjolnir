@@ -1436,6 +1436,37 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
     }
 }
 
+/// Campaign finding W-1: the second Esc out of a dirty Settings draft opens
+/// the "Discard Settings changes?" prompt, which looks like the dashboard
+/// behind it. Esc on that prompt means "Keep editing", so a third Esc returns
+/// to Settings. Once the draft is discarded, Esc on the dashboard is inert.
+#[test]
+fn escape_on_the_discard_prompt_keeps_editing_and_dashboard_escape_stays_inert() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "review");
+    dashboard.handle_key(key(KeyCode::Char(' ')));
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.handle_key(key(KeyCode::Esc));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("Esc on the discard prompt keeps editing")
+    };
+    assert!(dialog.draft["review"]["enabled"].as_bool().unwrap());
+    // Discard, then Esc on the plain dashboard does nothing.
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.handle_key(key(KeyCode::Right));
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(!dashboard.modal_open());
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(!dashboard.modal_open());
+}
+
 #[test]
 fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     let mut dashboard = dashboard_with_session(stopped_session());
