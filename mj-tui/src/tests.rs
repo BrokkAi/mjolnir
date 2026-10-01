@@ -1508,6 +1508,9 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
     dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Stopped;
     assert_eq!(ids(&dashboard), ["first"]);
     dashboard.config.advanced.show_stopped_sessions = true;
+    // Stopped sessions sort after the rest, whatever their creation order.
+    assert_eq!(ids(&dashboard), ["first", "second"]);
+    dashboard.state.sessions.get_mut("second").unwrap().state = SessionState::Running;
     assert_eq!(ids(&dashboard), ["second", "first"]);
     dashboard
         .state
