@@ -1060,6 +1060,30 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;"))?;
     }
 
+    // Compatible: only shortens existing title text. Older readers and writers
+    // accept the same column and values; no schema or JSON shape changes.
+    if version < 70 {
+        let transaction = connection.unchecked_transaction()?;
+        let titles: Vec<(String, String)> = transaction
+            .prepare("SELECT session_id, acp_session_title FROM sessions WHERE length(acp_session_title) > ?1")?
+            .query_map([mj_core::state::MAX_SESSION_TITLE_CHARS], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for (session_id, title) in titles {
+            transaction.execute(
+                "UPDATE sessions SET acp_session_title = ?2 WHERE session_id = ?1",
+                params![session_id, mj_core::state::normalize_session_title(&title)],
+            )?;
+        }
+        transaction.execute_batch(
+            "INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (70, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 70;",
+        )?;
+        transaction.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1431,6 +1455,97 @@ mod reader_tests {
     }
 
     #[test]
+    fn title_migration_caps_old_titles_preserves_short_titles_and_is_compatible() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("title-migration.sqlite3");
+        let titles = [
+            ("long", Some("word ".repeat(20_000))),
+            ("unicode", Some("界".repeat(257))),
+            ("exact", Some("界".repeat(256))),
+            ("short", Some("  Keep\nthis title  ".into())),
+            ("unset", None),
+        ];
+        for (id, _) in &titles {
+            let mut session = super::super::tests::session(id, "project");
+            session.state = SessionState::Stopped;
+            save_session_to(&path, &session).unwrap();
+        }
+        stamp_schema_version(&path, 69);
+        let old = Connection::open(&path).unwrap();
+        for (id, title) in &titles {
+            old.execute(
+                "UPDATE sessions SET acp_session_title=?2 WHERE session_id=?1",
+                params![id, title],
+            )
+            .unwrap();
+        }
+        drop(old);
+
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, 70);
+        assert_eq!(state.minimum_compatible, Some(69));
+        state.ensure_supported_by(69).unwrap();
+        for (id, original) in &titles {
+            let stored: Option<String> = upgraded
+                .query_row(
+                    "SELECT acp_session_title FROM sessions WHERE session_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let expected = match *id {
+                "long" => Some(format!("{}word…", "word ".repeat(50))),
+                "unicode" => Some(format!("{}…", "界".repeat(255))),
+                _ => original.clone(),
+            };
+            assert_eq!(stored, expected, "session {id}");
+            assert!(stored.is_none_or(|title| title.chars().count() <= 256));
+        }
+        drop(upgraded);
+        forget_verified_schema(&path);
+        drop(open_writer(&path).unwrap());
+    }
+
+    #[test]
+    fn interrupted_title_migration_rolls_back_titles_and_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("title-migration-interrupted.sqlite3");
+        save_session_to(&path, &super::super::tests::session("old", "project")).unwrap();
+        stamp_schema_version(&path, 69);
+        let original = "word ".repeat(20_000);
+        let old = Connection::open(&path).unwrap();
+        old.execute("UPDATE sessions SET acp_session_title=?1", [&original])
+            .unwrap();
+        old.execute_batch(
+            "CREATE TRIGGER stop_title_migration BEFORE INSERT ON schema_migrations
+             WHEN NEW.version=70 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;",
+        )
+        .unwrap();
+        assert!(migrate_schema(&old).is_err());
+        assert_eq!(read_schema_state(&old).unwrap().revision, 69);
+        let stored: String = old
+            .query_row("SELECT acp_session_title FROM sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, original);
+        old.execute_batch("DROP TRIGGER stop_title_migration")
+            .unwrap();
+        drop(old);
+        drop(open_writer(&path).unwrap());
+        assert!(
+            load_state_from(&path).unwrap().sessions["old"]
+                .acp_session_title
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count()
+                <= 256
+        );
+    }
+
+    #[test]
     fn recent_revisions_upgrade_directly_and_preserve_user_data() {
         // Revision 47 was current on 2026-09-23. Keep the exhaustive
         // interruption matrix focused on the last week's migration history.
@@ -1561,7 +1676,7 @@ mod reader_tests {
         );
         assert_eq!(
             read_schema_state(&writer).unwrap().minimum_compatible,
-            Some(SCHEMA_VERSION)
+            Some(MINIMUM_COMPATIBLE_VERSION)
         );
     }
 

@@ -754,7 +754,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        SCHEMA_VERSION
+        69
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -795,7 +795,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        SCHEMA_VERSION
+        69
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -1610,6 +1610,29 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
         load_state_from(&database).unwrap().sessions["session-1"]
             .acp_session_title
             .is_none()
+    );
+}
+
+#[test]
+fn harness_title_write_caps_large_titles_in_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("title-write.sqlite3");
+    save_session_to(&path, &session("session-1", "project")).unwrap();
+    set_session_acp_title_to(&path, "session-1", Some(&"word ".repeat(20_000))).unwrap();
+    let stored: String = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT acp_session_title FROM sessions WHERE session_id='session-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, format!("{}word…", "word ".repeat(50)));
+    assert_eq!(
+        load_state_from(&path).unwrap().sessions["session-1"]
+            .acp_session_title
+            .as_deref(),
+        Some(stored.as_str())
     );
 }
 

@@ -111,17 +111,38 @@ impl RuntimeState {
                 // replaces, so its children stop exactly as they do when the
                 // parent is suspended. The destination's resume tells the
                 // model which ones stopped.
+                let stopping = std::time::Instant::now();
                 state.stop_subagents_for_suspend(&session_id).await?;
+                tracing::info!(
+                    %session_id,
+                    phase = "stop sub-agents",
+                    elapsed_ms = stopping.elapsed().as_millis() as u64,
+                    "move phase finished"
+                );
                 let result = blocking({
                     let state = state.clone();
                     let session_id = session_id.clone();
                     move || {
+                        let reserving = std::time::Instant::now();
                         let _reservation = reserve_recovery_or_cancel(
                             &state.recovery_observer,
                             &session_id,
                             &cancelled,
                         )?;
+                        tracing::info!(
+                            %session_id,
+                            phase = "recovery reservation",
+                            elapsed_ms = reserving.elapsed().as_millis() as u64,
+                            "move phase finished"
+                        );
+                        let loading = std::time::Instant::now();
                         let mut controller = Controller::load()?;
+                        tracing::info!(
+                            %session_id,
+                            phase = "load controller state",
+                            elapsed_ms = loading.elapsed().as_millis() as u64,
+                            "move phase finished"
+                        );
                         let executor = DaemonStageReportingExecutor::new(
                             CancellableProcessExecutor::new(cancelled),
                             state.clone(),
