@@ -1,6 +1,5 @@
 //! Authenticated local daemon protocol and client transport.
 use crate::executable::describe_running_daemon_and_client_builds;
-use crate::review::RuntimeReviewView;
 use crate::session::{ManagedSessionView, ViewError};
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::{Config, data_dir};
@@ -12,7 +11,6 @@ use mj_core::state::*;
 use mj_core::targets::{AdditionalMount, ProvisionStage};
 use mj_core::workspace::WorkspaceRecord;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -295,35 +293,6 @@ pub struct RuntimeNotice {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeSnapshot {
-    #[serde(default)]
-    pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
-    #[serde(default)]
-    pub native_agents: Vec<mj_core::native_agent::NativeAgentSummary>,
-    #[serde(default)]
-    pub workspace_names: BTreeMap<String, String>,
-    #[serde(default)]
-    pub moves: Vec<mj_core::state::MoveOperation>,
-    pub revision: u64,
-    pub config: Config,
-    pub records: Vec<SessionRecord>,
-    pub sessions: Vec<RuntimeSessionView>,
-    pub lifecycles: Vec<RuntimeLifecycleView>,
-    /// Reviews the daemon is running, so every surface renders the same one.
-    #[serde(default)]
-    pub reviews: Vec<RuntimeReviewView>,
-    /// Recent background events for this workspace's sessions, oldest first.
-    #[serde(default)]
-    pub notices: Vec<RuntimeNotice>,
-    /// Parent/child relations for the sessions in `records`, so a surface can
-    /// keep a daemon-created child out of the real workspace without a full
-    /// state reload.
-    #[serde(default)]
-    pub subagents: Vec<mj_core::subagent::SubagentRecord>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeLifecycleKind {
@@ -595,12 +564,6 @@ pub enum DaemonAction {
     Snapshot {
         workspace_id: String,
     },
-    RuntimeSnapshot {
-        workspace_id: String,
-        after_revision: u64,
-        #[serde(default)]
-        all_workspaces: bool,
-    },
     RuntimeChanges {
         cursor: Option<crate::runtime_feed::RuntimeCursor>,
         wait: bool,
@@ -784,7 +747,6 @@ pub enum DaemonReply {
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
     Snapshot(WorkspaceSnapshot),
-    RuntimeSnapshot(Box<RuntimeSnapshot>),
     RuntimeChanges(Box<crate::runtime_feed::RuntimeFrame>),
     /// Transport fragments of one RuntimeFrame; never exposed to consumers.
     RuntimeChunk {
@@ -1812,25 +1774,6 @@ impl DaemonClient {
         {
             DaemonReply::Snapshot(snapshot) => Ok(snapshot),
             reply => bail!("unexpected snapshot reply {reply:?}"),
-        }
-    }
-
-    pub async fn runtime_snapshot(
-        &mut self,
-        workspace_id: String,
-        after_revision: u64,
-        all_workspaces: bool,
-    ) -> Result<RuntimeSnapshot> {
-        match self
-            .request(DaemonAction::RuntimeSnapshot {
-                workspace_id,
-                after_revision,
-                all_workspaces,
-            })
-            .await?
-        {
-            DaemonReply::RuntimeSnapshot(snapshot) => Ok(*snapshot),
-            reply => bail!("unexpected runtime snapshot reply {reply:?}"),
         }
     }
 

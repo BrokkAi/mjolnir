@@ -1,5 +1,6 @@
 use super::*;
 use crate::controller::test_support::RefusingExecutor;
+use mj_core::subagent::SubagentRecord;
 use tokio::io::AsyncWriteExt;
 
 #[test]
@@ -970,30 +971,6 @@ pub(super) fn runtime_test_session(
     }
 }
 
-#[test]
-fn runtime_records_include_global_history_but_only_local_active_sessions() {
-    let local = runtime_test_session("local", "workspace-a", SessionState::Running);
-    let remote = runtime_test_session("remote", "workspace-b", SessionState::Running);
-    let history = runtime_test_session("history", "deleted-workspace", SessionState::Stopped);
-    let controller = Controller {
-        config: Config::default(),
-        state: mj_core::state::State {
-            sessions: [local, remote, history]
-                .into_iter()
-                .map(|session| (session.id.clone(), session))
-                .collect(),
-            ..mj_core::state::State::default()
-        },
-    };
-    let records = runtime_records_for_workspace(&controller, &BTreeSet::from(["local".to_owned()]));
-    let ids = records
-        .iter()
-        .map(|session| session.id.as_str())
-        .collect::<BTreeSet<_>>();
-
-    assert_eq!(ids, BTreeSet::from(["history", "local"]));
-}
-
 pub(super) fn runtime_test_subagent(
     child_session_id: &str,
     parent_session_id: &str,
@@ -1012,70 +989,6 @@ pub(super) fn runtime_test_subagent(
         noticed_turn: None,
         handback_tool: false,
     }
-}
-
-#[test]
-fn runtime_subagents_include_only_relations_whose_child_is_in_the_returned_records() {
-    let parent_a = runtime_test_session("parent-a", "workspace-a", SessionState::Running);
-    let child_a1 = runtime_test_session("child-a1", "workspace-a", SessionState::Running);
-    let child_a2 = runtime_test_session("child-a2", "workspace-a", SessionState::Running);
-    let parent_b = runtime_test_session("parent-b", "workspace-b", SessionState::Running);
-    let child_b1 = runtime_test_session("child-b1", "workspace-b", SessionState::Running);
-    let mut state = mj_core::state::State {
-        sessions: [
-            parent_a.clone(),
-            child_a1.clone(),
-            child_a2.clone(),
-            parent_b.clone(),
-            child_b1.clone(),
-        ]
-        .into_iter()
-        .map(|session| (session.id.clone(), session))
-        .collect(),
-        ..mj_core::state::State::default()
-    };
-    state.subagents = [
-        runtime_test_subagent(&child_a1.id, &parent_a.id),
-        runtime_test_subagent(&child_a2.id, &parent_a.id),
-        runtime_test_subagent(&child_b1.id, &parent_b.id),
-    ]
-    .into_iter()
-    .map(|subagent| (subagent.child_session_id.clone(), subagent))
-    .collect();
-    let controller = Controller {
-        config: Config::default(),
-        state,
-    };
-
-    let workspace_a_ids = BTreeSet::from([
-        "parent-a".to_owned(),
-        "child-a1".to_owned(),
-        "child-a2".to_owned(),
-    ]);
-    let workspace_a_records = runtime_records_for_workspace(&controller, &workspace_a_ids);
-    let workspace_a_subagents = runtime_subagents_for_workspace(&controller, &workspace_a_records);
-    let mut workspace_a_child_ids = workspace_a_subagents
-        .iter()
-        .map(|subagent| subagent.child_session_id.as_str())
-        .collect::<Vec<_>>();
-    workspace_a_child_ids.sort_unstable();
-    assert_eq!(workspace_a_child_ids, ["child-a1", "child-a2"]);
-
-    let all_ids = BTreeSet::from([
-        "parent-a".to_owned(),
-        "child-a1".to_owned(),
-        "child-a2".to_owned(),
-        "parent-b".to_owned(),
-        "child-b1".to_owned(),
-    ]);
-    let all_records = runtime_records_for_workspace(&controller, &all_ids);
-    let all_subagents = runtime_subagents_for_workspace(&controller, &all_records);
-    let mut all_child_ids = all_subagents
-        .iter()
-        .map(|subagent| subagent.child_session_id.as_str())
-        .collect::<Vec<_>>();
-    all_child_ids.sort_unstable();
-    assert_eq!(all_child_ids, ["child-a1", "child-a2", "child-b1"]);
 }
 
 #[test]
@@ -2390,39 +2303,6 @@ async fn force_destruction_preemption_times_out_without_destroying() {
 
 /// A background image download belongs to the daemon, not to a session, so
 /// whichever workspace the person is looking at shows it.
-#[test]
-fn a_daemon_owned_notice_reaches_every_workspace_snapshot() {
-    let session_ids = BTreeSet::from(["018f9dd2-a3b4".to_owned()]);
-    let daemon_notice = RuntimeNotice {
-        id: 1,
-        session_id: String::new(),
-        text: "Downloading image ghcr.io/example/dev:latest for local podman\u{2026}".to_owned(),
-    };
-    let own_session = RuntimeNotice {
-        id: 2,
-        session_id: "018f9dd2-a3b4".to_owned(),
-        text: "Mounted /data read-only.".to_owned(),
-    };
-    let other_session = RuntimeNotice {
-        id: 3,
-        session_id: "018f9dd2-cccc".to_owned(),
-        text: "Mounted /data read-only.".to_owned(),
-    };
-
-    assert!(snapshot::notice_reaches_workspace(
-        &daemon_notice,
-        &session_ids
-    ));
-    assert!(snapshot::notice_reaches_workspace(
-        &own_session,
-        &session_ids
-    ));
-    assert!(!snapshot::notice_reaches_workspace(
-        &other_session,
-        &session_ids
-    ));
-}
-
 /// A view of `session-1` whose harness is ready for its first prompt.
 fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
@@ -3824,9 +3704,9 @@ async fn workspace_close_retains_history_discards_drafts_and_refuses_resume_race
     );
     assert!(
         !state
-            .runtime_snapshot("", 0, true)
-            .await
+            .runtime_publication()
             .unwrap()
+            .metadata
             .workspace_names
             .contains_key(&workspace.id)
     );
@@ -3880,9 +3760,9 @@ async fn workspace_feed_tracks_names_and_a_delayed_refresh_cannot_restore_a_dele
     assert_eq!(state.workspaces().borrow()[0].name, "After");
     assert_eq!(
         state
-            .runtime_snapshot("", 0, true)
-            .await
+            .runtime_publication()
             .unwrap()
+            .metadata
             .workspace_names[&workspace.id],
         "After"
     );

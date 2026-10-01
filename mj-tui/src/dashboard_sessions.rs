@@ -267,7 +267,8 @@ impl DashboardState {
     }
 
     /// Sessions visible in the selected workspace, grouped by project and
-    /// ordered by creation. Stopped sessions are included only when their
+    /// ordered by creation, with stopped sessions after the rest. Stopped
+    /// sessions are included only when their
     /// advanced display setting is enabled; in-flight transitions remain
     /// visible regardless. The controller may feed all workspaces into one
     /// state snapshot; the tab is the local view filter.
@@ -619,7 +620,11 @@ impl DashboardState {
                 } else {
                     2
                 };
-                (group, session.creation_order_key())
+                (
+                    session.state == SessionState::Stopped,
+                    group,
+                    session.creation_order_key(),
+                )
             });
             return children;
         }
@@ -638,6 +643,7 @@ impl DashboardState {
                 let source = self.project_source(session);
                 (
                     session.id.clone(),
+                    session.state == SessionState::Stopped,
                     if priority {
                         format!(
                             "{:?}/{}",
@@ -665,6 +671,7 @@ impl DashboardState {
         if self.config.advanced.session_order == SessionOrder::Priority {
             active.sort_by_cached_key(|session| {
                 (
+                    session.state == SessionState::Stopped,
                     std::cmp::Reverse(self.attention_level(&session.id)),
                     std::cmp::Reverse(self.last_activity_ms(&session.id)),
                     session.creation_order_key(),
@@ -674,7 +681,13 @@ impl DashboardState {
             cache.ids = active.iter().map(|session| session.id.clone()).collect();
             return active;
         }
-        active.sort_by_cached_key(|session| session.creation_order_key());
+        // Grouping keeps this order, so stopped sessions end each project.
+        active.sort_by_cached_key(|session| {
+            (
+                session.state == SessionState::Stopped,
+                session.creation_order_key(),
+            )
+        });
         let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
         for session in active {
             groups

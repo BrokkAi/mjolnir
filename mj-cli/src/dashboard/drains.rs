@@ -296,15 +296,11 @@ impl DashboardContext {
             io::spawn_workspace_pane_sizes_load(new_layouts.clone(), self.dashboard_io_tx.clone());
             io::spawn_workspace_layouts_load(new_layouts, self.dashboard_io_tx.clone());
         }
-        let next_workspace = if self
-            .dashboard
-            .active_workspace_id()
-            .is_some_and(|id| update.workspace_names.contains_key(id))
-        {
-            self.dashboard.active_workspace_id().map(str::to_owned)
-        } else {
-            update.workspace_names.keys().next().cloned()
-        };
+        let next_workspace = next_workspace(
+            self.dashboard.active_workspace_id(),
+            &mut self.pending_workspace_selection,
+            &update.workspace_names,
+        );
         self.dashboard.set_workspace_names(update.workspace_names);
         self.select_workspace(next_workspace);
         self.apply_runtime_records(
@@ -698,9 +694,51 @@ fn session_uses_subagents(session: &mj_core::state::SessionRecord, is_child: boo
         .uses_mjolnir()
 }
 
+/// The tab to show after a feed frame: a workspace the user just created once
+/// the frame carries it, else the active tab while it exists, else the first.
+fn next_workspace(
+    active: Option<&str>,
+    pending: &mut Option<String>,
+    names: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(created) = pending.take_if(|id| names.contains_key(id)) {
+        return Some(created);
+    }
+    active
+        .filter(|id| names.contains_key(*id))
+        .map(str::to_owned)
+        .or_else(|| names.keys().next().cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_created_workspace_opens_with_the_feed_frame_that_adds_it() {
+        let names = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| ((*id).to_owned(), (*id).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut pending = Some("created".to_owned());
+        assert_eq!(
+            next_workspace(Some("work"), &mut pending, &names(&["home", "work"])),
+            Some("work".into()),
+            "a frame from before the create keeps the current tab"
+        );
+        assert_eq!(pending.as_deref(), Some("created"));
+        assert_eq!(
+            next_workspace(Some("work"), &mut pending, &names(&["created", "work"])),
+            Some("created".into())
+        );
+        assert_eq!(pending, None);
+        assert_eq!(
+            next_workspace(Some("gone"), &mut pending, &names(&["home", "work"])),
+            Some("home".into()),
+            "a deleted active tab falls back to the first workspace"
+        );
+    }
 
     #[test]
     fn delayed_lifecycle_callback_cannot_remove_a_newer_operation() {
