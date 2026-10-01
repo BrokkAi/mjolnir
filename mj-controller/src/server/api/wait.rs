@@ -39,6 +39,22 @@ pub(super) async fn wait(
     Path(session_id): Path<String>,
     Json(request): Json<WaitRequest>,
 ) -> Result<Json<WaitResponse>, ApiFailure> {
+    let answered = wait_for_turn(state.clone(), session_id, request).await;
+    // A handoff tears down what a wait reads in no fixed order: the session
+    // feed can close before the shutdown signal arrives. A wait is a read, so
+    // any failure while the daemon is handing off sends the client to the next
+    // daemon rather than reporting the teardown.
+    match answered {
+        Err(_) if state.handing_off() => Err(ApiFailure::handoff()),
+        answered => answered,
+    }
+}
+
+async fn wait_for_turn(
+    state: ServerState,
+    session_id: String,
+    request: WaitRequest,
+) -> Result<Json<WaitResponse>, ApiFailure> {
     let timeout = request.timeout_secs.unwrap_or(DEFAULT_WAIT_SECS);
     if timeout == 0 || timeout > MAX_WAIT_SECS {
         return Err(ApiFailure::bad_request(format!(
