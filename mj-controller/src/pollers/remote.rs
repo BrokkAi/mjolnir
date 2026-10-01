@@ -69,6 +69,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                             publish_runtime_state(&state_tx, RuntimeStateUpdate {
                                 last_subagent_policy: metadata.last_subagent_policy,
                                 native_agents: native.views_snapshot(),
+                                session_cpu: snapshot.session_cpu,
                                 workspace_names: metadata.workspace_names,
                                 revision: snapshot.revision,
                                 records: snapshot.records,

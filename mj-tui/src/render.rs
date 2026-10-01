@@ -32,7 +32,8 @@ use mj_core::targets::DeploymentCapacityKind;
 use crate::dialogs::{
     render_changed_files, render_config_id_editor, render_confirmation, render_container_editor,
     render_import_bundle_confirmation, render_import_progress, render_notice_log,
-    render_rename_editor, render_repository_origin, render_target_actions, render_web_dialog,
+    render_rename_editor, render_repository_origin, render_session_cpu_report,
+    render_target_actions, render_web_dialog,
 };
 use crate::ingest::{CapacityDetail, SessionDetail, SessionOperationDisplay};
 use crate::resume::render_resume_dialog;
@@ -147,6 +148,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::Rename(editor) => render_rename_editor(frame, area, editor, &mut surfaces),
         Mode::ChangedFiles(dialog) => {
             render_changed_files(frame, area, dashboard, dialog, &mut surfaces)
+        }
+        Mode::SessionCpuReport(dialog) => {
+            render_session_cpu_report(frame, area, dashboard, dialog, &mut surfaces)
         }
         Mode::NoticeLog(dialog) => render_notice_log(frame, area, dashboard, dialog, &mut surfaces),
         Mode::EditContainer(editor) => render_container_editor(frame, area, editor, &mut surfaces),

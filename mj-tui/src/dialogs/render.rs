@@ -519,6 +519,61 @@ pub(crate) fn render_notice_log(
     form.end_frame(DialogControl::NoticeLogClose);
 }
 
+pub(crate) fn render_session_cpu_report(
+    frame: &mut Frame,
+    area: Rect,
+    dashboard: &DashboardState,
+    dialog: &SessionCpuReportDialog,
+    surfaces: &mut FrameSurfaces,
+) {
+    let lines = crate::session_cpu_report::report_lines(dashboard);
+    let popup_height = u16::try_from(lines.len().saturating_add(5).clamp(8, 30)).unwrap_or(30);
+    let popup = centered_modal(frame, surfaces, 80, popup_height, area);
+    let inner = popup.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 2 {
+        clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
+        return;
+    }
+    let mut form = dialog.form.borrow_mut();
+    form.begin_frame();
+    let title =
+        dismissible_modal_title(&mut form, popup, "CPU by session", theme::title(true), true);
+    frame.render_widget(theme::modal().title(title), popup);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No live sessions.").style(theme::muted()),
+            list_area,
+        );
+    } else {
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let total = paragraph.line_count(list_area.width.max(1));
+        let max_scroll = total.saturating_sub(usize::from(list_area.height));
+        dialog.max_scroll.set(max_scroll);
+        let scroll = dialog.scroll.min(max_scroll);
+        frame.render_widget(
+            paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+            list_area,
+        );
+    }
+    Dialog::render_actions(
+        frame,
+        footer,
+        &[(DialogControl::SessionCpuReportClose, "Close", true)],
+        &mut form,
+    );
+    form.end_frame(DialogControl::SessionCpuReportClose);
+}
+
 /// The changed-files overlay: the branch line, the totals, then one row per
 /// file with its kind and line counts.
 pub(crate) fn render_changed_files(

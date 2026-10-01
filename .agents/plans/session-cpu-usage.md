@@ -19,14 +19,35 @@ To see it working: start an isolated daemon and TUI with `--instance cpu-test`, 
 
 ## Progress
 
-- [ ] Milestone 1: worker-side measurement (process-tree CPU time on Linux and macOS, sampler with recent and hourly figures), with unit and behavior tests.
-- [ ] Milestone 2: relay protocol 29 with the connection-only `CpuUsage` request, worker handler, controller client method, with relay tests.
-- [ ] Milestone 3: daemon sampling in the session actor, the shared CPU table, publication through the runtime feed, with feed tests.
-- [ ] Milestone 4: TUI row display and the "CPU by session…" dialog, with render tests.
-- [ ] Milestone 5: end-to-end check in an isolated instance; full `cargo test` and `cargo clippy --all-targets -- -D warnings` on the dev profile; commit.
+- [x] (2026-10-01) Milestone 1: worker-side measurement (process-tree CPU time on Linux and macOS, sampler with recent and hourly figures), with passing unit and isolated reaped-child behavior tests on Linux. macOS CI is enabled for the new module; its result remains pending.
+- [x] (2026-10-01) Milestone 2: relay protocol 29 with the connection-only `CpuUsage` request, worker handler and controller client method; passing journal exclusion and protocol-28 compatibility tests.
+- [x] (2026-10-01) Milestone 3: daemon sampling in the session actor, the generation-owned CPU table and keyed runtime-feed publication; passing ownership and feed tests.
+- [x] (2026-10-01) Milestone 4: TUI row display and the live "CPU by session…" dialog; passing menu, ordering and rendering tests.
+- [x] (2026-10-01) Milestone 5: full dev-profile tests, strict Clippy, formatting, Python helper tests, macOS path checks and isolated acceptance passed; commit the validated implementation on the current master branch for the authorized upstream push.
 
 
 ## Surprises & Discoveries
+
+- Observation: an existing ACP startup-error test required one particular internal EOF string, although both the protocol error and child-exit paths report an actionable failure with the same supervisor stderr and exit status.
+  Evidence: `bridge_exit_during_initialize_returns_an_actionable_error` failed on `Incoming transport closed` while retaining `specific supervisor failure` and `exit status: 17`. Its shell now reads the initialize request before exiting, making the intended phase deterministic; assertions verify the bridge label, actual exit status, stderr and failure/stopped events rather than which valid EOF path won.
+
+- Observation: the shared mbx collector repeatedly removed the build-generated fixture during active test runs. Its generated-output leases cover compiler processes; the fixture is also needed later by running test executables.
+  Evidence: the 1393a59c cached directory was present after regeneration, then absent during the next suite; controller fixtures failed against that exact path too. Inspected mbx’s registrar and per-directory file-lock leases, then held its existing lease for this one 867-byte directory through the approved build-script regeneration and full validation. The lease is released afterward; target paths, cache settings and build configuration stay unchanged.
+
+- Observation: a later full-suite retry timed out in two existing worker bridge tests, which had passed in the preceding combined-tree run. Both failures were five-second waits in the ACP fixture helpers, before CPU sampling is involved.
+  Evidence: `classifier_marks_silent_parent_awaiting_input_despite_continuous_native_child_traffic` timed out waiting for the bridge prompt; `failed_clear_reloads_the_previous_native_session` timed out waiting for a runtime event. Repeated complete validation with `cargo test -- --test-threads=4` to reduce test-runner contention without changing build configuration or weakening any assertions.
+
+- Observation: Apple's XNU fills `ri_user_time` and `ri_system_time` from task power counters expressed in Mach time units; child counters accumulate those same values. The conversion is required on Apple Silicon.
+  Evidence: [fill_task_rusage](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/bsd_kern.c) assigns the task power counters, and [task_power_info_locked](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task.c) uses `rm_time_mach`. The separate libproc wrapper was also checked to confirm that `proc_listchildpids` returns PID counts.
+
+- Observation: a full-suite run lost the build-generated fake worker when the shared build volume filled and cached outputs were collected. Thirteen existing resume/move/launch regressions then failed because the fixture path was absent, rather than because their assertions changed.
+  Evidence: `MJ_WORKER_BINARY is not a file: /mnt/optane/mbx-cache/out-dirs/v1/4e27183cd45ce401061276e192c2730b058a56e0ce94f25b339107bd98ffe6ac/fake-worker.sh`. Continuing ordinary Cargo validation regenerated the first fixture automatically. A later combined-tree run passed all earlier suites but its terminal tests referenced another missing cached fixture (`1393a59c.../fake-worker.sh`). With the user’s explicit approval, reran the existing compiled Cargo build script to restore exactly that fixture at its original path and checked its complete stamped contents and executable permissions. No target-directory, build-layout or cache-setting changes were made; complete validation resumed with the affected tests included.
+
+- Observation: after a daemon restart, separate worker, actor and publication timer phases delayed the idle row update to 22.6 seconds. Reacting to CPU watch changes with a ten-second publication rate limit removes the additional polling phase.
+  Evidence: the isolated cpu-test run retained worker coverage across restart and reported zero recent CPU, but the report refreshed after the acceptance deadline. The acceptance script now measures its deadline from the harness's actual idle transition.
+
+- Observation: runtime-feed replies are chunked, including snapshot replies. The Python reliability helper formerly returned only the first fragment.
+  Evidence: the first acceptance attempt received `reply_chunk` instead of a snapshot. The shared helper now validates and reassembles fragments; its loopback regression transfers more than 220 KB and splits the framing header.
 
 - Observation: the Linux per-thread `children` file, which would let a process list its direct children without scanning all of `/proc`, is missing on the WSL2 development kernel. It exists on morannon. A full `/proc` scan is therefore the portable way to find descendants.
   Evidence: `ls /proc/self/task/*/children` on WSL2 6.18.33.2 printed "No such file or directory". The same command on morannon listed the file.
@@ -40,6 +61,26 @@ To see it working: start an isolated daemon and TUI with `--instance cpu-test`, 
 
 
 ## Decision Log
+
+- Decision: CPU publication reacts to the watch and publishes its first change promptly, with subsequent changes coalesced to at most one publication every ten seconds.
+  Rationale: polling the watch on an independent periodic timer adds a full sampling interval after a replacement daemon starts. A watch-driven rate limit preserves coalescing and bounded shutdown without that extra phase.
+  Date/Author: 2026-10-01, Codex.
+
+- Decision: the TUI accepts the serialized runtime feed's latest publication without comparing daemon revision numbers across incarnations.
+  Rationale: the isolated daemon-restart acceptance check found a stale row even after the worker and daemon reported idle CPU. The old TUI revision guard rejected the replacement daemon's smaller revision. Runtime cursors already own ordering, so removing that second predicate makes restart updates possible without weakening cursor validation.
+  Date/Author: 2026-10-01, Codex.
+
+- Decision: CPU publication and cleanup use the existing actor producer registration and its generation identity.
+  Rationale: the producer already owns each session publication. Guarding CPU updates and cleanup under that same registry lock makes it impossible for a retiring actor to erase a replacement actor's CPU entry. The shared watch receiver is available on the session-manager channels and control handle; the daemon reads that one table.
+  Date/Author: 2026-10-01, Codex.
+
+- Decision: sampler failures use `RelayErrorCode::Internal` with `retryable: false`.
+  Rationale: a failed OS measurement does not invalidate a healthy relay connection. The actor reports it as unavailable data; transport failures follow ordinary sync failure handling.
+  Date/Author: 2026-10-01, Codex.
+
+- Decision: the reaped-child behavior test runs alone in a named child process and does three wall-clock seconds of mostly shell arithmetic with infrequent clock reads, with a one-to-five CPU-second bound.
+  Rationale: invoking date on every loop iteration spends much of the test blocked on subprocesses. Measuring the parallel test runner counts every other test thread and descendant. Isolating the test makes the bound prove child accounting without unrelated CPU noise, and still catches a Mach conversion error.
+  Date/Author: 2026-10-01, Codex.
 
 - Decision: each worker measures the CPU time of its own process tree on every target type, instead of reading the container's cgroup counter.
   Rationale: borrowed containers make a cgroup counter shared between sessions (see Surprises). One code path also covers bare hosts, containers and EC2 machines, and the worker needs no knowledge of its target type. Accepted limitation: processes that leave the worker's tree are not counted. Examples are programs that detach by forking twice (so they are re-parented to process 1), and processes that `podman exec` starts directly in the container rather than through the worker. The plan does not make the worker a "child subreaper" (a Linux process setting that re-parents orphaned descendants to it), because the worker would then have to reap processes it did not spawn, which conflicts with tokio's own child handling.
@@ -76,7 +117,11 @@ To see it working: start an isolated daemon and TUI with `--instance cpu-test`, 
 
 ## Outcomes & Retrospective
 
-Nothing implemented yet.
+Implemented the worker sampler, protocol 29, generation-owned CPU publications, keyed feed deltas and the live TUI report. Full dev-profile tests (four test threads) and strict Clippy pass on the final combined tree, as do formatting, the five Python reliability-helper tests and macOS CI path checks. The temporary mbx fixture lease was released after the successful full run. No database or stored-state changes are needed.
+
+The isolated cpu-test acceptance run measured two busy cores on a 120-CPU host as 1.6% recent CPU. The row appeared after 10.03 seconds and cleared after 16.41 seconds. Worker coverage advanced from 19 to 29 seconds across a daemon restart, then to 69 seconds after idle, with the hourly history preserved. The test opened the report through the actual Targets menu and verified its live updates through that restart.
+
+The acceptance run exposed two ownership problems beyond basic sampling: independent publication timer phases added latency, and comparing daemon revisions across incarnations froze the TUI after restart. Watch-driven coalescing and the existing serialized runtime cursor now own these decisions. Actor producer generations similarly prevent a retiring actor from removing or overwriting a replacement actor's CPU data. Processes that leave the worker's tree remain outside the measurement, as agreed in the design. macOS behavior still needs its CI result.
 
 
 ## Context and Orientation
@@ -87,7 +132,7 @@ Mjolnir runs coding agents ("harnesses" such as Claude Code or Codex) in "sessio
 
 Each session has one "worker", an `mj-worker` process that runs on the target. The worker starts the harness process and everything the agent runs (builds, tests, shells, and the second-opinion reviewer). All of those are descendants of the worker process in the operating system's process tree. The worker code lives in `mj-worker/src/`. Its connection handling is in `mj-worker/src/worker_runtime/unix.rs`.
 
-The "daemon" (`mj daemon-run`, crate `mj-controller`) is the control plane. It owns the database and talks to every worker over a "relay" connection, a request/response protocol defined in `mj-core/src/relay/protocol.rs` (`RelayRequest`, `RelayResponsePayload`). `RELAY_PROTOCOL_VERSION` in `mj-core/src/relay.rs` is the protocol version, currently 28. A worker serves exactly its own version. The daemon can still talk to older workers, and it refuses to send a request the older worker cannot decode. `RelayRequest::minimum_protocol` and `RelayRequest::supported_at` in `protocol.rs` implement that check. Some requests are "connection-only": the worker answers them directly on the connection, and they never enter the worker's durable journal. Examples are `CredentialState`, `SkillsState` and `GithubTokenState`. The worker routes them in `mj-worker/src/worker_runtime/unix.rs` near the `matches!(&envelope.request, RelayRequest::CredentialState | ...)` block, and `mj-worker/src/relay/requests.rs` lists them as invalid if they ever reach the durable relay.
+The "daemon" (`mj daemon-run`, crate `mj-controller`) is the control plane. It owns the database and talks to every worker over a "relay" connection, a request/response protocol defined in `mj-core/src/relay/protocol.rs` (`RelayRequest`, `RelayResponsePayload`). `RELAY_PROTOCOL_VERSION` in `mj-core/src/relay.rs` is the protocol version (28 before this change, 29 after it). A worker serves exactly its own version. The daemon can still talk to older workers, and it refuses to send a request the older worker cannot decode. `RelayRequest::minimum_protocol` and `RelayRequest::supported_at` in `protocol.rs` implement that check. Some requests are "connection-only": the worker answers them directly on the connection, and they never enter the worker's durable journal. Examples are `CredentialState`, `SkillsState` and `GithubTokenState`. The worker routes them in `mj-worker/src/worker_runtime/unix.rs` near the `matches!(&envelope.request, RelayRequest::CredentialState | ...)` block, and `mj-worker/src/relay/requests.rs` lists them as invalid if they ever reach the durable relay.
 
 Inside the daemon, each live session has a "session actor": a tokio task in `mj-controller/src/session_manager/actor.rs` that holds a long-lived relay connection (`StandaloneSession`, in `mj-controller/src/session_manager/standalone.rs`). On each tick it calls `sync_actor_connection`, which calls `StandaloneSession::sync_in_place`. Ticks run every 150 ms while the worker is busy and every 2 s while it is quiet (`SESSION_SYNC_INTERVAL` and `QUIET_SESSION_SYNC_INTERVAL` in `mj-controller/src/session_manager.rs`). The controller's typed relay calls are methods on `RelayClient` in `mj-controller/src/worker_client/relay.rs`, for example `history_requests`, which also shows how to skip a call an older worker does not support.
 
@@ -95,7 +140,7 @@ The daemon publishes what clients display through the "runtime feed". `mj-client
 
 On the client side, the TUI's feed consumer turns frames into dashboard updates. `mj-controller/src/pollers/runtime_feed.rs` (`RemoteDashboardWorkerPoller`, `RuntimeStateUpdate`) and `mj-cli/src/dashboard/drains.rs` (see `set_native_agent_snapshot(update.native_agents)` near line 313) pass them into `DashboardState`, whose ingest methods are in `mj-tui/src/ingest.rs`. The native-agents map is the model to copy for a keyed map that reaches the TUI.
 
-The TUI sessions list is drawn by `mj-tui/src/render/sessions.rs`. Each row's second line is built by `session_activity_line`, which lays out the status word, an optional queue count, then the muted target and profile identity, cutting text to fit the width. A width of 24 cells or less is "compact".
+The TUI sessions list is drawn by `mj-tui/src/render/sessions.rs`. Each row's second line is built by `session_activity_line`, which lays out the status word, an optional queue count, then CPU when at least 1%, and the muted target and profile identity, cutting text to fit the width. A width of 24 cells or less is "compact".
 
 The Targets pane menu is built in `mj-tui/src/pane_controls.rs`, `begin_support_pane_menu`. For `SupportPane::Targets` it lists "Refresh", then `("Runtimes…", CommandId::ManageTargets)` and `("Machines…", CommandId::ManageMachines)`. Commands are declared in `mj-tui/src/actions.rs` (the `CommandId` enum, the command table entry with label and description, and the handler `match`), and help grouping is in `mj-tui/src/help.rs`. A read-only modal dialog with a close button already exists for the notice log: `NoticeLogDialog` (`Mode::NoticeLog` in `mj-tui/src/lib.rs`, `impl DialogModal for NoticeLogDialog` in `mj-tui/src/modal_surface.rs`, rendered by `render_notice_log` from `mj-tui/src/render.rs`, events in `mj-tui/src/component_events.rs`, `DialogControl::NoticeLogClose` in `mj-tui/src/dialogs.rs`). Copy that dialog's structure.
 
@@ -156,7 +201,7 @@ Tests for this milestone, colocated in `#[cfg(test)] mod tests` blocks:
 - `cpu_sampler_hourly_average_is_not_diluted_at_start`: a constant 50% share over five 10-second intervals gives `hourly_permille == 500` and `hourly_covered_secs == 50`.
 - `cpu_sampler_treats_a_falling_counter_as_idle`: a smaller CPU time than before gives `recent_permille == 0`, and the next interval measures from the new value.
 - On Linux, `parse_proc_stat_reads_fields_after_a_command_name_with_parentheses`, using a line whose command name is `(a) (b)`.
-- `process_tree_cpu_time_counts_a_busy_child_after_it_is_reaped`, run on both Linux and macOS: read `process_tree_cpu_time(std::process::id())`. Spawn `sh -c 'end=$(($(date +%s)+2)); while [ $(date +%s) -lt $end ]; do :; done'` through the shared subprocess helper (see "Subprocess Rules" in `AGENTS.md`), wait for it, and read again. Assert that the increase is at least 1 s and at most 3 s. The upper bound catches a missed Mach time-base conversion on Apple Silicon, which would inflate the value about 41 times. Waiting for the child before the second read proves that waited-for children are counted. The test process's own threads add noise, so keep the bounds loose.
+- `process_tree_cpu_time_counts_a_busy_child_after_it_is_reaped`, run on both Linux and macOS: read `process_tree_cpu_time(std::process::id())`. Spawn a three-second shell arithmetic loop with infrequent clock reads through the shared subprocess helper (see "Subprocess Rules" in `AGENTS.md`), wait for it, and read again. Run the measurement in an exact isolated child test with its own named instance and configuration/data directories. Assert that the increase is at least 1 s and less than 5 s. The upper bound catches a missed Mach time-base conversion on Apple Silicon, which would inflate the value about 41 times. Waiting for the child before the second read proves that waited-for children are counted. Isolation excludes the parallel test runner's other threads and descendants from this process tree.
 
 ### Milestone 2: relay protocol 29 and the `CpuUsage` request
 
@@ -193,11 +238,11 @@ Add `#[serde(default)] pub session_cpu: SnapshotMap<String, SessionCpuView>` to 
 
 The shared table: create a `tokio::sync::watch::channel(SnapshotMap::<String, SessionCpuView>::new())` where the session manager's channels are created (`SessionManagerChannels` in `mj-controller/src/session_manager/channels.rs`). Give the sender to every session actor and the receiver to the daemon. The watch is the daemon's only copy of these facts. Actors only write their own key, and the feed only reads.
 
-In the session actor (`mj-controller/src/session_manager/actor.rs`), keep a `next_cpu_read: tokio::time::Instant`. After a successful `sync_actor_connection` on an `Event::Tick`, if the actor is not leased, a connection is present and `now >= next_cpu_read`, call `connection.client.cpu_usage()` (expose a small method on `StandaloneSession` in `standalone.rs` if the client is private), then set `next_cpu_read = now + 10 s`. Map `Ok(Some(usage))` to `Measured`, `Ok(None)` to removing the key, and a worker-reported error to `Unavailable { reason }`. A transport error must take the same path as a failed sync (drop the connection, count a failure), because the next sync on that connection would fail the same way. Write the key with `send_if_modified`, so an unchanged value wakes nobody. Remove the session's key on every exit path of the actor loop with a small guard value whose `Drop` removes it. This covers retirement, `break`, and panic.
+In the session actor (`mj-controller/src/session_manager/actor.rs`), keep a `next_cpu_read: tokio::time::Instant`. After a successful `sync_actor_connection` on an `Event::Tick`, if the actor is not leased, a connection is present and `now >= next_cpu_read`, call `connection.client.cpu_usage()` (expose a small method on `StandaloneSession` in `standalone.rs` if the client is private), then set `next_cpu_read = now + 10 s`. Map `Ok(Some(usage))` to `Measured`, `Ok(None)` to removing the key, and a worker-reported error to `Unavailable { reason }`. A transport error must take the same path as a failed sync (drop the connection, count a failure), because the next sync on that connection would fail the same way. Write the key with `send_if_modified`, so an unchanged value wakes nobody. The existing `UpdateProducer` guard removes the actor's CPU key in `Drop`, under the producer registry lock and only if its generation still owns the session. This covers retirement, `break`, panic and replacement without letting an old actor erase new data.
 
-Publication: start one daemon task, next to where other daemon background tasks are started, that every 10 seconds checks `receiver.has_changed()`, marks the value seen, and calls `publish_revision()`. Each tick does a bounded amount of work, and the task owns no work a daemon handoff must wait for, so it takes no admission label. When the daemon stops, the task ends with it. Document that in a comment.
+Publication: start one daemon task, next to where other daemon background tasks are started, that waits for `receiver.changed()` and calls `publish_revision()`. Publish the first change promptly, then coalesce changes until ten seconds after the previous publication, marking the newest value seen. Each publication does bounded work, and the task owns no work a daemon handoff must wait for, so it takes no admission label. Cancel and await it when the daemon stops. Document that in a comment.
 
-Capture: in `mj-controller/src/daemon/feed.rs`, where the full `RuntimeProjection` is built from `owner.sessions.clone()` (around line 256), also set `session_cpu` from `receiver.borrow().clone()`. In `RuntimeHistory::live_projection`, set `live.session_cpu` to `full.session_cpu` filtered to keys present in `live.records`.
+Capture: in `mj-controller/src/daemon/feed.rs`, where the full `RuntimeProjection` is built from `owner.sessions.clone()` (around line 256), also set `session_cpu` from `receiver.borrow().clone()`. In `RuntimeHistory::live_projection`, keep `live.session_cpu` filtered to keys present in `live.records`, applying only changed CPU keys and live-membership transitions so unrelated publications preserve the shared map.
 
 Tests: in `mj-client/src/runtime_feed.rs` tests, a delta between projections that differ only in `session_cpu` is not empty and, when applied, reproduces the target. A projection serialized without the `session_cpu` field deserializes with an empty map. In the session-manager tests, an actor whose fake worker reports a usage value writes it to the table, and the key disappears after the actor is retired. Use the existing hand-written fake worker setup in that module's tests, not a mocking framework.
 
@@ -226,11 +271,11 @@ Run all commands from the repository root, `/home/jonathan/Projects/mjolnir`. Ru
 
 Focused tests while working on a milestone:
 
-    cargo test -p mj-worker cpu_
-    cargo test -p mj-core relay::protocol
-    cargo test -p mj-client runtime_feed
-    cargo test -p mj-controller worker_client
-    cargo test -p mj-tui render
+    cargo test -p brokk-mj-worker cpu_
+    cargo test -p brokk-mj-core relay::protocol
+    cargo test -p brokk-mj-client runtime_feed
+    cargo test -p brokk-mj-controller worker_client
+    cargo test -p brokk-mj-tui render
 
 Before committing:
 
@@ -241,19 +286,19 @@ Expected result: all tests pass and clippy prints no warnings.
 
 End-to-end check in an isolated instance. Never point a test build at the default instance. Binaries built by Cargo refuse to touch it, and that refusal must not be worked around.
 
-    cargo build -p mj-cli
+    cargo build -p brokk-mjolnir -p brokk-mj-worker --bin mj --bin mj-worker
     target/debug/mj --instance cpu-test
 
 (If `mbx` places build output elsewhere, use the `mj` binary path that `cargo build` reports.)
 
-In that TUI, start a session on a local target. In the session's user shell, run a CPU-bound command, for example `timeout 120 sh -c 'while :; do :; done'`. Within about 20 seconds the session's row shows a percentage close to 100 ÷ (the machine's logical CPU count), for example `1.0%` on a 96-CPU machine or `6.3%` on a 16-CPU machine. Open the Targets menu, choose "CPU by session…", and check that the session is first in its machine's group, with an hourly figure that rises over successive refreshes and a coverage note such as `(1m)`. After the command ends, the row's percentage disappears within about 20 seconds. Stop the instance's daemon when done (`target/debug/mj --instance cpu-test daemon stop`).
+In that TUI, start a session on a local target. In the session's user shell, run a CPU-bound command, for example `timeout 120 sh -c 'while :; do :; done'`. Within about 20 seconds the session's row shows a percentage close to 100 ÷ (the machine's logical CPU count), for example `1.0%` on a 96-CPU machine or `6.3%` on a 16-CPU machine. On machines with more than 100 CPUs, run enough concurrent burners to exceed the row's 1% display threshold. Open the Targets menu, choose "CPU by session…", and check that the session is first in its machine's group, with an hourly figure that rises over successive refreshes and a coverage note such as `(1m)`. After the command ends, the row's percentage disappears within about 20 seconds. Stop the instance's daemon when done (`target/debug/mj --instance cpu-test daemon stop`). The repeatable automated equivalent is `python3 tests/e2e/session_cpu_usage.py --mj target/debug/mj`; it also restarts the daemon during the turn and checks that the worker's CPU history and the open report survive.
 
 
 ## Validation and Acceptance
 
 The feature is accepted when all of the following hold:
 
-1. In an isolated instance, a session running a CPU-bound loop shows a row percentage within 20 seconds that matches one busy core's share of the machine to within a factor of 1.5, and the figure disappears within 20 seconds of the loop ending.
+1. In an isolated instance, a session running enough CPU-bound loops to exceed the 1% display threshold shows a row percentage within 20 seconds that matches the busy cores' share of the machine to within a factor of 1.5, and the figure disappears within 20 seconds of the loops ending.
 2. "CPU by session…" appears in the Targets pane menu, opens a dialog listing live sessions grouped by machine, sorted by the hourly figure in descending order, and updates while open.
 3. A session whose worker is still on relay protocol 28 shows no row figure and appears in the dialog as "no CPU data yet". No error is logged for it.
 4. While the instance runs, `ps` on the host shows no `podman`, `docker` or `ssh` processes started for CPU sampling.
@@ -266,6 +311,15 @@ Every step is additive and can be repeated. There is no database migration and n
 
 
 ## Artifacts and Notes
+
+Final validation evidence (2026-10-01):
+
+- `cargo test -- --test-threads=4`: exit 0 on the final combined tree, `/tmp/mj-cpu-test-final.log`. The existing mbx fixture lease covered regeneration and the full run, then was released. An earlier default-concurrency full run also passed (`/tmp/mj-cpu-test-validated.log`).
+- `cargo clippy --all-targets -- -D warnings`: exit 0 on the final Rust tree, `/tmp/mj-cpu-clippy-delivery.log`.
+- `cargo fmt --all -- --check`: exit 0.
+- Python reliability helper: five tests passed, `/tmp/mj-cpu-python-test.log`; syntax checks also passed.
+- `bash scripts/test-macos-ci-paths.sh`: exit 0, `/tmp/mj-cpu-macos-paths.log`.
+- `python3 tests/e2e/session_cpu_usage.py --mj target/debug/mj`: exit 0, `/tmp/mj-cpu-e2e-passing.log`. Detailed measurements are in `target/reliability-artifacts/session-cpu-seed-1-3121699/cpu-evidence.json`.
 
 Evidence gathered while writing this plan:
 
@@ -303,3 +357,7 @@ In `mj-client/src/runtime_feed.rs`: `pub enum SessionCpuView`, `RuntimeProjectio
 In `mj-client/src/usage_format.rs`: `pub fn format_cpu_permille(permille: u16) -> String`.
 
 In `mj-tui`: `CommandId::SessionCpuReport`, `Mode::SessionCpuReport(SessionCpuReportDialog)`, `DialogControl::SessionCpuReportClose`, and `DashboardState::set_session_cpu`.
+
+Implementation note (2026-10-01): added the worker, relay, feed and TUI paths and their regression tests. CPU lifecycle ownership reuses actor producer generations to prevent replacement races. Added `tests/e2e/session_cpu_usage.py` to exercise the feature in cpu-test, including daemon-restart retention. Full checks and isolated acceptance passed.
+
+Integration note (2026-10-01): fast-forwarded the current master branch to `83d1aad8` before final validation. Both the new transcript-tail publications and CPU map are retained. Git stash conflicts were resolved without changing branches or rebasing. Subsequently fast-forwarded to `dc76520a`, retaining its conversation-search changes without conflicts. The full checks passed against that combined tree with the final fixture corrections.

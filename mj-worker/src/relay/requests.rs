@@ -148,6 +148,7 @@ impl DurableRelay {
             RelayRequest::AttachmentPresent { .. }
             | RelayRequest::InstallAttachment { .. }
             | RelayRequest::ReadAttachment { .. }
+            | RelayRequest::CpuUsage
             | RelayRequest::CredentialState
             | RelayRequest::ReadCredentials
             | RelayRequest::InstallCredentials { .. }

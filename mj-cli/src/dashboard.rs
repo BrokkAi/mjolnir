@@ -368,7 +368,6 @@ pub(crate) struct DashboardContext {
     pending_runtime_updates: Vec<io::PendingRuntimeUpdate>,
     remote_lifecycle_sessions: BTreeSet<String>,
     remote_lifecycle_operations: BTreeMap<String, String>,
-    runtime_state_revision: u64,
     /// A workspace the user just created, opened once the feed carries it.
     pending_workspace_selection: Option<String>,
     pub(crate) worker_commands_tx: SessionManagerControl,
@@ -1701,7 +1700,6 @@ impl DashboardContext {
             pending_runtime_updates: Vec::new(),
             remote_lifecycle_sessions: BTreeSet::new(),
             remote_lifecycle_operations: BTreeMap::new(),
-            runtime_state_revision: 0,
             pending_workspace_selection: None,
             worker_commands_tx,
             worker_shutdown: Some(worker_shutdown),

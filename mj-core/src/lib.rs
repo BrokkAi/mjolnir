@@ -59,3 +59,5 @@ pub mod worker_protocol;
 pub mod workspace;
 
 pub mod continuation;
+
+pub mod cpu_usage;

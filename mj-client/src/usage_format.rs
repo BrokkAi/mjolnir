@@ -1,5 +1,14 @@
 //! Shared formatting for live-session, provider quota, and rate-limit displays.
 
+/// Machine CPU share: retain tenths below ten percent.
+pub fn format_cpu_permille(permille: u16) -> String {
+    if permille < 100 {
+        format!("{}.{:01}%", permille / 10, permille % 10)
+    } else {
+        format!("{}%", (u32::from(permille) + 5) / 10)
+    }
+}
+
 /// Render a running clock: the two largest units that still fit, so a glance
 /// reads the magnitude rather than counting colons.
 ///

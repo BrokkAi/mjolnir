@@ -59,7 +59,10 @@ async fn client_adapter_preserves_actor_replacement_and_submit_completion() {
 #[tokio::test]
 async fn session_adoption_deadline_also_bounds_an_unanswered_manager_request() {
     let (commands, mut requests) = mpsc::channel(1);
-    let control = SessionManagerControl { commands };
+    let control = SessionManagerControl {
+        commands,
+        session_cpu: watch::channel(SessionCpuTable::new()).1,
+    };
     let request = tokio::spawn(async move {
         control
             .wait_for_session("muse", Duration::from_millis(20))
@@ -1363,6 +1366,15 @@ fn leased_relay_child_serves_stdio() {
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
             let history = match &request.request {
+                RelayRequest::CpuUsage => {
+                    let path = PathBuf::from(&root).join("cpu-usage.json");
+                    let usage = if path.exists() {
+                        Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+                    } else {
+                        None
+                    };
+                    Some(RelayResponsePayload::CpuUsage { usage })
+                }
                 RelayRequest::SubagentRequests => {
                     let path = PathBuf::from(&root).join("subagent-request.json");
                     let requests = if path.exists() {
@@ -1548,6 +1560,7 @@ async fn session_manager_shutdown_joins_a_live_relay_actor() {
     register_leased_relay_session();
     let relay_root = tempfile::tempdir().unwrap();
     let SessionManagerChannels {
+        session_cpu: _,
         targets,
         control,
         updates: _updates,
@@ -3095,4 +3108,87 @@ fn a_submit_that_never_reached_the_worker_is_a_definite_failure() {
     assert!(!super::actor::submit_failure(&never_sent).unconfirmed);
     let lost_reply = anyhow::anyhow!("relay connection closed while awaiting a reply");
     assert!(super::actor::submit_failure(&lost_reply).unconfirmed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn actor_publishes_worker_cpu_and_removes_it_on_retirement() {
+    const CHILD: &str = "MJ_TEST_CPU_ACTOR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "actor_publishes_worker_cpu_and_removes_it_on_retirement",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    let usage = mj_core::cpu_usage::SessionCpuUsage {
+        recent_permille: 230,
+        hourly_permille: 100,
+        hourly_covered_secs: 20,
+        online_cpus: 4,
+    };
+    std::fs::write(
+        root.path().join("cpu-usage.json"),
+        serde_json::to_vec(&usage).unwrap(),
+    )
+    .unwrap();
+    let manager = spawn_session_manager().unwrap();
+    manager
+        .targets
+        .send_replace(vec![leased_relay_target(root.path())]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .session_cpu
+                .borrow()
+                .contains_key(LEASED_RELAY_SESSION)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        manager.session_cpu.borrow().get(LEASED_RELAY_SESSION),
+        Some(&mj_client::runtime_feed::SessionCpuView::Measured { usage })
+    );
+    manager.targets.send_replace(Vec::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.session_cpu.borrow().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    manager.shutdown.shutdown().await.unwrap();
+}
+
+#[test]
+fn retired_cpu_producers_cannot_erase_or_overwrite_their_replacement() {
+    let (updates, _receiver) = coalesced_update_channel();
+    let old = updates.for_actor("session");
+    old.publish_cpu(
+        "session",
+        Some(mj_client::runtime_feed::SessionCpuView::Unavailable {
+            reason: "old".into(),
+        }),
+    );
+    let current = updates.for_actor("session");
+    let expected = mj_client::runtime_feed::SessionCpuView::Unavailable {
+        reason: "current".into(),
+    };
+    current.publish_cpu("session", Some(expected.clone()));
+    old.publish_cpu("session", None);
+    drop(old);
+    assert_eq!(updates.cpu.borrow().get("session"), Some(&expected));
+    drop(current);
+    assert!(updates.cpu.borrow().is_empty());
 }

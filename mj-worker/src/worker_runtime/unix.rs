@@ -402,6 +402,29 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
+    let (cpu_tx, cpu_rx) = tokio::sync::watch::channel(Ok(None));
+    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(cpu_tx));
+    let cpu_abort = cpu_task.abort_handle();
+    struct StopCpu(tokio::task::AbortHandle);
+    impl Drop for StopCpu {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _stop_cpu = StopCpu(cpu_abort);
+    let cpu_fatal = fatal_tx.clone();
+    let cpu_session_id = config.session_id.clone();
+    tokio::spawn(async move {
+        match cpu_task.await {
+            Err(error) if error.is_cancelled() => {}
+            result => {
+                tracing::error!(session_id = %cpu_session_id, ?result, "worker CPU sampler stopped");
+                let _ = cpu_fatal
+                    .send(anyhow::anyhow!("worker CPU sampler stopped: {result:?}"))
+                    .await;
+            }
+        }
+    });
     if checkpoint_only
         || relay
             .lock()
@@ -428,7 +451,11 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             relay,
             dispatch_wake_tx,
             credentials,
-            project_memory,
+            ConnectionRuntime {
+                project_memory,
+                cpu: Some(cpu_rx),
+                ..Default::default()
+            },
             fatal_tx,
             fatal_rx,
         )
@@ -644,6 +671,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                     let client_project_memory = project_memory.clone();
                     let client_reviewer = reviewer.clone();
                     let client_subagents = subagents.clone();
+                    let client_cpu = cpu_rx.clone();
                     tokio::spawn(async move {
                         if let Err(error) = serve_client_with_memory(
                             stream,
@@ -655,6 +683,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
                                 commands: Some(client_commands),
                                 reviewer: Some(client_reviewer),
                                 subagents: client_subagents,
+                                cpu: Some(client_cpu),
                             },
                             client_fatal,
                         ).await {
@@ -736,7 +765,7 @@ pub async fn run_daemon(root: PathBuf, mut config: WorkerLaunchConfig) -> Result
             relay,
             dispatch_wake_tx,
             credentials,
-            project_memory,
+            ConnectionRuntime { project_memory, cpu: Some(cpu_rx), ..Default::default() },
             fatal_tx,
             fatal_rx,
         )
@@ -779,7 +808,7 @@ pub(super) async fn serve_terminal_relay(
     relay: Arc<Mutex<DurableRelay>>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
-    project_memory: ProjectMemoryEndpoint,
+    runtime: ConnectionRuntime,
     fatal: mpsc::Sender<anyhow::Error>,
     mut fatal_reports: mpsc::Receiver<anyhow::Error>,
 ) -> Result<()> {
@@ -798,7 +827,7 @@ pub(super) async fn serve_terminal_relay(
         let client_dispatch_wake = dispatch_wake.clone();
         let client_credentials = credentials.clone();
         let client_fatal = fatal.clone();
-        let client_project_memory = project_memory.clone();
+        let client_runtime = runtime.clone();
         tokio::spawn(async move {
             // A sealed session has no ACP runtime left, so compaction
             // cannot be served here.
@@ -807,10 +836,7 @@ pub(super) async fn serve_terminal_relay(
                 client_relay,
                 client_dispatch_wake,
                 client_credentials,
-                ConnectionRuntime {
-                    project_memory: client_project_memory,
-                    ..ConnectionRuntime::default()
-                },
+                client_runtime,
                 client_fatal,
             )
             .await
@@ -833,6 +859,7 @@ pub(super) struct ConnectionRuntime {
     /// one beside. A sealed session has none.
     pub(super) reviewer: Option<Arc<ReviewerSidecar>>,
     pub(super) subagents: Option<super::subagents::SubagentEndpoint>,
+    pub(super) cpu: Option<tokio::sync::watch::Receiver<crate::cpu_usage::CpuRead>>,
 }
 
 #[cfg(test)]
@@ -900,6 +927,7 @@ pub(super) async fn serve_client_with_memory(
         commands,
         reviewer,
         subagents,
+        cpu,
     } = runtime;
     let relay_root = relay
         .lock()
@@ -1012,6 +1040,18 @@ pub(super) async fn serve_client_with_memory(
                     operation,
                 )
                 .await?;
+                continue;
+            }
+            if matches!(&envelope.request, RelayRequest::CpuUsage) {
+                let value = cpu.as_ref().map(|receiver| receiver.borrow().clone()).unwrap_or(Ok(None));
+                let body = match value {
+                    Ok(usage) => RelayResponseBody::Ok { payload: RelayResponsePayload::CpuUsage { usage } },
+                    Err(message) => RelayResponseBody::Error { error: RelayProtocolError {
+                        code: RelayErrorCode::Internal, message, retryable: false, detail: None,
+                    } },
+                };
+                let response = RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body };
+                write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
                 continue;
             }
             if matches!(

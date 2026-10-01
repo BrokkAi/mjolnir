@@ -26,6 +26,7 @@ pub(crate) struct RenderChangeSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RenderClockSignature {
     sessions: Vec<DisplayedClock>,
+    cpu: Vec<DisplayedClock>,
     capacity: Vec<DisplayedClock>,
     quota: Vec<DisplayedClock>,
     resume: Vec<DisplayedClock>,
@@ -78,6 +79,7 @@ impl DashboardState {
         let now = epoch_seconds();
         RenderClockSignature {
             sessions: self.session_clock_signature(now),
+            cpu: self.session_cpu_signature(),
             capacity: self.capacity_clock_signature(now),
             quota: self.quota_clock_signature(now),
             resume: self.resume_clock_signature(),
@@ -156,6 +158,38 @@ impl DashboardState {
             let area = areas[index];
             area.width > 0 && area.height > 0
         })
+    }
+
+    fn session_cpu_signature(&self) -> Vec<DisplayedClock> {
+        if matches!(self.mode, Mode::SessionCpuReport(_)) {
+            return crate::session_cpu_report::report_lines(self)
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| DisplayedClock {
+                    key: index.to_string(),
+                    value: line.to_string(),
+                })
+                .collect();
+        }
+        if !self.support_projection_visible(SupportPane::Sessions) {
+            return Vec::new();
+        }
+        self.ordered_sessions()
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| self.session_row_is_visible_at(*index))
+            .filter_map(|(_, session)| match self.session_cpu.get(&session.id) {
+                Some(mj_client::runtime_feed::SessionCpuView::Measured { usage })
+                    if usage.recent_permille >= 10 =>
+                {
+                    Some(DisplayedClock {
+                        key: session.id.clone(),
+                        value: mj_client::usage_format::format_cpu_permille(usage.recent_permille),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn session_clock_signature(&self, now: u64) -> Vec<DisplayedClock> {

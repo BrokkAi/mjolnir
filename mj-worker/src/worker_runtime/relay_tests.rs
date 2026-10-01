@@ -4703,7 +4703,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
         relay.clone(),
         wake_tx,
         test_credentials(),
-        unix::ProjectMemoryEndpoint::default(),
+        unix::ConnectionRuntime::default(),
         fatal_tx,
         fatal_rx,
     ));
@@ -6954,4 +6954,74 @@ async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
     drop(event_tx);
     drop(wake_tx);
     coordinator.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn cpu_usage_answers_from_the_sampler_without_journaling() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (wake, _wakes) = mpsc::channel(1);
+    let (fatal, _errors) = mpsc::channel(1);
+    let (cpu, receiver) = tokio::sync::watch::channel(Ok(None));
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay.clone(),
+        wake,
+        Err("no credentials".into()),
+        unix::ConnectionRuntime {
+            cpu: Some(receiver),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    let usage = mj_core::cpu_usage::SessionCpuUsage {
+        recent_permille: 230,
+        hourly_permille: 100,
+        hourly_covered_secs: 20,
+        online_cpus: 4,
+    };
+    for value in [
+        Ok(None),
+        Ok(Some(usage)),
+        Err("measurement denied".to_owned()),
+    ] {
+        let _ = cpu.send_replace(value.clone());
+        let request = RelayRequestEnvelope {
+            request_id: "cpu".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::CpuUsage,
+        };
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+        match (value, response.body) {
+            (
+                Ok(expected),
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::CpuUsage { usage },
+                },
+            ) => assert_eq!(usage, expected),
+            (Err(expected), RelayResponseBody::Error { error }) => {
+                assert_eq!(error.message, expected);
+                assert!(!error.retryable);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
+    }
+    drop(client);
+    task.await.unwrap().unwrap();
 }

@@ -263,6 +263,12 @@ pub(crate) fn drawn_session_rows_with_options(
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
                 let spacing = u16::from(expanded && !options.summary_only);
+                let cpu = match dashboard.session_cpu.get(&session.id) {
+                    Some(mj_client::runtime_feed::SessionCpuView::Measured { usage }) => {
+                        Some(usage.recent_permille)
+                    }
+                    _ => None,
+                };
                 if session.configuration_issue(&dashboard.config).is_some() {
                     lines.push(Line::styled(
                         format!("{prefix}{}", session_name(session)),
@@ -315,6 +321,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         operation,
                         now_epoch_seconds,
                         &target,
+                        cpu,
                         permission,
                         width,
                         &prefix,
@@ -334,6 +341,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         operation,
                         now_epoch_seconds,
                         &target,
+                        cpu,
                         permission,
                         spinner,
                         width,
@@ -503,6 +511,7 @@ pub(crate) fn expanded_session_lines(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
+    cpu: Option<u16>,
     permission: Option<Span<'static>>,
     width: u16,
     prefix: &str,
@@ -542,6 +551,7 @@ pub(crate) fn expanded_session_lines(
         operation,
         now_epoch_seconds,
         target,
+        cpu,
         permission,
         spinner,
         width,
@@ -591,6 +601,7 @@ pub(crate) fn session_activity_line(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
+    cpu: Option<u16>,
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
@@ -690,10 +701,18 @@ pub(crate) fn session_activity_line(
         Truncate::PLAIN,
     );
     let status_width = Line::raw(status.as_str()).width() + queue_width + 2;
+    let cpu = cpu
+        .filter(|value| !compact && *value >= 10)
+        .map(mj_client::usage_format::format_cpu_permille)
+        .filter(|text| {
+            Line::raw(prefix).width() + spinner_width + status_width + text.len() < available
+        });
+    let cpu_width = cpu.as_ref().map_or(0, |text| text.len() + 1);
     let identity_width = if compact {
         0
     } else {
-        available.saturating_sub(Line::raw(prefix).width() + spinner_width + status_width)
+        available
+            .saturating_sub(Line::raw(prefix).width() + spinner_width + status_width + cpu_width)
     };
     let badge_text = permission
         .as_ref()
@@ -739,6 +758,9 @@ pub(crate) fn session_activity_line(
             facts.style().add_modifier(Modifier::BOLD),
         ));
     }
+    if let Some(cpu) = cpu {
+        spans.push(Span::styled(format!(" {cpu}"), theme::muted()));
+    }
     if !identity.is_empty() || show_permission {
         spans.push(Span::styled(format!("  {identity}"), theme::muted()));
     }
@@ -763,6 +785,7 @@ pub(crate) fn compact_session_lines(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
+    cpu: Option<u16>,
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
@@ -800,6 +823,7 @@ pub(crate) fn compact_session_lines(
         operation,
         now_epoch_seconds,
         target,
+        cpu,
         permission,
         spinner,
         width,

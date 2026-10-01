@@ -74,6 +74,7 @@ pub(crate) enum DialogControl {
     ChangedFilesRefresh,
     ChangedFilesClose,
     NoticeLogClose,
+    SessionCpuReportClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +110,15 @@ pub struct ImportProfileOption {
 /// burst of background failures that overwrote each other can still be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NoticeLogDialog {
+    /// First wrapped line drawn.
+    pub(crate) scroll: usize,
+    /// The largest useful `scroll`, measured by the renderer at its width.
+    pub(crate) max_scroll: std::cell::Cell<usize>,
+    pub(crate) form: RefCell<Dialog<DialogControl>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SessionCpuReportDialog {
     /// First wrapped line drawn.
     pub(crate) scroll: usize,
     /// The largest useful `scroll`, measured by the renderer at its width.
@@ -1255,6 +1265,43 @@ impl DashboardState {
                 self.cancel_modal();
             }
             _ => self.mode = Mode::NoticeLog(dialog),
+        }
+        DashboardAction::None
+    }
+
+    pub(crate) fn handle_session_cpu_report_event(
+        &mut self,
+        event: Event,
+        mut dialog: SessionCpuReportDialog,
+    ) -> DashboardAction {
+        let last = dialog.max_scroll.get();
+        if let Event::Key(key) = &event
+            && key.kind != KeyEventKind::Release
+        {
+            let scrolled = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(dialog.scroll.saturating_add(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(dialog.scroll.saturating_sub(1)),
+                KeyCode::PageDown => Some(dialog.scroll.saturating_add(10)),
+                KeyCode::PageUp => Some(dialog.scroll.saturating_sub(10)),
+                KeyCode::Home => Some(0),
+                KeyCode::End => Some(last),
+                _ => None,
+            };
+            if let Some(scroll) = scrolled {
+                dialog.scroll = scroll.min(last);
+                self.record_event_handled();
+                self.mode = Mode::SessionCpuReport(dialog);
+                return DashboardAction::None;
+            }
+        }
+        let result = dialog.form.get_mut().handle(&event);
+        self.last_event_consumed.set(result.consumed);
+        match result.action {
+            Some(Interaction::Cancel)
+            | Some(Interaction::Activate(DialogControl::SessionCpuReportClose)) => {
+                self.cancel_modal();
+            }
+            _ => self.mode = Mode::SessionCpuReport(dialog),
         }
         DashboardAction::None
     }

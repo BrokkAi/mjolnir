@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
+    pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
 }
 

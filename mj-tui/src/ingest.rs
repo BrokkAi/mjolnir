@@ -1325,3 +1325,12 @@ impl DashboardState {
 
 #[cfg(test)]
 mod tests;
+
+impl DashboardState {
+    pub fn set_session_cpu(
+        &mut self,
+        cpu: mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
+    ) {
+        self.session_cpu = cpu;
+    }
+}
