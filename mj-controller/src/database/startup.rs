@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartupDelivery {
     pub session_id: String,
     pub command_id: String,
@@ -198,9 +198,19 @@ pub fn withdraw_startup_prompt(session_id: &str, text: &str) -> Result<bool> {
     })
 }
 
+/// A session's latest startup group, the only one the API reports on. The
+/// daemon reads it from its published records
+/// ([`CommittedState::startup_groups`]); this store read serves a process
+/// without the writer.
 pub fn load_latest_startup_group(session_id: &str) -> Result<Vec<StartupDelivery>> {
-    let connection = open_reader(&database_path())?;
-    let mut statement = connection.prepare(
+    load_latest_startup_group_with(&open_reader(&database_path())?, session_id)
+}
+
+pub(super) fn load_latest_startup_group_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Vec<StartupDelivery>> {
+    let mut statement = connection.prepare_cached(
         "SELECT session_id,command_id,step_json,phase,group_id,accepted_ordinal,error
          FROM startup_steps WHERE session_id=?1 AND group_id=(
             SELECT group_id FROM startup_steps WHERE session_id=?1 AND group_id IS NOT NULL

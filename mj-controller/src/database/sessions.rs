@@ -251,28 +251,34 @@ pub(super) fn load_subagent_report_from(
     path: &Path,
     child_session_id: &str,
 ) -> Result<mj_core::subagent::SubagentReport> {
-    let connection = open_reader(path)?;
+    Ok(load_subagent_report_with(&open_reader(path)?, child_session_id)?.unwrap_or_default())
+}
+
+/// A child's recorded report, or `None` when nothing is recorded for it.
+pub(super) fn load_subagent_report_with(
+    connection: &Connection,
+    child_session_id: &str,
+) -> Result<Option<mj_core::subagent::SubagentReport>> {
     let row = connection
-        .query_row(
+        .prepare_cached(
             "SELECT handback_command_id, handback_message, handback_recorded_at_ms,
                     reminder_command_id, reminder_for_command_id, reminder_sent_at_ms,
                     reminder_failed_for_command_id, awaited_ordinal, report_dir
              FROM subagent_handbacks WHERE child_session_id = ?1",
-            [child_session_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            },
-        )
+        )?
+        .query_row([child_session_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })
         .optional()?;
     let Some((
         handback_command,
@@ -286,9 +292,9 @@ pub(super) fn load_subagent_report_from(
         report_dir,
     )) = row
     else {
-        return Ok(mj_core::subagent::SubagentReport::default());
+        return Ok(None);
     };
-    Ok(mj_core::subagent::SubagentReport {
+    Ok(Some(mj_core::subagent::SubagentReport {
         handback: match (handback_command, handback_message, handback_at) {
             (Some(command_id), Some(message), Some(recorded_at_ms)) => {
                 Some(mj_core::subagent::SubagentHandback {
@@ -312,7 +318,7 @@ pub(super) fn load_subagent_report_from(
         reminder_failed_for,
         awaited_ordinal: awaited_ordinal.and_then(|ordinal| u64::try_from(ordinal).ok()),
         report_dir,
-    })
+    }))
 }
 
 /// Record the directory Mjolnir created for a child's report files. It is
