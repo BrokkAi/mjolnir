@@ -224,8 +224,6 @@ pub(super) fn policy_plan_permission_answer(
     }
 }
 
-pub(super) const UNEXPECTED_PERMISSION_REQUEST_WARNING: &str = "The agent made a permission request while configured to run unconstrained; its execution policy is misconfigured. The request is shown for you to answer.";
-
 pub(super) fn nested_string_matches(
     value: &serde_json::Value,
     keys: &[&str],
@@ -334,10 +332,9 @@ pub(super) fn permission_plan_response(
     )
 }
 
-/// Muse can still ask for individual approval after its allow-all mode was
-/// selected. An unconstrained Mjolnir session must answer that protocol edge
-/// instead of cancelling it or leaving the adapter parked forever.
-pub(super) fn muse_unconstrained_permission_response(
+/// Harnesses can still ask for tool approval after their full-access mode was
+/// selected. YOLO authorizes those requests, preferably for this call alone.
+pub(super) fn unconstrained_permission_response(
     request: &RequestPermissionRequest,
 ) -> Option<RequestPermissionResponse> {
     request

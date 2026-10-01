@@ -2168,6 +2168,25 @@ fn first_queued_prompt_seeds_a_provisional_session_title() {
 }
 
 #[test]
+fn session_info_update_caps_large_titles_in_the_published_projection() {
+    let mut session = MaterializedSession::empty("session-1");
+    apply_observation(
+        &mut session,
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::SessionInfoUpdate(
+                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                    .title("word ".repeat(20_000)),
+            )),
+        },
+    );
+
+    let expected = format!("{}word…", "word ".repeat(50));
+    assert_eq!(session.session_title.as_deref(), Some(expected.as_str()));
+    assert_eq!(session.resolved_title().as_deref(), Some(expected.as_str()));
+    assert!(serde_json::to_string(&session).unwrap().len() < 10_000);
+}
+
+#[test]
 fn harness_title_replaces_the_provisional_title() {
     let mut session = MaterializedSession::empty("session-1");
     apply_observation(

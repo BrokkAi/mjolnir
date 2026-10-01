@@ -532,17 +532,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.dashboard_io_tx.clone(),
             context.critical_operations.clone(),
         );
-    } else if context
-        .controller
-        .config
-        .enabled_profiles()
-        .next()
-        .is_none()
-    {
-        io::spawn_installed_agent_discovery(
-            context.dashboard_io_tx.clone(),
-            context.critical_operations.clone(),
-        );
     }
     let mut restart_executable = None;
     if go.is_none() {

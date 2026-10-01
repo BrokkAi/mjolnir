@@ -496,17 +496,6 @@ pub(crate) fn spawn_first_run_setup(
                 },
             )?;
             let Some(summary) = result else {
-                if Config::load_from(&config_path)?.profiles.is_empty() {
-                    let agents = setup::discover_profiles(&executor)
-                        .into_iter()
-                        .map(|home| home.kind)
-                        .collect();
-                    report(
-                        "looking for installed coding agents",
-                        &progress,
-                        DashboardIoUpdate::InstalledAgents(Ok(agents)),
-                    );
-                }
                 return Ok(None);
             };
             report(
@@ -525,29 +514,6 @@ pub(crate) fn spawn_first_run_setup(
             Ok(Some(setup::actionable_errors(&result)))
         },
         DashboardIoUpdate::FirstRunChecked,
-    )
-}
-
-/// Look for the coding agents installed on this machine, the same way Detect
-/// profiles does, so the Get started panel of a dashboard with no agent
-/// profile can say whether any was found.
-pub(crate) fn spawn_installed_agent_discovery(
-    updates: UnboundedSender<DashboardIoUpdate>,
-    tracker: CriticalOperationTracker,
-) -> JoinHandle<()> {
-    spawn_cancellable_io(
-        tracker,
-        "looking for installed coding agents",
-        updates,
-        move |cancelled| {
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            Ok(mj_controller::setup::discover_profiles(&executor)
-                .into_iter()
-                .map(|home| home.kind)
-                .collect::<Vec<_>>())
-        },
-        DashboardIoUpdate::InstalledAgents,
     )
 }
 
@@ -1414,7 +1380,9 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
 
 /// Registering a session and provisioning it are one job with two answers: the
 /// dashboard shows the session as soon as it exists, then follows the launch,
-/// so this stays separate from [`spawn_lifecycle_operation`].
+/// so this stays separate from [`spawn_lifecycle_operation`]. Only the
+/// registration holds dashboard exit: once the daemon has the record, the
+/// launch is the daemon's.
 pub(crate) fn spawn_dashboard_create_session(
     action: DashboardAction,
     go_save: Option<(std::path::PathBuf, mj_core::go::GoRecipe, bool)>,
@@ -1538,24 +1506,43 @@ pub(crate) fn spawn_dashboard_create_session(
                 Box::new(registered),
             ))),
         );
-        let result = mj_core::runtime::block_on(async {
-            let mut daemon = daemon::connect_or_start().await?;
-            daemon.wait_create_session(session_id.clone()).await?;
-            Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-        })
-        .and_then(|result| result)
-        .map_err(|error| format!("{error:#}"));
-        report(
-            "creating session",
-            &lifecycle_updates,
-            DashboardLifecycleUpdate {
-                session_id,
-                result,
-                operation: cancelled.clone(),
-            },
-        );
         drop(guard);
+        follow_daemon_creation(
+            "creating session",
+            session_id,
+            &lifecycle_updates,
+            cancelled,
+        );
     });
+}
+
+/// Reports how a session the daemon has accepted finishes launching.
+///
+/// The daemon owns the launch from registration on, and it continues after
+/// this terminal exits. Callers therefore release their exit guard before
+/// calling this, so quitting never waits for a launch or its rollback.
+fn follow_daemon_creation(
+    operation: &str,
+    session_id: String,
+    lifecycle_updates: &UnboundedSender<DashboardLifecycleUpdate>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let result = mj_core::runtime::block_on(async {
+        let mut daemon = daemon::connect_or_start().await?;
+        daemon.wait_create_session(session_id.clone()).await?;
+        Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
+    })
+    .and_then(|result| result)
+    .map_err(|error| format!("{error:#}"));
+    report(
+        operation,
+        lifecycle_updates,
+        DashboardLifecycleUpdate {
+            session_id,
+            result,
+            operation: cancelled,
+        },
+    );
 }
 
 /// Search the SessionWiki index for the resume dialog, after `delay`.
@@ -1746,22 +1733,12 @@ pub(crate) fn spawn_dashboard_restore_session(
                 }),
             ))),
         );
-        let result = mj_core::runtime::block_on(async {
-            let mut daemon = daemon::connect_or_start().await?;
-            daemon.wait_create_session(session_id.clone()).await?;
-            Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
-        })
-        .and_then(|result| result)
-        .map_err(|error| format!("{error:#}"));
-        report(
-            "restoring archived session",
-            &lifecycle_updates,
-            DashboardLifecycleUpdate {
-                session_id,
-                result,
-                operation: cancelled.clone(),
-            },
-        );
         drop(guard);
+        follow_daemon_creation(
+            "restoring archived session",
+            session_id,
+            &lifecycle_updates,
+            cancelled,
+        );
     });
 }

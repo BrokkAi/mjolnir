@@ -1214,3 +1214,75 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
     task.await.unwrap().unwrap();
     remote.shutdown.shutdown().await.unwrap();
 }
+
+/// A continuation service with no sessions, reading updates from `input`.
+fn idle_feed(
+    control: SessionManagerControl,
+    input: SessionManagerUpdates,
+    cancellation: CancellationToken,
+) -> UpdateFeed {
+    let environment = Environment {
+        log: None,
+        control,
+        allowed: Arc::new(|_| false),
+        live: Arc::new(BTreeSet::new),
+        review: Arc::new(|_, _| {}),
+        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+        profile: Arc::new(|_| None),
+    };
+    let classifier: Classifier =
+        Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected classification") }));
+    let (updates, service) = spawn_in(environment, input, cancellation, classifier);
+    UpdateFeed::new(updates, service)
+}
+
+/// A shutdown stops the continuation service, which closes the serving
+/// loop's update channel while the shutdown token is also ready. The feed
+/// must report that as a shutdown, not as a stopped session manager. The
+/// second round also closes the session manager's channel at the same moment,
+/// so the service sees both endings in one poll.
+#[tokio::test]
+async fn shutdown_ends_the_update_feed_without_reporting_a_session_manager_stop() {
+    for manager_closes_too in [false, true] {
+        let remote = spawn_remote_session_manager().unwrap();
+        let (manager, input) = coalesced_update_channel();
+        let cancellation = CancellationToken::new();
+        let mut feed = idle_feed(remote.control, input, cancellation.clone());
+        // The service has not been polled yet, so whatever is set here is
+        // ready together when it first runs.
+        cancellation.cancel();
+        let manager = (!manager_closes_too).then_some(manager);
+        let end = tokio::time::timeout(Duration::from_secs(3), feed.next())
+            .await
+            .expect("the feed ends promptly");
+        assert!(
+            matches!(end, Ok(None)),
+            "a shutdown was reported as {end:?} (manager closed too: {manager_closes_too})"
+        );
+        feed.join().await.unwrap();
+        drop(manager);
+        remote.shutdown.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_session_manager_that_stops_without_a_shutdown_request_is_an_error() {
+    let remote = spawn_remote_session_manager().unwrap();
+    let (manager, input) = coalesced_update_channel();
+    let cancellation = CancellationToken::new();
+    let mut feed = idle_feed(remote.control, input, cancellation.clone());
+    drop(manager);
+    let error = tokio::time::timeout(Duration::from_secs(3), feed.next())
+        .await
+        .expect("the feed ends promptly")
+        .expect_err("an unrequested stop is a failure");
+    assert_eq!(
+        error.to_string(),
+        "controller daemon session manager stopped"
+    );
+    // The daemon's epilogue cancels and joins the service afterwards. The
+    // failure was already reported, so the join does not repeat it.
+    cancellation.cancel();
+    feed.join().await.unwrap();
+    remote.shutdown.shutdown().await.unwrap();
+}

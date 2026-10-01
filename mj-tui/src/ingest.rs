@@ -957,14 +957,6 @@ impl DashboardState {
         self.quotas.insert(quota.profile_id.clone(), quota);
     }
 
-    /// Record which coding agents a look at this machine found. The Get
-    /// started panel names them, or says that none was found.
-    pub fn set_installed_agents(&mut self, mut agents: Vec<mj_core::config::HarnessKind>) {
-        agents.sort();
-        agents.dedup();
-        self.installed_agents = Some(agents);
-    }
-
     pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {
         let mut previous = std::mem::take(&mut self.capacity_details);
         self.capacity_details = targets

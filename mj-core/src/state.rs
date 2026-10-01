@@ -2381,12 +2381,28 @@ pub fn default_session_title(
     format!("{project} via {profile_id}")
 }
 
+pub const MAX_SESSION_TITLE_CHARS: usize = 256;
+
+/// Clean a title and bound it at a word boundary, including the ellipsis.
 pub fn normalize_session_title(title: &str) -> Option<String> {
     let normalized = crate::relay::strip_hidden_prompt_context(title)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    (!normalized.is_empty()).then_some(normalized)
+    (!normalized.is_empty()).then(|| truncate_session_title(normalized, MAX_SESSION_TITLE_CHARS))
+}
+
+fn truncate_session_title(title: String, maximum_chars: usize) -> String {
+    if title.chars().count() <= maximum_chars {
+        return title;
+    }
+
+    let mut truncated = title.chars().take(maximum_chars - 1).collect::<String>();
+    if let Some(boundary) = truncated.rfind(char::is_whitespace) {
+        truncated.truncate(boundary);
+    }
+    truncated.push('…');
+    truncated
 }
 
 /// Build the short-lived title shown before the harness supplies its own.
@@ -2398,19 +2414,7 @@ pub fn provisional_session_title(prompt: &str) -> Option<String> {
     const MAX_TITLE_CHARS: usize = 64;
 
     let normalized = normalize_session_title(prompt)?;
-    if normalized.chars().count() <= MAX_TITLE_CHARS {
-        return Some(normalized);
-    }
-
-    let mut truncated = normalized
-        .chars()
-        .take(MAX_TITLE_CHARS - 1)
-        .collect::<String>();
-    if let Some(boundary) = truncated.rfind(char::is_whitespace) {
-        truncated.truncate(boundary);
-    }
-    truncated.push('…');
-    Some(truncated)
+    Some(truncate_session_title(normalized, MAX_TITLE_CHARS))
 }
 
 pub fn short_id(id: &str) -> &str {

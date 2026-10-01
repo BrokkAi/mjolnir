@@ -406,11 +406,81 @@ fn publish(
     tx.send(SessionManagerUpdate { session_id, view });
 }
 
+/// Why the continuation service stopped forwarding session updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FeedEnd {
+    /// The daemon asked the service to stop.
+    Shutdown,
+    /// The session manager closed its update channel while no shutdown was
+    /// requested. The daemon stops the session manager only after it has
+    /// joined this service, so this is never part of a graceful shutdown.
+    SessionManagerStopped,
+}
+
+/// Session updates as the serving loop receives them, after the continuation
+/// service has seen them.
+///
+/// The service is the only sender on this channel and decides, at one point,
+/// why it stopped. A closed channel therefore says nothing by itself: the
+/// feed reports the service's decision instead of guessing a cause.
+pub(super) struct UpdateFeed {
+    updates: SessionManagerUpdates,
+    service: Option<tokio::task::JoinHandle<Result<FeedEnd>>>,
+}
+
+impl UpdateFeed {
+    fn new(
+        updates: SessionManagerUpdates,
+        service: tokio::task::JoinHandle<Result<FeedEnd>>,
+    ) -> Self {
+        Self {
+            updates,
+            service: Some(service),
+        }
+    }
+
+    /// The next update. `Ok(None)` means the service stopped because shutdown
+    /// was requested. An error means the session manager stopped without a
+    /// shutdown request, or the service failed. After the end is reported,
+    /// the feed stays pending. Cancel safe.
+    pub(super) async fn next(&mut self) -> Result<Option<SessionManagerUpdate>> {
+        if let Some(update) = self.updates.recv().await {
+            return Ok(Some(update));
+        }
+        let Some(service) = self.service.as_mut() else {
+            return std::future::pending().await;
+        };
+        // The service holds the only sender and drops it as it finishes, so
+        // its result is ready or about to be.
+        let end = service.await;
+        self.service = None;
+        match end.context("continuation service task failed")?? {
+            FeedEnd::Shutdown => Ok(None),
+            FeedEnd::SessionManagerStopped => bail!("controller daemon session manager stopped"),
+        }
+    }
+
+    /// Wait for the service after the daemon has cancelled it. An end that
+    /// [`Self::next`] already reported is not reported again.
+    pub(super) async fn join(self) -> Result<()> {
+        let Some(service) = self.service else {
+            return Ok(());
+        };
+        match service
+            .await
+            .context("continuation service task failed")??
+        {
+            FeedEnd::Shutdown => Ok(()),
+            FeedEnd::SessionManagerStopped => bail!("controller daemon session manager stopped"),
+        }
+    }
+}
+
 pub(super) fn spawn(
     state: Arc<RuntimeState>,
     input: SessionManagerUpdates,
     cancellation: CancellationToken,
-) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
+) -> UpdateFeed {
     let environment = Environment {
         log: match mj_core::jev::DecisionLog::open(mj_core::jev::controller_log_dir()) {
             Ok(log) => Some(log),
@@ -451,7 +521,7 @@ pub(super) fn spawn(
         },
         review: Arc::new(move |id, view| state.review_host().observe(id, view)),
     };
-    spawn_in(
+    let (updates, service) = spawn_in(
         environment,
         input,
         cancellation,
@@ -460,7 +530,8 @@ pub(super) fn spawn(
                 async move { crate::continuation::classify(&evidence, diagnostic.as_ref()).await },
             )
         }),
-    )
+    );
+    UpdateFeed::new(updates, service)
 }
 
 fn spawn_in(
@@ -468,7 +539,10 @@ fn spawn_in(
     input: SessionManagerUpdates,
     cancellation: CancellationToken,
     classifier: Classifier,
-) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
+) -> (
+    SessionManagerUpdates,
+    tokio::task::JoinHandle<Result<FeedEnd>>,
+) {
     spawn_with_gate(
         environment,
         input,
@@ -484,7 +558,10 @@ fn spawn_with_gate(
     cancellation: CancellationToken,
     classifier: Classifier,
     gate: Arc<crate::upgrade::Gate>,
-) -> (SessionManagerUpdates, tokio::task::JoinHandle<Result<()>>) {
+) -> (
+    SessionManagerUpdates,
+    tokio::task::JoinHandle<Result<FeedEnd>>,
+) {
     let (tx, rx) = coalesced_update_channel();
     let task = tokio::spawn(async move {
         let mut seen = BTreeMap::<String, Option<String>>::new();
@@ -506,10 +583,13 @@ fn spawn_with_gate(
 
         let mut generation = 0_u64;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
-        loop {
+        // The one point that decides why this service stops. Shutdown is
+        // checked first, so an input that closes once shutdown is requested
+        // still ends as a shutdown.
+        let end = loop {
             tokio::select! {
                 biased;
-                () = cancellation.cancelled() => break,
+                () = cancellation.cancelled() => break FeedEnd::Shutdown,
                 update = async {
                     loop {
                         tokio::select! {
@@ -527,7 +607,7 @@ fn spawn_with_gate(
                         }
                     }
                 } => {
-                    let Some(update) = update else { break };
+                    let Some(update) = update else { break FeedEnd::SessionManagerStopped };
                     let id = update.session_id;
                     let view = update.view;
                     latest.insert(id.clone(), view.clone());
@@ -962,11 +1042,11 @@ fn spawn_with_gate(
                     seed_after.retain(|id, _| live.contains(id));
                 }
             }
-        }
+        };
         seed_jobs.shutdown().await;
         jobs.shutdown().await;
 
-        Ok(())
+        Ok(end)
     });
     (rx, task)
 }

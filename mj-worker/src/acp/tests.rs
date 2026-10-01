@@ -1583,13 +1583,7 @@ fn live_config_finds_model_and_anvil_reasoning_effort_separately() {
 }
 
 #[test]
-fn permission_request_warning_explains_required_permission_modes() {
-    assert!(UNEXPECTED_PERMISSION_REQUEST_WARNING.contains("misconfigured"));
-    assert!(UNEXPECTED_PERMISSION_REQUEST_WARNING.contains("unconstrained"));
-}
-
-#[test]
-fn unconstrained_muse_permission_prefers_a_one_time_allow_and_never_cancels() {
+fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
     use agent_client_protocol::schema::v1::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -1604,7 +1598,7 @@ fn unconstrained_muse_permission_prefers_a_one_time_allow_and_never_cancels() {
         ],
     );
 
-    let response = muse_unconstrained_permission_response(&request).unwrap();
+    let response = unconstrained_permission_response(&request).unwrap();
     assert_eq!(
         serde_json::to_value(response).unwrap()["outcome"]["optionId"],
         "allow_once"
@@ -1619,7 +1613,7 @@ fn unconstrained_muse_permission_prefers_a_one_time_allow_and_never_cancels() {
             PermissionOptionKind::RejectOnce,
         )],
     );
-    assert!(muse_unconstrained_permission_response(&rejected_only).is_none());
+    assert!(unconstrained_permission_response(&rejected_only).is_none());
 }
 
 #[tokio::test]

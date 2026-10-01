@@ -322,7 +322,7 @@ pub(crate) struct CoalescedUpdateSender {
     producer: Option<Arc<UpdateProducer>>,
     pub(super) delegation: Option<DelegationSender>,
     pub(super) observer: Option<Arc<DelegationPublisher>>,
-    pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
+    pub(super) mailbox: Arc<Mutex<UpdateMailbox>>,
     pub(super) wake: mpsc::Sender<()>,
 }
 
@@ -348,9 +348,9 @@ impl Drop for UpdateProducer {
 }
 
 /// Bounded latest-state feed for the dashboard. At most one snapshot per
-/// session is retained while the consumer is busy.
+/// session is retained, and sessions are served in first-pending order.
 pub struct SessionManagerUpdates {
-    pub(super) pending: Arc<Mutex<BTreeMap<String, PendingUpdate>>>,
+    pub(super) mailbox: Arc<Mutex<UpdateMailbox>>,
     pub(super) wake: mpsc::Receiver<()>,
     // Keep the update owned until the consumer asks for another one. Its
     // completion edge can schedule a review or continuation in the meantime.
@@ -360,6 +360,38 @@ pub struct SessionManagerUpdates {
 pub(super) struct PendingUpdate {
     update: SessionManagerUpdate,
     work: Option<crate::upgrade::Work>,
+}
+
+#[derive(Default)]
+pub(super) struct UpdateMailbox {
+    pub(super) pending: BTreeMap<String, PendingUpdate>,
+    ready: VecDeque<String>,
+}
+
+impl UpdateMailbox {
+    fn enqueue(&mut self, pending: PendingUpdate) {
+        let session_id = pending.update.session_id.clone();
+        // Replacing a pending view keeps its place; a delivered session's
+        // next view joins the tail so it cannot overtake waiting sessions.
+        if self.pending.insert(session_id.clone(), pending).is_none() {
+            self.ready.push_back(session_id);
+        }
+    }
+
+    fn remove(&mut self, session_id: &str) {
+        if self.pending.remove(session_id).is_some() {
+            self.ready.retain(|queued| queued != session_id);
+        }
+    }
+
+    fn pop(&mut self) -> Option<PendingUpdate> {
+        let session_id = self.ready.pop_front()?;
+        Some(
+            self.pending
+                .remove(&session_id)
+                .expect("queued session update"),
+        )
+    }
 }
 
 impl CoalescedUpdateSender {
@@ -375,7 +407,7 @@ impl CoalescedUpdateSender {
             .expect("session producer registry poisoned");
         registry.insert(session_id.to_owned(), identity.clone());
         // Replacing a producer also invalidates its undelivered observation.
-        self.pending
+        self.mailbox
             .lock()
             .expect("session update coalescer poisoned")
             .remove(session_id);
@@ -408,16 +440,13 @@ impl CoalescedUpdateSender {
         if self.wake.is_closed() {
             return;
         }
-        self.pending
+        self.mailbox
             .lock()
             .expect("session update coalescer poisoned")
-            .insert(
-                update.session_id.clone(),
-                PendingUpdate {
-                    update,
-                    work: crate::upgrade::activity("session update").ok(),
-                },
-            );
+            .enqueue(PendingUpdate {
+                update,
+                work: crate::upgrade::activity("session update").ok(),
+            });
         let _ = self.wake.try_send(());
     }
 }
@@ -426,11 +455,10 @@ impl SessionManagerUpdates {
     pub(super) fn pop_pending(&mut self) -> Option<SessionManagerUpdate> {
         self.delivered_work = None;
         let pending = self
-            .pending
+            .mailbox
             .lock()
             .expect("session update coalescer poisoned")
-            .pop_first()
-            .map(|(_, update)| update)?;
+            .pop()?;
         self.delivered_work = pending.work;
         Some(pending.update)
     }
@@ -456,7 +484,7 @@ impl SessionManagerUpdates {
 }
 
 pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManagerUpdates) {
-    let pending = Arc::new(Mutex::new(BTreeMap::new()));
+    let mailbox = Arc::new(Mutex::new(UpdateMailbox::default()));
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
@@ -464,11 +492,11 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
             producer: None,
             delegation: None,
             observer: None,
-            pending: pending.clone(),
+            mailbox: mailbox.clone(),
             wake: wake_tx,
         },
         SessionManagerUpdates {
-            pending,
+            mailbox,
             wake: wake_rx,
             delivered_work: None,
         },
