@@ -404,7 +404,10 @@ impl ProfileCatalog {
                 Entry::Failed { error, .. } => bail!("{error}"),
                 Entry::Pending(_) => {}
             }
+            // Shutdown also cancels this definition; report the owning cause
+            // consistently when both tokens are ready.
             tokio::select! {
+                biased;
                 _ = self.cancellation.cancelled() => bail!("profile discovery cancelled by daemon shutdown"),
                 _ = cancellation.cancelled() => bail!("profile definition retired"),
                 result = revisions.changed() => { result.context("profile capability publisher stopped")?; }

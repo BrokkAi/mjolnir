@@ -244,6 +244,16 @@ async fn serialized_until(
             guard = lock.gate.lock() => guard,
         };
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Runtime shutdown can drop this supervisor before it polls a token.
+        // Its blocking process must still receive cancellation before the
+        // profile lock is released.
+        struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
         let job_cancelled = cancelled.clone();
         let mut task = tokio::task::spawn_blocking(move || job(job_cancelled));
         let result = tokio::select! {
@@ -947,6 +957,45 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn runtime_shutdown_cancels_a_probes_blocking_job_even_if_its_supervisor_is_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let saw_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = saw_cancellation.clone();
+        runtime.block_on(async move {
+            tokio::spawn(serialized_until(
+                "runtime-drop-test".into(),
+                CancellationToken::new(),
+                move |cancelled| {
+                    started.send(()).unwrap();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    while !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    stopped.store(
+                        cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    Ok(ProfileConfig {
+                        model: None,
+                        models: vec![],
+                        efforts: vec![],
+                        observed_at: 0,
+                    })
+                },
+            ));
+            running.await.unwrap();
+        });
+        drop(runtime);
+        assert!(saw_cancellation.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]
