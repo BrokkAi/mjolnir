@@ -2628,6 +2628,12 @@ fn bare_project_validation_checks_directory_and_git_repository() {
             .contains("does not exist or is not a directory")
     );
     assert_eq!(missing.seen.borrow().len(), 1);
+    // The reason is for the caller: it names the directory and the host, and
+    // is marked so the API answers 4xx instead of an opaque 500.
+    let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal the caller can fix");
+    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
+    assert!(refusal.message().contains("/missing"), "{refusal}");
+    assert!(refusal.message().contains(&ssh().destination), "{refusal}");
 
     let not_git = FakeExecutor {
         seen: RefCell::new(vec![]),
