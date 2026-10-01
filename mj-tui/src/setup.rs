@@ -1955,12 +1955,16 @@ impl SetupDialog {
                 ))
             }
             "effort" if value.is_null() => {
+                // Saving refuses an unset effort whenever the model offers
+                // efforts (`SubagentOptions::validate`), so "Model default" is
+                // only true once the options are known to offer none; until
+                // they arrive the field asks for a selection.
                 let requires_effort = self
                     .subagent_choices
                     .as_ref()
                     .and_then(|choices| choices.result.as_ref())
                     .and_then(|result| result.as_ref().ok())
-                    .is_some_and(|options| !options.efforts.is_empty());
+                    .is_none_or(|options| !options.efforts.is_empty());
                 Some(
                     if requires_effort {
                         "Select effort"
@@ -2031,6 +2035,7 @@ impl SetupDialog {
         if self.saving {
             return DashboardAction::None;
         }
+        let mut subagent_page = None;
         let result = config_from_draft(self.draft.clone())
             .map_err(|error| error.to_string())
             .and_then(|config| {
@@ -2046,6 +2051,9 @@ impl SetupDialog {
                         &profile.subagents
                     && choices.model.as_deref() == Some(model.as_str())
                 {
+                    // A refusal here is about this page's fields, so the
+                    // dialog opens the page that holds them.
+                    subagent_page = Some(choices.profile.clone());
                     match &choices.result {
                         Some(Ok(options)) => options.validate(&profile.subagents)?,
                         Some(Err(error)) => return Err(error.clone()),
@@ -2055,6 +2063,7 @@ impl SetupDialog {
                             );
                         }
                     }
+                    subagent_page = None;
                 }
                 config
                     .validate()
@@ -2072,6 +2081,12 @@ impl SetupDialog {
                 }
             }
             Err(error) => {
+                if let Some(profile) = subagent_page {
+                    self.editor = None;
+                    self.path = vec!["profiles".into(), profile, "subagents".into()];
+                    self.selected = 0;
+                    self.form = RefCell::new(Dialog::default());
+                }
                 self.notice = Some(error);
                 DashboardAction::None
             }

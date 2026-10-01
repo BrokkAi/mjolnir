@@ -3614,6 +3614,54 @@ fn profile_setup_edits_native_or_one_model_and_saves_policy() {
 }
 
 #[test]
+fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page() {
+    let mut dialog = SetupDialog::new(&config());
+    let page = vec!["profiles".to_owned(), "claude-1".into(), "subagents".into()];
+    dialog.draft["profiles"]["claude-1"]["subagents"] =
+        json!({"mode":"single_model","model":"chosen","effort":null});
+    dialog.path = page.clone();
+    dialog.take_subagent_choices().unwrap();
+    let effort = |dialog: &SetupDialog| {
+        let mut path = page.clone();
+        path.push("effort".into());
+        dialog.subagent_value_label(&path, &Value::Null).unwrap()
+    };
+    // The same label while the efforts load as after they arrive: the field
+    // never claims "Model default" for a value the save will refuse.
+    assert_eq!(effort(&dialog), "Select effort");
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![subagent_choice("chosen")],
+            efforts: vec![subagent_choice("low"), subagent_choice("high")],
+            unavailable: vec![],
+        }));
+    assert_eq!(effort(&dialog), "Select effort");
+
+    // Saving from another page says what is wrong where it can be fixed.
+    dialog.path = Vec::new();
+    assert!(matches!(dialog.save(), DashboardAction::None));
+    assert_eq!(dialog.path, page);
+    assert!(
+        dialog
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("Select an available effort"),
+        "{:?}",
+        dialog.notice
+    );
+
+    // A model that offers no efforts is where "Model default" is the answer.
+    dialog.subagent_choices.as_mut().unwrap().result =
+        Some(Ok(mj_core::subagent::SubagentOptions {
+            models: vec![subagent_choice("chosen")],
+            efforts: vec![],
+            unavailable: vec![],
+        }));
+    assert_eq!(effort(&dialog), "Model default");
+}
+
+#[test]
 fn profile_subagent_discovery_uses_unsaved_draft_and_rejects_stale_replies() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_settings_section("profiles", Some("claude-1"));
