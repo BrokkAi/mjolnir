@@ -1729,10 +1729,23 @@ async fn load_startup_status(session_id: String) -> Result<Option<StartStatus>> 
 }
 
 async fn load_startup_context(session_id: String) -> Result<(Option<String>, Option<StartStatus>)> {
-    let steps = blocking("read durable startup status", move || {
-        crate::database::load_latest_startup_group(&session_id)
-    })
-    .await?;
+    // The daemon's writer publishes each session's latest group with its
+    // other durable records, so a status read costs no store connection. A
+    // `mj wait` reads this on every revision it wakes for. Only a process
+    // without the writer reads the store.
+    let steps = match crate::database::committed_state()? {
+        Some(committed) => committed
+            .startup_groups
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default(),
+        None => {
+            blocking("read durable startup status", move || {
+                crate::database::load_latest_startup_group(&session_id)
+            })
+            .await?
+        }
+    };
     let group_id = steps.last().and_then(|step| step.group_id.clone());
     if let Some(step) = steps
         .iter()
@@ -2146,6 +2159,20 @@ impl SubagentBackend for ApiBackend {
         session_id: String,
     ) -> BoxFuture<'_, Result<Option<(bool, mj_core::subagent::SubagentReport)>>> {
         Box::pin(async move {
+            // As for startup status: the daemon answers from its published
+            // records, and only a process without the writer reads the store.
+            if let Some(committed) = crate::database::committed_state()? {
+                return Ok(committed.state.subagents.get(&session_id).map(|record| {
+                    (
+                        record.handback_tool,
+                        committed
+                            .subagent_reports
+                            .get(&session_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                }));
+            }
             blocking("load sub-agent report", move || {
                 let Some(record) = crate::database::load_subagent(&session_id)? else {
                     return Ok(None);

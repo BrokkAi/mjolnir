@@ -57,6 +57,8 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("host_container_sizes", "container_size", "host"),
         ("session_moves", "move", "session_id"),
         ("native_agents", "native_agent", "owner"),
+        ("startup_steps", "startup", "session_id"),
+        ("subagent_handbacks", "report", "child_session_id"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
         // an unrelated optional table. Its own read/write still reports damage.
@@ -114,6 +116,13 @@ pub struct CommittedState {
     pub state: State,
     pub moves: SnapshotMap<String, mj_core::state::MoveOperation>,
     pub native_agents: SnapshotMap<String, SnapshotMap<String, NativeAgentSummary>>,
+    /// Each session's latest startup group, keyed by session. A session with
+    /// no group has no entry. API status readers ask this record instead of
+    /// the store, and a change to it publishes a revision.
+    pub startup_groups: SnapshotMap<String, Vec<StartupDelivery>>,
+    /// Each sub-agent child's recorded report, keyed by child session. A
+    /// child with nothing recorded has no entry.
+    pub subagent_reports: SnapshotMap<String, mj_core::subagent::SubagentReport>,
 }
 
 impl CommittedState {
@@ -121,6 +130,27 @@ impl CommittedState {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
         let state = state_io::load_state_with(&transaction)?;
+        let mut startup_groups = SnapshotMap::new();
+        let session_ids = transaction
+            .prepare("SELECT DISTINCT session_id FROM startup_steps WHERE group_id IS NOT NULL")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for session_id in session_ids {
+            let group = startup::load_latest_startup_group_with(&transaction, &session_id)?;
+            if !group.is_empty() {
+                startup_groups.insert(session_id, group);
+            }
+        }
+        let mut subagent_reports = SnapshotMap::new();
+        let children = transaction
+            .prepare("SELECT child_session_id FROM subagent_handbacks")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for child in children {
+            if let Some(report) = sessions::load_subagent_report_with(&transaction, &child)? {
+                subagent_reports.insert(child, report);
+            }
+        }
         let moves = session_move::load_move_operations_with(&transaction)?
             .into_iter()
             .map(|operation| (operation.selection.session_id.clone(), operation))
@@ -149,6 +179,8 @@ impl CommittedState {
             state,
             moves,
             native_agents,
+            startup_groups,
+            subagent_reports,
         })
     }
 }
@@ -174,6 +206,8 @@ pub(super) fn finish_operation(
     let mut state = previous.state.clone();
     let mut moves = previous.moves.clone();
     let mut native_agents = previous.native_agents.clone();
+    let mut startup_groups = previous.startup_groups.clone();
+    let mut subagent_reports = previous.subagent_reports.clone();
     let mut changed_history = State::default();
     let mut changed = false;
     let mut relations = BTreeSet::new();
@@ -328,6 +362,35 @@ pub(super) fn finish_operation(
                     changed = true;
                 }
             }
+            "startup" => {
+                let group = startup::load_latest_startup_group_with(&transaction, key)?;
+                let group = (!group.is_empty()).then_some(group);
+                if startup_groups.get(key) != group.as_ref() {
+                    match group {
+                        Some(group) => {
+                            startup_groups.insert(key.clone(), group);
+                        }
+                        None => {
+                            startup_groups.remove(key);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            "report" => {
+                let report = sessions::load_subagent_report_with(&transaction, key)?;
+                if subagent_reports.get(key) != report.as_ref() {
+                    match report {
+                        Some(report) => {
+                            subagent_reports.insert(key.clone(), report);
+                        }
+                        None => {
+                            subagent_reports.remove(key);
+                        }
+                    }
+                    changed = true;
+                }
+            }
             _ => bail!("unknown committed record kind {kind}"),
         }
     }
@@ -367,6 +430,8 @@ pub(super) fn finish_operation(
         state,
         moves,
         native_agents,
+        startup_groups,
+        subagent_reports,
     }))
 }
 
@@ -430,6 +495,95 @@ mod tests {
         assert!(before.state.sessions.is_empty());
         assert_eq!(after.state.sessions["created"], record);
         assert_eq!(after.sequence, before.sequence + 1);
+    }
+
+    /// A wait reads a session's startup status and a child's report from the
+    /// published records, so every write to them must publish, keyed to the
+    /// session it changed and equal to what the store holds.
+    #[test]
+    fn startup_groups_and_subagent_reports_are_published_per_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        let owner = start_database_writer_at(&path, false).unwrap();
+        let before = owner.writer.committed_state().unwrap();
+        assert!(before.startup_groups.is_empty() && before.subagent_reports.is_empty());
+
+        owner
+            .writer
+            .execute("queue startup", |connection| {
+                connection.execute(
+                    "INSERT INTO startup_steps(session_id,group_id,command_id,step_json,phase)
+                     VALUES ('first','group-1','first:prompt','{}','pending'),
+                            ('second','group-2','second:prompt','{}','pending')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let queued = owner.writer.committed_state().unwrap();
+        assert_eq!(queued.sequence, before.sequence + 1);
+        let reader = open_reader(&path).unwrap();
+        for session in ["first", "second"] {
+            assert_eq!(
+                queued.startup_groups[session],
+                startup::load_latest_startup_group_with(&reader, session).unwrap()
+            );
+        }
+
+        let handback = mj_core::subagent::SubagentHandback {
+            command_id: "task".into(),
+            message: "the report".into(),
+            recorded_at_ms: 7,
+        };
+        let recorded = handback.clone();
+        let report_path = path.clone();
+        owner
+            .writer
+            .execute("finish one session", move |connection| {
+                connection.execute(
+                    "UPDATE startup_steps SET phase='failed',error='refused'
+                     WHERE session_id='first'",
+                    [],
+                )?;
+                sessions::record_subagent_handback_to(&report_path, "first", &recorded)?;
+                Ok(())
+            })
+            .unwrap();
+        let after = owner.writer.committed_state().unwrap();
+        assert_eq!(after.startup_groups["first"][0].phase, "failed");
+        assert_eq!(
+            after.startup_groups["first"][0].error.as_deref(),
+            Some("refused")
+        );
+        assert_eq!(
+            after.subagent_reports["first"].handback.as_ref(),
+            Some(&handback)
+        );
+        assert_eq!(
+            after.startup_groups["second"], queued.startup_groups["second"],
+            "the other session's group is untouched"
+        );
+        assert!(!after.subagent_reports.contains_key("second"));
+
+        // A writer that starts over the same store publishes the same records.
+        owner.shutdown().unwrap();
+        let owner = start_database_writer_at(&path, false).unwrap();
+        let bootstrapped = owner.writer.committed_state().unwrap();
+        assert_eq!(bootstrapped.startup_groups, after.startup_groups);
+        assert_eq!(bootstrapped.subagent_reports, after.subagent_reports);
+
+        owner
+            .writer
+            .execute("drop startup", |connection| {
+                connection.execute("DELETE FROM startup_steps WHERE session_id='first'", [])?;
+                connection.execute("DELETE FROM subagent_handbacks", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let cleared = owner.writer.committed_state().unwrap();
+        assert!(!cleared.startup_groups.contains_key("first"));
+        assert!(cleared.startup_groups.contains_key("second"));
+        assert!(cleared.subagent_reports.is_empty());
     }
 
     #[test]

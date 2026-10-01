@@ -302,12 +302,7 @@ pub(crate) fn spawn_workspace_close(
         let closing_workspace_id = workspace_id.clone();
         let work = tokio::spawn(async move {
             let mut daemon = daemon::connect_or_start().await?;
-            daemon.close_workspace(workspace_id.clone()).await?;
-            Ok(WorkspaceManagementResult {
-                entries: load_workspace_management_entries(&mut daemon).await?,
-                select_workspace: None,
-                deleted_workspace_id: Some(workspace_id),
-            })
+            daemon.close_workspace(workspace_id).await
         });
         let result = blocking_result("closing workspace", work.await);
         report(

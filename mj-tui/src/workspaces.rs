@@ -384,6 +384,14 @@ fn workspace_manager_generation(mode: &Mode) -> Option<u64> {
     }
 }
 
+fn workspace_manager_ref(mode: &Mode) -> Option<&WorkspaceManager> {
+    match mode {
+        Mode::WorkspaceManager(manager) => Some(manager),
+        Mode::Help(overlay) => workspace_manager_ref(&overlay.return_to),
+        _ => None,
+    }
+}
+
 fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
     match mode {
         Mode::WorkspaceManager(manager) => Some(manager),
@@ -545,6 +553,22 @@ impl DashboardState {
         DashboardAction::LoadWorkspaceManagement { generation }
     }
 
+    /// The visible manager's entries once the daemon has confirmed deleting
+    /// `workspace_id`, so the dialog does not wait for a second query to learn
+    /// what the confirmation already says. Empty when no manager is open.
+    pub fn workspace_entries_without(&self, workspace_id: &str) -> Vec<WorkspaceManagementEntry> {
+        workspace_manager_ref(&self.mode)
+            .map(|manager| {
+                manager
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.workspace.id != workspace_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Clear operation state even when its original dialog has been dismissed.
     pub fn workspace_close_finished(&mut self, workspace_id: &str) -> Option<u64> {
         self.closing_workspaces.remove(workspace_id);
@@ -574,15 +598,16 @@ impl DashboardState {
         &mut self,
         generation: u64,
         result: Result<Vec<WorkspaceManagementEntry>, String>,
-    ) -> bool {
+    ) -> WorkspaceManagementOutcome {
         if !self.workspace_management_is_current(generation) {
-            return false;
+            return WorkspaceManagementOutcome::ignored();
         }
         let active_workspace_id = self.active_workspace_id.clone();
         let foreground = matches!(self.mode, Mode::WorkspaceManager(_));
         let Some(manager) = workspace_manager_in_mode(&mut self.mode) else {
-            return false;
+            return WorkspaceManagementOutcome::ignored();
         };
+        let mut close_without_confirmation = false;
         match result {
             Ok(entries) => {
                 let previous_busy = manager.busy;
@@ -667,6 +692,8 @@ impl DashboardState {
                         .position(|entry| entry.workspace.id == workspace_id)
                     {
                         manager.select(index);
+                        close_without_confirmation =
+                            close && !close_needs_confirmation(&manager.entries[index]);
                         manager.open_selected_command(close);
                         manager.opened_by_shortcut = true;
                     } else {
@@ -674,6 +701,11 @@ impl DashboardState {
                     }
                 }
                 manager.sync_form();
+                let action = if close_without_confirmation {
+                    self.workspace_manager_mutation(WorkspaceMutation::Close)
+                } else {
+                    DashboardAction::None
+                };
                 if return_to_dashboard {
                     match &mut self.mode {
                         Mode::WorkspaceManager(_) => self.cancel_modal(),
@@ -681,13 +713,16 @@ impl DashboardState {
                         _ => {}
                     }
                 }
-                return foreground;
+                return WorkspaceManagementOutcome { foreground, action };
             }
             Err(error) => {
                 manager.set_error(error);
             }
         }
-        true
+        WorkspaceManagementOutcome {
+            foreground: true,
+            action: DashboardAction::None,
+        }
     }
 
     pub(crate) fn handle_workspace_manager_event(&mut self, event: Event) -> DashboardAction {
@@ -776,7 +811,13 @@ impl DashboardState {
                     return self.workspace_manager_mutation(WorkspaceMutation::Close);
                 }
                 WorkspaceControl::Delete if manager.can_mutate() => {
-                    manager.open_selected_command(true)
+                    let immediate = manager
+                        .selected_entry()
+                        .is_some_and(|entry| !close_needs_confirmation(entry));
+                    manager.open_selected_command(true);
+                    if immediate {
+                        return self.workspace_manager_mutation(WorkspaceMutation::Close);
+                    }
                 }
                 WorkspaceControl::Drafts if manager.can_mutate() => {
                     if let Some(entry) = manager.selected_entry() {
@@ -893,6 +934,32 @@ impl DashboardState {
         manager.error = None;
         manager.success = None;
         action
+    }
+}
+
+/// Whether deleting this workspace discards something the user cannot get
+/// back. `session_count` is the daemon's own count of the active sessions it
+/// refuses to delete under; detached drafts are discarded by a delete.
+fn close_needs_confirmation(entry: &WorkspaceManagementEntry) -> bool {
+    entry.workspace.session_count > 0 || !entry.drafts.is_empty()
+}
+
+/// What a workspace-management result asks of the caller.
+#[derive(Debug, PartialEq)]
+pub struct WorkspaceManagementOutcome {
+    /// Whether the result belongs to the visible manager.
+    pub foreground: bool,
+    /// Follow-up work the result started, such as deleting an empty workspace
+    /// the user asked to delete before the manager had loaded.
+    pub action: DashboardAction,
+}
+
+impl WorkspaceManagementOutcome {
+    fn ignored() -> Self {
+        Self {
+            foreground: false,
+            action: DashboardAction::None,
+        }
     }
 }
 

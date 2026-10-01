@@ -532,6 +532,10 @@ struct FakeBackend {
     event_queries: Mutex<Vec<(crate::database::ApiEventFilter, Option<u64>)>>,
     /// Sub-agent children that have handed back their reports.
     handed_back: BTreeSet<String>,
+    /// How often `turn_state` read the store.
+    turn_state_reads: std::sync::atomic::AtomicUsize,
+    /// What `subagent_report` answers; tests change it as a report lands.
+    child_report: Mutex<Option<(bool, mj_core::subagent::SubagentReport)>>,
 }
 
 impl FakeBackend {
@@ -652,7 +656,15 @@ impl SubagentBackend for FakeBackend {
         })
     }
     fn turn_state(&self, _session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>> {
+        self.turn_state_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Ok(self.next_turn_state()) })
+    }
+    fn subagent_report(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<(bool, mj_core::subagent::SubagentReport)>>> {
+        Box::pin(async { Ok(self.child_report.lock().unwrap().clone()) })
     }
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
         Box::pin(async move { Ok(self.handed_back.contains(&child_session_id)) })
@@ -840,6 +852,51 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
         connected: true,
         error: None,
     }
+}
+
+#[tokio::test]
+async fn session_detail_keeps_the_setter_configuration_while_the_snapshot_lags() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["max", "high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        snapshot.sessions[0].capabilities.set_config = true;
+        snapshot.sessions[0].config_options = crate::server::session_config_view(
+            mj_core::config::HarnessKind::Codex,
+            &live_view("slow", &["high"]).snapshot.unwrap().operational,
+        );
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::patch("/api/v1/sessions/session-1/config"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"effort","value":"max"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied = json_body(response).await;
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/session-1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail = json_body(response).await;
+    let options = detail["config_options"].as_array().unwrap();
+    for (key, current) in [("model", "flash"), ("effort", "max")] {
+        let option = options.iter().find(|option| option["key"] == key).unwrap();
+        assert_eq!(option["current"], current);
+    }
+    assert_eq!(detail["config_options"], applied["config_options"]);
 }
 
 /// A model change replaces the effort catalogue at once, while the controller
@@ -4989,4 +5046,153 @@ fn public_creation_rejects_legacy_subagent_parameters_and_boolean_policies() {
             effort: Some("high".into())
         })
     );
+}
+
+/// A live actor that has not delivered its first projection, so a wait reads
+/// the session's turn state from the store on every decision.
+fn actor_without_projection() -> ManagedSessionView {
+    ManagedSessionView {
+        snapshot: None,
+        connected: true,
+        error: None,
+    }
+}
+
+/// Copy the fixture session as a second one, which the tests' revisions
+/// change while the first is waited on.
+fn add_second_session(snapshot: &mut ViewerSnapshot) {
+    let mut other = snapshot.sessions[0].clone();
+    other.id = "session-2".into();
+    snapshot.sessions.push(other);
+}
+
+fn spawn_wait(
+    app: axum::Router,
+    body: &'static str,
+) -> tokio::task::JoinHandle<Result<Response, std::convert::Infallible>> {
+    tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/wait"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ),
+    )
+}
+
+/// The controller republishes its snapshot for every revision of any session.
+/// A waiter on an idle session must not decide again, or read the store, for
+/// a revision that leaves its own session unchanged: twenty idle `mj wait`
+/// callers beside three streaming sessions kept the daemon above two cores.
+/// It must still answer as soon as its own session asks for input.
+#[tokio::test(start_paused = true)]
+async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(actor_without_projection()),
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "prompt-1".into(),
+                accepted_ordinal: Some(5),
+                turn_start_position: 6,
+                started_at_ms: 10,
+                steered_into: None,
+            }),
+            last_turn_outcome: None,
+        })]),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), add_second_session);
+    let reads = || {
+        backend
+            .turn_state_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    super::wait::SKIPPED_WAIT_PASSES.with(|skipped| skipped.set(0));
+    let waiter = spawn_wait(app, r#"{"return_on_input":true,"timeout_secs":600}"#);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(reads(), 1, "the first pass decides");
+
+    for revision in 0..50 {
+        snapshot_tx.send_modify(|snapshot| {
+            snapshot.revision += 1;
+            snapshot.sessions[1].title = format!("streaming {revision}");
+            snapshot.sessions[1].latest_event_ordinal = revision;
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(reads(), 1, "other sessions' revisions read nothing");
+    assert_eq!(
+        super::wait::SKIPPED_WAIT_PASSES.with(std::cell::Cell::get),
+        50,
+        "every publication woke the waiter, and none needed a decision"
+    );
+    assert!(!waiter.is_finished());
+
+    snapshot_tx.send_modify(|snapshot| {
+        snapshot.revision += 1;
+        snapshot.sessions[0].pending_elicitations = vec![input_request()];
+    });
+    let response = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the waiter answers its own session's change at once")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["outcome"], "input_required");
+    assert_eq!(reads(), 2);
+}
+
+/// A child's report lands in the durable records, which republish the
+/// snapshot without changing the child's row. The waiter must decide again
+/// then, and answer with the report.
+#[tokio::test(start_paused = true)]
+async fn a_waiter_answers_when_its_child_s_report_lands() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(actor_without_projection()),
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Idle,
+            active_turn: None,
+            last_turn_outcome: Some(finished_child_turn("task")),
+        })]),
+        summary: Some(TurnSummary {
+            turn_number: 1,
+            turn_started_at_ms: 100,
+            last_changed_at_ms: 900,
+            final_message: Some("Report delivered.".into()),
+            tool_calls: 0,
+        }),
+        child_report: Mutex::new(Some((true, mj_core::subagent::SubagentReport::default()))),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        add_second_session(snapshot);
+        snapshot.sessions[0].activity_state =
+            Some(mj_core::activity::ActivityState::Idle { since_ms: None });
+    });
+    let waiter = spawn_wait(app, r#"{"turn_id":5,"timeout_secs":600}"#);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!waiter.is_finished(), "the child still owes its report");
+
+    *backend.child_report.lock().unwrap() = Some((
+        true,
+        mj_core::subagent::SubagentReport {
+            handback: Some(mj_core::subagent::SubagentHandback {
+                command_id: "task".into(),
+                message: "the full report".into(),
+                recorded_at_ms: 1,
+            }),
+            ..Default::default()
+        },
+    ));
+    snapshot_tx.send_modify(|snapshot| snapshot.revision += 1);
+    let response = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the landed report ends the wait")
+        .unwrap()
+        .unwrap();
+    let body = json_body(response).await;
+    assert_eq!(body["outcome"], "finished");
+    assert_eq!(body["final_message"], "the full report");
+    assert_eq!(body["report_source"], "handback");
 }

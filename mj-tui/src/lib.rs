@@ -89,7 +89,9 @@ pub use crate::render::sessions::{NOTICE_NAME_CELLS, fit_session_name};
 pub use crate::resume::resume_profile_placeholders;
 pub use crate::review_settings::{ReviewSettingsChoices, ReviewSettingsDiscoveryResult};
 pub use crate::setup::{DetectScope, RejectedRuntime, SetupDetection};
-pub use crate::workspaces::{WorkspaceDraftEntry, WorkspaceManagementEntry};
+pub use crate::workspaces::{
+    WorkspaceDraftEntry, WorkspaceManagementEntry, WorkspaceManagementOutcome,
+};
 pub use mj_core::workspace::{PaneSize, PaneSizes};
 
 /// One drawn row of the Sessions pane.

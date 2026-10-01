@@ -66,7 +66,9 @@ pub(crate) enum DashboardIoUpdate {
     WorkspaceClosed {
         generation: u64,
         workspace_id: String,
-        result: std::result::Result<WorkspaceManagementResult, String>,
+        /// The daemon's confirmation. The dashboard removes the workspace from
+        /// the manager it already shows instead of querying everything again.
+        result: std::result::Result<(), String>,
     },
     WorkspaceCloseCancelled {
         result: std::result::Result<(), String>,
@@ -642,10 +644,19 @@ impl DashboardContext {
                     .dashboard
                     .workspace_close_finished(&workspace_id)
                     .unwrap_or(generation);
+                let deleted = result.is_ok();
+                let result = result.map(|()| WorkspaceManagementResult {
+                    entries: self.dashboard.workspace_entries_without(&workspace_id),
+                    select_workspace: None,
+                    deleted_workspace_id: Some(workspace_id),
+                });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
                     result,
                 });
+                if deleted {
+                    self.dashboard.set_notice("Workspace deleted.");
+                }
             }
             DashboardIoUpdate::WorkspaceCloseCancelled { result } => {
                 self.dashboard.set_notice(match result {
@@ -677,9 +688,21 @@ impl DashboardContext {
                     // The TUI owns the modal generation guard. It returns
                     // whether this result still belongs to the visible
                     // manager, so a late create cannot switch another tab.
-                    let foreground = self
+                    let outcome = self
                         .dashboard
                         .finish_workspace_management(generation, Ok(entries));
+                    let foreground = outcome.foreground;
+                    if let DashboardAction::CloseWorkspace {
+                        generation,
+                        workspace_id,
+                    } = outcome.action
+                    {
+                        spawn_workspace_close(
+                            generation,
+                            workspace_id,
+                            self.dashboard_io_tx.clone(),
+                        );
+                    }
                     if foreground && let Some(workspace_id) = select_workspace {
                         self.dashboard.cancel_modal();
                         if self.known_workspace_layouts.contains(&workspace_id) {
@@ -694,6 +717,7 @@ impl DashboardContext {
                     if !self
                         .dashboard
                         .finish_workspace_management(generation, Err(error.clone()))
+                        .foreground
                     {
                         self.dashboard
                             .set_notice(format!("Workspace operation failed: {error}"));

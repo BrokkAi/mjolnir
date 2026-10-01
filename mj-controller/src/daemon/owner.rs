@@ -51,7 +51,7 @@ pub(super) struct RuntimeStateOwner {
 
 enum StoreState {
     Bootstrap,
-    Current(crate::database::CommittedState),
+    Current(Box<crate::database::CommittedState>),
     Unavailable(Arc<str>),
 }
 
@@ -145,7 +145,7 @@ impl RuntimeStateOwner {
         let before = self.controller.state.clone();
         self.controller.state = committed.state.clone();
         self.records_changed(&before);
-        self.store = StoreState::Current(committed.clone());
+        self.store = StoreState::Current(Box::new(committed.clone()));
     }
 
     fn records_changed(&mut self, before: &mj_core::state::State) {

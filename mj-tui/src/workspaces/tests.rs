@@ -551,10 +551,11 @@ fn manager_load_finishes_behind_help_and_is_restored_when_help_closes() {
     );
     assert!(matches!(&dashboard.mode, Mode::Help(_)));
 
-    assert!(!dashboard.finish_workspace_management(
-        generation,
-        Ok(vec![entry("workspace-a", "Workspace A")]),
-    ));
+    assert!(
+        !dashboard
+            .finish_workspace_management(generation, Ok(vec![entry("workspace-a", "Workspace A")]),)
+            .foreground
+    );
     assert!(matches!(
         &dashboard.mode,
         Mode::Help(overlay)
@@ -697,7 +698,9 @@ fn a_workspace_close_can_run_in_background_and_reopen_for_cancellation() {
     else {
         panic!("load");
     };
-    dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    let mut workspace = entry("a", "Example");
+    workspace.workspace.session_count = 1;
+    dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
     assert!(matches!(
         dashboard.workspace_manager_mutation(WorkspaceMutation::Close),
         DashboardAction::CloseWorkspace { .. }
@@ -839,7 +842,11 @@ fn a_rename_opened_by_shortcut_returns_to_the_dashboard_when_it_lands() {
         DashboardAction::RenameWorkspace { .. }
     ));
 
-    assert!(dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Renamed")])));
+    assert!(
+        dashboard
+            .finish_workspace_management(generation, Ok(vec![entry("a", "Renamed")]))
+            .foreground
+    );
 
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
@@ -855,10 +862,9 @@ fn a_close_opened_by_shortcut_returns_to_the_dashboard_when_it_finishes() {
     else {
         panic!("load");
     };
-    dashboard.finish_workspace_management(
-        generation,
-        Ok(vec![entry("a", "Example"), entry("b", "Other")]),
-    );
+    let mut workspace = entry("a", "Example");
+    workspace.workspace.session_count = 1;
+    dashboard.finish_workspace_management(generation, Ok(vec![workspace, entry("b", "Other")]));
     if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
         manager.sync_form();
         manager.form.get_mut().focus(WorkspaceControl::ConfirmClose);
@@ -946,4 +952,95 @@ fn workspace_title_keeps_the_ascii_glyph_and_right_side_order() {
     assert!(name < brand, "{line}");
     assert!(!line.contains('✦'), "{line}");
     println!("{line}");
+}
+
+fn draft() -> WorkspaceDraftEntry {
+    WorkspaceDraftEntry {
+        id: "draft-a".into(),
+        session_id: None,
+        source: "composer".into(),
+        saved_at: "now".into(),
+        owner_pid: None,
+    }
+}
+
+#[test]
+fn deleting_an_empty_workspace_from_its_shortcut_acts_without_confirmation() {
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_active_workspace(Some("a".into()));
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+    else {
+        panic!("load");
+    };
+    let outcome =
+        dashboard.finish_workspace_management(generation, Ok(vec![entry("a", "Example")]));
+    assert_eq!(
+        outcome.action,
+        DashboardAction::CloseWorkspace {
+            generation,
+            workspace_id: "a".into(),
+        }
+    );
+    assert!(
+        matches!(&dashboard.mode, Mode::WorkspaceManager(manager) if manager.busy == Some(WorkspaceMutation::Close)),
+        "the delete is in flight at once"
+    );
+}
+
+#[test]
+fn deleting_a_workspace_with_sessions_or_drafts_from_its_shortcut_still_asks() {
+    for (sessions, drafts) in [(2, false), (0, true)] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_active_workspace(Some("a".into()));
+        let DashboardAction::LoadWorkspaceManagement { generation } =
+            chord(&mut dashboard, crate::CommandId::CloseWorkspace)
+        else {
+            panic!("load");
+        };
+        let mut workspace = entry("a", "Example");
+        workspace.workspace.session_count = sessions;
+        if drafts {
+            workspace.drafts.push(draft());
+        }
+        let outcome = dashboard.finish_workspace_management(generation, Ok(vec![workspace]));
+        assert_eq!(outcome.action, DashboardAction::None);
+        assert!(matches!(&dashboard.mode, Mode::WorkspaceManager(manager)
+                if manager.busy.is_none() && matches!(manager.view, WorkspaceManagerView::Close { .. })));
+    }
+}
+
+#[test]
+fn the_list_delete_button_acts_at_once_only_for_an_empty_workspace() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("load");
+    };
+    let mut busy = entry("busy", "Busy");
+    busy.workspace.session_count = 1;
+    dashboard.finish_workspace_management(generation, Ok(vec![busy, entry("empty", "Empty")]));
+    let press_delete = |dashboard: &mut DashboardState, index: usize| {
+        if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+            manager.select(index);
+            manager.form.get_mut().focus(WorkspaceControl::Delete);
+        }
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    };
+    assert_eq!(press_delete(&mut dashboard, 0), DashboardAction::None);
+    assert!(matches!(
+        &dashboard.mode,
+        Mode::WorkspaceManager(manager) if matches!(manager.view, WorkspaceManagerView::Close { .. })
+    ));
+    if let Mode::WorkspaceManager(manager) = &mut dashboard.mode {
+        manager.reset_to_list();
+    }
+    assert_eq!(
+        press_delete(&mut dashboard, 1),
+        DashboardAction::CloseWorkspace {
+            generation,
+            workspace_id: "empty".into(),
+        }
+    );
 }

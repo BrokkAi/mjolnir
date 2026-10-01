@@ -1,5 +1,39 @@
 use super::*;
 
+/// Why the wait loop is running a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// The first pass, which always decides.
+    First,
+    /// Something only this session owns moved: its live actor's view, its
+    /// durable state while it has no actor, or a deadline its own report set.
+    Session,
+    /// The controller published a new viewer snapshot. It does that for every
+    /// revision of any session, so this pass decides again only when this
+    /// session's own published facts changed.
+    Published,
+}
+
+/// The published facts a wait decides from, apart from the live actor's view.
+/// Each has one owner that republishes the viewer snapshot when it changes:
+/// the session row and launch failures belong to the viewer projection, and
+/// the startup group and sub-agent report to the daemon's durable records,
+/// whose every change publishes a revision.
+#[derive(Debug, PartialEq)]
+struct WaitInputs {
+    session: ViewerSession,
+    launch_failure: Option<crate::server::ViewerLaunchFailure>,
+    start_status: Option<StartStatus>,
+    child_report: Option<(bool, mj_core::subagent::SubagentReport)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Passes the wait loop skipped because a publication left the waited
+    /// session's facts unchanged.
+    pub(super) static SKIPPED_WAIT_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) async fn wait(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -19,47 +53,89 @@ pub(super) async fn wait(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     let mut snapshot_rx = state.snapshot_rx.clone();
     let mut handle = backend.session_handle(session_id.clone()).await?;
+    // What the previous pass decided from, apart from the live actor's view.
+    // An idle waiter used to read the store again for every other session's
+    // revision, which with many waiters kept the daemon busy opening
+    // connections.
+    let mut decided: Option<WaitInputs> = None;
+    let mut observation = WaitObservation::default();
+    let mut relay = None;
+    let mut wake = Wake::First;
+    let mut report_deadline = None;
 
     loop {
         let start_status = backend.start_status(session_id.clone()).await?;
         let child_report = backend.subagent_report(session_id.clone()).await?;
-        let live = handle.as_ref().map(SessionHandle::view);
-        let relay = live.as_ref().map(RelayHealth::from);
-        let durable = match live.as_ref().and_then(|view| view.snapshot.as_ref()) {
-            Some(_) => None,
-            None => backend.turn_state(session_id.clone()).await?,
-        };
-        let (session_facts, observation) = {
+        let inputs = {
             let snapshot = snapshot_rx.borrow();
             let session = require_session_record(&snapshot, &session_id)?;
-            let mut observation = build_observation(
-                &snapshot,
-                session,
-                live.as_ref(),
-                durable.as_ref(),
-                start_status,
-            );
-            if let Some((handback_tool, report)) = &child_report {
-                observation.apply_subagent_report(
-                    *handback_tool,
-                    report,
-                    mj_core::clock::epoch_millis(),
-                );
+            let launch_failure = snapshot
+                .launch_failures
+                .iter()
+                .find(|failure| failure.session_id.as_deref() == Some(session_id.as_str()));
+            match &decided {
+                Some(decided)
+                    if wake == Wake::Published
+                        && decided.session == *session
+                        && decided.launch_failure.as_ref() == launch_failure
+                        && decided.start_status == start_status
+                        && decided.child_report == child_report =>
+                {
+                    None
+                }
+                _ => Some(WaitInputs {
+                    session: session.clone(),
+                    launch_failure: launch_failure.cloned(),
+                    start_status: start_status.clone(),
+                    child_report: child_report.clone(),
+                }),
             }
-            (ApiSession::from(session), observation)
         };
-        if let Some(decision) = resolve_wait(&observation, &request) {
-            let mut response = finish_wait(
-                &backend,
-                &session_id,
-                session_facts,
-                observation,
-                decision,
-                relay,
-            )
-            .await?;
-            response.requested_turn_id = request.turn_id;
-            return Ok(Json(response));
+        match inputs {
+            None => {
+                #[cfg(test)]
+                SKIPPED_WAIT_PASSES.with(|skipped| skipped.set(skipped.get() + 1));
+            }
+            Some(inputs) => {
+                decided = Some(inputs);
+                report_deadline = None;
+                let live = handle.as_ref().map(SessionHandle::view);
+                relay = live.as_ref().map(RelayHealth::from);
+                let durable = match live.as_ref().and_then(|view| view.snapshot.as_ref()) {
+                    Some(_) => None,
+                    None => backend.turn_state(session_id.clone()).await?,
+                };
+                let session_facts = {
+                    let snapshot = snapshot_rx.borrow();
+                    let session = require_session_record(&snapshot, &session_id)?;
+                    observation = build_observation(
+                        &snapshot,
+                        session,
+                        live.as_ref(),
+                        durable.as_ref(),
+                        start_status,
+                    );
+                    if let Some((handback_tool, report)) = &child_report {
+                        let now = mj_core::clock::epoch_millis();
+                        observation.apply_subagent_report(*handback_tool, report, now);
+                        report_deadline = reminder_grace_end(&observation, report, now);
+                    }
+                    ApiSession::from(session)
+                };
+                if let Some(decision) = resolve_wait(&observation, &request) {
+                    let mut response = finish_wait(
+                        &backend,
+                        &session_id,
+                        session_facts,
+                        observation,
+                        decision,
+                        relay,
+                    )
+                    .await?;
+                    response.requested_turn_id = request.turn_id;
+                    return Ok(Json(response));
+                }
+            }
         }
 
         let changed = async {
@@ -72,8 +148,15 @@ pub(super) async fn wait(
                 None => tokio::time::sleep(STOPPED_POLL_INTERVAL).await,
             }
         };
+        let report_due = async {
+            match report_deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
-            () = changed => {}
+            () = changed => wake = Wake::Session,
+            () = report_due => wake = Wake::Session,
             // A closed snapshot channel means the control loop that publishes
             // session facts is gone. Ignoring the error would spin this loop,
             // because a closed watch reports "changed" immediately and forever.
@@ -83,48 +166,18 @@ pub(super) async fn wait(
                         "the controller stopped publishing session state",
                     ));
                 }
+                wake = Wake::Published;
             }
             () = tokio::time::sleep_until(deadline) => {
                 let snapshot = snapshot_rx.borrow();
                 let session = require_session_record(&snapshot, &session_id)?;
-                return Ok(Json(WaitResponse {
-                           diagnostic: None,
-                    pending_elicitations: Vec::new(),
-                    usage: None,
-                    outcome: WaitOutcome::Timeout,
-                    stop_reason: None,
-                    // A caller that times out has to decide what to do next,
-                    // and the one fact that bears on it is whether the harness
-                    // is still saying anything. Mjolnir will not end the turn
-                    // for silence on its own, so it reports the silence here
-                    // and leaves `mj interrupt-turn` to the caller.
-                    message: Some(match session
-                        .activity_state
-                        .as_ref()
-                        .and_then(|state| {
-                            mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
-                        }) {
-                        Some(note) => format!(
-                            "the turn was still running after {timeout} seconds, with {note}"
-                        ),
-                        None => format!("the turn was still running after {timeout} seconds"),
-                    }),
-                    final_message: None,
-                    report_source: None,
-                    turn_id: request.turn_id.or_else(|| {
-                        observation.active_turn.as_ref().and_then(|turn| turn.accepted_ordinal)
-                    }),
-                    requested_turn_id: request.turn_id,
-                    turn_number: None,
-                    elapsed_ms: None,
-                    tool_calls: None,
-                    capacity_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
-                    server_retry: observation.capacity_retry.as_ref().map(WaitCapacityRetry::from),
-                    retry_assessment_pending: observation.retry_assessment_pending,
-                    quota_recovery: observation.quota_recovery.clone(),
+                return Ok(Json(timeout_response(
+                    session,
+                    &observation,
+                    &request,
+                    timeout,
                     relay,
-                    session: ApiSession::from(session),
-                }));
+                )));
             }
             () = state.shutdown.cancelled() => {
                 return Err(ApiFailure::unavailable("the server is shutting down"));
@@ -135,7 +188,87 @@ pub(super) async fn wait(
         // forever.
         if handle.as_ref().is_some_and(SessionHandle::is_stopped) {
             handle = backend.session_handle(session_id.clone()).await?;
+            wake = Wake::Session;
         }
+    }
+}
+
+/// When a child's pending report stops waiting on the reminder it was sent.
+/// Inside the grace period the report is still owed; after it, the turn's last
+/// message stands, and nothing is republished at that moment.
+fn reminder_grace_end(
+    observation: &WaitObservation,
+    report: &mj_core::subagent::SubagentReport,
+    now_ms: i64,
+) -> Option<tokio::time::Instant> {
+    let pending_for = observation.report_pending_for.as_deref()?;
+    let reminder = report
+        .reminder
+        .as_ref()
+        .filter(|reminder| reminder.for_command_id == pending_for)?;
+    let remaining = reminder
+        .sent_at_ms
+        .saturating_add(mj_core::subagent::HANDBACK_REMINDER_GRACE_MS)
+        .saturating_sub(now_ms);
+    // A grace that has already run out leaves the report pending only while
+    // the reminder turn runs, and that turn's end is the actor's own change.
+    let remaining = u64::try_from(remaining).ok().filter(|&ms| ms > 0)?;
+    // One millisecond past the end, so the next pass reads it as over.
+    Some(tokio::time::Instant::now() + Duration::from_millis(remaining + 1))
+}
+
+fn timeout_response(
+    session: &ViewerSession,
+    observation: &WaitObservation,
+    request: &WaitRequest,
+    timeout: u64,
+    relay: Option<RelayHealth>,
+) -> WaitResponse {
+    WaitResponse {
+        diagnostic: None,
+        pending_elicitations: Vec::new(),
+        usage: None,
+        outcome: WaitOutcome::Timeout,
+        stop_reason: None,
+        // A caller that times out has to decide what to do next, and the one
+        // fact that bears on it is whether the harness is still saying
+        // anything. Mjolnir will not end the turn for silence on its own, so
+        // it reports the silence here and leaves `mj interrupt-turn` to the
+        // caller.
+        message: Some(
+            match session.activity_state.as_ref().and_then(|state| {
+                mj_core::activity::silence_note(state, mj_core::clock::epoch_millis())
+            }) {
+                Some(note) => {
+                    format!("the turn was still running after {timeout} seconds, with {note}")
+                }
+                None => format!("the turn was still running after {timeout} seconds"),
+            },
+        ),
+        final_message: None,
+        report_source: None,
+        turn_id: request.turn_id.or_else(|| {
+            observation
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.accepted_ordinal)
+        }),
+        requested_turn_id: request.turn_id,
+        turn_number: None,
+        elapsed_ms: None,
+        tool_calls: None,
+        capacity_retry: observation
+            .capacity_retry
+            .as_ref()
+            .map(WaitCapacityRetry::from),
+        server_retry: observation
+            .capacity_retry
+            .as_ref()
+            .map(WaitCapacityRetry::from),
+        retry_assessment_pending: observation.retry_assessment_pending,
+        quota_recovery: observation.quota_recovery.clone(),
+        relay,
+        session: ApiSession::from(session),
     }
 }
 
