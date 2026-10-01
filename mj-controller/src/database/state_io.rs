@@ -103,7 +103,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
 /// first, as `load_state` reads them. A dashboard reads this again when a
 /// wizard opens, since sessions created after it started add to the history.
 pub fn load_mount_history() -> Result<BTreeMap<String, Vec<PathBuf>>> {
-    read_mount_history(&open_reader(&database_path())?)
+    read_mount_history(&*open_reader(&database_path())?)
 }
 
 pub(super) fn read_mount_history(

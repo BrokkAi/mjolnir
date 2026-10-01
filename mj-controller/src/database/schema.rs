@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::OpenFlags;
+use std::collections::HashMap;
 
 const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
@@ -148,34 +149,171 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
 /// Client processes use this path so an accidental write fails locally
 /// instead of competing with the daemon's writer.
 #[cfg(not(test))]
-pub(super) fn open_reader(path: &Path) -> Result<Connection> {
+pub(super) fn open_reader(path: &Path) -> Result<Reader> {
     open_reader_strict(path)
 }
 
 #[cfg(test)]
-pub(super) fn open_reader(path: &Path) -> Result<Connection> {
+pub(super) fn open_reader(path: &Path) -> Result<Reader> {
     // Path-taking database helpers are migration fixtures in unit tests: they
     // intentionally open old or not-yet-created schemas. Production query
     // entry points compile against the strict reader above. The connection is
     // writable but keeps SQLite's DEFERRED default, so a fixture read does not
-    // take the write lock.
-    open_writable(path)
+    // take the write lock. It is never pooled.
+    Ok(Reader {
+        connection: Some(open_writable(path)?),
+        home: None,
+    })
 }
 
+/// Idle read-only connections kept per database file. Each new connection
+/// parses the whole schema on its first query, which cost about 8 ms of CPU;
+/// a daemon serving many readers spent most of its time doing that.
+const IDLE_READERS_PER_STORE: usize = 8;
+
+/// Which file a connection was opened on. A pooled connection is handed out
+/// again only while the path still names that file, so a store that was
+/// removed and created again under the same path is never read through a
+/// connection to the old one. The idle connection keeps the old file open, so
+/// a new file cannot be given its inode. Elsewhere than Unix, SQLite's own
+/// sharing mode keeps an open store from being replaced, so the path alone
+/// identifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoreIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl StoreIdentity {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Some(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Some(Self {})
+        }
+    }
+}
+
+struct IdleReader {
+    connection: Connection,
+    identity: StoreIdentity,
+}
+
+/// The one owner of this process's read-only store connections.
+fn idle_readers() -> &'static Mutex<HashMap<PathBuf, Vec<IdleReader>>> {
+    static IDLE: OnceLock<Mutex<HashMap<PathBuf, Vec<IdleReader>>>> = OnceLock::new();
+    IDLE.get_or_init(Mutex::default)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Read-only connections this thread opened rather than reused.
+    static OPENED_READERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A read-only store connection. Dropping it returns the connection to the
+/// idle set for its store, unless it is still inside a transaction.
+pub(super) struct Reader {
+    connection: Option<Connection>,
+    home: Option<(PathBuf, StoreIdentity)>,
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Reader")
+            .field("home", &self.home)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for Reader {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.connection.as_ref().expect("reader connection is held")
+    }
+}
+
+impl std::ops::DerefMut for Reader {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.connection.as_mut().expect("reader connection is held")
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        let (Some(connection), Some((path, identity))) = (self.connection.take(), self.home.take())
+        else {
+            return;
+        };
+        if !connection.is_autocommit() {
+            return;
+        }
+        let mut idle = idle_readers()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let readers = idle.entry(path).or_default();
+        if readers.len() < IDLE_READERS_PER_STORE {
+            readers.push(IdleReader {
+                connection,
+                identity,
+            });
+        }
+    }
+}
+
+/// A read-only connection to `path`, reused when one is idle. Every checkout
+/// checks the store's schema compatibility again, as a new connection did, so
+/// a store that another build migrated is refused just the same. On a
+/// connection that has already parsed the schema that check is a few small
+/// queries; SQLite parses the schema again itself if it changed.
 #[cfg_attr(test, allow(dead_code))]
-fn open_reader_strict(path: &Path) -> Result<Connection> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("open Mjolnir database read-only {}", path.display()))?;
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA query_only = ON;",
-    )?;
+fn open_reader_strict(path: &Path) -> Result<Reader> {
+    let identity = StoreIdentity::of(path);
+    let reused = identity.and_then(|identity| {
+        let mut idle = idle_readers()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let readers = idle.get_mut(path)?;
+        // A connection to a file the path no longer names is dropped here.
+        readers.retain(|reader| reader.identity == identity);
+        readers.pop().map(|reader| reader.connection)
+    });
+    let connection = match reused {
+        Some(connection) => connection,
+        None => {
+            let connection = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .with_context(|| format!("open Mjolnir database read-only {}", path.display()))?;
+            #[cfg(test)]
+            OPENED_READERS.with(|opened| opened.set(opened.get() + 1));
+            connection.busy_timeout(Duration::from_secs(5))?;
+            connection.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA query_only = ON;",
+            )?;
+            connection
+        }
+    };
     read_schema_state(&connection)?.ensure_supported()?;
-    Ok(connection)
+    Ok(Reader {
+        connection: Some(connection),
+        home: identity.map(|identity| (path.to_owned(), identity)),
+    })
 }
 
 /// Databases this process has already migrated. A controller owns its store
@@ -2062,6 +2200,106 @@ mod reader_tests {
                 Some(rusqlite::ErrorCode::ReadOnly)
             ),
             "unexpected mutation error: {error}"
+        );
+    }
+
+    fn opened_readers() -> usize {
+        OPENED_READERS.with(std::cell::Cell::get)
+    }
+
+    fn has_workspace(reader: &Connection, name: &str) -> bool {
+        reader
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn add_workspace(path: &Path, name: &str) {
+        open_writer(path)
+            .unwrap()
+            .execute(
+                "INSERT INTO workspaces(workspace_id, name, name_key, created_at, last_opened_at)
+                 VALUES (?1, ?1, ?1, 'now', 'now')",
+                [name],
+            )
+            .unwrap();
+    }
+
+    /// Reads reuse an idle connection instead of opening one and parsing the
+    /// schema again, and still see every write committed since.
+    #[test]
+    fn strict_readers_are_reused_and_see_later_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        drop(open_writer(&path).unwrap());
+        let before = opened_readers();
+        assert!(!has_workspace(&open_reader_strict(&path).unwrap(), "later"));
+        add_workspace(&path, "later");
+        for _ in 0..20 {
+            assert!(has_workspace(&open_reader_strict(&path).unwrap(), "later"));
+        }
+        assert_eq!(
+            opened_readers() - before,
+            1,
+            "one connection served every read"
+        );
+
+        // Two readers at once need two connections; both are kept afterwards.
+        let first = open_reader_strict(&path).unwrap();
+        let second = open_reader_strict(&path).unwrap();
+        drop((first, second));
+        assert_eq!(opened_readers() - before, 2);
+        drop(open_reader_strict(&path).unwrap());
+        drop(open_reader_strict(&path).unwrap());
+        assert_eq!(opened_readers() - before, 2);
+
+        // A connection given back inside a transaction is not reused.
+        let reader = open_reader_strict(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        drop(reader);
+        let (first, second) = (
+            open_reader_strict(&path).unwrap(),
+            open_reader_strict(&path).unwrap(),
+        );
+        assert!(first.is_autocommit() && second.is_autocommit());
+        assert_eq!(opened_readers() - before, 3);
+    }
+
+    /// An idle connection must not outlive the store it was opened on, and
+    /// must not hide a migration another build made while it sat idle.
+    #[test]
+    fn idle_readers_follow_store_replacement_and_schema_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        drop(open_writer(&path).unwrap());
+        add_workspace(&path, "old store");
+        drop(open_reader_strict(&path).unwrap());
+
+        for suffix in ["", "-wal", "-shm"] {
+            let file = PathBuf::from(format!("{}{suffix}", path.display()));
+            if file.exists() {
+                fs::remove_file(file).unwrap();
+            }
+        }
+        forget_verified_schema(&path);
+        drop(open_writer(&path).unwrap());
+        add_workspace(&path, "new store");
+        let reader = open_reader_strict(&path).unwrap();
+        assert!(has_workspace(&reader, "new store"));
+        assert!(!has_workspace(&reader, "old store"));
+        drop(reader);
+
+        drop(open_reader_strict(&path).unwrap());
+        stamp_schema_version(&path, SCHEMA_VERSION + 1);
+        let error = open_reader_strict(&path).unwrap_err();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<StoreSchemaMismatch>().is_some()),
+            "a reused connection checks compatibility like a new one: {error:#}"
         );
     }
 }

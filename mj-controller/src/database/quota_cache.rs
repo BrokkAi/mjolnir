@@ -2,7 +2,7 @@ use super::*;
 use crate::quota::ProfileQuota;
 
 pub(crate) fn load_quota_cache(identity: &str) -> Result<Option<ProfileQuota>> {
-    load(&open_reader(&database_path())?, identity)
+    load(&*open_reader(&database_path())?, identity)
 }
 
 fn load(connection: &Connection, identity: &str) -> Result<Option<ProfileQuota>> {
