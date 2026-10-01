@@ -3768,6 +3768,46 @@ fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
     assert!(!refusal.contains("close"), "{refusal}");
 }
 
+/// W-2: a failed Move that holds the session's environment withdraws
+/// Resume, and the refusal says why and what to do instead, rather than
+/// claiming an operation is running.
+#[test]
+fn a_resume_refused_for_a_move_held_environment_names_the_move() {
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let mut session = snapshot.sessions[0].clone();
+    session.lifecycle = ViewerLifecycleCategory::Failed;
+    session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        operation_id: "move-a".into(),
+        source_profile_id: "destination".into(),
+        source_target_template_id: "destination".into(),
+        destination_profile_id: "fake".into(),
+        destination_target_template_id: "localhost".into(),
+        phase: "failed".into(),
+        queue: "discard".into(),
+        clear_resource_allocation: false,
+        source_additional_mounts: Vec::new(),
+        source_resource_allocation: None,
+        destination_additional_mounts: Vec::new(),
+        destination_resource_allocation: None,
+        checkpoint_retained: true,
+        environment_retained: true,
+        destination_ready: false,
+        queue_admission_started: false,
+        queue_admission_finished: false,
+    });
+    let refusal = resume_refusal(&session);
+    assert!(
+        refusal.contains("retry the Move to fake / localhost"),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("operation running"), "{refusal}");
+    session.move_recovery.as_mut().unwrap().checkpoint_retained = false;
+    let refusal = resume_refusal(&session);
+    assert!(refusal.contains("destroy the session"), "{refusal}");
+    assert!(!refusal.contains("retry the Move"), "{refusal}");
+}
+
 /// Launch finding R6-1: `mj resume` on a session with no checkpoint was
 /// accepted, and the daemon's resume then failed with "session has no
 /// checkpoint" where the caller never saw it. The API now refuses it at once,
