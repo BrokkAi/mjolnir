@@ -17,6 +17,7 @@ pub(super) struct ViewerPublication {
     pub(super) dirty: BTreeSet<String>,
     project_dirty: BTreeSet<String>,
     pub(super) inputs_changed: bool,
+    engines: InstalledEngines,
 }
 
 impl ViewerPublication {
@@ -159,6 +160,7 @@ impl ViewerPublication {
                 ids: &self.dirty,
                 children: &self.children,
             }),
+            &mut self.engines,
         );
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {
