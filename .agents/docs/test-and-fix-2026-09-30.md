@@ -169,3 +169,34 @@ Findings, with verdicts:
 - **P-1** (rough, product): moving a sized container session to a bare target fails with "bare targets have fixed host resources" and does not name `--clear-resources`. Sonnet fix.
 
 Runbook errors: `--model claude-sonnet-5-5` is refused; use `sonnet`. Container targets need a configured bundle (no `--project-directory`), and the project needs a network `origin` whose default branch exists locally. The wizard's project picker lists the user's real projects from discovery (see M-1).
+
+### Track X (Codex Luna on precision-3260 and morannon-raw, `codex3`) — done
+
+Passed: doctor and the Build cache page (one shared budget; copied `max_size`/`target_max_size` kept in the file and ignored without a warning); remote launch on both hosts in about 30 s; ten idle minutes with one persistent `worker proxy` ssh per session and no new connections; an in-place Move on morannon kept the workspace, dirty state and policy, and a prompt sent mid-Move was refused (409), never run at the source; the dashboard Move dialog shows per-target blockers; suspend/resume kept HEAD, status, stash and diff; Single model with Luna from Settings; a localhost child with `mj usage --parent`; usage, transcript, diff on a remote session; destroy cleans the remote directories.
+
+Findings, with verdicts:
+
+- **X-7** (blocks, product): a Single-model child of a session on a bare SSH target crashed the daemon ("database publication failed after save_subagent_session … bare SSH target locator must be a safe path ending in the session id"), and every later start refused the store. `borrowed_locator` gives the child the parent's workspace with `worker_id` = child (since 2e66d14f), but state validation required the workspace to end in the row's own id. Fixed by the coordinator (`70c93757`): validation follows `worker_id` as cleanup already does; such stores load again.
+- **X-6** (wrong, product): the effort chosen at creation (`--effort low`) reads `high` after suspend and resume; the model is kept. Sonnet fix.
+- **X-8** (wrong or upstream): `mj interrupt-turn` on a Codex turn leaves its running command (`bwrap`/`codex-linux-sandbox`/`python3`) alive until it ends by itself. Sonnet investigation.
+- **X-1** (rough): `--project-directory` missing on the remote answers 500. **X-2** (rough): empty `purpose=` stage lines; routine GitHub token sync logged at WARN. **X-5** (rough): Single model with no effort chosen shows "Model default" and then Save is refused on the top-level page. **X-9** (rough): resume on a machine whose host changed answers a bare 400. Fix wave S3.
+- **X-4** is T-3. **X-10** (turn ordinal in `mj prompt`) is the 09-29 F24 decision; no change. **X-3** (worker roots ignore `workspace_prefix`): as M recorded; isolation rests on instance-stamped ownership markers (`recovery_scan.rs`), not on directories.
+
+Runbook errors: a bare SSH target takes a project path that exists on the remote host (nothing is uploaded); a bare SSH session cannot Move to another machine by design ("resume it there"), so the cross-machine and mid-transfer missions were not reachable; Git-ignored files do not travel through suspend/resume (documented). The worker continued on a sibling instance `tf3-x2` after X-7.
+
+### Track L (localhost, real Claude, `claude2`) — done
+
+Passed: `all-models` refused (CLI parser; API 422) with nothing provisioned; native, single-model, none and the profile default give the documented tool sets; a Haiku child's result reached the parent and `mj usage --parent` kept the tree's totals after the child was destroyed; with the daemon stopped for 135 s the spawn answered "Mjolnir has not picked up this request … do not repeat it" and exactly one child ran later (dfd2e320); Plan mode returns Guardian to `auto`; `mj set-config --key mode --value auto`; `mj stop-task` for one and `--all`; the mj skill names the instance's own config path and a theme edit reaches the dashboard; startup preview row persists from the first frame; six parallel `mj new` all succeed with one waiting line each.
+
+Findings, with verdicts:
+
+- **L-1** is M-1. Fixed (`b1de7d1a`, cherry-picked from the M-1 agent): `discover_local` (a6b741a1) also wrote each discovered project into `config.toml` as a bundle; it now stores only the catalog project and location. The web managed-target "Saved projects" list reads config bundles, so it no longer lists discovered projects the user never saved.
+- **L-2** (question for the user): leaving Plan mode returns to `auto` even when the mode before Plan was `bypassPermissions` or `acceptEdits` set through `mj set-config`.
+- **L-3** (by design): `mj wait` keeps waiting after a turn that started a long background task, because Jev judged the work unfinished; matches "honoring expected continuation".
+- **L-4** (wrong, product): the create-session 429 lacks `running_actions`/`action_limit`, so the CLI prints its no-count line (1d1ff6dc not met there). Fix wave S3.
+
+Runbook errors: model ids are `sonnet` and `haiku`; Haiku offers no efforts; `mj set-config` takes `--key`/`--value`; no `--queue` on `mj new`/`mj prompt`; Claude answers with AskUserQuestion unless told to use no tools. The worker once ran a read-only `mj sessions` without `MJ_INSTANCE`.
+
+### Track U2 (upgrade from the v2.24.0 release) — done
+
+Passed on a fake lab and on a real Claude instance: the v2.24.0 daemon (protocol 44, schema 65) was replaced within 2 s; "database migrations applied from_revision=65 to_revision=69" at INFO; a mid-turn reply and a first-prompt turn crossing the handover each ran once; idle workers replaced at idle, the busy one after its turn; suspended session resumed; `mj usage` on every session; the 2.24.0 client against the upgraded daemon refuses with "the daemon uses a newer protocol (49) than this client (44)…" and leaves the daemon and store untouched; a real Claude turn 49 s into a 60 s sleep finished once across the handover. Observation: `mj usage` printed "model unknown; effort unknown:" with a dangling colon (fix wave S3).
