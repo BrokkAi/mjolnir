@@ -761,6 +761,7 @@ pub(crate) enum Mode {
     ChangedFiles(ChangedFilesDialog),
     /// The last notices the footer showed, newest first.
     NoticeLog(NoticeLogDialog),
+    SessionCpuReport(dialogs::SessionCpuReportDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
@@ -1022,6 +1023,8 @@ pub struct DashboardState {
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
     subagent_parent_id: Tracked<Option<String>>,
     pub(crate) native_agents: Tracked<BTreeMap<String, native_agents::NativeAgentPane>>,
+    pub(crate) session_cpu:
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
     pub(crate) native_sources:
         mj_core::snapshot_map::SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
@@ -1095,6 +1098,7 @@ mod dashboard_standby;
 mod dashboard_workspaces;
 pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
+mod session_cpu_report;
 mod stopped_subagents;
 
 impl DashboardState {
@@ -1211,6 +1215,7 @@ impl DashboardState {
             active_workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned()).into(),
             subagent_parent_id: Default::default(),
             native_agents: Default::default(),
+            session_cpu: Default::default(),
             native_sources: Default::default(),
             stopped_subagents: BTreeMap::new(),
             stopped_by_suspend: StoppedBySuspend::default(),

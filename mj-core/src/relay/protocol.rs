@@ -94,6 +94,8 @@ pub enum RelayRequest {
     InstallProjectMemorySnapshot {
         snapshot: ProjectMemorySnapshot,
     },
+    /// Connection-only CPU measurement; never journaled.
+    CpuUsage,
     /// Report non-secret metadata for this session's harness credentials.
     /// The runtime handles credential requests on the connection and never
     /// passes them through the durable relay.
@@ -299,6 +301,7 @@ impl RelayRequest {
             Self::AttachmentPresent { .. } => "attachment_present",
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
+            Self::CpuUsage => "cpu_usage",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
             Self::InstallCredentials { .. } => "install_credentials",
@@ -324,6 +327,7 @@ impl RelayRequest {
     /// non-steering turn cancellation in 7.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
@@ -450,6 +454,9 @@ pub enum RelayResponsePayload {
     ProjectMemorySnapshotInstalled,
     /// Fingerprint and freshness of a session's harness credentials. Neither
     /// value is secret.
+    CpuUsage {
+        usage: Option<crate::cpu_usage::SessionCpuUsage>,
+    },
     CredentialState {
         present: bool,
         fingerprint: String,

@@ -81,6 +81,7 @@ impl DashboardState {
                 &[
                     ("Runtimes…", CommandId::ManageTargets),
                     ("Machines…", CommandId::ManageMachines),
+                    ("CPU by session…", CommandId::SessionCpuReport),
                 ],
             ),
             SupportPane::Quota => (2, "Profiles", &[("Settings…", CommandId::ManageProfiles)]),
@@ -885,9 +886,12 @@ mod tests {
                 .iter()
                 .map(|(label, _)| label.as_str())
                 .collect();
-            let expected: Vec<&str> = std::iter::once("Refresh")
+            let mut expected: Vec<&str> = std::iter::once("Refresh")
                 .chain(settings.iter().map(|(label, _, _)| *label))
                 .collect();
+            if name == "Targets" {
+                expected.push("CPU by session…");
+            }
             assert_eq!(labels, expected, "{name}");
             for (row, label) in (0..).zip(&expected) {
                 let (x, y) = entry(popup, row);
@@ -1039,5 +1043,31 @@ mod tests {
                 drawn(&mut d, 140, 40);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cpu_menu_tests {
+    use super::*;
+    use crate::test_support::*;
+    #[test]
+    fn choosing_cpu_by_session_in_the_targets_menu_opens_and_closes_the_report() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.dispatch_command(CommandId::TargetsMenu);
+        let index = dashboard
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|(label, _)| label == "CPU by session…")
+            .unwrap();
+        dashboard.handle_pane_menu_event(Event::Key(key(KeyCode::Char(
+            char::from_digit((index + 1) as u32, 10).unwrap(),
+        ))));
+        assert!(matches!(dashboard.mode, Mode::SessionCpuReport(_)));
+        assert!(dashboard.pane_menu.is_none());
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 }

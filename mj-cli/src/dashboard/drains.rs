@@ -258,13 +258,8 @@ impl DashboardContext {
         let Some(update) = latest else {
             return;
         };
-        // Watch receivers can be primed with revision zero and later receive
-        // the same revision during startup. Accept that first snapshot, but
-        // never let an older daemon response roll a completed operation back.
-        if update.revision < self.runtime_state_revision {
-            return;
-        }
-        self.runtime_state_revision = update.revision;
+        // The serialized runtime feed owns ordering through incarnation-scoped
+        // cursors. A replacement daemon's revision can start below the old one.
         let removed_layouts = self
             .known_workspace_layouts
             .iter()
@@ -309,6 +304,7 @@ impl DashboardContext {
         );
         self.dashboard
             .set_native_agent_snapshot(update.native_agents);
+        self.dashboard.set_session_cpu(update.session_cpu);
         self.dashboard.set_move_snapshot(update.moves);
         self.apply_runtime_lifecycles(update.lifecycles);
     }

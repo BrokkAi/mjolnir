@@ -55,6 +55,7 @@ pub(super) async fn run_session_actor(
 ) {
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
+    let mut next_cpu_read = tokio::time::Instant::now();
     let mut last_recovery_probe = None;
     let mut lifecycle = ActorLifecycle::default();
     let mut deferred_submits: VecDeque<DeferredSubmit> = VecDeque::new();
@@ -160,7 +161,38 @@ pub(super) async fn run_session_actor(
                 if lifecycle.is_leased() {
                     continue;
                 }
-                let result = sync_actor_connection(&target, &mut connection).await;
+                let result = async {
+                    let snapshot = sync_actor_connection(&target, &mut connection).await?;
+                    let now = tokio::time::Instant::now();
+                    if now >= next_cpu_read {
+                        next_cpu_read = now + Duration::from_secs(10);
+                        let result = connection
+                            .as_mut()
+                            .expect("synced connection")
+                            .cpu_usage()
+                            .await;
+                        let value = match result {
+                            Ok(Some(usage)) => {
+                                Some(mj_client::runtime_feed::SessionCpuView::Measured { usage })
+                            }
+                            Ok(None) => None,
+                            Err(error) if is_final_rejection(&error) => {
+                                Some(mj_client::runtime_feed::SessionCpuView::Unavailable {
+                                    reason: error
+                                        .downcast_ref::<RelayRejected>()
+                                        .expect("worker error")
+                                        .0
+                                        .message
+                                        .clone(),
+                                })
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        updates.publish_cpu(&target.session_id, value);
+                    }
+                    Ok(snapshot)
+                }
+                .await;
                 match result {
                     Ok(snapshot) => {
                         failures = 0;
@@ -180,6 +212,7 @@ pub(super) async fn run_session_actor(
                     }
                     Err(error) => {
                         connection = None;
+                        updates.publish_cpu(&target.session_id, None);
                         failures = failures.saturating_add(1);
                         // A projection integrity failure repeats on every
                         // retry, so report it at once rather than waiting for

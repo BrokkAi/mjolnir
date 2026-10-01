@@ -4640,6 +4640,7 @@ fn credential_requests_cannot_enter_durable_relay_state() {
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
 
     for (request_id, request) in [
+        ("cpu-usage", RelayRequest::CpuUsage),
         ("credential-state", RelayRequest::CredentialState),
         ("read-credentials", RelayRequest::ReadCredentials),
         (

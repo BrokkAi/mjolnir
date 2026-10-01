@@ -249,6 +249,36 @@ pub(super) async fn run_daemon_runtime(
         cancellation.clone(),
     );
 
+    // CPU publication is bounded and reconstructed from workers. It holds no
+    // admission during handoff and exits with the daemon's cancellation token.
+    let cpu_publication = {
+        let mut receiver = manager.session_cpu;
+        let state = state.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let mut next_publication = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    changed = receiver.changed() => {
+                        if changed.is_err() {
+                            tracing::error!("session CPU publication channel closed");
+                            return;
+                        }
+                    }
+                }
+                // Publish the first update promptly, then coalesce other actors'
+                // updates. A separate polling phase adds a needless ten seconds.
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = tokio::time::sleep_until(next_publication) => {}
+                }
+                receiver.borrow_and_update();
+                state.publish_revision();
+                next_publication = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
+        })
+    };
     let project_catalog = tokio::spawn(state.projects().run(cancellation.child_token()));
 
     let target_refresh = spawn_manager_target_refresher(
@@ -443,6 +473,7 @@ pub(super) async fn run_daemon_runtime(
             cancellation.clone(),
             state.clone(),
             SessionManagerChannels {
+                session_cpu: remote.control.session_cpu.clone(),
                 targets: remote.targets,
                 control: remote.control,
                 updates: remote.updates,
@@ -693,6 +724,11 @@ pub(super) async fn run_daemon_runtime(
             .map_err(anyhow::Error::msg),
     );
     epilogue.record(
+        &mut outcome,
+        "join CPU publication",
+        cpu_publication.await.map_err(anyhow::Error::from),
+    );
+    record_daemon_cleanup(
         &mut outcome,
         "join project discovery",
         project_catalog.await.map_err(anyhow::Error::from),

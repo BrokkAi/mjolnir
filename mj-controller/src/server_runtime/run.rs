@@ -85,6 +85,7 @@ pub(crate) async fn run_server(
     let (background_task_stop_tx, mut background_task_stop_rx) =
         tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
     let SessionManagerChannels {
+        session_cpu: _,
         targets: _,
         control: worker_commands_tx,
         updates: mut worker_updates_rx,

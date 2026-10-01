@@ -28,7 +28,7 @@ use ratatui::layout::Rect;
 use crate::dialogs::{
     ChangedFilesDialog, ConfigIdEditor, ConfirmDialog, ContainerEditor, DialogControl,
     ImportBundleConfirmation, ImportProgress, NoticeLogDialog, RenameEditor,
-    RepositoryOriginDialog, TargetActionsDialog, WebDialog,
+    RepositoryOriginDialog, SessionCpuReportDialog, TargetActionsDialog, WebDialog,
 };
 use crate::help::HelpOverlay;
 use crate::palette::{CommandPalette, PaletteControl};
@@ -143,6 +143,16 @@ impl DialogModal for NoticeLogDialog {
         let form = self.form.get_mut();
         form.set_dismiss_actions(&[DialogControl::NoticeLogClose]);
         form.set_default_action(DialogControl::NoticeLogClose);
+    }
+}
+
+impl DialogModal for SessionCpuReportDialog {
+    dialog_form!(DialogControl);
+
+    fn prepare(&mut self) {
+        let form = self.form.get_mut();
+        form.set_dismiss_actions(&[DialogControl::SessionCpuReportClose]);
+        form.set_default_action(DialogControl::SessionCpuReportClose);
     }
 }
 
@@ -415,6 +425,7 @@ mode_surfaces!(
     Rename,
     ChangedFiles,
     NoticeLog,
+    SessionCpuReport,
     EditContainer,
     Importing,
     ConfirmImportBundle,

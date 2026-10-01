@@ -145,21 +145,37 @@ def daemon_request(data: pathlib.Path, action: dict[str, object], request_id: in
     host, port_text = str(metadata["address"]).rsplit(":", 1)
     with socket.create_connection((host, int(port_text)), timeout=5) as stream:
         stream.sendall(struct.pack(">I", len(body)) + body)
-        header = stream.recv(4)
-        if len(header) != 4:
-            raise ScenarioFailure("daemon closed before its response frame")
-        remaining = struct.unpack(">I", header)[0]
-        chunks = bytearray()
-        while len(chunks) < remaining:
-            chunk = stream.recv(remaining - len(chunks))
-            if not chunk:
-                raise ScenarioFailure("daemon response frame was truncated")
-            chunks.extend(chunk)
-    response = json.loads(chunks)
-    result = response.get("result")
-    if not isinstance(result, dict) or "Ok" not in result:
-        raise ScenarioFailure(f"daemon action failed: {response!r}")
-    return result["Ok"]
+
+        def receive_exact(length):
+            chunks = bytearray()
+            while len(chunks) < length:
+                chunk = stream.recv(length - len(chunks))
+                if not chunk:
+                    raise ScenarioFailure("daemon response frame was truncated")
+                chunks.extend(chunk)
+            return chunks
+
+        assembled = bytearray()
+        while True:
+            length = struct.unpack(">I", receive_exact(4))[0]
+            response = json.loads(receive_exact(length))
+            if response.get("request_id") != request_id or response.get("protocol_version") != metadata["protocol_version"]:
+                raise ScenarioFailure("daemon crossed reply fragment identities")
+            result = response.get("result")
+            if not isinstance(result, dict) or "Ok" not in result:
+                raise ScenarioFailure(f"daemon action failed: {response!r}")
+            reply = result["Ok"]
+            if reply.get("reply") != "reply_chunk":
+                if assembled:
+                    raise ScenarioFailure("daemon interrupted a chunked reply")
+                return reply
+            fragment = reply["value"]
+            if not fragment["bytes"]:
+                raise ScenarioFailure("empty daemon reply fragment")
+            assembled.extend(fragment["bytes"])
+            if fragment["finished"]:
+                return json.loads(assembled)
+
 
 
 class PtyClient:

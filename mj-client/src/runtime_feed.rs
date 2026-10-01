@@ -30,6 +30,8 @@ pub struct RuntimeProjection {
     pub sessions: SnapshotMap<String, RuntimeSessionView>,
     pub moves: SnapshotMap<String, MoveOperation>,
     pub native_agents: SnapshotMap<String, NativeAgentSummary>,
+    #[serde(default)]
+    pub session_cpu: SnapshotMap<String, SessionCpuView>,
     pub metadata: RuntimeMetadata,
     /// Each live session's transcript tail. Never part of a snapshot frame:
     /// sixty tails can be hundreds of megabytes. A client fetches the tails it
@@ -368,6 +370,17 @@ impl TranscriptChange {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SessionCpuView {
+    Measured {
+        usage: mj_core::cpu_usage::SessionCpuUsage,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
 pub type KeyChanges<T> = Vec<(String, Option<T>)>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -378,6 +391,8 @@ pub struct RuntimeDelta {
     pub sessions: KeyChanges<RuntimeSessionView>,
     pub moves: KeyChanges<MoveOperation>,
     pub native_agents: KeyChanges<NativeAgentSummary>,
+    #[serde(default)]
+    pub session_cpu: KeyChanges<SessionCpuView>,
     pub metadata: Option<RuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcripts: Vec<(String, TranscriptChange)>,
@@ -406,6 +421,7 @@ impl RuntimeDelta {
             sessions: changes(&before.sessions, &after.sessions),
             moves: changes(&before.moves, &after.moves),
             native_agents: changes(&before.native_agents, &after.native_agents),
+            session_cpu: changes(&before.session_cpu, &after.session_cpu),
             metadata: (before.metadata != after.metadata).then(|| after.metadata.clone()),
             transcripts: before
                 .transcripts
@@ -431,6 +447,7 @@ impl RuntimeDelta {
             && self.sessions.is_empty()
             && self.moves.is_empty()
             && self.native_agents.is_empty()
+            && self.session_cpu.is_empty()
             && self.metadata.is_none()
             && self.transcripts.is_empty()
     }
@@ -444,6 +461,7 @@ impl RuntimeDelta {
         apply_keys(&mut projection.sessions, self.sessions);
         apply_keys(&mut projection.moves, self.moves);
         apply_keys(&mut projection.native_agents, self.native_agents);
+        apply_keys(&mut projection.session_cpu, self.session_cpu);
         if let Some(metadata) = self.metadata {
             projection.metadata = metadata;
         }
@@ -828,6 +846,64 @@ mod tests {
         assert!(
             replica.projection.transcripts.is_empty(),
             "a snapshot carries no tails, so a new daemon's are fetched again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+    #[test]
+    fn cpu_only_deltas_apply_measurements_errors_and_removals() {
+        let mut before = RuntimeProjection::default();
+        for value in [
+            Some(SessionCpuView::Measured {
+                usage: mj_core::cpu_usage::SessionCpuUsage {
+                    recent_permille: 230,
+                    hourly_permille: 120,
+                    hourly_covered_secs: 80,
+                    online_cpus: 8,
+                },
+            }),
+            Some(SessionCpuView::Unavailable {
+                reason: "denied".into(),
+            }),
+            None,
+        ] {
+            let mut after = before.clone();
+            match value {
+                Some(value) => {
+                    after.session_cpu.insert("session".into(), value);
+                }
+                None => {
+                    after.session_cpu.remove("session");
+                }
+            }
+            let changes = RuntimeDelta::between(&before, &after);
+            assert!(!changes.is_empty());
+            assert!(changes.metadata.is_none());
+            assert!(changes.sessions.is_empty());
+            changes.apply(&mut before);
+            assert_eq!(before, after);
+        }
+    }
+    #[test]
+    fn old_runtime_frames_default_to_an_empty_cpu_map() {
+        let mut value = serde_json::to_value(RuntimeProjection::default()).unwrap();
+        value.as_object_mut().unwrap().remove("session_cpu");
+        assert!(
+            serde_json::from_value::<RuntimeProjection>(value)
+                .unwrap()
+                .session_cpu
+                .is_empty()
+        );
+        let mut value = serde_json::to_value(RuntimeDelta::default()).unwrap();
+        value.as_object_mut().unwrap().remove("session_cpu");
+        assert!(
+            serde_json::from_value::<RuntimeDelta>(value)
+                .unwrap()
+                .session_cpu
+                .is_empty()
         );
     }
 }

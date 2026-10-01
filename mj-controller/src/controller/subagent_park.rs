@@ -441,6 +441,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         register_child(root.path());
         let crate::session_manager::SessionManagerChannels {
+            session_cpu: _,
             targets,
             control,
             updates: _updates,
@@ -534,6 +535,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         register_child(root.path());
         let crate::session_manager::SessionManagerChannels {
+            session_cpu: _,
             targets,
             control,
             updates: _updates,

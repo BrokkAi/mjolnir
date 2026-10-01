@@ -6,7 +6,11 @@ pub struct SessionManagerUpdate {
     pub view: ManagedSessionView,
 }
 
+pub(crate) type SessionCpuTable =
+    mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>;
+
 pub struct SessionManagerChannels {
+    pub session_cpu: watch::Receiver<SessionCpuTable>,
     pub targets: watch::Sender<Vec<RelaySessionTarget>>,
     pub control: SessionManagerControl,
     pub updates: SessionManagerUpdates,
@@ -318,6 +322,7 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(super) cpu: watch::Sender<SessionCpuTable>,
     producers: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
     producer: Option<Arc<UpdateProducer>>,
     pub(super) delegation: Option<DelegationSender>,
@@ -327,6 +332,7 @@ pub(crate) struct CoalescedUpdateSender {
 }
 
 struct UpdateProducer {
+    cpu: watch::Sender<SessionCpuTable>,
     registry: Arc<Mutex<BTreeMap<String, Arc<()>>>>,
     session_id: String,
     identity: Arc<()>,
@@ -343,6 +349,8 @@ impl Drop for UpdateProducer {
             .is_some_and(|current| Arc::ptr_eq(current, &self.identity))
         {
             registry.remove(&self.session_id);
+            self.cpu
+                .send_if_modified(|table| table.remove(&self.session_id).is_some());
         }
     }
 }
@@ -406,6 +414,8 @@ impl CoalescedUpdateSender {
             .lock()
             .expect("session producer registry poisoned");
         registry.insert(session_id.to_owned(), identity.clone());
+        self.cpu
+            .send_if_modified(|table| table.remove(session_id).is_some());
         // Replacing a producer also invalidates its undelivered observation.
         self.mailbox
             .lock()
@@ -413,11 +423,44 @@ impl CoalescedUpdateSender {
             .remove(session_id);
         let mut sender = self.clone();
         sender.producer = Some(Arc::new(UpdateProducer {
+            cpu: self.cpu.clone(),
             registry: self.producers.clone(),
             session_id: session_id.to_owned(),
             identity,
         }));
         sender
+    }
+
+    pub(super) fn publish_cpu(
+        &self,
+        session_id: &str,
+        value: Option<mj_client::runtime_feed::SessionCpuView>,
+    ) {
+        let registry = self
+            .producers
+            .lock()
+            .expect("session producer registry poisoned");
+        if let Some(producer) = &self.producer
+            && !registry
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &producer.identity))
+        {
+            return;
+        }
+        self.cpu.send_if_modified(|table| {
+            if table.get(session_id) == value.as_ref() {
+                return false;
+            }
+            match value {
+                Some(value) => {
+                    table.insert(session_id.to_owned(), value);
+                }
+                None => {
+                    table.remove(session_id);
+                }
+            }
+            true
+        });
     }
 
     pub(crate) fn send(&self, update: SessionManagerUpdate) {
@@ -488,6 +531,7 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            cpu: watch::channel(SessionCpuTable::new()).0,
             producers: Default::default(),
             producer: None,
             delegation: None,

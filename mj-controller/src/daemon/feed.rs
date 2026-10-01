@@ -116,6 +116,11 @@ impl RuntimeHistory {
                 full.subagents.get(&id).filter(|_| now),
             );
             sync_key(&mut live.moves, &id, full.moves.get(&id).filter(|_| now));
+            sync_key(
+                &mut live.session_cpu,
+                &id,
+                full.session_cpu.get(&id).filter(|_| now),
+            );
             if was == now {
                 continue;
             }
@@ -148,6 +153,13 @@ impl RuntimeHistory {
             if owner.is_some_and(|owner| live.records.contains_key(owner)) {
                 sync_key(&mut live.native_agents, view_id, summary);
             }
+        }
+        for (id, value) in before.session_cpu.changes(&full.session_cpu) {
+            sync_key(
+                &mut live.session_cpu,
+                id,
+                value.filter(|_| live.records.contains_key(id)),
+            );
         }
         debug_assert_eq!(
             live.records.keys().cloned().collect::<BTreeSet<_>>(),
@@ -276,6 +288,7 @@ impl RuntimeState {
                     subagents: controller.state.subagents.clone(),
                     sessions: owner.sessions.clone(),
                     transcripts: owner.transcripts.clone(),
+                    session_cpu: self.session_manager.session_cpu.borrow().clone(),
                     moves,
                     metadata: RuntimeMetadata {
                         config: controller.config.clone(),
@@ -582,6 +595,41 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+    }
+
+    #[test]
+    fn cpu_measurements_follow_live_membership_and_replay_by_key() {
+        let mut full = RuntimeProjection::default();
+        let mut history = RuntimeHistory::default();
+        let value = mj_client::runtime_feed::SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: 230,
+                hourly_permille: 100,
+                hourly_covered_secs: 30,
+                online_cpus: 8,
+            },
+        };
+        for (id, state) in [
+            ("live", SessionState::Running),
+            ("stopped", SessionState::Stopped),
+        ] {
+            full.records.insert(id.into(), record(id, state));
+            full.session_cpu.insert(id.into(), value.clone());
+        }
+        capture(&mut history, &full, &NativeOwners::new(), &[]);
+        let mut replica = RuntimeReplica::default();
+        replica.apply(history.frame(None)).unwrap();
+        assert_eq!(replica.projection.session_cpu.len(), 1);
+        assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
+        let cursor = replica.cursor.clone();
+        full.records.get_mut("live").unwrap().state = SessionState::Stopped;
+        capture(&mut history, &full, &NativeOwners::new(), &[]);
+        replica.apply(history.frame(cursor.as_ref())).unwrap();
+        assert!(replica.projection.session_cpu.is_empty());
+        let cursor = replica.cursor.clone();
+        capture(&mut history, &full, &NativeOwners::new(), &["live"]);
+        replica.apply(history.frame(cursor.as_ref())).unwrap();
+        assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
     }
 
     fn record(id: &str, state: SessionState) -> SessionRecord {

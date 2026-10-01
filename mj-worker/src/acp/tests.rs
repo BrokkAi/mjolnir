@@ -6119,7 +6119,8 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         command: "sh".into(),
         args: vec![
             "-c".into(),
-            "echo 'specific supervisor failure' >&2; exit 17".into(),
+            // Exit during initialize, after the request has reached the bridge.
+            "IFS= read -r initialize; echo 'specific supervisor failure' >&2; exit 17".into(),
         ],
         environment: BTreeMap::new(),
         cwd: std::env::current_dir().unwrap(),
@@ -6158,7 +6159,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     .unwrap_err();
     let complete_error = format!("{error:#}");
     assert!(
-        complete_error.contains("bridge stdout must contain only JSON-RPC frames"),
+        complete_error.contains("ACP bridge") && complete_error.contains("exit status: 17"),
         "unexpected error: {error:#}"
     );
     assert!(complete_error.contains("specific supervisor failure"));
