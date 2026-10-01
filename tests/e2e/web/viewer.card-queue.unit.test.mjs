@@ -289,7 +289,7 @@ test('queue details disappear when empty but preserve active shell cancellation'
   assert.equal(context.queue.hidden, true);
   assert.equal(context.shells.hidden, false);
   assert.equal(context.shellsHeading.hidden, false);
-  assert.equal(context.conversationSummary.textContent, 'Shell commands');
+  assert.equal(context.conversationSummary.textContent, 'Shell commands (1)');
   assert.equal(context.shells.children.length, 1);
   assert.equal(context.shells.children[0].children[1].textContent, 'Cancel');
   assert.equal(context.shells.children[0].children[1].dataset.shellId, 'shell-1');
@@ -306,6 +306,7 @@ test('background task rows expose elapsed time, stop capability, and pending fai
   );
   assert.equal(context.conversationSide.hidden, false);
   assert.equal(context.backgroundTasksHeading.hidden, false);
+  assert.equal(context.conversationSummary.textContent, 'Background tasks (2)');
   assert.equal(context.backgroundTasks.children.length, 2);
   assert.equal(context.backgroundTasks.children[0].children[0].children[1].textContent, '1m00s');
   assert.equal(context.backgroundTasks.children[0].children[1].textContent, 'Stop');

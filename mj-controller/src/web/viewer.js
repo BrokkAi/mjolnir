@@ -4795,9 +4795,9 @@ function renderQueue(session) {
   }
   if (conversationSummary) {
     const labels = [];
-    if (prompts.length) labels.push('queued prompts');
-    if (running.length) labels.push('shell commands');
-    if (tasks.length) labels.push('background tasks');
+    if (prompts.length) labels.push(`queued prompts (${prompts.length})`);
+    if (running.length) labels.push(`shell commands (${running.length})`);
+    if (tasks.length) labels.push(`background tasks (${tasks.length})`);
     conversationSummary.textContent = labels.length
       ? labels.map(label => label[0].toUpperCase() + label.slice(1)).join(', ')
       : 'Shell commands';
