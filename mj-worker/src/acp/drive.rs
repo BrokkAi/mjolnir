@@ -364,30 +364,44 @@ where
                 }
                 permission_output_count.mark();
                 permission_step_clock.begin_client_work();
-                if permission_harness == HarnessKind::Muse
-                    && permission_policy.is_unconstrained()
+                let plan_permission = is_plan_permission(&request);
+                let claude_plan_approval = is_claude_plan_approval(&request, permission_harness);
+                // The worker's policy owns tool approval, including provider
+                // asks that survive full-access mode. Plans still need consent.
+                if permission_policy.is_unconstrained()
+                    && !plan_permission
+                    && !claude_plan_approval
                 {
-                    let Some(response) = muse_unconstrained_permission_response(&request) else {
+                    let Some(response) = unconstrained_permission_response(&request) else {
+                        let message = format!(
+                            "{} requested tool permission in YOLO mode without offering an allow response (session {}, tool {}).",
+                            permission_harness.display_name(), request.session_id, request.tool_call.tool_call_id,
+                        );
                         permission_events
                             .send(RuntimeEvent::Warning {
-                                message: "Muse requested permission in allow-all mode without offering an allow response.".into(),
+                                message: message.clone(),
                             })
                             .await
                             .map_err(|_| relay_event_channel_error())?;
                         return responder.respond_with_error(
-                            agent_client_protocol::Error::invalid_params(),
+                            agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(message)),
                         );
                     };
+                    tracing::debug!(
+                        harness = %permission_harness.display_name(),
+                        session_id = %request.session_id,
+                        tool_call_id = %request.tool_call.tool_call_id,
+                        selected_option = ?response.outcome,
+                        "automatically approved tool permission in YOLO mode"
+                    );
                     return responder.respond(response);
                 }
-                // Muse has always answered every permission ask with the
-                // generic form, plan requests included; keep that order for it
-                // and route every other harness through plan review first.
+                // Preserve Muse's Guardian forms; YOLO plans use plan review.
                 let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
                     && !permission_policy.is_unconstrained();
                 let native_child = permission_native_agents.lock().expect("native agent router poisoned")
                     .is_child(&request.session_id.to_string());
-                if !native_child && !prefer_form_over_plan_review && is_plan_permission(&request) {
+                if !native_child && !prefer_form_over_plan_review && plan_permission {
                     let id = format!(
                         "plan-review-{}",
                         permission_review_ids.fetch_add(1, Ordering::Relaxed)
@@ -514,20 +528,6 @@ where
                         %error,
                         "permission request not classified as a plan review and could not be serialized"
                     ),
-                }
-                // An unconstrained harness must never ask. Report the
-                // misconfiguration, then still let the user answer instead of
-                // failing the tool call.
-                // Claude's plan approval is an expected question in any policy.
-                if permission_policy.is_unconstrained()
-                    && !is_claude_plan_approval(&request, permission_harness)
-                {
-                    permission_events
-                        .send(RuntimeEvent::Warning {
-                            message: UNEXPECTED_PERMISSION_REQUEST_WARNING.to_owned(),
-                        })
-                        .await
-                        .map_err(|_| relay_event_channel_error())?;
                 }
                 let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
                 // The worker alone decides which answers this form offers, and
