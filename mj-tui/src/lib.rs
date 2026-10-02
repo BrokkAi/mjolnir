@@ -803,6 +803,7 @@ pub struct DashboardState {
     pub(crate) native_by_parent: Tracked<BTreeMap<String, BTreeSet<String>>>,
     pub(crate) native_by_owner: BTreeMap<String, BTreeSet<String>>,
     session_facts: RefCell<session_view::SessionFacts>,
+    cpu_rollups: RefCell<session_view::CpuRollups>,
     session_order: RefCell<session_view::SessionOrder>,
     pub(crate) config: Tracked<Config>,
     pub(crate) profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
@@ -1023,8 +1024,9 @@ pub struct DashboardState {
     /// Parent whose direct children temporarily replace the ordinary workspace tabs.
     subagent_parent_id: Tracked<Option<String>>,
     pub(crate) native_agents: Tracked<BTreeMap<String, native_agents::NativeAgentPane>>,
-    pub(crate) session_cpu:
+    pub(crate) session_cpu: Tracked<
         mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
+    >,
     pub(crate) native_sources:
         mj_core::snapshot_map::SnapshotMap<String, mj_core::native_agent::NativeAgentView>,
     /// Stored conversations of Mjolnir sub-agents that have stopped, drawn
@@ -1133,6 +1135,7 @@ impl DashboardState {
             sessions_with_review: BTreeSet::new(),
             project_sources: Default::default(),
             session_facts: RefCell::default(),
+            cpu_rollups: RefCell::default(),
             session_order: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),

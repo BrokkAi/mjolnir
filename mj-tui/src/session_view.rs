@@ -188,6 +188,112 @@ impl SessionFacts {
     }
 }
 
+/// A session's CPU together with its sub-agents', for display.
+///
+/// A parent's figure is its own CPU plus that of every descendant that has
+/// a live worker, so a parent that waits on busy children still shows load.
+/// Recent and hourly shares are summed (a share can exceed 100% across
+/// processes). If some member (the session or a live descendant) has no
+/// measurement, the sum is a lower bound and `partial` is set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) struct CpuRollup {
+    pub(crate) recent_permille: u32,
+    pub(crate) hourly_permille: u32,
+    /// The session itself plus its live descendants.
+    pub(crate) members: usize,
+    pub(crate) measured: usize,
+}
+
+impl CpuRollup {
+    pub(crate) fn is_partial(&self) -> bool {
+        self.measured < self.members
+    }
+
+    pub(crate) fn has_descendants(&self) -> bool {
+        self.members > 1
+    }
+}
+
+/// The rolled-up figure a row shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CpuShare {
+    pub(crate) permille: u16,
+    pub(crate) partial: bool,
+}
+
+impl CpuShare {
+    /// The row text: the share, then `+` when it is a lower bound.
+    pub(crate) fn label(&self) -> String {
+        let marker = if self.partial { "+" } else { "" };
+        format!(
+            "{}{marker}",
+            mj_client::usage_format::format_cpu_permille(self.permille)
+        )
+    }
+}
+
+pub(crate) fn clamp_permille(permille: u32) -> u16 {
+    permille.min(u32::from(u16::MAX)) as u16
+}
+
+/// Every session's [`CpuRollup`] and its live sub-agents, derived when a
+/// CPU sample or the session tree changes. Rows, the live CPU report, and
+/// the redraw check all read this one result.
+#[derive(Default)]
+pub(crate) struct CpuRollups {
+    inputs: Option<[u64; 2]>,
+    by_session: HashMap<String, CpuRollup>,
+    /// Live sub-agents of each parent, in id order.
+    children: HashMap<String, Vec<String>>,
+    #[cfg(test)]
+    derivations: usize,
+}
+
+impl CpuRollups {
+    fn derive(dashboard: &DashboardState, inputs: [u64; 2]) -> Self {
+        let index = dashboard.synchronized_row_index();
+        let children: HashMap<String, Vec<String>> = index
+            .active_children
+            .iter()
+            .map(|(parent, ids)| (parent.clone(), ids.iter().cloned().collect()))
+            .collect();
+        let mut by_session = HashMap::new();
+        for id in dashboard.state.sessions.keys() {
+            let mut rollup = CpuRollup::default();
+            let mut seen = std::collections::HashSet::new();
+            let mut pending = vec![id.as_str()];
+            while let Some(member) = pending.pop() {
+                if !seen.insert(member) {
+                    continue;
+                }
+                rollup.members += 1;
+                if let Some(mj_client::runtime_feed::SessionCpuView::Measured { usage }) =
+                    dashboard.session_cpu.get(member)
+                {
+                    rollup.measured += 1;
+                    rollup.recent_permille += u32::from(usage.recent_permille);
+                    rollup.hourly_permille += u32::from(usage.hourly_permille);
+                }
+                pending.extend(
+                    children
+                        .get(member)
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str),
+                );
+            }
+            by_session.insert(id.clone(), rollup);
+        }
+        Self {
+            inputs: Some(inputs),
+            by_session,
+            children,
+            #[cfg(test)]
+            derivations: 0,
+        }
+    }
+}
+
 /// What the Sessions pane shows, in order.
 #[derive(Default)]
 pub(crate) struct SessionOrder {
@@ -310,6 +416,53 @@ impl DashboardState {
         self.session_facts.borrow()
     }
 
+    fn cpu_rollups_inputs(&self) -> [u64; 2] {
+        [self.state.revision(), self.session_cpu.revision()]
+    }
+
+    fn cpu_rollups(&self) -> Ref<'_, CpuRollups> {
+        let inputs = self.cpu_rollups_inputs();
+        if self.cpu_rollups.borrow().inputs != Some(inputs) {
+            let rollups = CpuRollups::derive(self, inputs);
+            let mut slot = self.cpu_rollups.borrow_mut();
+            #[cfg(test)]
+            let rollups = CpuRollups {
+                derivations: slot.derivations + 1,
+                ..rollups
+            };
+            *slot = rollups;
+        }
+        self.cpu_rollups.borrow()
+    }
+
+    /// A session's CPU with its live sub-agents' included.
+    pub(crate) fn cpu_rollup(&self, session_id: &str) -> CpuRollup {
+        self.cpu_rollups()
+            .by_session
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The figure a Sessions row shows: `None` when nothing in the tree is
+    /// measured. The row applies its own display threshold.
+    pub(crate) fn cpu_share(&self, session_id: &str) -> Option<CpuShare> {
+        let rollup = self.cpu_rollup(session_id);
+        (rollup.measured > 0).then(|| CpuShare {
+            permille: clamp_permille(rollup.recent_permille),
+            partial: rollup.is_partial(),
+        })
+    }
+
+    /// The live sub-agents of a session, in id order.
+    pub(crate) fn cpu_children(&self, session_id: &str) -> Vec<String> {
+        self.cpu_rollups()
+            .children
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn session_order_key(&self) -> OrderKey {
         let [state, details, reviews, unreachable, operations] = self.session_facts_inputs();
         OrderKey {
@@ -356,6 +509,10 @@ impl DashboardState {
 impl DashboardState {
     /// How many times the session facts and the Sessions order have been
     /// derived, without deriving them.
+    pub(crate) fn cpu_rollup_derivations(&self) -> usize {
+        self.cpu_rollups.borrow().derivations
+    }
+
     pub(crate) fn session_view_derivations(&self) -> (usize, usize) {
         (
             self.session_facts.borrow().derivations,

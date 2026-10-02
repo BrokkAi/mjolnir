@@ -93,7 +93,7 @@ impl DashboardState {
     }
 
     /// The index, synchronized with the current records.
-    fn synchronized_row_index(&self) -> std::cell::Ref<'_, RowIndex> {
+    pub(crate) fn synchronized_row_index(&self) -> std::cell::Ref<'_, RowIndex> {
         drop(self.session_facts());
         self.row_index.borrow()
     }

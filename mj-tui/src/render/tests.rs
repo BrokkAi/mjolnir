@@ -4932,7 +4932,11 @@ fn only_the_focused_pane_draws_the_focused_border() {
 #[test]
 fn session_cpu_rows_show_meaningful_load_and_stay_quiet_when_idle() {
     let session = running_session();
-    let draw = |cpu, width| {
+    let draw = |cpu: Option<u16>, width| {
+        let cpu = cpu.map(|permille| crate::session_view::CpuShare {
+            permille,
+            partial: false,
+        });
         session_activity_line(
             "",
             &session,
@@ -5058,4 +5062,171 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         text.find("machine-b").unwrap() < text.find("machine-a").unwrap(),
         "{text}"
     );
+}
+
+fn measured_cpu(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpuView {
+    mj_client::runtime_feed::SessionCpuView::Measured {
+        usage: mj_core::cpu_usage::SessionCpuUsage {
+            recent_permille: recent,
+            hourly_permille: hourly,
+            hourly_covered_secs: 3600,
+            online_cpus: 8,
+        },
+    }
+}
+
+/// A parent with the given running sub-agents, each named by its id.
+fn dashboard_with_subagents(children: &[&str]) -> (DashboardState, String) {
+    let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+    let mut state = dashboard.state.clone();
+    let template = state.sessions["child-session"].clone();
+    let relation = state.subagents["child-session"].clone();
+    state.sessions.remove("child-session");
+    state.subagents.remove("child-session");
+    for id in children {
+        let mut child = template.clone();
+        child.id = (*id).into();
+        child.title = (*id).into();
+        child.acp_session_title = None;
+        let mut link = relation.clone();
+        link.child_session_id = (*id).into();
+        link.request_key = format!("request-{id}");
+        state.sessions.insert(child.id.clone(), child);
+        state.subagents.insert((*id).into(), link);
+    }
+    dashboard.set_state(state);
+    (dashboard, parent)
+}
+
+fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
+    let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
+    for (id, recent, hourly) in entries {
+        cpu.insert((*id).into(), measured_cpu(*recent, *hourly));
+    }
+    dashboard.set_session_cpu(cpu);
+}
+
+#[test]
+fn parent_cpu_is_its_own_plus_every_live_subagent() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
+    set_cpu(
+        &mut dashboard,
+        &[(&parent, 30, 20), ("kid-a", 400, 300), ("kid-b", 250, 100)],
+    );
+    let share = dashboard.cpu_share(&parent).unwrap();
+    assert_eq!((share.permille, share.partial), (680, false));
+    assert_eq!(dashboard.cpu_rollup(&parent).hourly_permille, 420);
+    // A child's own figure is its own, not folded into anything.
+    let child = dashboard.cpu_share("kid-a").unwrap();
+    assert_eq!((child.permille, child.partial), (400, false));
+}
+
+#[test]
+fn parent_cpu_is_marked_partial_when_a_subagent_is_unmeasured() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
+    set_cpu(&mut dashboard, &[(&parent, 30, 20), ("kid-a", 400, 300)]);
+    let share = dashboard.cpu_share(&parent).unwrap();
+    assert_eq!((share.permille, share.partial), (430, true));
+    assert_eq!(share.label(), "43%+");
+    let rollup = dashboard.cpu_rollup(&parent);
+    assert_eq!((rollup.measured, rollup.members), (2, 3));
+    // Nothing measured anywhere in the tree shows nothing.
+    set_cpu(&mut dashboard, &[]);
+    assert_eq!(dashboard.cpu_share(&parent), None);
+}
+
+#[test]
+fn parent_row_draws_the_rolled_up_figure_and_the_threshold_applies_to_it() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
+    // Each part is under 1.0%; the sum is over it.
+    set_cpu(
+        &mut dashboard,
+        &[(&parent, 4, 4), ("kid-a", 5, 5), ("kid-b", 6, 6)],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("1.5%"), "{text}");
+    println!("{text}");
+    // The same parent with one child unmeasured: a lower bound, marked.
+    set_cpu(&mut dashboard, &[(&parent, 4, 4), ("kid-a", 50, 5)]);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("5.4%+"), "{text}");
+    // Under the threshold nothing is drawn.
+    set_cpu(&mut dashboard, &[(&parent, 4, 4), ("kid-a", 5, 5)]);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(!text.contains("0.9%"), "{text}");
+}
+
+#[test]
+fn cpu_rollup_is_derived_only_when_samples_or_the_tree_change() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    set_cpu(&mut dashboard, &[(&parent, 30, 20), ("kid-a", 400, 300)]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    dashboard.clock_changed();
+    let settled = dashboard.cpu_rollup_derivations();
+    for _ in 0..3 {
+        terminal
+            .draw(|frame| render(frame, &mut dashboard))
+            .unwrap();
+        dashboard.clock_changed();
+    }
+    assert_eq!(dashboard.cpu_rollup_derivations(), settled);
+    set_cpu(&mut dashboard, &[(&parent, 30, 20), ("kid-a", 500, 300)]);
+    assert_eq!(dashboard.cpu_share(&parent).unwrap().permille, 530);
+    assert_eq!(dashboard.cpu_rollup_derivations(), settled + 1);
+    let mut state = dashboard.state.clone();
+    state.subagents.remove("kid-a");
+    dashboard.set_state(state);
+    assert_eq!(dashboard.cpu_share(&parent).unwrap().permille, 30);
+    assert_eq!(dashboard.cpu_rollup_derivations(), settled + 2);
+}
+
+#[test]
+fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
+    set_cpu(&mut dashboard, &[(&parent, 30, 20), ("kid-a", 400, 300)]);
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    println!("{text}");
+    let lines = crate::session_cpu_report::report_lines(&dashboard)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let parent_line = lines
+        .iter()
+        .position(|line| line.contains("tree of 3"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(
+        lines[parent_line].contains("32% hourly+") || lines[parent_line].contains("32%+ hourly"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[parent_line].contains("own 3.0%, 2 of 3 measured"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[parent_line + 1].starts_with("    kid-a"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines[parent_line + 2].starts_with("    kid-b"),
+        "{lines:#?}"
+    );
+    assert!(lines[parent_line + 2].contains("no CPU data yet"));
 }

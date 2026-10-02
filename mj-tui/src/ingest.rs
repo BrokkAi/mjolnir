@@ -1331,6 +1331,6 @@ impl DashboardState {
         &mut self,
         cpu: mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
     ) {
-        self.session_cpu = cpu;
+        self.session_cpu = cpu.into();
     }
 }

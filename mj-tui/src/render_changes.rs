@@ -178,16 +178,14 @@ impl DashboardState {
             .into_iter()
             .enumerate()
             .filter(|(index, _)| self.session_row_is_visible_at(*index))
-            .filter_map(|(_, session)| match self.session_cpu.get(&session.id) {
-                Some(mj_client::runtime_feed::SessionCpuView::Measured { usage })
-                    if usage.recent_permille >= 10 =>
-                {
-                    Some(DisplayedClock {
-                        key: session.id.clone(),
-                        value: mj_client::usage_format::format_cpu_permille(usage.recent_permille),
-                    })
-                }
-                _ => None,
+            .filter_map(|(_, session)| {
+                let share = self
+                    .cpu_share(&session.id)
+                    .filter(|share| share.permille >= 10)?;
+                Some(DisplayedClock {
+                    key: session.id.clone(),
+                    value: share.label(),
+                })
             })
             .collect()
     }

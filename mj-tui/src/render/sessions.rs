@@ -263,12 +263,7 @@ pub(crate) fn drawn_session_rows_with_options(
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
                 let spacing = u16::from(expanded && !options.summary_only);
-                let cpu = match dashboard.session_cpu.get(&session.id) {
-                    Some(mj_client::runtime_feed::SessionCpuView::Measured { usage }) => {
-                        Some(usage.recent_permille)
-                    }
-                    _ => None,
-                };
+                let cpu = dashboard.cpu_share(&session.id);
                 if session.configuration_issue(&dashboard.config).is_some() {
                     lines.push(Line::styled(
                         format!("{prefix}{}", session_name(session)),
@@ -511,7 +506,7 @@ pub(crate) fn expanded_session_lines(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
-    cpu: Option<u16>,
+    cpu: Option<crate::session_view::CpuShare>,
     permission: Option<Span<'static>>,
     width: u16,
     prefix: &str,
@@ -601,7 +596,7 @@ pub(crate) fn session_activity_line(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
-    cpu: Option<u16>,
+    cpu: Option<crate::session_view::CpuShare>,
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
@@ -702,8 +697,8 @@ pub(crate) fn session_activity_line(
     );
     let status_width = Line::raw(status.as_str()).width() + queue_width + 2;
     let cpu = cpu
-        .filter(|value| !compact && *value >= 10)
-        .map(mj_client::usage_format::format_cpu_permille)
+        .filter(|value| !compact && value.permille >= 10)
+        .map(|value| value.label())
         .filter(|text| {
             Line::raw(prefix).width() + spinner_width + status_width + text.len() < available
         });
@@ -785,7 +780,7 @@ pub(crate) fn compact_session_lines(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
-    cpu: Option<u16>,
+    cpu: Option<crate::session_view::CpuShare>,
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
