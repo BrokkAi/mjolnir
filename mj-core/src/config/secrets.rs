@@ -8,7 +8,11 @@
 //!
 //! References are resolved while the configuration is read, so every consumer
 //! sees plain strings, and they are serialized as written, so a save keeps
-//! the reference rather than the value it stood for.
+//! the reference rather than the value it stood for. A reference that cannot
+//! be resolved leaves its entry out of the values and is recorded instead: the
+//! profile or container that needs it is unusable until it resolves, but the
+//! configuration still loads. [`Environment::ensure_resolved`] reports it
+//! wherever that owner is about to be used.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -140,6 +144,9 @@ impl EnvironmentValue {
 pub struct Environment {
     sources: BTreeMap<String, EnvironmentValue>,
     resolved: BTreeMap<String, String>,
+    /// Each entry whose reference did not resolve, with what it needs. Such
+    /// an entry has no resolved value.
+    unresolved: BTreeMap<String, String>,
 }
 
 impl Environment {
@@ -147,13 +154,55 @@ impl Environment {
         Self::default()
     }
 
-    /// Resolve every entry with the active [`SecretResolver`].
-    pub fn from_sources(sources: BTreeMap<String, EnvironmentValue>) -> Result<Self> {
-        let resolved = sources
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), resolve_active(key, value)?)))
-            .collect::<Result<_>>()?;
-        Ok(Self { sources, resolved })
+    /// Resolve every entry with the active [`SecretResolver`], recording the
+    /// ones that do not resolve rather than failing the read.
+    pub fn from_sources(sources: BTreeMap<String, EnvironmentValue>) -> Self {
+        let mut resolved = BTreeMap::new();
+        let mut unresolved = BTreeMap::new();
+        for (key, value) in &sources {
+            match resolve_active(key, value) {
+                Ok(value) => {
+                    resolved.insert(key.clone(), value);
+                }
+                Err(error) => {
+                    unresolved.insert(key.clone(), format!("{error:#}"));
+                }
+            }
+        }
+        Self {
+            sources,
+            resolved,
+            unresolved,
+        }
+    }
+
+    /// Supply `key` from the loading process's environment, as `{ from_env =
+    /// "key" }` would, when the table does not name it. The value is not an
+    /// entry, so a save never writes it. An unset variable adds nothing: the
+    /// caller that needs the key reports it.
+    pub(super) fn inherit(&mut self, key: &str) {
+        if self.sources.contains_key(key) || SOURCES_ONLY.get() {
+            return;
+        }
+        if let Ok(value) = resolve_active(key, &EnvironmentValue::FromEnv(key.to_owned())) {
+            self.resolved.insert(key.to_owned(), value);
+        }
+    }
+
+    /// Fail, naming what each one needs, when any entry's reference did not
+    /// resolve. The owner of this table must not be used until it does.
+    pub fn ensure_resolved(&self) -> Result<()> {
+        if self.unresolved.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "{}",
+            self.unresolved
+                .values()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -178,17 +227,20 @@ impl Environment {
     pub fn insert(&mut self, key: String, value: String) -> Option<String> {
         self.sources
             .insert(key.clone(), EnvironmentValue::Literal(value.clone()));
+        self.unresolved.remove(&key);
         self.resolved.insert(key, value)
     }
 
     pub fn remove(&mut self, key: &str) -> Option<String> {
         self.sources.remove(key);
+        self.unresolved.remove(key);
         self.resolved.remove(key)
     }
 
     pub fn clear(&mut self) {
         self.sources.clear();
         self.resolved.clear();
+        self.unresolved.clear();
     }
 }
 
@@ -206,7 +258,11 @@ impl From<BTreeMap<String, String>> for Environment {
             .iter()
             .map(|(key, value)| (key.clone(), EnvironmentValue::Literal(value.clone())))
             .collect();
-        Self { sources, resolved }
+        Self {
+            sources,
+            resolved,
+            unresolved: BTreeMap::new(),
+        }
     }
 }
 
@@ -246,16 +302,10 @@ impl<'de> Deserialize<'de> for Environment {
         if SOURCES_ONLY.get() {
             return Ok(Self {
                 sources,
-                resolved: BTreeMap::new(),
+                ..Self::default()
             });
         }
-        Self::from_sources(sources).map_err(|error| {
-            let message = format!("{error:#}");
-            // The TOML parser wraps this in a parse error with a source
-            // excerpt, which buries the message. The loader reads it from here.
-            FAILURE.with(|failure| *failure.borrow_mut() = Some(message.clone()));
-            de::Error::custom(message)
-        })
+        Ok(Self::from_sources(sources))
     }
 }
 
@@ -341,7 +391,6 @@ impl SecretResolver {
 }
 
 thread_local! {
-    static FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<SecretResolver>> = const { RefCell::new(None) };
     static SOURCES_ONLY: Cell<bool> = const { Cell::new(false) };
 }
@@ -360,6 +409,12 @@ pub fn with_environment_sources_only<T>(read: impl FnOnce() -> T) -> T {
     read()
 }
 
+/// False while a projection is read with [`with_environment_sources_only`],
+/// which must neither resolve values nor read files to find them.
+pub(super) fn resolves_values() -> bool {
+    !SOURCES_ONLY.get()
+}
+
 /// Run `read` with `resolver` answering every environment reference it meets.
 /// Without one, references resolve against this instance's secrets file and
 /// the process environment.
@@ -368,14 +423,6 @@ pub fn with_secret_resolver<T>(resolver: SecretResolver, read: impl FnOnce() -> 
     let value = read();
     ACTIVE.with(|active| *active.borrow_mut() = previous);
     value
-}
-
-/// The message of the last environment reference this thread failed to
-/// resolve, cleared by the call. A caller that reads a configuration takes it
-/// after a failed read, to report the reference instead of the parser's
-/// excerpt of the file.
-pub fn take_environment_failure() -> Option<String> {
-    FAILURE.with(|failure| failure.borrow_mut().take())
 }
 
 fn resolve_active(key: &str, value: &EnvironmentValue) -> Result<String> {
@@ -493,10 +540,11 @@ mod tests {
                     with_environment_sources_only(|| serde_json::from_value(json.clone())).unwrap();
                 assert!(projected.resolved().is_empty());
                 assert_eq!(serde_json::to_value(projected).unwrap(), json);
-                let resolved: Result<Environment, _> = serde_json::from_value(json);
+                let resolved: Environment = serde_json::from_value(json).unwrap();
+                assert_eq!(resolved.resolved().len(), 1);
                 assert!(
-                    resolved.is_err(),
-                    "normal reads still require real credentials"
+                    resolved.ensure_resolved().is_err(),
+                    "normal reads still resolve, and report what is missing"
                 );
                 let malformed: Result<Environment, _> = with_environment_sources_only(|| {
                     serde_json::from_value(serde_json::json!({"A": {"from_secret": ""}}))
@@ -510,20 +558,32 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_secret_or_variable_names_what_to_set() {
-        let missing_secret: Result<Environment, _> = with_secret_resolver(fixed(), || {
-            toml::from_str("KEY = { from_secret = \"ABSENT\" }")
-        });
-        let message = missing_secret.unwrap_err().to_string();
+    fn a_missing_secret_or_variable_still_reads_and_names_what_to_set() {
+        let missing_secret: Environment = with_secret_resolver(fixed(), || {
+            toml::from_str("KEY = { from_secret = \"ABSENT\" }\nOTHER = \"kept\"")
+        })
+        .unwrap();
+        assert_eq!(missing_secret.get("KEY"), None);
+        assert_eq!(missing_secret["OTHER"], "kept");
+        let message = missing_secret.ensure_resolved().unwrap_err().to_string();
         assert!(
             message.contains("ABSENT") && message.contains("KEY"),
             "{message}"
         );
-        let missing_variable: Result<Environment, _> = with_secret_resolver(fixed(), || {
+        let mut missing_variable: Environment = with_secret_resolver(fixed(), || {
             toml::from_str("KEY = { from_env = \"ABSENT\" }")
-        });
-        let message = missing_variable.unwrap_err().to_string();
+        })
+        .unwrap();
+        let message = missing_variable.ensure_resolved().unwrap_err().to_string();
         assert!(message.contains("ABSENT set"), "{message}");
+        // A save still writes the reference back.
+        assert!(
+            toml::to_string(&missing_variable)
+                .unwrap()
+                .contains("from_env = \"ABSENT\"")
+        );
+        missing_variable.insert("KEY".into(), "set".into());
+        missing_variable.ensure_resolved().unwrap();
     }
 
     #[test]

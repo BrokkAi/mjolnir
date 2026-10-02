@@ -534,7 +534,7 @@ home = "/home/me/.codex-work"
 | `enabled` | boolean | no | `true` | Disabled profiles stay configured but cannot be selected for new work, login, import, review, quota reporting, or utility-model inference. Existing running sessions continue. |
 | `kind` | string enum | yes | none | `codex`, `claude`, `kimi`, `grok`, or `muse`. |
 | `home` | path string | yes | none | Non-empty controller-side harness home. An absolute path is strongly recommended. |
-| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` must set that variable here, with a non-empty value. |
+| `environment` | table of strings or references | no | empty | Environment passed to harness/profile commands. Each value is a string, `{ from_env = "NAME" }`, or `{ from_secret = "NAME" }`; see [Secrets](#secrets-secretstoml). Keys cannot be blank or contain `=`. A Codex profile whose `config.toml` names a custom model provider with `env_key` reads that variable from the environment Mjolnir started with unless it is set here; when it is set in neither, the profile cannot start, the configuration still loads, and `mj doctor` says how to supply it. |
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
 
@@ -582,8 +582,10 @@ DEEPSEEK_API_KEY = "sk-..."
 ```
 
 Make it readable only by you (`chmod 600 secrets.toml`). References are
-resolved when the configuration is read, and an entry that names a missing
-variable or secret fails the load with the entry and file named. Saving a
+resolved when the configuration is read. An entry that names a missing
+variable or secret does not stop the configuration from loading: the profile or
+target that holds it cannot start until the value exists, its sessions are
+refused with the entry and file named, and `mj doctor` reports it. Saving a
 setting writes the reference back as written, never the value it stood for.
 `mj doctor` warns about a `secrets.toml` other users can read, and about any
 environment value written as plain text under a name that suggests a

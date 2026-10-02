@@ -39,7 +39,7 @@ use std::fs::{self, File, OpenOptions};
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -647,11 +647,14 @@ impl TryFrom<StoredConfig> for Config {
             jev,
             keys,
             legacy_startup,
-            profiles,
+            mut profiles,
             bundles,
             mut machines,
             targets,
         } = stored;
+        for profile in profiles.values_mut() {
+            profile.inherit_provider_key();
+        }
         let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
         for (id, entry) in targets {
             let runtime = match entry {
@@ -848,6 +851,11 @@ impl Config {
         self.profiles.get(id).filter(|profile| profile.enabled)
     }
 
+    /// Check what this file itself declares. Whether a profile or target can
+    /// start depends on harness homes, secrets and variables outside it, and
+    /// is asked of [`HarnessProfile::ensure_ready`] and
+    /// [`TargetTemplate::ensure_ready`] where they are used, so one unusable
+    /// profile never stops the configuration, and the daemon, from loading.
     pub fn validate(&self) -> Result<()> {
         if self.version != CONFIG_VERSION {
             bail!(
@@ -999,22 +1007,12 @@ impl Config {
         // `TryFrom<StoredConfig>`, which is also what decides whether an old
         // `kind` is still accepted.
         // Environment references resolve against the secrets file beside
-        // this configuration and the process environment.
-        take_environment_failure();
-        let config: Self = match with_secret_resolver(SecretResolver::beside(path), || {
-            toml::from_str(&contents)
-        }) {
-            Ok(config) => config,
-            // An unresolvable reference reads as one line naming the entry
-            // and the file, not as the parser's excerpt of the config.
-            Err(error) => {
-                return Err(match take_environment_failure() {
-                    Some(failure) => anyhow!("{failure} (in Mjolnir config {})", path.display()),
-                    None => anyhow::Error::new(error)
-                        .context(format!("parse Mjolnir config {}", path.display())),
-                });
-            }
-        };
+        // this configuration and the process environment. One that does not
+        // resolve makes its profile or target unusable, not this file
+        // unreadable; see `HarnessProfile::ensure_ready`.
+        let config: Self =
+            with_secret_resolver(SecretResolver::beside(path), || toml::from_str(&contents))
+                .with_context(|| format!("parse Mjolnir config {}", path.display()))?;
         config.validate()?;
         Ok(config)
     }

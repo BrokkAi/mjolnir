@@ -594,7 +594,15 @@ pub(crate) fn save_setup_at(
     let original: serde_json::Value = serde_json::from_str(original)?;
     let updated_config: Config = serde_json::from_str(updated)?;
     updated_config.validate()?;
-    let updated = serde_json::to_value(updated_config)?;
+    let updated = serde_json::to_value(&updated_config)?;
+    // A profile this edit adds or changes must be usable, so Setup reports a
+    // missing key while it is open. Any other profile's readiness is not this
+    // save's business: refusing over it would block every unrelated setting.
+    for (id, profile) in updated_config.enabled_profiles() {
+        if original["profiles"][id] != updated["profiles"][id] {
+            profile.ensure_ready(id)?;
+        }
+    }
     Config::update_to(path, |config| {
         // The editor includes implicit local defaults. Treat those same defaults
         // as the merge base when they have not been written to disk yet.

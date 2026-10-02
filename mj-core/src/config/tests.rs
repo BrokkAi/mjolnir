@@ -194,12 +194,15 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
 fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     let home = tempfile::tempdir().expect("temporary home");
     let without_key = zai_profile(home.path(), BTreeMap::new());
-    let error = without_key
+    without_key
         .validate("glm")
-        .expect_err("a missing key is a configuration error")
+        .expect("the key lives outside Mjolnir's file, so the configuration is valid");
+    let error = without_key
+        .ensure_ready("glm")
+        .expect_err("a missing key leaves the profile unusable")
         .to_string();
-    assert!(error.contains("ZAI_API_KEY"), "{error}");
-    assert!(error.contains("glm"), "{error}");
+    assert!(error.contains("ZAI_API_KEY = { from_secret"), "{error}");
+    assert!(error.contains("[profiles.glm.environment]"), "{error}");
 
     let with_key = zai_profile(
         home.path(),
@@ -210,6 +213,9 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     with_key
         .validate("glm")
         .expect("a configured key validates");
+    with_key
+        .ensure_ready("glm")
+        .expect("a configured key is ready");
     assert_eq!(
         with_key.auth_scheme(),
         AuthScheme::ApiKey {
@@ -223,6 +229,64 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     );
     assert_eq!(with_key.credential_freshness(b"{}"), None);
     assert_eq!(with_key.credential_expiry(b"{}"), None);
+}
+
+/// A Codex home that names its key variable works the way standalone Codex
+/// does: an exported key reaches the profile without an `environment` entry,
+/// and is never written to config.toml.
+#[test]
+fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_in() {
+    let home = tempfile::tempdir().expect("temporary home");
+    zai_profile(home.path(), BTreeMap::new());
+    let text = format!(
+        "version = {CONFIG_VERSION}\n\n[profiles.glm]\nkind = \"codex\"\nhome = {:?}\n",
+        home.path().to_string_lossy()
+    );
+    let read = |process: &[(&str, &str)]| -> Config {
+        let process = process
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        with_secret_resolver(SecretResolver::fixed(process, BTreeMap::new()), || {
+            toml::from_str(&text)
+        })
+        .expect("read the configuration")
+    };
+
+    let exported = read(&[("ZAI_API_KEY", "from-the-shell")]);
+    let profile = &exported.profiles["glm"];
+    assert_eq!(profile.environment["ZAI_API_KEY"], "from-the-shell");
+    profile
+        .ensure_ready("glm")
+        .expect("the exported key is enough");
+    let written = toml::to_string(&exported).expect("serialize");
+    assert!(!written.contains("ZAI_API_KEY"), "{written}");
+    assert!(!written.contains("from-the-shell"), "{written}");
+
+    // An entry the profile sets wins over the environment.
+    let explicit = format!("{text}\n[profiles.glm.environment]\nZAI_API_KEY = \"configured\"\n");
+    let configured: Config = with_secret_resolver(
+        SecretResolver::fixed(
+            [("ZAI_API_KEY".to_owned(), "from-the-shell".to_owned())].into(),
+            BTreeMap::new(),
+        ),
+        || toml::from_str(&explicit),
+    )
+    .expect("read the configuration");
+    assert_eq!(
+        configured.profiles["glm"].environment["ZAI_API_KEY"],
+        "configured"
+    );
+
+    // Unset everywhere: the configuration still reads, the profile says how
+    // to supply the key.
+    let unset = read(&[]);
+    let error = unset.profiles["glm"]
+        .ensure_ready("glm")
+        .expect_err("no key anywhere")
+        .to_string();
+    assert!(error.contains("export ZAI_API_KEY"), "{error}");
+    assert!(error.contains("from_secret"), "{error}");
 }
 
 #[test]
@@ -297,8 +361,11 @@ fn guardian_review_model_accepts_its_three_forms_only_on_a_custom_provider() {
         subagents: Default::default(),
         guardian_review_model: Some(GUARDIAN_REVIEW_SESSION.to_owned()),
     };
-    let error = native_profile
+    native_profile
         .validate("work")
+        .expect("whether the home names a provider is not Mjolnir's file's to say");
+    let error = native_profile
+        .ensure_ready("work")
         .expect_err("no custom provider means no generated catalog")
         .to_string();
     assert!(error.contains("guardian_review_model"), "{error}");
@@ -435,19 +502,24 @@ fn environment_references_resolve_from_the_secrets_file_and_survive_a_save() {
     assert_eq!(saved, original.replace("bell = true", "bell = false"));
     assert_eq!(Config::load_from(&path).unwrap(), config);
 
-    // A missing secret says which entry needs it and where.
+    // A missing secret makes the profile unusable, not the configuration
+    // unreadable, and an unrelated save still writes the reference back.
     fs::write(&secrets, "").unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(
-        error.contains("PROVIDER_API_KEY") && error.contains(SECRETS_FILE),
-        "{error}"
+    let mut config = Config::load_from(&path).unwrap();
+    assert_eq!(
+        config.profiles["codex"].environment.get("PROVIDER_API_KEY"),
+        None
     );
+    config.notify.bell = true;
+    config.save_to(&path).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
-/// Test-and-fix C-8: a missing secret was reported as a TOML parse error with
-/// a caret hundreds of columns wide, and the entry and file came last.
+/// Test-and-fix C-8 reported a missing secret as a TOML parse error with a
+/// caret hundreds of columns wide. Now the configuration loads, and the
+/// profile names the entry and the file in one line where it is used.
 #[test]
-fn a_missing_secret_is_named_in_one_line_without_a_parse_caret() {
+fn a_missing_secret_is_named_in_one_line_where_its_profile_is_used() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let padding = "X".repeat(400);
@@ -459,14 +531,18 @@ fn a_missing_secret_is_named_in_one_line_without_a_parse_caret() {
         ),
     )
     .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    let config = Config::load_from(&path).unwrap();
+    let error = config.profiles["codex"].ensure_ready("codex").unwrap_err();
+    // The person's to fix, so a client is told the reason, not "internal error".
+    let refusal = crate::refusal::Refusal::of(&error).expect("the failure is a refusal");
+    assert_eq!(refusal.kind(), crate::refusal::RefusalKind::Precondition);
+    let error = format!("{error:#}");
     assert!(
-        error.starts_with("FAKE_TOKEN = { from_secret = \"FAKE_TOKEN\" } needs "),
+        error
+            .starts_with("profile \"codex\": FAKE_TOKEN = { from_secret = \"FAKE_TOKEN\" } needs "),
         "{error}"
     );
     assert!(error.contains(SECRETS_FILE), "{error}");
-    assert!(error.contains(&path.display().to_string()), "{error}");
-    assert!(!error.contains("TOML parse error"), "{error}");
     assert!(!error.contains('\n'), "{error}");
 }
 

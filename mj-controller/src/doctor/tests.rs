@@ -2492,6 +2492,57 @@ fn each_profile_line_says_where_its_quota_comes_from_and_who_may_delegate_to_it(
 }
 
 #[test]
+fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("deepseek");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "model_provider = \"deepseek\"\n\n[model_providers.deepseek]\n\
+         base_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\nenv_key = \"MJ_TEST_UNSET_PROVIDER_KEY\"\n",
+    )
+    .unwrap();
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {}\n\n[profiles.deepseek]\nkind = \"codex\"\nhome = {:?}\n\n\
+             [targets.boxed]\nkind = \"podman\"\nimage = \"example\"\n\n\
+             [targets.boxed.environment]\nTOKEN = {{ from_secret = \"TOKEN\" }}\n",
+            mj_core::config::CONFIG_VERSION,
+            home.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    // The configuration loads even though neither can start.
+    let config = Config::load_from(&config_path).unwrap();
+
+    let profile = harness_checks(Ok(&config), &AlwaysFailingExecutor)
+        .into_iter()
+        .find(|check| check.id == "harness.deepseek")
+        .expect("the profile is reported");
+    assert_eq!(profile.status, CheckStatus::Fixable);
+    assert!(
+        profile
+            .detail
+            .contains("export MJ_TEST_UNSET_PROVIDER_KEY and run `mj daemon restart`"),
+        "{}",
+        profile.detail
+    );
+
+    let target = secret_checks(Ok(&config), &config_path)
+        .into_iter()
+        .find(|check| check.id == "targets.boxed.environment")
+        .expect("the target is reported");
+    assert_eq!(target.status, CheckStatus::Fixable);
+    assert!(
+        target.detail.contains("TOKEN = { from_secret"),
+        "{}",
+        target.detail
+    );
+}
+
+#[test]
 fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode() {
     use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
 
@@ -2528,8 +2579,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
                 .into(),
             )
         },
-    )
-    .unwrap();
+    );
     config.profiles.insert(
         "referenced".into(),
         HarnessProfile {

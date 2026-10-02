@@ -2101,21 +2101,23 @@ mod tests {
         let path = directory.path().join("config.toml");
         let home = directory.path().join("codex");
         std::fs::create_dir(&home).unwrap();
+        // A key name no test runner exports: a profile that does not set its
+        // provider's key inherits it from the process environment.
         std::fs::write(
             home.join("config.toml"),
-            "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\nbase_url = 'https://api.deepseek.com/v1'\nenv_key = 'DEEPSEEK_API_KEY'\nwire_api = 'responses'\n",
+            "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\nbase_url = 'https://api.deepseek.com/v1'\nenv_key = 'MJ_TEST_SETUP_PROVIDER_KEY'\nwire_api = 'responses'\n",
         )
         .unwrap();
         std::fs::write(
             directory.path().join("secrets.toml"),
-            "DEEPSEEK_API_KEY = 'test-secret'\n",
+            "MJ_TEST_SETUP_PROVIDER_KEY = 'test-secret'\n",
         )
         .unwrap();
         with_secret_resolver(SecretResolver::beside(&path), || {
             let mut value = serde_json::to_value(Config::default()).unwrap();
             value["profiles"] = serde_json::json!({"deepseek": {
                 "kind": "codex", "home": home,
-                "environment": {"DEEPSEEK_API_KEY": {"from_secret": "DEEPSEEK_API_KEY"}}
+                "environment": {"MJ_TEST_SETUP_PROVIDER_KEY": {"from_secret": "MJ_TEST_SETUP_PROVIDER_KEY"}}
             }});
             let original: Config = serde_json::from_value(value.clone()).unwrap();
             original.save_to(&path).unwrap();
@@ -2125,7 +2127,7 @@ mod tests {
                 .unwrap();
             assert_eq!(saved.notify.bell, !original.notify.bell);
             assert_eq!(
-                saved.profiles["deepseek"].environment["DEEPSEEK_API_KEY"],
+                saved.profiles["deepseek"].environment["MJ_TEST_SETUP_PROVIDER_KEY"],
                 "test-secret"
             );
             let before = std::fs::read_to_string(&path).unwrap();
@@ -2138,10 +2140,31 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("authenticates with DEEPSEEK_API_KEY"),
+                    .contains("authenticates with MJ_TEST_SETUP_PROVIDER_KEY"),
                 "{error:#}"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+            // A profile the edit leaves alone does not hold up the save, even
+            // when it cannot start because its secret is gone.
+            std::fs::write(directory.path().join("secrets.toml"), "").unwrap();
+            let unready = Config::load_from(&path).unwrap();
+            assert!(
+                unready.profiles["deepseek"]
+                    .ensure_ready("deepseek")
+                    .is_err()
+            );
+            let unready_json = serde_json::to_string(&unready).unwrap();
+            let mut value = serde_json::to_value(&unready).unwrap();
+            value["notify"] = serde_json::json!({"bell": !unready.notify.bell});
+            let saved =
+                save_setup_at(&path, &unready_json, &value.to_string(), &State::default()).unwrap();
+            assert_eq!(saved.notify.bell, !unready.notify.bell);
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("from_secret")
+            );
         });
     }
 

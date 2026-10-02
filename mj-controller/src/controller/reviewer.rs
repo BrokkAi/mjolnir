@@ -156,6 +156,7 @@ impl Controller {
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
         let local = staging.path().join("profile");
+        profile.ensure_ready(profile_id)?;
         stage_profile(profile, &local).with_context(|| format!("stage profile {profile_id:?}"))?;
         apply_staged_execution_setting(profile.kind, execution_policy, &local)
             .with_context(|| format!("stage profile {profile_id:?}"))?;

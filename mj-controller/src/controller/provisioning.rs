@@ -521,6 +521,14 @@ impl Controller {
                 .targets
                 .get(&session.target_template_id)
                 .context("target template disappeared before provisioning")?;
+            // Before the runtime is recorded, so a container never starts
+            // without an entry whose secret is missing.
+            selected.ensure_ready(&session.target_template_id)?;
+            self.config
+                .profiles
+                .get(&session.last_profile)
+                .context("harness profile disappeared before provisioning")?
+                .ensure_ready(&session.last_profile)?;
             let runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 ensure!(

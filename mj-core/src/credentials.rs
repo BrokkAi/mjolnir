@@ -586,7 +586,7 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> {
     if let AuthScheme::ApiKey { env_key } = profile.auth_scheme() {
         bail!(
-            "this profile authenticates with the {env_key} API key from its `environment` entry, so it has no interactive login"
+            "this profile authenticates with the {env_key} API key, from its `environment` entry or the environment Mjolnir started with, so it has no interactive login"
         );
     }
     Ok(native_login_command(profile))
