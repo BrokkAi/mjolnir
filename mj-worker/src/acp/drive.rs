@@ -105,7 +105,7 @@ where
     let permission_harness = spec.harness;
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
-    let terminals = TerminalRegistry::new();
+    let terminals = TerminalRegistry::new()?;
     let create_terminals = terminals.clone();
     let output_terminals = terminals.clone();
     let wait_terminals = terminals.clone();

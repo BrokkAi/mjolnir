@@ -152,16 +152,26 @@ struct TerminalEntry {
 ///
 /// Cloning shares the registry; the ACP handlers and connection teardown hold
 /// the same one.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TerminalRegistry {
     terminals: Arc<Mutex<BTreeMap<String, TerminalEntry>>>,
+    /// Random per registry. The session transcript outlives this connection
+    /// and attaches output by terminal id, so ids must not repeat after a
+    /// harness restart or worker replacement opens a new registry.
+    connection: Arc<str>,
     next_id: Arc<AtomicU64>,
 }
 
 impl TerminalRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new() -> Result<Self> {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow::anyhow!("generate terminal connection id: {error}"))?;
+        Ok(Self {
+            terminals: Arc::default(),
+            connection: mj_core::hex::lower_hex(random).into(),
+            next_id: Arc::default(),
+        })
     }
 
     /// Spawn `spawn` in its own process group and register it under a fresh
@@ -187,7 +197,11 @@ impl TerminalRegistry {
             .context("client terminal stderr unavailable")?;
         let buffer = Arc::new(Mutex::new(TerminalBuffer::new(spawn.output_byte_limit)));
         let (exit_tx, exit_rx) = watch::channel(None);
-        let terminal_id = format!("term-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let terminal_id = format!(
+            "term-{}-{}",
+            self.connection,
+            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+        );
         let supervisor = tokio::spawn(supervise(
             terminal_id.clone(),
             child,
@@ -591,7 +605,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn terminal_environment_is_complete_not_an_ambient_overlay() {
-        let registry = TerminalRegistry::new();
+        let registry = TerminalRegistry::new().unwrap();
         let (events, _received) = mpsc::channel(16);
         let id = registry.create(TerminalSpawn {
             command: "printf '%s|%s|%s' \"${HOME-unset}\" \"${CARGO_MANIFEST_DIR-unset}\" \"$SESSION_SETTING\"".into(),
@@ -606,6 +620,35 @@ mod tests {
             .unwrap();
         assert_eq!(registry.output(&id).unwrap().output, "unset|unset|explicit");
         registry.shutdown(&events).await;
+    }
+
+    /// A harness restart or worker replacement opens a new ACP connection
+    /// with a new registry, while the session transcript keeps every earlier
+    /// terminal id. Kimi Code's ACP adapter starts every `Bash` call in a
+    /// client terminal, so a reused id attaches the new command's output to
+    /// a tool call from before the restart.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_connection_never_reuses_an_earlier_connections_terminal_id() {
+        let (events, _received) = mpsc::channel(16);
+        let spawn = || TerminalSpawn {
+            command: "true".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: std::env::current_dir().unwrap(),
+            output_byte_limit: 1024,
+        };
+        let before_restart = TerminalRegistry::new().unwrap();
+        let after_restart = TerminalRegistry::new().unwrap();
+        let first = before_restart.create(spawn(), events.clone()).unwrap();
+        let second = before_restart.create(spawn(), events.clone()).unwrap();
+        let restarted = after_restart.create(spawn(), events.clone()).unwrap();
+
+        assert_ne!(first, second);
+        assert_ne!(first, restarted);
+        assert_ne!(second, restarted);
+        before_restart.shutdown(&events).await;
+        after_restart.shutdown(&events).await;
     }
 
     #[test]
@@ -731,7 +774,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_reaps_stuck_terminals_under_one_shared_deadline() {
-        let registry = TerminalRegistry::new();
+        let registry = TerminalRegistry::new().unwrap();
         let (events, mut reports) = mpsc::channel(16);
         for index in 0..4 {
             register_stuck_terminal(&registry, &format!("term-{index}"));
@@ -762,7 +805,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_reports_a_supervisor_that_finished() {
-        let registry = TerminalRegistry::new();
+        let registry = TerminalRegistry::new().unwrap();
         let (events, mut reports) = mpsc::channel(16);
         register_stuck_terminal(&registry, "stuck");
         let (_exit, exit_rx) = watch::channel(Some(TerminalExit::default()));
