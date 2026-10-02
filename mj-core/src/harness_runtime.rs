@@ -10,7 +10,7 @@ pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.13.5";
 pub const CODEX_CLI_VERSION: &str = "0.159.1";
 pub const CLAUDE_ACP_VERSION: &str = "0.84.0";
-pub const KIMI_VERSION: &str = "2.0.2";
+pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.8.1";
 pub const MUSE_VERSION: &str = "1.4.1-R4503.1";
@@ -114,8 +114,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "node_modules/.bin/claude-agent-acp",
         },
         HarnessKind::Kimi => HarnessPin {
-            install_id: "kimi-2.0.2",
-            display_version: "Kimi Code 2.0.2",
+            install_id: "kimi-2.1.1",
+            display_version: "Kimi Code 2.1.1",
             entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
