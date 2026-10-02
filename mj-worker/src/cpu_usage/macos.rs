@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use mach2::mach_time::{mach_timebase_info, mach_timebase_info_data_t};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -27,8 +28,10 @@ fn child_pids(pid: i32) -> Result<Vec<i32>> {
 }
 
 pub(super) fn process_tree_cpu_time(root: u32) -> Result<Duration> {
-    let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
-    if unsafe { libc::mach_timebase_info(&mut timebase) } != 0 || timebase.denom == 0 {
+    // `rusage_info_v2` reports CPU time in Mach absolute-time ticks, so the
+    // nanoseconds-per-tick time base has to come from the same host.
+    let mut timebase = mach_timebase_info_data_t::default();
+    if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.denom == 0 {
         bail!("could not read Mach time base");
     }
     let mut pending = vec![i32::try_from(root)?];

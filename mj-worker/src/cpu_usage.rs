@@ -81,9 +81,14 @@ impl CpuSampler {
     }
 }
 
+/// The serving runtime that samples CPU is Unix-only, so the channel type and
+/// the sampler task exist only there. The measurement API above stays
+/// available everywhere.
+#[cfg(unix)]
 pub(crate) type CpuRead = Result<Option<SessionCpuUsage>, String>;
 
 /// One sampler per serving worker. The serving loop supervises this task.
+#[cfg(unix)]
 pub(crate) async fn sample_cpu(sender: tokio::sync::watch::Sender<CpuRead>) {
     let mut sampler = CpuSampler::default();
     let mut ticks = tokio::time::interval(Duration::from_secs(10));

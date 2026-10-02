@@ -245,7 +245,12 @@ fn install_stderr_logging() -> Result<()> {
 
 /// Clean the worker itself as well as its harnesses: Git and other target-side
 /// helpers must not inherit controller or build-tool variables either.
-fn bootstrap_login_environment(cli: &Cli, owner: Option<&WorkerRootOwner>) -> Result<()> {
+fn bootstrap_login_environment(
+    cli: &Cli,
+    // The root lock descriptor only crosses the login re-exec, which is a Unix
+    // process detail; the non-Unix arm below reports the missing worker.
+    #[cfg_attr(not(unix), allow(unused_variables))] owner: Option<&WorkerRootOwner>,
+) -> Result<()> {
     if cli.login_environment_ready {
         return mj_core::login_environment::initialize_from_parent();
     }
