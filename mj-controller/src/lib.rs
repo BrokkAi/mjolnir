@@ -36,6 +36,7 @@ pub mod worker_upgrade;
 
 pub mod database;
 
+pub mod target_storage;
 pub mod targets;
 
 pub mod termination;

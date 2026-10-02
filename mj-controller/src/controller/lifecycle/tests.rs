@@ -307,6 +307,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         source_target: record.target.clone().unwrap(),
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
         binary_refresh: None,
         launch_refresh: None,

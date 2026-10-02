@@ -215,6 +215,7 @@ pub fn run_with_config_path(
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
+    checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
     checks.extend(build_cache_release_check(
         &crate::controller::recent_release_failures(),
@@ -1902,6 +1903,103 @@ fn ssh_podman_limits_check(
         );
     }
     DoctorCheck::ready(check_id, title, detail)
+}
+
+/// One check per host Mjolnir writes to: does the tightest filesystem it
+/// writes to there have room? The probe is the daemon capacity service's own
+/// host probe, and the verdict is the storage owner's rule, so doctor and the
+/// daemon judge a disk the same way.
+fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
+    use mj_core::targets::storage::{StorageCondition, TargetStorageView};
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    let controller = crate::controller::Controller {
+        config: config.clone(),
+        state: mj_core::state::State::default(),
+    };
+    controller
+        .deployment_capacity_targets()
+        .into_iter()
+        .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
+        .filter_map(|target| {
+            let probe = target.probes.first()?;
+            let check_id = format!("storage.{}", target.id);
+            let title = format!("Free space on {}", target.host);
+            let output = match executor.execute(probe) {
+                Ok(output) if output.status == 0 => output,
+                // An unreachable host is reported by its access check.
+                Ok(output) if probe.ssh_destination.is_some() && output.status == 255 => {
+                    return None;
+                }
+                Ok(output) => {
+                    return Some(DoctorCheck::warning(
+                        check_id,
+                        title,
+                        format!(
+                            "Could not measure free space: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                        "Check that `df` runs on the host.",
+                    ));
+                }
+                Err(error) => {
+                    return Some(DoctorCheck::warning(
+                        check_id,
+                        title,
+                        format!("Could not measure free space: {error:#}"),
+                        "Check that the host is reachable and `df` runs on it.",
+                    ));
+                }
+            };
+            let (home, filesystems) =
+                mj_core::targets::storage::parse_storage_lines(&output.stdout);
+            let view =
+                TargetStorageView::evaluate(&target.host, home, &filesystems, None, |_| None, None);
+            // Every filesystem, with its free space and root reserve, one
+            // per line; the check takes the worst one's status.
+            let lines = view.filesystem_lines().join("; ");
+            let flagged = |condition| {
+                view.filesystems
+                    .iter()
+                    .filter(|filesystem| filesystem.condition == condition)
+                    .map(|filesystem| filesystem.space.mount.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Some(match view.worst().map(|filesystem| filesystem.condition) {
+                None => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    "The probe reported no filesystem.",
+                    "Check that `df -Pk` runs on the host.",
+                ),
+                Some(StorageCondition::Ok) => DoctorCheck::ready(check_id, title, format!("{lines}.")),
+                Some(StorageCondition::Low) => DoctorCheck::warning(
+                    check_id,
+                    title,
+                    format!("Disk low on {}: {lines}.", flagged(StorageCondition::Low)),
+                    format!("Free space on {} before it fills up.", target.host),
+                ),
+                Some(StorageCondition::Full) => DoctorCheck::fixable(
+                    check_id,
+                    title,
+                    format!(
+                        "Disk full on {}: {lines}. Mjolnir refuses writes there, and sessions that write there wait instead of restarting.",
+                        flagged(StorageCondition::Full)
+                    ),
+                    format!(
+                        "Free at least {} on {} of {}.",
+                        mj_core::move_workspace::format_bytes(
+                            mj_core::targets::storage::WRITE_RESERVE_BYTES
+                        ),
+                        flagged(StorageCondition::Full),
+                        target.host
+                    ),
+                ),
+            })
+        })
+        .collect()
 }
 
 /// One check per `ssh-docker` target: Docker daemon, image, and optional

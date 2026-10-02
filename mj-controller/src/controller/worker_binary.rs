@@ -72,6 +72,7 @@ pub(super) use install::*;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;
+pub(crate) use process::recorded_exit_reason;
 pub(super) use process::*;
 
 #[cfg(test)]

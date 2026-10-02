@@ -20,6 +20,7 @@ use crate::config::{HarnessKind, ImagePullPolicy};
 
 mod diagnostics;
 pub use diagnostics::{BlockingOperation, BlockingOperationSnapshot, active_blocking_operations};
+pub mod storage;
 
 pub const SESSION_LABEL: &str = "dev.mj.session";
 pub const MANAGED_LABEL: &str = "dev.mj.managed";
@@ -317,6 +318,9 @@ pub struct DeploymentCapacityUsage {
     pub memory_total_bytes: u64,
     pub logical_cores: u64,
     pub disk_total_bytes: Option<u64>,
+    /// Free space on the filesystems Mjolnir writes to, per machine probed:
+    /// one for a host, one per instance for a fleet.
+    pub storage: Vec<storage::HostStorageSample>,
 }
 
 /// An additional directory made available to one session.
@@ -665,9 +669,16 @@ fn sleep_unless_cancelled(delay: Duration, is_cancelled: &dyn Fn() -> bool) -> b
     }
 }
 
-/// One debug line per finished target command, so a slow launch or resume
-/// phase can be attributed from logs instead of re-profiled by hand.
-pub fn trace_command_duration(command: &CommandSpec, started: Instant, status: i32) {
+/// Every process executor finishes a command here: one debug line, so a slow
+/// launch or resume phase can be attributed from logs instead of re-profiled
+/// by hand, and one look at a failure for a full disk on the target.
+fn finished_command(
+    command: &CommandSpec,
+    started: Instant,
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> CommandOutput {
     tracing::debug!(
         purpose = command.purpose.as_str(),
         program = command.program.as_str(),
@@ -675,6 +686,13 @@ pub fn trace_command_duration(command: &CommandSpec, started: Instant, status: i
         elapsed_ms = started.elapsed().as_millis() as u64,
         "target command finished"
     );
+    let output = CommandOutput {
+        status,
+        stdout,
+        stderr,
+    };
+    storage::observe_command_output(command, &output);
+    output
 }
 
 impl ProcessExecutor {
@@ -696,12 +714,13 @@ impl ProcessExecutor {
             .output()
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
         let status = output.status.code().unwrap_or(-1);
-        trace_command_duration(command, started, status);
-        Ok(CommandOutput {
+        Ok(finished_command(
+            command,
+            started,
             status,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+            output.stdout,
+            output.stderr,
+        ))
     }
 }
 
@@ -878,12 +897,7 @@ fn stream_command_with_stdin(
         input_result?;
     }
     let status = status.code().unwrap_or(-1);
-    trace_command_duration(command, started, status);
-    Ok(CommandOutput {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok(finished_command(command, started, status, stdout, stderr))
 }
 
 #[derive(Clone)]
@@ -1160,12 +1174,7 @@ impl CancellableProcessExecutor {
         let stderr = stderr_reader.finish("stderr", deadline)?;
         let status = status.code().unwrap_or(-1);
         drop(group);
-        trace_command_duration(command, started, status);
-        Ok(CommandOutput {
-            status,
-            stdout,
-            stderr,
-        })
+        Ok(finished_command(command, started, status, stdout, stderr))
     }
 }
 

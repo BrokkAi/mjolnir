@@ -2206,6 +2206,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             },
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
+            exit_record: None,
             liveness_probe: worker_liveness_command(&locator, &root),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
@@ -4968,6 +4969,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         source_target: mj_core::state::TargetLocator::LocalBare { worker_root: root },
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["dead\n"]),
         binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
         launch_refresh: Some(WorkerLaunchRefreshPlan {

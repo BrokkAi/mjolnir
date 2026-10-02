@@ -501,6 +501,7 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
             target: mj_core::state::ManagedWorktreeTarget::Local,
             directory: directory.path().to_path_buf(),
         }),
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", [format!("{liveness}\n")])
             .purpose("probe test worker liveness"),
         binary_refresh: None,
@@ -558,6 +559,7 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
             target: mj_core::state::ManagedWorktreeTarget::Local,
             directory: missing.clone(),
         }),
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["dead\n"])
             .purpose("probe test worker liveness"),
         binary_refresh: None,
@@ -578,6 +580,91 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
     assert!(
         !restarted.exists(),
         "a missing workspace must not be restarted"
+    );
+}
+
+/// precision-3260: the worker stopped with "No space left on device", and
+/// every recovery attempt uploaded a replacement into the same full disk.
+/// Recovery now reads the dead worker's exit record, tells the storage owner,
+/// and restarts nothing until a later measurement finds room.
+#[tokio::test]
+async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
+    // The storage board is per process; this host name is this test's own.
+    let host = "full-disk-recovery-host";
+    let directory = tempfile::tempdir().unwrap();
+    let restarted = directory.path().join("worker-restarted");
+    let stopped_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    let exit_record = format!(
+        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test"}}    "#,
+        stopped_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    let plan = WorkerRecoveryPlan {
+        source_target: mj_core::state::TargetLocator::SshBare {
+            host: host.into(),
+            workspace: "/work".into(),
+            worker_id: None,
+        },
+        target: None,
+        workspace: None,
+        exit_record: Some(
+            CommandSpec::new("printf", ["%s", exit_record.as_str()])
+                .purpose("read test worker exit record"),
+        ),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"])
+            .purpose("probe test worker liveness"),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart test worker".into(),
+            commands: vec![
+                CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
+                    .purpose("restart test worker"),
+            ],
+        },
+    };
+
+    let outcome = recover_worker(plan.clone(), false).await.unwrap();
+    let WorkerRecoveryOutcome::StorageFull {
+        host: full_host,
+        problem,
+    } = outcome
+    else {
+        panic!("expected a full-disk wait, got {outcome:?}");
+    };
+    assert_eq!(full_host, host);
+    assert!(problem.starts_with("disk full: "), "{problem}");
+    assert!(problem.contains("No space left on device"), "{problem}");
+    assert!(!restarted.exists(), "a worker on a full disk was restarted");
+
+    // Still full by measurement: still no restart.
+    let now = chrono::Utc::now().timestamp() as u64;
+    crate::target_storage::record_samples(
+        &[crate::target_storage::tests::sample(host, 0, 40 << 30)],
+        now,
+    );
+    assert!(matches!(
+        recover_worker(plan.clone(), false).await.unwrap(),
+        WorkerRecoveryOutcome::StorageFull { .. }
+    ));
+    assert!(!restarted.exists());
+
+    // Space was freed. The old exit record predates this measurement, so it
+    // no longer holds recovery back.
+    crate::target_storage::record_samples(
+        &[crate::target_storage::tests::sample(
+            host,
+            40 << 30,
+            40 << 30,
+        )],
+        now + 1,
+    );
+    assert_eq!(
+        recover_worker(plan, false).await.unwrap(),
+        WorkerRecoveryOutcome::RestartedDead
+    );
+    assert!(
+        restarted.exists(),
+        "recovery did not resume once space was free"
     );
 }
 
@@ -618,6 +705,7 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
             source_target: recovery_source_target(),
             target: None,
             workspace: None,
+            exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
                 .purpose("probe test worker liveness"),
             binary_refresh: Some(WorkerBinaryRefresh::Prepared(WorkerBinaryRefreshPlan {
@@ -689,6 +777,7 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
             source_target: recovery_source_target(),
             target: None,
             workspace: None,
+            exit_record: None,
             liveness_probe: CommandSpec::new("printf", ["dead\n"])
                 .purpose("probe test worker liveness"),
             binary_refresh: None,
@@ -788,6 +877,7 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
                 session_id: "session-1".into(),
             }),
             workspace: None,
+            exit_record: None,
             liveness_probe: liveness,
             binary_refresh: None,
             launch_refresh: None,
@@ -822,6 +912,7 @@ async fn recovery_reports_a_missing_target_without_running_worker_commands() {
                 session_id: "session-1".into(),
             }),
             workspace: None,
+            exit_record: None,
             liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>()),
             binary_refresh: None,
             launch_refresh: None,
@@ -1315,6 +1406,8 @@ const SUBMIT_WITHOUT_SYNC_TEST_CHILD: &str = "MJ_TEST_SUBMIT_WITHOUT_SYNC_CHILD"
 const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
 #[cfg(unix)]
 const SYNC_CADENCE_TEST_CHILD: &str = "MJ_TEST_SYNC_CADENCE_CHILD";
+#[cfg(unix)]
+const FULL_DISK_RECOVERY_TEST_CHILD: &str = "MJ_TEST_FULL_DISK_RECOVERY_CHILD";
 const LEASED_RELAY_SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 /// File in the relay root where the stdio relay child logs each request.
 const RELAY_REQUEST_LOG: &str = "requests.log";
@@ -1813,6 +1906,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
         source_target: recovery_source_target(),
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
         binary_refresh: None,
         launch_refresh: None,
@@ -1965,6 +2059,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
         source_target: recovery_source_target(),
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["alive\n"]).purpose("probe test relay worker"),
         binary_refresh: None,
         launch_refresh: None,
@@ -2003,6 +2098,155 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
             if view.connected {
                 assert!(restarted.exists(), "the restart plan did not run");
                 assert!(view.error.is_none());
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("relay stayed disconnected: {:?}", view_rx.borrow().error));
+}
+
+/// The relay actor on a full disk: it shows "disk full" instead of a bare
+/// "unreachable", does not restart (or upload into) the target while the
+/// storage owner says full, and resumes as soon as a measurement finds room,
+/// without waiting out a backoff.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
+    if std::env::var_os(FULL_DISK_RECOVERY_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            FULL_DISK_RECOVERY_TEST_CHILD,
+            "relay_actor_waits_for_disk_space_then_recovers_its_worker",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("full-disk relay actor never recovered");
+    let host = "precision-3260";
+    let source_target = mj_core::state::TargetLocator::SshBare {
+        host: host.into(),
+        workspace: format!("work/{LEASED_RELAY_SESSION}").into(),
+        worker_id: None,
+    };
+    register_leased_relay_session();
+    let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
+    record.target = Some(source_target.clone());
+    crate::database::save_session(&record).unwrap();
+    let relay_root = tempfile::tempdir().unwrap();
+    let restarted = relay_root.path().join("worker-restarted");
+    let script = format!(
+        "if [ ! -f \"${AUTO_RESTART_MARKER}\" ]; then IFS= read -r _; exit 0; fi; \
+         \"$0\" --exact {} --nocapture | grep --line-buffered '^{{'",
+        exact_test_name("leased_relay_child_serves_stdio")
+    );
+    let mut spec = CommandSpec::new(
+        "sh",
+        [
+            "-c".to_owned(),
+            script,
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ],
+    )
+    .purpose("test restartable relay");
+    spec.env.insert(
+        LEASED_RELAY_ROOT.to_owned(),
+        relay_root.path().to_string_lossy().into_owned(),
+    );
+    spec.env.insert(
+        AUTO_RESTART_MARKER.to_owned(),
+        restarted.to_string_lossy().into_owned(),
+    );
+    let stopped_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+    let exit_record = format!(
+        r#"{{"reason":"relay coordinator failed: No space left on device (os error 28)","at":"{}"}}"#,
+        stopped_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    let worker_recovery = WorkerRecoveryPlan {
+        source_target,
+        target: None,
+        workspace: None,
+        exit_record: Some(
+            CommandSpec::new("printf", ["%s", exit_record.as_str()])
+                .purpose("read test worker exit record"),
+        ),
+        liveness_probe: CommandSpec::new("printf", ["dead\n"]).purpose("probe test relay worker"),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: CommandPlan {
+            description: "restart test relay worker".into(),
+            commands: vec![
+                CommandSpec::new("touch", [restarted.to_string_lossy().into_owned()])
+                    .purpose("restart test relay worker"),
+            ],
+        },
+    };
+    let target = RelaySessionTarget {
+        session_id: LEASED_RELAY_SESSION.to_owned(),
+        spec,
+        worker_recovery: Some(worker_recovery),
+        project_memory: None,
+    };
+    let (_commands_tx, commands_rx) = mpsc::channel(4);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (_retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
+    let (updates_tx, _updates_rx) = coalesced_update_channel();
+    tokio::spawn(run_session_actor(
+        target,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates_tx,
+    ));
+
+    let detail = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            view_rx.changed().await.unwrap();
+            let view = view_rx.borrow_and_update().clone();
+            if let Some(ViewError::Unreachable(detail)) = view.error
+                && detail.starts_with("disk full: ")
+            {
+                return detail;
+            }
+        }
+    })
+    .await
+    .expect("the session never said its disk was full");
+    assert!(detail.contains(host), "{detail}");
+    assert!(detail.contains("No space left on device"), "{detail}");
+    assert!(
+        detail.contains("will not be restarted until space is freed"),
+        "{detail}"
+    );
+
+    // Reconnects go on, but nothing is restarted on the full disk.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !restarted.exists(),
+        "the worker was restarted on a full disk"
+    );
+    assert!(!view_rx.borrow().connected);
+
+    // Space is freed: the storage owner's next measurement wakes the actor.
+    let now = chrono::Utc::now().timestamp() as u64;
+    crate::target_storage::record_samples(
+        &[crate::target_storage::tests::sample(
+            host,
+            40 << 30,
+            40 << 30,
+        )],
+        now,
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            view_rx.changed().await.unwrap();
+            let view = view_rx.borrow_and_update().clone();
+            if view.connected {
+                assert!(restarted.exists(), "the restart plan did not run");
                 return;
             }
         }
@@ -3082,6 +3326,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
         source_target: recovery_source_target(),
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
         binary_refresh: None,
         launch_refresh: None,

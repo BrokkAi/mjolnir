@@ -681,6 +681,7 @@ mod tests {
                 exit: exited.then(|| WorkerExitRecord {
                     reason: "durable relay open failed".into(),
                     refusal: self.refusal.map(ToOwned::to_owned),
+                    at: None,
                 }),
                 pids: if exited || gone { vec![] } else { vec![41] },
             })

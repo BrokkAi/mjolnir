@@ -393,12 +393,10 @@ pub async fn run_daemon_owned(
     write_worker_pidfile(&root, std::process::id())?;
     // Durable state recovered, so any exit record belongs to a previous
     // life of this worker. Leaving it would make the controller read this
-    // startup as another death.
-    let exit_record = root.join("worker-exit.json");
-    if exit_record.exists() {
-        std::fs::remove_file(&exit_record)
-            .with_context(|| format!("clear stale exit record {}", exit_record.display()))?;
-    }
+    // startup as another death. Replacing it with a reservation also keeps
+    // room for this life's record: a worker that stops on a full disk can
+    // still say so.
+    crate::exit_record::reserve(&root)?;
 
     if restarting
         && durable_relay.operational_state().execution

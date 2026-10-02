@@ -96,7 +96,7 @@ impl WorkerDiagnosisTracker {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CapacityPollUpdate {
     pub target_id: String,
     pub result: std::result::Result<Option<DeploymentCapacityUsage>, String>,

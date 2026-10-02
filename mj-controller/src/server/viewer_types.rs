@@ -239,6 +239,7 @@ impl ViewerSnapshot {
                     .then(|| session.last_error.clone())
                     .flatten()
                     .or_else(|| session.public_error().map(str::to_owned)),
+                    storage_problem: None,
                     preview: Vec::new(),
                     queued_prompts: Vec::new(),
                     active_user_shells: Vec::new(),
@@ -470,6 +471,11 @@ pub struct ViewerSession {
     /// the reason instead of a bare "failed to launch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_error: Option<String>,
+    /// "disk full: precision-3260 has 0 B free on / …" while the disk this
+    /// session's target writes to is full. The daemon's storage owner decides;
+    /// automatic recovery waits on the same fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_problem: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,
@@ -960,6 +966,46 @@ pub struct ViewerTargetCapacity {
     /// Whether the last probe failed. The probe's own message names hosts and
     /// commands, so it stays on the controller.
     pub has_error: bool,
+    /// The storage owner's verdict on each filesystem Mjolnir writes to
+    /// here; for a fleet, on each instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage: Vec<ViewerTargetStorage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerTargetStorage {
+    /// The machine, for a fleet; absent for a plain host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    pub mount: String,
+    pub available_bytes: u64,
+    /// Free bytes the filesystem keeps for root, which Mjolnir cannot use.
+    pub reserved_bytes: u64,
+    pub condition: mj_core::targets::storage::StorageCondition,
+    /// The sentence a full or low filesystem owes the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ViewerTargetStorage {
+    pub fn list(views: &[&mj_core::targets::storage::TargetStorageView], fleet: bool) -> Vec<Self> {
+        use mj_core::targets::storage::StorageCondition;
+        views
+            .iter()
+            .flat_map(|view| {
+                view.filesystems.iter().map(move |filesystem| Self {
+                    machine: fleet.then(|| view.host.clone()),
+                    mount: filesystem.space.mount.clone(),
+                    available_bytes: filesystem.space.available_bytes,
+                    reserved_bytes: filesystem.space.reserved_bytes,
+                    condition: filesystem.condition,
+                    detail: (filesystem.condition != StorageCondition::Ok)
+                        .then(|| view.explanation(filesystem)),
+                })
+            })
+            .collect()
+    }
 }
 
 fn unknown_availability() -> crate::server::api::LaunchAvailability {

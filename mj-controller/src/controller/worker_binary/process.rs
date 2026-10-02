@@ -51,6 +51,44 @@ pub(in crate::controller) fn worker_liveness_command(
         .purpose("probe Mjolnir worker daemon liveness")
 }
 
+/// Print the worker's exit record, or nothing when it left none. Reads only,
+/// so it works on a target whose disk is full.
+pub(in crate::controller) fn worker_exit_record_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> CommandSpec {
+    let path = targets::join_remote_command(&[format!(
+        "{worker_root}/{}",
+        mj_core::relay::WORKER_EXIT_FILE
+    )]);
+    targets::locator_command(
+        locator,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("cat -- {path} 2>/dev/null; exit 0"),
+        ],
+    )
+    .purpose("read the Mjolnir worker's exit record")
+}
+
+/// The reason a worker recorded for its exit, and when (epoch seconds), from
+/// the output of [`worker_exit_record_command`]. A reserved record that says
+/// `null` means the worker left no reason.
+pub(crate) fn recorded_exit_reason(output: &[u8]) -> Option<(String, Option<u64>)> {
+    serde_json::from_slice::<Option<WorkerExitRecord>>(output)
+        .ok()
+        .flatten()
+        .map(|record| {
+            let at = record
+                .at
+                .as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .and_then(|at| u64::try_from(at.timestamp()).ok());
+            (record.reason, at)
+        })
+}
+
 pub(in crate::controller) fn start_worker(
     owner: &crate::worker_lifecycle::WorkerPermit,
     executor: &impl CommandExecutor,
@@ -296,6 +334,9 @@ pub(in crate::controller) struct WorkerExitRecord {
     /// precondition the caller can fix rather than on an internal failure.
     #[serde(default)]
     pub refusal: Option<String>,
+    /// When the worker stopped, as RFC 3339.
+    #[serde(default)]
+    pub at: Option<String>,
 }
 
 impl WorkerProbe {
@@ -448,6 +489,7 @@ mod probe_tests {
                          ACP bridge stderr:\n[session/create] phase=register durationMs=1"
                     .into(),
                 refusal: None,
+                at: None,
             }),
             pids: vec![],
         };

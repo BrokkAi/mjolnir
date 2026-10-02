@@ -272,6 +272,7 @@ fn documentation_dashboard() -> DashboardState {
             memory_total_bytes: 64 * 1024 * 1024 * 1024,
             logical_cores: 16,
             disk_total_bytes: Some(1_000 * 1024 * 1024 * 1024),
+            storage: Vec::new(),
         })),
         refreshed,
     );

@@ -456,6 +456,12 @@ pub(super) fn install_worker_files(
     profile_stage: &Path,
 ) -> Result<()> {
     verify_worker_build(worker_binary)?;
+    crate::target_storage::ensure_room_for(
+        locator,
+        [worker_root],
+        || super::file_size(worker_binary),
+        "install the Mjolnir worker",
+    )?;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             if profile_stage.is_dir() {

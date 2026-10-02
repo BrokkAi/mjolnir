@@ -116,6 +116,37 @@ pub(crate) fn capacity_table_rows(
                     _ => vec![Span::styled("unavailable", theme::muted())],
                 }
             };
+            // Free space comes from the daemon's storage owner, the same
+            // verdict that refuses writes and holds recovery back.
+            for view in dashboard.capacity_storage(detail) {
+                use mj_core::targets::storage::StorageCondition;
+                let fleet = detail.target.kind == DeploymentCapacityKind::AwsFleet;
+                for filesystem in &view.filesystems {
+                    let color = match filesystem.condition {
+                        StorageCondition::Full => theme::palette().error,
+                        StorageCondition::Low => theme::palette().warning,
+                        StorageCondition::Ok => theme::palette().success,
+                    };
+                    let flag = match filesystem.condition {
+                        StorageCondition::Full => " full",
+                        StorageCondition::Low => " low",
+                        StorageCondition::Ok => "",
+                    };
+                    let place = if fleet {
+                        format!("{} {}", view.host, filesystem.space.mount)
+                    } else {
+                        filesystem.space.mount.clone()
+                    };
+                    in_use.push(Span::styled(theme::footer_separator(), theme::muted()));
+                    in_use.push(Span::styled(
+                        format!(
+                            "{place} {} free{flag}",
+                            format_resource_bytes(filesystem.space.available_bytes)
+                        ),
+                        Style::default().fg(color),
+                    ));
+                }
+            }
             if let Some(staleness) = staleness {
                 in_use.push(Span::styled(
                     format!("  · {staleness}"),

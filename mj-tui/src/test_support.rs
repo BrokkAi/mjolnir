@@ -563,6 +563,54 @@ pub(crate) fn dashboard_with_finished_native_child() -> (DashboardState, String,
     (dashboard, parent.id, id)
 }
 
+/// precision-3260 as the daemon's storage owner reports it: `/` holds the
+/// worker roots and profile homes, `~/Projects` is a filesystem of its own.
+pub(crate) fn precision_storage(
+    root_free: u64,
+    projects_free: u64,
+) -> mj_core::targets::storage::TargetStorageView {
+    use mj_core::targets::storage::{FilesystemSpace, TargetStorageView};
+    TargetStorageView::evaluate(
+        "precision-3260",
+        Some("/home/jonathan".into()),
+        &[
+            FilesystemSpace {
+                mount: "/".into(),
+                available_bytes: root_free,
+                total_bytes: 500 << 30,
+                reserved_bytes: 25 << 30,
+                paths: vec![
+                    "/home/jonathan/.local/share/hel/workers".into(),
+                    "/home/jonathan/.local/share/hel/profiles".into(),
+                    "/tmp".into(),
+                ],
+            },
+            FilesystemSpace {
+                mount: "/home/jonathan/Projects".into(),
+                available_bytes: projects_free,
+                total_bytes: 1000 << 30,
+                reserved_bytes: 0,
+                paths: vec!["/home/jonathan/Projects".into()],
+            },
+        ],
+        Some(1),
+        |_| None,
+        None,
+    )
+}
+
+/// A running session on precision-3260 whose managed clone is under
+/// `~/Projects`.
+pub(crate) fn precision_session() -> SessionRecord {
+    let mut session = running_session();
+    session.target = Some(mj_core::state::TargetLocator::SshBare {
+        host: "precision-3260".into(),
+        workspace: format!("/home/jonathan/Projects/app/.mj/clones/{}", session.id).into(),
+        worker_id: None,
+    });
+    session
+}
+
 pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
     DeploymentCapacityTarget {
         id: "local".into(),

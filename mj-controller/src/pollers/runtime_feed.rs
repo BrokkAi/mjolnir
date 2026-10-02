@@ -37,6 +37,8 @@ pub struct RuntimeStateUpdate {
     /// What new-session defaults are chosen from; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    /// The daemon storage owner's verdict per target host.
+    pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
 }
 
 /// What a session looked like the last time a view was published for it.

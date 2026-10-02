@@ -4490,6 +4490,7 @@ async fn options_explain_a_failed_host_without_repeating_its_probe() {
             refreshing: false,
             stale: false,
             has_error: true,
+            storage: Vec::new(),
         }];
     });
 
@@ -4560,6 +4561,7 @@ async fn options_mark_a_local_target_without_its_engine_unavailable() {
                 refreshing: false,
                 stale: false,
                 has_error: false,
+                storage: Vec::new(),
             }];
         },
         absent_preferences_path(),
@@ -4621,6 +4623,7 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
             refreshing: false,
             stale: false,
             has_error: true,
+            storage: Vec::new(),
         }];
     });
     let response = app

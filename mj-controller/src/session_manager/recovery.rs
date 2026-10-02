@@ -21,8 +21,53 @@ pub(crate) enum WorkerRecoveryOutcome {
     TargetMissing,
     Suppressed,
     WorkspaceMissing(PathBuf),
+    /// The target's disk is full. Nothing was restarted: a restart writes to
+    /// the target, and a worker started there would stop again at once.
+    StorageFull {
+        host: String,
+        problem: String,
+    },
     RestartedDead,
     RestartedUnresponsive,
+}
+
+/// Whether a full disk forbids restarting this worker. A dead worker's own
+/// exit record is read first: if it stopped for lack of space, the storage
+/// owner learns that before anything is written, and the record is read
+/// before a restart would replace it.
+fn storage_forbids_restart(
+    plan: &WorkerRecoveryPlan,
+    session_id: Option<&str>,
+    executor: &impl CommandExecutor,
+    dead: bool,
+) -> Option<WorkerRecoveryOutcome> {
+    let (host, worker_root) =
+        crate::target_storage::session_worker_root(&plan.source_target, session_id.unwrap_or(""));
+    if dead && let Some(command) = &plan.exit_record {
+        match executor.execute(command) {
+            Ok(output) => {
+                if let Some((reason, at)) = crate::controller::recorded_exit_reason(&output.stdout)
+                    && mj_core::targets::storage::reports_no_space(&reason)
+                {
+                    // The worker stops when it cannot write its journal,
+                    // which lives in the worker root.
+                    crate::target_storage::observe_no_space_at(
+                        &host,
+                        Some(&worker_root),
+                        &format!("the worker stopped: {reason}"),
+                        at.unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64),
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                %host,
+                error = format!("{error:#}"),
+                "could not read the dead worker's exit record"
+            ),
+        }
+    }
+    crate::target_storage::worker_root_problem(&plan.source_target, session_id.unwrap_or(""))
+        .map(|(host, problem)| WorkerRecoveryOutcome::StorageFull { host, problem })
 }
 
 pub(super) fn refresh_worker_binary_if_stale(
@@ -176,6 +221,9 @@ pub(crate) fn recover_worker_controlled(
             "starting" => Ok(WorkerRecoveryOutcome::Starting),
             "alive" if !restart_unresponsive => Ok(WorkerRecoveryOutcome::Alive),
             "alive" => {
+                if let Some(full) = storage_forbids_restart(&plan, session_id, executor, false) {
+                    return Ok(full);
+                }
                 if let Some(workspace) = plan.workspace.as_ref()
                     && !crate::controller::path_exists_on_managed_target(
                         executor,
@@ -191,6 +239,9 @@ pub(crate) fn recover_worker_controlled(
                 Ok(WorkerRecoveryOutcome::RestartedUnresponsive)
             }
             "dead" => {
+                if let Some(full) = storage_forbids_restart(&plan, session_id, executor, true) {
+                    return Ok(full);
+                }
                 if let Some(workspace) = plan.workspace.as_ref()
                     && !crate::controller::path_exists_on_managed_target(
                         executor,

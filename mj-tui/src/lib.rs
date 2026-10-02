@@ -852,6 +852,9 @@ pub struct DashboardState {
     /// cancelled operations that still have an explicit recovery action.
     pub(crate) move_operations: mj_core::snapshot_map::SnapshotMap<String, MoveOperation>,
     pub(crate) capacity_details: BTreeMap<String, CapacityDetail>,
+    /// The daemon storage owner's verdict per target host. The daemon is the
+    /// only judge of a full disk; this surface shows what it says.
+    pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
     /// The build stamped on the workspace pane, as `v2.11.0`. It is a field
     /// rather than the compiled constant so the documentation capture can pin
     /// a placeholder: those screenshots are committed, and a version read from
@@ -1146,6 +1149,7 @@ impl DashboardState {
             launch_standby: None,
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
+            target_storage: Vec::new(),
             version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,

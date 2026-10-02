@@ -45,6 +45,14 @@ async fn durable_session_outcome(
     .flatten()
 }
 
+/// What an unreachable session on a full disk says: the disk first, because
+/// that is what the user can fix, then the transport failure behind it.
+fn storage_wait_detail(problem: &str, error: &anyhow::Error) -> String {
+    format!(
+        "{problem}; the relay worker will not be restarted until space is freed (last error: {error:#})"
+    )
+}
+
 pub(super) async fn run_session_actor(
     target: RelaySessionTarget,
     mut commands: mpsc::Receiver<ActorCommand>,
@@ -66,12 +74,17 @@ pub(super) async fn run_session_actor(
     let mut reviewer_cancellation = tokio_util::sync::CancellationToken::new();
     let mut schedule = SyncSchedule::immediately();
     let mut handled_command = false;
+    // The host whose full disk holds this session's recovery back. Recovery
+    // resumes when the storage owner changes its mind, not on a backoff.
+    let mut storage_wait: Option<String> = None;
+    let mut storage = crate::target_storage::subscribe();
     enum Event {
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
         Command(Option<ActorCommand>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
+        Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
         // A command can start work on a quiet session (a prompt) or drop the
@@ -96,10 +109,36 @@ pub(super) async fn run_session_actor(
                     () = tokio::time::sleep_until(schedule.deadline) => Event::Tick,
                     command = commands.recv() => Event::Command(command),
                     changed = retirement.changed() => Event::Retirement(changed),
+                    changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
                 }
             } => event,
         };
         match event {
+            Event::Storage(changed) => {
+                storage.borrow_and_update();
+                let Some(host) = storage_wait.as_deref() else {
+                    continue;
+                };
+                // The board lives as long as the process; a closed channel
+                // only means nothing will wake this wait again.
+                let still_full = target.worker_recovery.as_ref().is_some_and(|plan| {
+                    crate::target_storage::worker_root_problem(
+                        &plan.source_target,
+                        &target.session_id,
+                    )
+                    .is_some()
+                });
+                if changed.is_err() || !still_full {
+                    tracing::info!(
+                        session_id = target.session_id,
+                        %host,
+                        "target disk has room again; resuming relay worker recovery"
+                    );
+                    storage_wait = None;
+                    last_recovery_probe = None;
+                    schedule.after(Duration::ZERO);
+                }
+            }
             Event::Returned(returned) => {
                 let Some(returned) = returned else { continue };
                 if lifecycle.return_lease(returned.lease_id) {
@@ -208,6 +247,7 @@ pub(super) async fn run_session_actor(
                 match result {
                     Ok(snapshot) => {
                         failures = 0;
+                        storage_wait = None;
                         schedule.after(sync_delay(connection.as_ref()));
                         if let Some(snapshot) = snapshot {
                             publish_view(
@@ -247,6 +287,21 @@ pub(super) async fn run_session_actor(
                             && last_recovery_probe.is_none_or(|last: tokio::time::Instant| {
                                 last.elapsed() >= WORKER_RESTART_COOLDOWN
                             });
+                        // A restart writes to the worker root. While the storage
+                        // owner says that filesystem is full, recovery waits for
+                        // that to change instead of retrying into the same
+                        // failure.
+                        let storage_problem = target
+                            .worker_recovery
+                            .as_ref()
+                            .filter(|_| !integrity && failures >= UNREACHABLE_FAILURE_THRESHOLD)
+                            .and_then(|plan| {
+                                crate::target_storage::worker_root_problem(
+                                    &plan.source_target,
+                                    &target.session_id,
+                                )
+                            });
+                        let recovery_due = recovery_due && storage_problem.is_none();
                         if integrity || failures >= UNREACHABLE_FAILURE_THRESHOLD {
                             // Bind the clone first: borrowing inside the call
                             // would hold the watch read guard while
@@ -254,7 +309,9 @@ pub(super) async fn run_session_actor(
                             // this actor on its own view.
                             let snapshot = view_tx.borrow().snapshot.clone();
                             let mut detail = format!("{error:#}");
-                            if recovery_due {
+                            if let Some((_, problem)) = &storage_problem {
+                                detail = storage_wait_detail(problem, &error);
+                            } else if recovery_due {
                                 detail.push_str("; checking whether the relay worker is dead");
                             }
                             publish_view(
@@ -310,7 +367,15 @@ pub(super) async fn run_session_actor(
                             );
                             break;
                         }
-                        if recovery_due {
+                        if let Some((host, _)) = storage_problem {
+                            tracing::warn!(
+                                session_id = target.session_id,
+                                %host,
+                                "relay worker is unreachable on a full disk; waiting for space before recovery"
+                            );
+                            storage_wait = Some(host);
+                            schedule.after(reconnect_delay(failures));
+                        } else if recovery_due {
                             last_recovery_probe = Some(tokio::time::Instant::now());
                             let plan = target
                                 .worker_recovery
@@ -345,6 +410,7 @@ pub(super) async fn run_session_actor(
                                         | WorkerRecoveryOutcome::Starting
                                         | WorkerRecoveryOutcome::TargetMissing
                                         | WorkerRecoveryOutcome::Suppressed
+                                        | WorkerRecoveryOutcome::StorageFull { .. }
                                         | WorkerRecoveryOutcome::WorkspaceMissing(_) => {
                                             unreachable!()
                                         }
@@ -362,6 +428,28 @@ pub(super) async fn run_session_actor(
                                         &updates,
                                     );
                                     schedule.after(RECONNECT_INTERVAL);
+                                }
+                                Ok(WorkerRecoveryOutcome::StorageFull { host, problem }) => {
+                                    tracing::warn!(
+                                        session_id = target.session_id,
+                                        %host,
+                                        "relay worker stopped on a full disk; waiting for space before restarting it"
+                                    );
+                                    let snapshot = view_tx.borrow().snapshot.clone();
+                                    publish_view(
+                                        &target.session_id,
+                                        ManagedSessionView {
+                                            snapshot,
+                                            connected: false,
+                                            error: Some(ViewError::Unreachable(
+                                                storage_wait_detail(&problem, &error),
+                                            )),
+                                        },
+                                        &view_tx,
+                                        &updates,
+                                    );
+                                    storage_wait = Some(host);
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::Alive) => {
                                     tracing::warn!(

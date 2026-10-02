@@ -162,6 +162,13 @@ impl<E: CommandExecutor> Drop for PreparedWorkerBinary<'_, E> {
     }
 }
 
+/// The bytes a local file will take on the target.
+pub(in crate::controller) fn file_size(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path)
+        .with_context(|| format!("measure {}", path.display()))?
+        .len())
+}
+
 pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
     executor: &'a E,
     locator: &targets::TargetLocator,
@@ -174,6 +181,12 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
     );
     let plan = worker_binary_replacement_plan(locator, session_id, worker_binary, &staging)?;
     let root = targets::worker_root(locator, session_id)?;
+    crate::target_storage::ensure_room_for(
+        locator,
+        [format!("{root}/{staging}.next").as_str()],
+        || file_size(worker_binary),
+        "stage the replacement Mjolnir worker",
+    )?;
     let (live, live_names) = LiveStaging::register(session_id, &staging);
     // The guard exists before the first byte is written, so a failed or
     // cancelled upload removes its partial `.next` file on the way out.
@@ -265,6 +278,16 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     if !launch.requires_harness_preparation() {
         return Ok(());
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [
+            targets::worker_root(locator, session_id)?.as_str(),
+            crate::target_storage::harness_cache_path(locator).as_str(),
+            launch.harness_home.to_string_lossy().as_ref(),
+        ],
+        || file_size(worker_binary),
+        "prepare the managed harness",
+    )?;
     if locator.container_engine().is_some() {
         return prepare_container_harness_for_upgrade(
             executor,
@@ -451,6 +474,15 @@ pub(super) fn prepare_installed_managed_harness(
     if !launch.requires_harness_preparation() {
         return Ok(());
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [
+            crate::target_storage::harness_cache_path(locator).as_str(),
+            launch.harness_home.to_string_lossy().as_ref(),
+        ],
+        || Ok(0),
+        "install the managed harness",
+    )?;
     let worker_binary = format!("{worker_root}/hel");
     let launch_config = format!("{worker_root}/launch.json");
     let command = targets::locator_command(
@@ -774,6 +806,12 @@ pub(super) fn replace_target_worker_binary_if_stale(
     if matches {
         return Ok(false);
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [targets::worker_root(locator, session_id)?.as_str()],
+        || file_size(source),
+        "replace the stale Mjolnir worker",
+    )?;
     installed_worker_binary_replacement_plan(locator, session_id, source)?
         .execute(executor)
         .context("replace stale relay worker binary")?;
