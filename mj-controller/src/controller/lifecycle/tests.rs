@@ -1493,3 +1493,415 @@ fn failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data()
         Some(reason.as_str())
     );
 }
+
+// -- releasing mbx build state when a workspace goes -----------------------
+
+/// The `$0` the mbx release script runs under.
+const RELEASE_LABEL: &str = "mj-mbx-release";
+
+fn is_release(command: &CommandSpec) -> bool {
+    command
+        .args
+        .iter()
+        .any(|argument| argument.contains(RELEASE_LABEL))
+}
+
+/// Runs every command for real except the mbx release, which it records and
+/// answers with `release_status`. It also notes whether the checkout still
+/// existed when the release ran.
+#[cfg(unix)]
+struct RealTargetsRecordedRelease {
+    release_status: i32,
+    checkout: std::path::PathBuf,
+    releases: RefCell<Vec<(CommandSpec, bool)>>,
+}
+
+#[cfg(unix)]
+impl CommandExecutor for RealTargetsRecordedRelease {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if !is_release(command) {
+            return ProcessExecutor.execute(command);
+        }
+        self.releases
+            .borrow_mut()
+            .push((command.clone(), self.checkout.exists()));
+        Ok(CommandOutput {
+            status: self.release_status,
+            stdout: Vec::new(),
+            stderr: if self.release_status == 0 {
+                Vec::new()
+            } else {
+                b"mbx: permission denied".to_vec()
+            },
+        })
+    }
+}
+
+/// Answers every command with success and records them in order.
+#[derive(Default)]
+struct RecordingTargets {
+    commands: RefCell<Vec<CommandSpec>>,
+}
+
+impl RecordingTargets {
+    fn releases(&self) -> Vec<CommandSpec> {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|command| is_release(command))
+            .cloned()
+            .collect()
+    }
+
+    /// The position of the first command whose arguments mention `needle`.
+    fn position(&self, needle: &str) -> Option<usize> {
+        self.commands.borrow().iter().position(|command| {
+            command
+                .args
+                .iter()
+                .any(|argument| argument.contains(needle))
+        })
+    }
+}
+
+impl CommandExecutor for RecordingTargets {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// The arguments the release script receives after its `$0`.
+fn release_arguments(release: &CommandSpec) -> &[String] {
+    let label = release
+        .args
+        .iter()
+        .position(|argument| argument == RELEASE_LABEL)
+        .expect("the release script's $0");
+    &release.args[label + 1..]
+}
+
+/// The repositories of the bundle the release tests' sessions check out.
+fn two_repository_bundle() -> mj_core::config::ProjectBundle {
+    let repository = |id: &str| mj_core::config::ProjectRepository {
+        id: id.into(),
+        github: Some(format!("owner/{id}")),
+        destination: id.into(),
+        ..Default::default()
+    };
+    mj_core::config::ProjectBundle {
+        primary_repo: "app".into(),
+        repositories: vec![repository("app"), repository("lib")],
+    }
+}
+
+/// A running local managed clone session whose worker root is `worker_root`.
+#[cfg(unix)]
+fn running_managed_clone_controller(
+    repository: &std::path::Path,
+    worker_root: &std::path::Path,
+    session_id: &str,
+) -> Controller {
+    let mut session =
+        crate::controller::test_support::managed_clone_session(repository, session_id);
+    session.state = SessionState::Running;
+    session.target_template_id = "local".into();
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: worker_root.to_owned(),
+    });
+    session.checkpoint = None;
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_gone() {
+    if !in_isolated_store(
+        "destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_gone",
+    ) {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let directory = tempfile::tempdir().unwrap();
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller =
+        running_managed_clone_controller(repository.path(), &worker_root, session_id);
+    let checkout = repository.path().join(".mj/clones").join(session_id);
+    assert!(checkout.exists());
+    let executor = RealTargetsRecordedRelease {
+        release_status: 0,
+        checkout: checkout.clone(),
+        releases: RefCell::new(Vec::new()),
+    };
+
+    controller
+        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
+        .unwrap();
+
+    let releases = executor.releases.into_inner();
+    assert_eq!(releases.len(), 1, "{releases:?}");
+    let (release, checkout_present) = &releases[0];
+    assert!(
+        !checkout_present,
+        "mbx is told only after the checkout is gone"
+    );
+    let arguments = release_arguments(release);
+    assert_eq!(arguments[0], "native", "{release:?}");
+    assert_eq!(
+        &arguments[5..],
+        [checkout.to_string_lossy().into_owned()],
+        "the clone is the only workspace released"
+    );
+    assert!(!controller.state.sessions.contains_key(session_id));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
+    if !in_isolated_store(
+        "a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor",
+    ) {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let directory = tempfile::tempdir().unwrap();
+    let repository = committed_repository();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller =
+        running_managed_clone_controller(repository.path(), &worker_root, session_id);
+    let checkout = repository.path().join(".mj/clones").join(session_id);
+    let executor = RealTargetsRecordedRelease {
+        release_status: 1,
+        checkout: checkout.clone(),
+        releases: RefCell::new(Vec::new()),
+    };
+
+    controller
+        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
+        .unwrap();
+
+    assert_eq!(executor.releases.borrow().len(), 1);
+    assert!(!checkout.exists());
+    assert!(!worker_root.exists());
+    assert!(!controller.state.sessions.contains_key(session_id));
+    let failures = crate::controller::recent_release_failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].host, "local");
+    assert!(
+        failures[0].error.contains("permission denied"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[0]
+            .remediation
+            .contains(&format!("mbx clean {}", checkout.display())),
+        "{failures:?}"
+    );
+}
+
+#[test]
+fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
+    if !in_isolated_store("destroying_an_ssh_bare_session_releases_each_repository_on_its_host") {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let workspace = format!(".local/share/hel/workspaces/{session_id}");
+    let template: TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "ssh-bare", "host": "build.test", "user": "ubuntu", "permissions": "guardian",
+    }))
+    .unwrap();
+    let mut session = checkpoint_test_session(session_id);
+    session.target_template_id = "ssh".into();
+    session.target_runtime = Some((&template).into());
+    session.checkpoint = None;
+    session.target = Some(TargetLocator::SshBare {
+        host: "build.test".into(),
+        workspace: workspace.clone().into(),
+        worker_id: None,
+    });
+    let mut config = Config::default();
+    config.targets.insert("ssh".into(), template);
+    config
+        .bundles
+        .insert("project".into(), two_repository_bundle());
+    let mut controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let executor = RecordingTargets::default();
+
+    controller
+        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
+        .unwrap();
+
+    let releases = executor.releases();
+    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    let release = &releases[0];
+    assert_eq!(release.program, "ssh");
+    let remote = release.args.last().unwrap();
+    assert!(remote.contains("native"), "{remote}");
+    for repository in ["app", "lib"] {
+        assert!(
+            remote.contains(&format!("{workspace}/{repository}")),
+            "{repository} is released: {remote}"
+        );
+    }
+    let removal = executor
+        .position("rm -rf")
+        .expect("the workspace removal ran");
+    assert!(
+        removal < executor.position(RELEASE_LABEL).unwrap(),
+        "the workspace and its worker go before mbx is told"
+    );
+    assert!(!controller.state.sessions.contains_key(session_id));
+}
+
+/// A stopped Podman session, with or without the shared build cache.
+fn stopped_cached_podman_controller(session_id: &str, cached: bool) -> Controller {
+    let mut controller = stopped_podman_cleanup_controller(session_id);
+    controller
+        .config
+        .bundles
+        .insert("project".into(), two_repository_bundle());
+    let session = controller.state.sessions.get_mut(session_id).unwrap();
+    session.container_workspace =
+        Some(mj_core::targets::new_container_workspace(session_id).unwrap());
+    session.build_cache = cached.then(|| mj_core::state::SessionBuildCache {
+        host: "local".into(),
+        directory: "/srv/mbx-cache".into(),
+        max_size: None,
+        target_root: None,
+    });
+    controller
+}
+
+#[test]
+fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
+    if !in_isolated_store(
+        "removing_a_cached_container_releases_its_workspaces_from_the_shared_cache",
+    ) {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut controller = stopped_cached_podman_controller(session_id, true);
+    let executor = RecordingTargets::default();
+
+    controller
+        .cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
+        .unwrap();
+
+    let releases = executor.releases();
+    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    let arguments = release_arguments(&releases[0]);
+    assert_eq!(
+        &arguments[..4],
+        [
+            "shared",
+            crate::controller::MBX_VERSION,
+            "/srv/mbx-cache",
+            "/srv/mbx-cache/.mjolnir/config"
+        ]
+    );
+    assert_eq!(
+        &arguments[5..],
+        [
+            format!("/workspace/{session_id}/app"),
+            format!("/workspace/{session_id}/lib"),
+        ]
+    );
+    assert!(
+        executor.position("podman rm").unwrap() < executor.position(RELEASE_LABEL).unwrap(),
+        "the container goes before mbx is told"
+    );
+    assert!(controller.state.sessions[session_id].target.is_none());
+}
+
+#[test]
+fn removing_a_container_that_ran_without_the_build_cache_releases_nothing() {
+    if !in_isolated_store("removing_a_container_that_ran_without_the_build_cache_releases_nothing")
+    {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut controller = stopped_cached_podman_controller(session_id, false);
+    let executor = RecordingTargets::default();
+
+    controller
+        .cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
+        .unwrap();
+
+    assert!(executor.position("podman rm").is_some());
+    assert!(executor.releases().is_empty());
+    assert!(controller.state.sessions[session_id].target.is_none());
+}
+
+#[test]
+fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
+    if !in_isolated_store("destroying_a_subagent_never_releases_the_workspace_it_borrows") {
+        return;
+    }
+    let _releases = crate::controller::mbx::release::enable_for_test();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let parent_id = "fedcba9876543210fedcba9876543210";
+    let mut controller = failed_subagent_controller(directory.path(), session_id);
+    controller
+        .config
+        .bundles
+        .insert("project".into(), two_repository_bundle());
+    let podman = stopped_podman_cleanup_controller(session_id).config.targets["podman"].clone();
+    controller.config.targets.insert("podman".into(), podman);
+    let child = controller.state.sessions.get_mut(session_id).unwrap();
+    // A child runs in its parent's container, workspace and build cache.
+    child.target_template_id = "podman".into();
+    child.target = Some(TargetLocator::LocalPodman {
+        borrowed_from: Some(parent_id.into()),
+        container_id: targets::resource_name(parent_id).unwrap(),
+        workspace_storage: mj_core::state::PodmanWorkspaceLocator::ContainerLayer,
+    });
+    child.container_workspace = Some(mj_core::targets::new_container_workspace(parent_id).unwrap());
+    child.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local".into(),
+        directory: "/srv/mbx-cache".into(),
+        max_size: None,
+        target_root: None,
+    });
+    let executor = RecordingTargets::default();
+
+    controller
+        .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
+        .unwrap();
+
+    assert!(
+        executor.position("rm -rf").is_some(),
+        "the child's own worker state still goes: {:?}",
+        executor.commands.borrow()
+    );
+    assert!(executor.releases().is_empty());
+    assert!(!controller.state.sessions.contains_key(session_id));
+}

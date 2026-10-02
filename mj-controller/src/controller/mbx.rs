@@ -5,12 +5,14 @@
 //! restores cached outputs instead of recompiling. Its store is an ordinary
 //! directory on the container host, which every mj container on that host
 //! mounts read-write at the same absolute path. Nothing is synchronized
-//! between hosts and mj never runs mbx garbage collection.
+//! between hosts and mj never runs mbx garbage collection; it only tells mbx
+//! when a workspace it removed will never build again (see [`release`]).
 //!
 //! Cache discovery can leave new sessions uncached. Once a cache is selected,
 //! configuration failures are reported rather than launching with stale policy.
 
 mod configuration;
+pub(crate) mod release;
 pub(crate) mod service;
 
 use std::io::Read;

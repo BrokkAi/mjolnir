@@ -16,6 +16,7 @@ use super::checkpoint::{
     CheckpointExportPolicy, LatchExclusivity, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
+use super::mbx::release::BuildStateRelease;
 use super::worker_restart::WorkerRestartLeftNoWorker;
 use super::worktree::{
     cleanup_managed_worktree, managed_worktree_checkout_is_dirty, retire_managed_worktree,
@@ -865,7 +866,7 @@ impl Controller {
                     plan.execute(executor)?;
                     true
                 } else {
-                    execute_target_cleanup(&backend, session_id, executor)?;
+                    execute_target_cleanup(&backend, &destroying, &self.config, executor)?;
                     false
                 };
                 if let Some(worktree) = &destroying.managed_worktree {
@@ -935,7 +936,9 @@ impl Controller {
                     targets::quiesce_plan(&backend, session_id)?.is_some(),
                     "session {session_id} retained a non-Podman target after stopping"
                 );
-                if let Err(error) = execute_target_cleanup(&backend, session_id, executor) {
+                if let Err(error) =
+                    execute_target_cleanup(&backend, &previous, &self.config, executor)
+                {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     record.updated_at = now();
                     record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
@@ -1041,7 +1044,7 @@ impl Controller {
                         plan.execute(executor)?;
                         deferred = true;
                     } else {
-                        execute_target_cleanup(&backend, session_id, executor)?;
+                        execute_target_cleanup(&backend, session, &self.config, executor)?;
                     }
                 }
                 if let Some(worktree) = &session.managed_worktree {
@@ -1264,7 +1267,7 @@ impl Controller {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
                     } else {
-                        execute_target_cleanup(&backend, session_id, executor)?;
+                        execute_target_cleanup(&backend, &session, &self.config, executor)?;
                     }
                 }
                 if let Some(worktree) = &session.managed_worktree {
@@ -1324,11 +1327,16 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> boo
     }
 }
 
+/// Remove a session's own target: its worker, container or workspace. Once
+/// the target is confirmed gone, the mbx build state of the workspaces it held
+/// is released; that release never fails the cleanup.
 fn execute_target_cleanup(
     backend: &targets::TargetLocator,
-    session_id: &str,
+    session: &SessionRecord,
+    config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
+    let session_id = session.id.as_str();
     let _owner = crate::worker_lifecycle::require(session_id)?;
     if let Err(cleanup_error) = targets::close_plan(backend, session_id)?.execute(executor) {
         match targets::cleanup_target_is_confirmed_absent(backend, session_id, executor) {
@@ -1359,6 +1367,9 @@ fn execute_target_cleanup(
                 )));
             }
         }
+    }
+    if let Some(release) = BuildStateRelease::for_target(session, backend, config) {
+        release.run(executor);
     }
     // Exact teardown proved there is no process left whose boot must be
     // preserved. Retire the intent before publishing a different placement.

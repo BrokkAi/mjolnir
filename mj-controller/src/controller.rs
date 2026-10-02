@@ -77,6 +77,7 @@ pub use backend::image_refresh_plan;
 use backend::validate_resource_allocation;
 pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
 pub use mbx::preview_build_cache;
+pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
 pub(crate) use worker_binary::{

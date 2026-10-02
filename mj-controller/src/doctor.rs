@@ -216,6 +216,9 @@ pub fn run_with_config_path(
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
     checks.extend(build_cache_checks(offered, executor));
+    checks.extend(build_cache_release_check(
+        &crate::controller::recent_release_failures(),
+    ));
     checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(offered));
     checks.extend(ssh_bare_worker_checks(config, executor));
@@ -285,6 +288,30 @@ fn build_cache_checks(
             }
         })
         .collect()
+}
+
+/// Report removed workspaces whose mbx build output Mjolnir could not release.
+/// Nothing is reported when every recent release succeeded.
+fn build_cache_release_check(
+    failures: &[crate::controller::ReleaseFailure],
+) -> Option<DoctorCheck> {
+    let latest = failures.last()?;
+    let days = crate::controller::FAILURE_REPORT_SECS / (24 * 60 * 60);
+    let count = failures.len();
+    let releases = if count == 1 { "release" } else { "releases" };
+    Some(DoctorCheck::warning(
+        "build-cache.release",
+        "Build output of removed sessions",
+        format!(
+            "{count} build cache {releases} failed in the last {days} days, so mbx still holds \
+             build output for workspaces Mjolnir removed. Latest, on {}: {}",
+            latest.host, latest.error
+        ),
+        format!(
+            "On {}, run: {}. mbx also removes this output once it reaches its target.max_age.",
+            latest.host, latest.remediation
+        ),
+    ))
 }
 
 fn harness_discovery_check(

@@ -2270,6 +2270,10 @@ pub(super) fn retire_managed_worktree(
 
 /// Remove the checkout and prune its metadata. Returns whether the repository
 /// is still there to act on at all.
+///
+/// Every caller has stopped the session's worker first, so once the checkout
+/// is gone nothing can build in it again, and mbx is told to drop its build
+/// state for that path.
 fn remove_managed_worktree_checkout(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
@@ -2277,6 +2281,13 @@ fn remove_managed_worktree_checkout(
     if !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)? {
         return Ok(false);
     }
+    let release = || {
+        super::mbx::release::BuildStateRelease::managed_checkout(
+            managed_target_ssh(&worktree.target),
+            &worktree.worktree_root,
+        )
+        .run(executor);
+    };
     if worktree.kind == ManagedCheckoutKind::Clone {
         if path_exists_on_managed_target(executor, &worktree.target, &worktree.worktree_root)? {
             execute_checked(
@@ -2288,6 +2299,7 @@ fn remove_managed_worktree_checkout(
                 )
                 .purpose("remove managed clone after its worker stopped"),
             )?;
+            release();
         }
         return Ok(true);
     }
@@ -2306,6 +2318,7 @@ fn remove_managed_worktree_checkout(
                 "remove managed raw-session worktree",
             ),
         )?;
+        release();
     }
     execute_checked(
         executor,
