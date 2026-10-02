@@ -238,6 +238,7 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "aws".into(),
         resource_allocation: None,
         additional_mounts: vec![AdditionalMount {

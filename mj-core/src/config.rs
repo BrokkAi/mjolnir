@@ -156,6 +156,47 @@ pub struct ReviewConfig {
     pub effort: Option<String>,
 }
 
+/// One session's turn-review choice, made when the session is created. It
+/// overrides `[review]` for that session only; a session without one follows
+/// `[review]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SessionReview {
+    /// Never review this session automatically. A manual `/review` still runs.
+    Off,
+    /// Review every turn. A field left empty keeps the `[review]` value; a
+    /// model without a `[review]` profile makes Auto pick a profile that
+    /// offers it.
+    On {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+}
+
+impl ReviewConfig {
+    /// This configuration as it applies to a session with `session`'s choice.
+    #[must_use]
+    pub fn for_session(&self, session: Option<&SessionReview>) -> Self {
+        let mut config = self.clone();
+        match session {
+            None => {}
+            Some(SessionReview::Off) => config.enabled = false,
+            Some(SessionReview::On { model, effort }) => {
+                config.enabled = true;
+                if model.is_some() {
+                    config.model.clone_from(model);
+                }
+                if effort.is_some() {
+                    config.effort.clone_from(effort);
+                }
+            }
+        }
+        config
+    }
+}
+
 /// Indexing every session into the user's SessionWiki index.
 ///
 /// SessionWiki is a separate tool that keeps one searchable index of AI coding

@@ -48,15 +48,28 @@ impl RuntimeState {
         // refresher already reloads config.toml every 500 ms and installs the
         // result here, so arming needs no reload machinery of its own.
         let review_config = Arc::new(Mutex::new(controller.config.review.clone()));
+        // A session's own review choice is read from the latest committed
+        // records, which the writer publishes without the owner's lock.
+        let committed_sessions = crate::database::database_writer_installed()
+            .then(|| crate::database::subscribe_committed_state().ok())
+            .flatten();
         let review_host = TurnReviewHost::spawn_notifying(
             session_manager.clone(),
             {
                 let installed = review_config.clone();
-                Arc::new(move || {
+                Arc::new(move |session_id: &str| {
+                    let session = committed_sessions.as_ref().and_then(|committed| {
+                        committed
+                            .borrow()
+                            .as_ref()
+                            .ok()
+                            .and_then(|committed| committed.state.sessions.get(session_id))
+                            .and_then(|session| session.review.clone())
+                    });
                     installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .clone()
+                        .for_session(session.as_ref())
                 })
             },
             revisions.notifier(),
@@ -237,6 +250,7 @@ impl RuntimeState {
                 base: None,
                 create_managed_worktree: None,
                 subagents: None,
+                review: None,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,

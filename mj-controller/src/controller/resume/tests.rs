@@ -1107,6 +1107,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "podman-old".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

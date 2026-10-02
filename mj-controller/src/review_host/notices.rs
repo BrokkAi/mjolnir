@@ -94,7 +94,7 @@ impl HostState {
                 let next = RuntimeReviewView {
                     session_id: session_id.into(),
                     questions: Vec::new(),
-                    tier: (self.config)().tier,
+                    tier: (self.config)(session_id).tier,
                     phase: TurnReviewPhase::LaunchingReviewer,
                     roles: Vec::new(),
                     status: "Preparing reviewer…".into(),

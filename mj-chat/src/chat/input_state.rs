@@ -751,7 +751,7 @@ impl ChatState {
                 LocalCommand::Review => {
                     self.record_prompt_history(&prompt);
                     self.clear_input();
-                    let review = &self.review_config;
+                    let review = self.review_config();
                     return match args.trim().to_ascii_lowercase().as_str() {
                         // Bare `/review` reviews the turn that just finished,
                         // whether or not automatic review is armed.
@@ -766,7 +766,10 @@ impl ChatState {
                             ChatAction::None
                         }
                         "status" => {
-                            self.set_notice(review_status_line(review, self.turn_review.is_some()));
+                            self.set_notice(review_status_line(
+                                &review,
+                                self.turn_review.is_some(),
+                            ));
                             ChatAction::None
                         }
                         _ => {

@@ -91,14 +91,17 @@ pub(crate) async fn resolve(
             score: 0,
         });
     } else {
-        ensure!(
-            settings.model.is_none() && settings.effort.is_none(),
-            "Auto uses fixed model and effort; select a named reviewer profile to override them"
-        );
+        // A model named without a profile can come from any enabled profile
+        // that offers it, not only from providers Auto has a policy for.
+        let pinned_model = settings.model.is_some();
         let supported = controller
             .config
             .enabled_profiles()
-            .filter(|(id, _)| providers.get(*id).and_then(|p| p.main_policy()).is_some())
+            .filter(|(id, _)| {
+                providers
+                    .get(*id)
+                    .is_some_and(|p| pinned_model || p.main_policy().is_some())
+            })
             .collect::<Vec<_>>();
         let quotas = UtilityLlmRuntime::shared()
             .quotas(&controller.config, &supported)
@@ -247,10 +250,25 @@ fn select_models(
 ) -> Result<(ReviewModelSettings, ReviewModelSettings)> {
     let automatic = settings.profile.is_none();
     let main = if automatic {
-        let (family, effort) = provider.main_policy().context("provider is manual-only")?;
+        // Auto takes its model and effort from the provider's policy, except
+        // where the session or `[review]` names one.
+        let policy = provider.main_policy();
+        let model = match &settings.model {
+            Some(model) => {
+                ensure!(
+                    catalog.model_choices.iter().any(|c| &c.value == model),
+                    "does not advertise model {model}"
+                );
+                model.clone()
+            }
+            None => family_model(catalog, policy.context("provider is manual-only")?.0)?,
+        };
         ReviewModelSettings {
-            model: Some(family_model(catalog, family)?),
-            effort: Some(effort.into()),
+            model: Some(model),
+            effort: settings
+                .effort
+                .clone()
+                .or_else(|| policy.map(|(_, effort)| effort.into())),
             fast_mode: false,
         }
     } else {
@@ -405,6 +423,58 @@ mod tests {
         let (main, specialist) =
             select_models(ReviewProvider::Other, &config, &catalog(&[]), true).unwrap();
         assert_eq!(main, specialist);
+    }
+
+    #[test]
+    fn auto_with_a_named_model_uses_it_only_where_it_is_offered() {
+        let config = ReviewConfig {
+            model: Some("gpt-6-astra".into()),
+            ..Default::default()
+        };
+        let (main, _) = select_models(
+            ReviewProvider::Codex,
+            &config,
+            &catalog(&["gpt-6-astra", "gpt-7-astra"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(main.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(main.effort.as_deref(), Some("medium"), "policy effort");
+
+        let error = select_models(
+            ReviewProvider::Claude,
+            &config,
+            &catalog(&["claude-fable-5-1"]),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("gpt-6-astra"), "{error:#}");
+
+        // A provider Auto has no policy for can still offer the model; its
+        // harness keeps its own effort unless one is named.
+        let (main, _) = select_models(
+            ReviewProvider::Other,
+            &config,
+            &catalog(&["gpt-6-astra"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(main.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(main.effort, None);
+
+        let effort_only = ReviewConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let (main, _) = select_models(
+            ReviewProvider::Codex,
+            &effort_only,
+            &catalog(&["gpt-6-astra", "gpt-7-astra"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(main.model.as_deref(), Some("gpt-7-astra"));
+        assert_eq!(main.effort.as_deref(), Some("high"));
     }
 
     #[test]

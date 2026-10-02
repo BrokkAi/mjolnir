@@ -566,6 +566,7 @@ fn adopted_session_record(
         bundle_id,
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: target_id.to_owned(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

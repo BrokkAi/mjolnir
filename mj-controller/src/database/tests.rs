@@ -482,6 +482,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         bundle_id: bundle.into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -1200,6 +1201,23 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     assert_eq!(session.additional_mounts, vec![attached]);
     assert_eq!(session.container_cpus.as_deref(), Some("6"));
     assert_eq!(session.container_memory.as_deref(), Some("12g"));
+}
+
+#[test]
+fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.review = Some(mj_core::config::SessionReview::On {
+        model: Some("gpt-6-astra".into()),
+        effort: Some("high".into()),
+    });
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Running;
+    save_lifecycle_session_to(&database, &record).unwrap();
+
+    let loaded = load_state_from(&database).unwrap();
+    assert_eq!(loaded.sessions["session-1"].review, record.review);
 }
 
 #[test]

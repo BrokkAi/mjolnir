@@ -799,6 +799,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         bundle_id: "hel".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

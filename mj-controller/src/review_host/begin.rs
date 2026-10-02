@@ -34,7 +34,7 @@ impl HostState {
             watch.prompt_driven
                 && matches!(watch.execution, MaterializedExecutionState::Running { .. })
         }) && matches!(execution, MaterializedExecutionState::Idle);
-        if !finished_turn || !(self.config)().enabled {
+        if !finished_turn || !(self.config)(&session_id).enabled {
             return;
         }
         self.begin(session_id, false, None);
@@ -66,7 +66,7 @@ impl HostState {
             );
             return;
         }
-        let config = (self.config)();
+        let config = (self.config)(&session_id);
         let tier = config.tier;
         let control = self.control.clone();
         let events = self.events.clone();

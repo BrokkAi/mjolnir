@@ -1456,6 +1456,7 @@ pub(crate) fn spawn_dashboard_create_session(
                 daemon::connect_or_start()
                     .await?
                     .start_create_session(daemon::CreateSessionRequest {
+                        review: None,
                         at: None,
                         branch: None,
                         base: None,

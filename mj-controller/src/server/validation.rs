@@ -414,7 +414,19 @@ fn validate_action_against(
             branch: _,
             base: _,
             subagents: _,
+            review,
         } => {
+            if let Some(mj_core::config::SessionReview::On { model, effort }) = review
+                && [model, effort].into_iter().flatten().any(|value| {
+                    value.trim().is_empty()
+                        || value.len() > 256
+                        || value.chars().any(char::is_control)
+                })
+            {
+                return Err(ApiError::bad_request(
+                    "a review model or effort must be 1-256 characters of plain text",
+                ));
+            }
             if !workspace_id.is_empty() {
                 validate_public_id(workspace_id)?;
             }

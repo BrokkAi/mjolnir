@@ -1420,6 +1420,7 @@ fn prompt_action() -> ControllerAction {
 
 fn new_action() -> ControllerAction {
     ControllerAction::New {
+        review: None,
         at: None,
         branch: None,
         base: None,
@@ -1458,6 +1459,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

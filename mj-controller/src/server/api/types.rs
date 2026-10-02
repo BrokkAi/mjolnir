@@ -184,6 +184,9 @@ pub struct StartSessionRequest {
     /// Omitted uses the selected profile's subagent setting.
     #[serde(default)]
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    /// Turn review for this session. Omitted follows `[review]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<mj_core::config::SessionReview>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default. See the type's own documentation.

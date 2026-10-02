@@ -40,6 +40,7 @@ fn session_record(id: &str) -> SessionRecord {
         bundle_id: "bundle-1".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "target-1".into(),
         resource_allocation: None,
         container_cpus: None,

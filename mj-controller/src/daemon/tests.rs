@@ -955,6 +955,7 @@ pub(super) fn runtime_test_session(
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -3699,6 +3700,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let shutdown = CancellationToken::new();
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
+            review: None,
             create_managed_worktree: Some(false),
             at: None,
             branch: None,

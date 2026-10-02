@@ -733,6 +733,7 @@ impl ActiveChat {
             }
             if let Some(context) = context.as_ref() {
                 state.set_review_config(context.config.review.clone());
+                state.set_session_review(context.session.review.clone());
                 state.set_spinner_style(context.config.spinner);
                 state
                     .set_detailed_activity_clocks(context.config.advanced.detailed_activity_clocks);
@@ -1036,6 +1037,8 @@ impl ActiveChat {
         self.state.set_header_summary(target, profile, title);
         self.state.set_harness_kind(harness_kind);
         self.state.set_review_config(config.review.clone());
+        self.state
+            .set_session_review(context.session.review.clone());
         self.state.set_spinner_style(config.spinner);
         self.state
             .set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);

@@ -522,9 +522,15 @@ impl ChatState {
         }
     }
 
+    /// Mirrors the session's own review choice, which `mj new` can set.
+    pub fn set_session_review(&mut self, review: Option<mj_core::config::SessionReview>) {
+        self.session_review = review;
+    }
+
+    /// `[review]` as it applies to this session.
     #[must_use]
-    pub(crate) fn review_config(&self) -> &mj_core::config::ReviewConfig {
-        &self.review_config
+    pub(crate) fn review_config(&self) -> mj_core::config::ReviewConfig {
+        self.review_config.for_session(self.session_review.as_ref())
     }
 
     pub(crate) fn mark_prompt_submitted(&mut self, prompt: &str) {
