@@ -240,6 +240,7 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
                     bundle_id: "project".to_owned(),
                     project_directory: None,
                     managed_worktree: None,
+                    review: None,
                     target_template_id: "local".to_owned(),
                     resource_allocation: None,
                     additional_mounts: Vec::new(),

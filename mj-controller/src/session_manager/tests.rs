@@ -2081,6 +2081,7 @@ fn register_leased_relay_session() {
         bundle_id: "project".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

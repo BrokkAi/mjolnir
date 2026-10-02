@@ -135,6 +135,7 @@ pub(super) async fn start_session(
         branch: request.branch.clone(),
         base: request.base.clone(),
         subagents: request.subagents,
+        review: request.review.clone(),
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,

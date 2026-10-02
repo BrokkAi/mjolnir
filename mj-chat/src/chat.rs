@@ -151,6 +151,10 @@ pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) ->
             )
         }
     };
+    let armed = match &review.model {
+        Some(model) => format!("{armed}, model {model:?}"),
+        None => armed,
+    };
     if open {
         format!("{armed}. A review is open now.")
     } else {
@@ -607,6 +611,8 @@ pub struct ChatState {
     /// What `[review]` says, mirrored from the config the TUI already drains,
     /// so `/review status` and the composer title can report it.
     review_config: mj_core::config::ReviewConfig,
+    /// This session's own review choice, applied over `review_config`.
+    session_review: Option<mj_core::config::SessionReview>,
     /// Whether the dialog on screen belongs to the reviewer rather than the
     /// primary, so its answer is routed to the harness that asked.
     elicitation_is_reviewers: bool,
@@ -795,6 +801,7 @@ impl ChatState {
             turn_review: None,
             turn_review_action_areas: Vec::new(),
             review_config: mj_core::config::ReviewConfig::default(),
+            session_review: None,
             elicitation_is_reviewers: false,
             elicitation_role: None,
             goal_state: mj_core::goal::GoalState::from_configuration(&snapshot.config)

@@ -1403,6 +1403,10 @@ pub struct SessionRecord {
         deserialize_with = "crate::subagent::deserialize_optional_policy"
     )]
     pub subagents: Option<crate::subagent::SubagentPolicy>,
+    /// Turn review chosen for this session when it was created. `None`
+    /// follows the global `[review]` section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::config::SessionReview>,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,

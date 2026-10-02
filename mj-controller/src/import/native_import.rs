@@ -162,6 +162,7 @@ pub fn import_native_session(
             bundle_id: bundle_id.to_owned(),
             project_directory: raw_project.as_ref().map(|(directory, _)| directory.clone()),
             managed_worktree: None,
+            review: None,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),

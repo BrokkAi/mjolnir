@@ -354,6 +354,13 @@ quick tier runs one general reviewer and validates reported findings. Extended
 review may add intent analysis, a supervisor, and specialist lanes. See
 [Independent turn review](/turn-review/).
 
+`mj new --review-model <model>` and `--review-effort <effort>` review every turn
+of one new session with that model or effort, even when `enabled` is false. In
+Auto, Mjolnir picks the first enabled profile that offers the model.
+`mj new --no-review` turns off automatic review for one session, even when
+`enabled` is true; `/review` still works. Sessions created without these flags
+follow `[review]`.
+
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
 selected review profile's supported model and effort choices and filters the

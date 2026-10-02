@@ -496,6 +496,7 @@ pub(super) async fn preflight_new(
     let project_validation = request.project_directory.is_some();
     let action = ControllerAction::New {
         subagents: None,
+        review: None,
         create_managed_worktree: None,
         at: None,
         branch: None,

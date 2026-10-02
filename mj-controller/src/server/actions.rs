@@ -28,6 +28,9 @@ pub enum ControllerAction {
         /// Omitted uses the selected profile's subagent setting.
         #[serde(default)]
         subagents: Option<mj_core::subagent::SubagentPolicy>,
+        /// Turn review for this session. Omitted follows `[review]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<mj_core::config::SessionReview>,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty

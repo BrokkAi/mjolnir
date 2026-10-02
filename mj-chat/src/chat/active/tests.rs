@@ -1089,6 +1089,7 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         bundle_id: "bundle-1".into(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1172,7 +1173,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
 
     assert_eq!(
         chat.state.review_config(),
-        &mj_core::config::ReviewConfig {
+        mj_core::config::ReviewConfig {
             enabled: true,
             tier: ReviewTier::Extended,
             profile: Some("reviewer-a".into()),
@@ -1185,7 +1186,7 @@ async fn review_status_configuration_is_applied_on_open_and_refresh() {
     reloaded.review.profile = Some("reviewer-b".into());
     chat.refresh_context(&reloaded, None, None);
 
-    assert_eq!(chat.state.review_config(), &reloaded.review);
+    assert_eq!(chat.state.review_config(), reloaded.review);
 }
 
 /// A failed recovery copy is the one thing the user has to see on opening

@@ -140,6 +140,7 @@ pub(super) async fn apply_phone_action(
             branch,
             base,
             subagents,
+            review,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -183,6 +184,7 @@ pub(super) async fn apply_phone_action(
                         branch,
                         base,
                         subagents,
+                        review,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,

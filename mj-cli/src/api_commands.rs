@@ -145,6 +145,19 @@ pub(crate) struct NewArgs {
     /// Fixed child reasoning effort.
     #[arg(long, requires = "subagents")]
     subagent_effort: Option<String>,
+    /// Review every turn of this session with this model, even when
+    /// `[review]` is off. Without a `[review]` profile, Auto picks a profile
+    /// that offers the model.
+    #[arg(long)]
+    review_model: Option<String>,
+    /// Review every turn of this session at this reasoning effort, even when
+    /// `[review]` is off.
+    #[arg(long)]
+    review_effort: Option<String>,
+    /// Do not review this session's turns automatically, even when `[review]`
+    /// is on. `/review` still reviews on request.
+    #[arg(long, conflicts_with_all = ["review_model", "review_effort"])]
+    no_review: bool,
     /// The first prompt. `-` reads it from standard input.
     prompt: Option<String>,
     /// Read the first prompt from this file instead.
@@ -816,6 +829,18 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
     })
 }
 
+/// The session's own turn-review choice, or `None` to follow `[review]`.
+fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
+    use mj_core::config::SessionReview;
+    if args.no_review {
+        return Some(SessionReview::Off);
+    }
+    (args.review_model.is_some() || args.review_effort.is_some()).then(|| SessionReview::On {
+        model: args.review_model.clone(),
+        effort: args.review_effort.clone(),
+    })
+}
+
 /// Create a session and deliver its optional first prompt.
 pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<String>) -> Result<()> {
     let prompt = read_prompt(args.prompt.clone(), args.prompt_file.clone())?;
@@ -836,6 +861,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     };
     let request = StartSessionRequest {
         subagents: new_subagent_policy(&args)?,
+        review: new_session_review(&args),
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -2151,6 +2177,38 @@ mod tests {
         assert_eq!(events.session.as_deref(), Some("s1"));
         assert_eq!(events.workspace_id.as_deref(), Some("w1"));
         assert_eq!(events.after_seq, Some(9));
+    }
+
+    #[test]
+    fn new_review_flags_choose_the_sessions_own_review() {
+        use mj_core::config::SessionReview;
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(Command::New(args)) => new_session_review(&args),
+                _ => panic!("expected the new command"),
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["--no-review"]).unwrap(), Some(SessionReview::Off));
+        assert_eq!(
+            parse(&["--review-model", "gpt-6-astra"]).unwrap(),
+            Some(SessionReview::On {
+                model: Some("gpt-6-astra".into()),
+                effort: None,
+            })
+        );
+        assert_eq!(
+            parse(&["--review-effort", "high"]).unwrap(),
+            Some(SessionReview::On {
+                model: None,
+                effort: Some("high".into()),
+            })
+        );
+        let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
+            .expect_err("off and a reviewer model contradict each other");
+        assert!(error.to_string().contains("--review-model"), "{error}");
     }
 
     #[test]

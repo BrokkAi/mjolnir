@@ -1981,6 +1981,67 @@ fn a_review_section_names_the_profile_that_reviews() {
 }
 
 #[test]
+fn a_session_review_choice_overrides_only_what_it_names() {
+    let global = ReviewConfig {
+        enabled: true,
+        tier: crate::review::lanes::ReviewTier::Extended,
+        profile: Some("reviewer".into()),
+        model: Some("global-model".into()),
+        effort: Some("high".into()),
+    };
+    assert_eq!(global.for_session(None), global);
+    assert_eq!(
+        global.for_session(Some(&SessionReview::Off)),
+        ReviewConfig {
+            enabled: false,
+            ..global.clone()
+        },
+        "off stops automatic review and keeps the reviewer /review uses"
+    );
+    let on = SessionReview::On {
+        model: Some("session-model".into()),
+        effort: None,
+    };
+    let off_globally = ReviewConfig {
+        enabled: false,
+        ..global.clone()
+    };
+    assert_eq!(
+        off_globally.for_session(Some(&on)),
+        ReviewConfig {
+            enabled: true,
+            model: Some("session-model".into()),
+            ..global
+        },
+        "on arms review and keeps the effort it did not name"
+    );
+}
+
+#[test]
+fn a_session_review_choice_is_stored_in_a_stable_shape() {
+    // Stored in `sessions.review_json`; older and newer releases read it.
+    let on = SessionReview::On {
+        model: Some("gpt-6-astra".into()),
+        effort: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&on).unwrap(),
+        r#"{"mode":"on","model":"gpt-6-astra"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionReview::Off).unwrap(),
+        r#"{"mode":"off"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
+        SessionReview::On {
+            model: None,
+            effort: None
+        }
+    );
+}
+
+#[test]
 fn auto_review_can_be_enabled_without_an_explicit_profile() {
     let config = Config {
         continuation: Default::default(),

@@ -611,6 +611,7 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
+        review: None,
         at: None,
         branch: None,
         base: None,

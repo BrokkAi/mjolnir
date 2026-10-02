@@ -394,6 +394,20 @@ Only Claude and Codex sessions accept a mode other than `native`. When
 (Native when unset). An unsupported mode or an unavailable model answers
 `422` with the reason in the body.
 
+`review` sets the session's own turn review, overriding `[review]` for this
+session only:
+
+```json
+{"review": {"mode": "on", "model": "<model-id>", "effort": "high"}}
+{"review": {"mode": "off"}}
+```
+
+`on` turns on automatic review for the session, with optional `model` and
+`effort` replacing those in `[review]`. `off` turns off automatic review; a
+manual review still runs. A blank or overlong `model` or `effort` answers `400`.
+When `review` is omitted, the session follows `[review]`. See
+[per-session settings](/turn-review/#per-session-settings).
+
 `all_models` is retired for new sessions and explicit Move overrides, which
 answer `422` with supported alternatives. Existing multi-model sessions retain
 their recorded policy on resume and on a Move with no policy override.

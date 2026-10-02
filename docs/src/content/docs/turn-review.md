@@ -52,6 +52,15 @@ profile = "reviewer"
 
 With `enabled = false`, both `/review` and plan second opinion remain available. Each new review reads current settings; an already-open review keeps its selection. Reviewers do not appear in the main session navigation or Resume list. Ordinary sessions using the same profile remain visible.
 
+### Per-session settings
+
+`mj new` can override these settings for the session it creates:
+
+- `--review-model <model>` and `--review-effort <effort>` turn on automatic review for that session, even when `enabled = false`. They replace `model` and `effort` for that session's turn reviews. When `[review]` names a profile, the model must be one that profile offers. In Auto, Mjolnir uses the first enabled profile, in Auto's usual order, that offers the model, including profiles Auto has no policy for. A named effort replaces the policy's effort.
+- `--no-review` turns off automatic review for that session, even when `enabled = true`. `/review` still reviews a turn on request.
+
+The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`. Plan second opinion always uses `[review]`.
+
 ## Plan second opinion
 
 Choose **Second opinion** before approving a proposed plan. Mj starts the reviewer from the shared settings, without a separate profile/model/effort picker. It asks the planning agent for context and sends that context plus the captured plan to the reviewer. You can transfer feedback for a revised plan, implement the original plan, or cancel. Preparation supports cancellation and retry; failures leave the plan unapproved. Previously remembered workspace reviewer choices are no longer used.

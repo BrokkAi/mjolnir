@@ -124,7 +124,8 @@ pub(crate) fn review_delivery_admitted(
     })
 }
 
-/// Where the host reads the arming configuration. The daemon reloads
-/// `config.toml` every 500 ms already, so this closure just reads whatever it
-/// last installed.
-pub type ReviewConfigSource = Arc<dyn Fn() -> ReviewConfig + Send + Sync>;
+/// Where the host reads the arming configuration for one session: `[review]`
+/// with that session's own choice applied. The daemon reloads `config.toml`
+/// every 500 ms already, so this closure just reads whatever it last
+/// installed. It must not block, because the host calls it on its loop.
+pub type ReviewConfigSource = Arc<dyn Fn(&str) -> ReviewConfig + Send + Sync>;

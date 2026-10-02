@@ -1234,6 +1234,28 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Compatible: adds one nullable column. Older readers ignore it, and the
+    // older writer's session upsert lists columns explicitly, so it preserves
+    // the value. An older executable reviews such a session by `[review]`
+    // alone, which is a behaviour difference, not data loss. The
+    // compatibility floor stays where it is.
+    if version < 72 {
+        let add_column =
+            if super::legacy_schema::table_has_column(connection, "sessions", "review_json")? {
+                ""
+            } else {
+                "ALTER TABLE sessions ADD COLUMN review_json TEXT;"
+            };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (72, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 72;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

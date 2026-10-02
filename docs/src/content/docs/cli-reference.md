@@ -208,6 +208,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
+       [--review-model <name>] [--review-effort <name>] [--no-review]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -257,6 +258,11 @@ cannot be combined with a session that runs directly in the selected directory.
   session without changing its settings. `all-models` is no longer accepted.
   The old `--mj-subagents` and
   `--native-subagents` flags are no longer accepted.
+- `mj new --review-model <name>` and `--review-effort <name>` review every
+  turn of the new session with that model or effort, even when `[review]` is
+  off. `--no-review` turns off automatic review for the session, even when
+  `[review]` is on; `/review` still works. See
+  [per-session settings](/turn-review/#per-session-settings).
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.

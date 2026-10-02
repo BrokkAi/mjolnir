@@ -1623,6 +1623,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            review: None,
             at: None,
             branch: None,
             base: None,
@@ -2055,6 +2056,7 @@ async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_b
     assert_eq!(
         request.action,
         ControllerAction::New {
+            review: None,
             at: None,
             branch: None,
             base: None,

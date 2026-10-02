@@ -552,6 +552,8 @@ pub struct SessionLaunchOptions {
     /// Diff base; defaults to `at`.
     pub base: Option<String>,
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
+    /// Turn review for this session; `None` follows `[review]`.
+    pub review: Option<mj_core::config::SessionReview>,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -842,6 +844,7 @@ impl Controller {
             branch,
             base,
             subagents,
+            review,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1008,6 +1011,7 @@ impl Controller {
             bundle_id,
             project_directory,
             managed_worktree: None,
+            review,
             target_template_id: target_id.to_string(),
             resource_allocation,
             additional_mounts: additional_mounts.clone(),

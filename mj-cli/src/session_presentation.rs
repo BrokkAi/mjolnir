@@ -190,6 +190,7 @@ mod tests {
                 bundle_id: "bundle-1".into(),
                 project_directory: None,
                 managed_worktree: None,
+                review: None,
                 target_template_id: "target-1".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),

@@ -771,7 +771,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
 
 fn armed(profile: Option<&str>) -> ReviewConfigSource {
     let profile = profile.map(str::to_owned);
-    Arc::new(move || ReviewConfig {
+    Arc::new(move |_| ReviewConfig {
         enabled: true,
         tier: ReviewTier::Quick,
         profile: profile.clone(),
@@ -801,6 +801,7 @@ fn the_primary_profile_can_run_an_independent_reviewer() {
         bundle_id: "bundle".to_owned(),
         project_directory: None,
         managed_worktree: None,
+        review: None,
         target_template_id: "local".to_owned(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1235,7 +1236,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
-    let config: ReviewConfigSource = Arc::new(|| ReviewConfig {
+    let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
         enabled: false,
         tier: ReviewTier::Quick,
         profile: Some("reviewer".to_owned()),

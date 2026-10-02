@@ -267,6 +267,7 @@ impl Controller {
             bundle_id: parent.bundle_id.clone(),
             project_directory: parent.project_directory.clone(),
             managed_worktree: None,
+            review: None,
             target_template_id: parent.target_template_id.clone(),
             resource_allocation: parent.resource_allocation.clone(),
             additional_mounts: parent.additional_mounts.clone(),
