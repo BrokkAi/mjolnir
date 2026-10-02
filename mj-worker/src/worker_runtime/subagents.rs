@@ -19,6 +19,51 @@ use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
 use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
+
+/// Finalize the controller's staged registration on the target, where the
+/// worker root is absolute. Claude launches MCP servers from the checkout,
+/// not from the home against which remote staging paths were written.
+pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path) -> Result<()> {
+    anyhow::ensure!(
+        root.is_absolute(),
+        "Claude MCP worker root must be absolute"
+    );
+    let path = home.join(".claude.json");
+    let body = std::fs::read(&path)
+        .with_context(|| format!("read staged Claude configuration {}", path.display()))?;
+    let mut config: serde_json::Value = serde_json::from_slice(&body)
+        .with_context(|| format!("parse staged Claude configuration {}", path.display()))?;
+    let server = config
+        .get_mut("mcpServers")
+        .and_then(|servers| servers.get_mut(mj_core::subagent::SUBAGENT_MCP_SERVER))
+        .and_then(serde_json::Value::as_object_mut)
+        .with_context(|| {
+            format!(
+                "missing staged Claude delegation server in {}",
+                path.display()
+            )
+        })?;
+    let args = server
+        .get_mut("args")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("staged Claude delegation server must have arguments")?;
+    let socket = args
+        .iter()
+        .position(|arg| arg.as_str() == Some("--socket"))
+        .and_then(|index| args.get_mut(index + 1))
+        .filter(|arg| arg.is_string())
+        .context("staged Claude delegation server must have a socket argument")?;
+    *socket = serde_json::to_value(root.join(SUBAGENT_SOCKET))?;
+    server.insert("command".into(), serde_json::to_value(root.join("hel"))?);
+    let mut resolved = serde_json::to_vec_pretty(&config)?;
+    resolved.push(b'\n');
+    if resolved != body {
+        mj_core::config::atomic_write(&path, &resolved)
+            .with_context(|| format!("write staged Claude configuration {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Register the owned server in Codex's session-private profile. The ACP bridge
 /// cannot carry omit_tools_from. Do this on the worker before launching the
 /// harness so an upgraded worker also repairs an older staged profile.
@@ -307,6 +352,122 @@ impl SubagentEndpoint {
 mod tests {
     use super::*;
     use mj_core::subagent::SubagentToolAction;
+
+    #[tokio::test]
+    async fn claude_delegation_launches_from_a_checkout_after_remote_profile_repair() {
+        use mj_core::subagent::SubagentMcpRole;
+        use std::os::unix::fs::PermissionsExt;
+
+        for (role, old_root) in [
+            (SubagentMcpRole::Parent, ".local/share/hel/profiles/session"),
+            (
+                SubagentMcpRole::FixedParent,
+                ".local/share/hel/workers/session",
+            ),
+            (SubagentMcpRole::Child, "/previous-target/workers/session"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("worker with spaces");
+            let home = temp.path().join("profile");
+            let checkout = temp.path().join("checkout");
+            for directory in [&root, &home, &checkout] {
+                std::fs::create_dir(directory).unwrap();
+            }
+            let worker = root.join("hel");
+            std::fs::write(
+                &worker,
+                r#"#!/usr/bin/env python3
+import socket, sys
+assert sys.argv[1:3] == ['worker', 'subagent-mcp']
+assert sys.argv[sys.argv.index('--harness') + 1] == 'claude'
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(sys.argv[sys.argv.index('--socket') + 1])
+    assert connection.recv(64) == b'connected'
+print(sys.argv[sys.argv.index('--role') + 1])
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let original = serde_json::json!({
+                "userSetting": "retained",
+                "mcpServers": {
+                    "user-server": {"command": "user-tool"},
+                    "mj-agents": {
+                        "type": "stdio",
+                        "alwaysLoad": true,
+                        "command": Path::new(old_root).join("hel"),
+                        "args": ["worker", "subagent-mcp", "--socket",
+                                 Path::new(old_root).join(SUBAGENT_SOCKET),
+                                 "--harness", "claude", "--role", role.id()]
+                    }
+                }
+            });
+            let path = home.join(".claude.json");
+            std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            resolve_claude_mcp_paths(&root, &home).unwrap();
+            let first = std::fs::read(&path).unwrap();
+            resolve_claude_mcp_paths(&root, &home).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), first);
+            let config: serde_json::Value = serde_json::from_slice(&first).unwrap();
+            assert_eq!(config["userSetting"], original["userSetting"]);
+            assert_eq!(
+                config["mcpServers"]["user-server"],
+                original["mcpServers"]["user-server"]
+            );
+            let server = &config["mcpServers"]["mj-agents"];
+            assert_eq!(server["alwaysLoad"], true);
+            let socket = UnixListener::bind(root.join(SUBAGENT_SOCKET)).unwrap();
+            let mut command = tokio::process::Command::new(server["command"].as_str().unwrap());
+            command
+                .args(
+                    server["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|arg| arg.as_str().unwrap()),
+                )
+                .current_dir(&checkout);
+            let (output, ()) = tokio::join!(
+                mj_core::subprocess::run_bounded(&mut command, 64 * 1024, Duration::from_secs(10)),
+                async {
+                    let (mut connection, _) =
+                        tokio::time::timeout(Duration::from_secs(10), socket.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    connection.write_all(b"connected").await.unwrap();
+                }
+            );
+            let output = output.unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), role.id());
+        }
+    }
+
+    #[test]
+    fn claude_delegation_reports_invalid_registration_without_rewriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join(".claude.json");
+        assert!(resolve_claude_mcp_paths(root.path(), &home).is_err());
+        assert!(!path.exists());
+        for broken in [
+            "{",
+            r#"{"mcpServers":{}}"#,
+            r#"{"mcpServers":{"mj-agents":{"args":[]}}}"#,
+            r#"{"mcpServers":{"mj-agents":{"args":["--socket"]}}}"#,
+            r#"{"mcpServers":{"mj-agents":{"args":["--socket",42]}}}"#,
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            assert!(resolve_claude_mcp_paths(root.path(), &home).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        }
+    }
 
     #[test]
     fn codex_delegation_profile_preserves_other_servers_and_handles_upgrades_and_disable() {

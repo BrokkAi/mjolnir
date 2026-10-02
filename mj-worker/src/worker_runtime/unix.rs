@@ -495,8 +495,17 @@ pub async fn run_daemon_owned(
             .map_err(|message| anyhow::anyhow!("{message}"))?
             .home;
         super::subagents::configure_codex_mcp(&root, home, subagent_role, config.execution_policy)?
+    } else if config.harness == HarnessKind::Claude {
+        if subagent_role.is_some() {
+            let home = &credentials
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!("{message}"))?
+                .home;
+            super::subagents::resolve_claude_mcp_paths(&root, home)?;
+        }
+        true
     } else {
-        config.harness == HarnessKind::Claude
+        false
     };
     super::record_startup_step(&root, "harness-resolve");
     let prepared_harness = super::prepare_harness_launch(
