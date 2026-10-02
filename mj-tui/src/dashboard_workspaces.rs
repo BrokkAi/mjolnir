@@ -34,6 +34,9 @@ impl DashboardState {
             return;
         }
         *self.subagent_parent_id = Some(parent_id.clone());
+        // The pane now lists a different set of rows; the parent list's
+        // scroll position means nothing here.
+        self.sessions_scroll.set(0);
         let child = self
             .managed_child_ids(&parent_id)
             .into_iter()
@@ -56,6 +59,7 @@ impl DashboardState {
             return;
         };
         *self.subagent_parent_id = self.subagent_parent_for(&parent_id);
+        self.sessions_scroll.set(0);
         self.select_active_session(&parent_id);
         self.clamp_selections();
     }

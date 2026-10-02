@@ -668,9 +668,12 @@ pub(crate) fn render_changed_files(
         let kind_width = 9;
         let count_width = 12;
         let path_width = usize::from(list_area.width).saturating_sub(kind_width + count_width + 2);
+        let scroll = dialog
+            .scroll
+            .min(files.len().saturating_sub(usize::from(list_area.height)));
         let rows = files
             .iter()
-            .skip(dialog.scroll)
+            .skip(scroll)
             .take(usize::from(list_area.height))
             .map(|file| {
                 let counts = match (file.added, file.removed) {
@@ -700,7 +703,7 @@ pub(crate) fn render_changed_files(
             frame,
             Rect::new(list_area.right(), list_area.y, 1, list_area.height),
             files.len(),
-            dialog.scroll,
+            scroll,
             usize::from(list_area.height).max(1),
         );
     }

@@ -5286,3 +5286,47 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     );
     assert!(lines[parent_line + 2].contains("no CPU data yet"));
 }
+
+#[test]
+fn table_offset_never_hides_rows_that_fit_the_viewport() {
+    use super::clamp_offset_to_last_page as clamp;
+    // Content shrank below the viewport: show it all from the top.
+    assert_eq!(clamp(7, &[1; 3], 10), 0);
+    // The viewport grew past the content.
+    assert_eq!(clamp(2, &[1; 6], 6), 0);
+    // Exact fit.
+    assert_eq!(clamp(1, &[1; 5], 5), 0);
+    // One more row than fits: only the last page start is allowed.
+    assert_eq!(clamp(4, &[1; 6], 5), 1);
+    assert_eq!(clamp(1, &[1; 6], 5), 1);
+    assert_eq!(clamp(0, &[1; 6], 5), 0);
+    // Variable heights: the last page starts where the tail first fits.
+    assert_eq!(clamp(9, &[3, 3, 2, 2], 5), 2);
+    assert_eq!(clamp(1, &[], 5), 0);
+}
+
+#[test]
+fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
+    let (mut dashboard, _parent) = dashboard_with_subagents(&["worker-a", "worker-b"]);
+    // An earlier, longer list had scrolled the pane down.
+    dashboard.sessions_scroll.set(3);
+    let text = crate::test_support::drawn(&mut dashboard, 120, 50).join("\n");
+    assert!(text.contains("ACP pretty name"), "{text}");
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
+}
+
+/// The Sub-agents view is the Sessions pane listing only a parent's children.
+/// A render that kept an offset from a longer list hid the first children
+/// although all of them fit.
+#[test]
+fn subagents_pane_shows_every_child_from_the_top_with_a_stale_offset() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b", "worker-c"]);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.select_active_session("worker-c");
+    dashboard.sessions_scroll.set(2);
+    let text = crate::test_support::drawn(&mut dashboard, 120, 60).join("\n");
+    for id in ["worker-a", "worker-b", "worker-c"] {
+        assert!(text.contains(id), "{id} hidden:\n{text}");
+    }
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
+}

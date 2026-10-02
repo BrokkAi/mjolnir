@@ -49,6 +49,31 @@ const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 /// One fixed row at the top of Sessions for Create and Resume.
 pub(crate) const SESSION_ACTIONS_HEIGHT: u16 = 1;
 
+/// Clamp a table offset so the viewport never opens on a hidden head.
+///
+/// The largest useful offset is the first row from which every remaining row
+/// fits (the last page). Any larger offset leaves blank space below the
+/// content while earlier rows stay hidden, which is how a pane whose rows
+/// shrank, or whose viewport grew, kept hiding its first rows although all of
+/// them fit. For unit-height rows this is `max(0, len - viewport)`. Every
+/// stateful table pane passes its stored offset through here before rendering.
+fn clamp_offset_to_last_page(
+    offset: usize,
+    row_heights: &[usize],
+    viewport_height: usize,
+) -> usize {
+    let mut first = row_heights.len();
+    let mut used = 0usize;
+    while first > 0 {
+        used = used.saturating_add(row_heights[first - 1]);
+        if used > viewport_height {
+            break;
+        }
+        first -= 1;
+    }
+    offset.min(first)
+}
+
 /// Move a table viewport just far enough to show the row beyond the selection
 /// in the direction the user moved. Variable-height rows only get that margin
 /// when the selected row and its neighbor fit together.

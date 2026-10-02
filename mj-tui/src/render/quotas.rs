@@ -606,7 +606,12 @@ pub(crate) fn render_quotas(
         })
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
-    let mut offset = dashboard.quota_scroll.get();
+    let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
+    let mut offset = crate::render::clamp_offset_to_last_page(
+        dashboard.quota_scroll.get(),
+        &vec![1; dashboard.config.enabled_profiles().count()],
+        viewport,
+    );
     if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
         let row_heights = vec![1; dashboard.config.enabled_profiles().count()];
         offset = offset_with_directional_lookahead(

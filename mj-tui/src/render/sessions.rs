@@ -1390,14 +1390,28 @@ pub(crate) fn render_sessions(
     let selected = dashboard
         .selected_visible_index()
         .filter(|index| *index < drawn.len());
-    let mut offset = dashboard.sessions_scroll.get();
+    // The last row's trailing margin is not content, so it must not keep an
+    // earlier row hidden.
+    let row_heights = drawn
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let spacing = if index + 1 == drawn.len() {
+                0
+            } else {
+                row.spacing
+            };
+            usize::from(row.content_height().saturating_add(spacing))
+        })
+        .collect::<Vec<_>>();
+    let mut offset = crate::render::clamp_offset_to_last_page(
+        dashboard.sessions_scroll.get(),
+        &row_heights,
+        usize::from(rows_area.height),
+    );
     if let (Some(selected), Some(direction)) =
         (selected, take_scroll_lookahead(dashboard, Focus::Sessions))
     {
-        let row_heights = drawn
-            .iter()
-            .map(|row| usize::from(row.content_height().saturating_add(row.spacing)))
-            .collect::<Vec<_>>();
         offset = offset_with_directional_lookahead(
             offset,
             selected,
