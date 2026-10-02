@@ -53,6 +53,7 @@ impl RuntimeState {
         let committed_sessions = crate::database::database_writer_installed()
             .then(|| crate::database::subscribe_committed_state().ok())
             .flatten();
+        let profile_catalog = crate::review_host::SharedProfileCatalog::default();
         let review_host = TurnReviewHost::spawn_notifying(
             session_manager.clone(),
             {
@@ -74,6 +75,7 @@ impl RuntimeState {
             },
             revisions.notifier(),
             Some(recovery_observer.gate.clone()),
+            Some(profile_catalog.clone()),
         );
         Self {
             attachments: Mutex::new(BTreeMap::new()),
@@ -95,7 +97,7 @@ impl RuntimeState {
             controller_loader,
             config_mutation: tokio::sync::Mutex::new(()),
             projects: Arc::new(crate::project_catalog::Catalog::default()),
-            profile_catalog: std::sync::OnceLock::new(),
+            profile_catalog,
             recovery_observer,
             worker_upgrade_observer,
             notices: Mutex::new(VecDeque::new()),

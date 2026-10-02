@@ -77,7 +77,14 @@ pub struct ControllerEnvironment {
     /// The daemon's gate for recovery copies and worker upgrades, which a
     /// review waits behind instead of racing for the session's lease.
     pub background: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+    /// The daemon's profile catalog, once it is installed. A pinned review
+    /// model is matched against it before any profile is staged.
+    pub(crate) catalog: Option<SharedProfileCatalog>,
 }
+
+/// The daemon installs its profile catalog after the review host starts.
+pub(crate) type SharedProfileCatalog =
+    Arc<std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>>;
 
 impl ReviewEnvironment for ControllerEnvironment {
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String> {
@@ -115,7 +122,12 @@ impl ReviewEnvironment for ControllerEnvironment {
     > {
         Box::pin(async move {
             let specialists = config.tier == ReviewTier::Extended;
-            crate::review_selection::resolve(handle, Some(config), specialists, cancelled)
+            let offered = self
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.get())
+                .map(|catalog| catalog.snapshot());
+            crate::review_selection::resolve(handle, Some(config), specialists, cancelled, offered)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
