@@ -161,7 +161,7 @@ pub(super) async fn run_session_actor(
                 if lifecycle.is_leased() {
                     continue;
                 }
-                let result = async {
+                let sync = async {
                     let snapshot = sync_actor_connection(&target, &mut connection).await?;
                     let now = tokio::time::Instant::now();
                     if now >= next_cpu_read {
@@ -191,8 +191,20 @@ pub(super) async fn run_session_actor(
                         updates.publish_cpu(&target.session_id, value);
                     }
                     Ok(snapshot)
-                }
-                .await;
+                };
+                // A connect or catch-up over SSH can take far longer than the
+                // shutdown grace. Retirement ends it here, as the abort after
+                // the grace would, but the actor then still answers its queued
+                // submissions instead of dropping their replies.
+                let result = tokio::select! {
+                    biased;
+                    _ = retirement.wait_for(|retired| *retired) => None,
+                    result = sync => Some(result),
+                };
+                let Some(result) = result else {
+                    connection = None;
+                    break;
+                };
                 match result {
                     Ok(snapshot) => {
                         failures = 0;

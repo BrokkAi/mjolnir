@@ -1583,6 +1583,68 @@ async fn session_manager_shutdown_joins_a_live_relay_actor() {
         .expect("manager shutdown task completed cleanly");
 }
 
+/// A remote connect or catch-up can outlast the session manager's shutdown
+/// grace by minutes. Retirement has to end it, so the actor stops in time and
+/// answers the submissions it was holding; an abort after the grace would
+/// drop their replies, which a caller must read as possibly delivered.
+#[cfg(unix)]
+#[tokio::test]
+async fn retirement_ends_a_connect_that_never_answers() {
+    const CHILD: &str = "MJ_TEST_HUNG_CONNECT_RETIREMENT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(CHILD, "retirement_ends_a_connect_that_never_answers");
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    fail_if_the_actor_stalls("a retired actor stayed in a connect that never answers");
+    let (commands_tx, commands_rx) = mpsc::channel(4);
+    let (_releases_tx, releases_rx) = mpsc::unbounded_channel();
+    let (retirement_tx, retirement_rx) = watch::channel(false);
+    let (view_tx, _view_rx) = watch::channel(ManagedSessionView::default());
+    let (updates_tx, _updates_rx) = coalesced_update_channel();
+    // A proxy that starts and never says hello, as an SSH relay to a busy host
+    // can for the whole handshake timeout.
+    let mut hung = target("sleep");
+    hung.spec = CommandSpec::new("sleep", ["600"]);
+    let actor = tokio::spawn(run_session_actor(
+        hung,
+        commands_rx,
+        releases_rx,
+        retirement_rx,
+        view_tx,
+        updates_tx,
+    ));
+    // The first sync starts at once and is now waiting on the proxy.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (reply, response) = oneshot::channel();
+    commands_tx
+        .send(ActorCommand::Submit {
+            queued_at: Instant::now(),
+            command_id: new_command_id("prompt").unwrap(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
+            },
+            admission: None,
+            reply,
+        })
+        .await
+        .unwrap();
+
+    retirement_tx.send(true).unwrap();
+    tokio::time::timeout(SESSION_MANAGER_SHUTDOWN_GRACE, actor)
+        .await
+        .expect("the retired actor stopped within the shutdown grace")
+        .expect("the actor task finished cleanly");
+    let error = response
+        .await
+        .expect("the actor answered the queued submission")
+        .expect_err("a retired actor must not deliver the prompt");
+    assert!(
+        error.message.contains("session manager stopped"),
+        "unexpected rejection: {error:?}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancellation() {
