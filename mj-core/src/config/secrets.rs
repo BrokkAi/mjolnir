@@ -176,6 +176,19 @@ impl Environment {
         }
     }
 
+    /// Supply `key` from the loading process's environment, as `{ from_env =
+    /// "key" }` would, when the table does not name it. The value is not an
+    /// entry, so a save never writes it. An unset variable adds nothing: the
+    /// caller that needs the key reports it.
+    pub(super) fn inherit(&mut self, key: &str) {
+        if self.sources.contains_key(key) || SOURCES_ONLY.get() {
+            return;
+        }
+        if let Ok(value) = resolve_active(key, &EnvironmentValue::FromEnv(key.to_owned())) {
+            self.resolved.insert(key.to_owned(), value);
+        }
+    }
+
     /// Fail, naming what each one needs, when any entry's reference did not
     /// resolve. The owner of this table must not be used until it does.
     pub fn ensure_resolved(&self) -> Result<()> {
@@ -394,6 +407,12 @@ pub fn with_environment_sources_only<T>(read: impl FnOnce() -> T) -> T {
     }
     let _restore = Restore(SOURCES_ONLY.replace(true));
     read()
+}
+
+/// False while a projection is read with [`with_environment_sources_only`],
+/// which must neither resolve values nor read files to find them.
+pub(super) fn resolves_values() -> bool {
+    !SOURCES_ONLY.get()
 }
 
 /// Run `read` with `resolver` answering every environment reference it meets.

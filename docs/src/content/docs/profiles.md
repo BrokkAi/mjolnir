@@ -75,27 +75,32 @@ wire_api = "responses"
 ```
 
 `wire_api` must be `responses`; Codex no longer supports the chat-completions
-form. `env_key` names the environment variable that carries the API key, and the
-key itself goes in the Mjolnir profile, not in the Codex file:
+form. `env_key` names the environment variable that carries the API key. As
+with Codex on its own, exporting that variable is enough: when the profile does
+not set it, Mjolnir reads it from the environment it started with and passes it
+to the session. The profile needs nothing beyond its home:
 
 ```toml
 [profiles.glm]
 kind = "codex"
 home = "/home/me/.codex-glm"
-
-[profiles.glm.environment]
-ZAI_API_KEY = "<your Coding Plan key>"
 ```
 
-To keep the key out of `config.toml`, write the entry as a reference instead:
-`{ from_env = "ZAI_API_KEY" }` reads it from the daemon's environment, and
-`{ from_secret = "ZAI_API_KEY" }` reads it from `secrets.toml` beside
-`config.toml`.
+The daemon only sees variables from the environment it was started in, so
+export the key before running `mj`, and run `mj daemon restart` after exporting
+it in a new shell. To keep the key in a file instead, put it in `secrets.toml`
+beside `config.toml` and name it in the profile; an entry the profile sets
+always wins over the environment:
 
-A profile whose provider names a variable its `environment` does not set cannot
-start: its sessions are refused with an error naming the profile, the variable
-and the line to add, and `mj doctor` reports the same. The rest of the
-configuration, the daemon and every other profile keep working.
+```toml
+[profiles.glm.environment]
+ZAI_API_KEY = { from_secret = "ZAI_API_KEY" }
+```
+
+A profile whose key is set in neither place cannot start: its sessions are
+refused with an error naming the profile, the variable and how to supply it,
+and `mj doctor` reports the same. The rest of the configuration, the daemon and
+every other profile keep working.
 
 A provider may instead inline its key as `experimental_bearer_token`; prefer
 `env_key`, because the inline form writes the key into a file that is copied to

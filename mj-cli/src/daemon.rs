@@ -1391,16 +1391,17 @@ mod tests {
     #[test]
     fn a_profile_that_cannot_start_does_not_refuse_the_replacement() {
         // The reported failure: a Codex home that authenticates with an API key
-        // the profile does not supply, beside a secret that is not defined.
-        // Either makes only that profile unusable; the new daemon reads the
-        // configuration and keeps every other profile working.
+        // that neither the profile nor the environment supplies, beside a
+        // secret that is not defined. Either makes only that profile unusable;
+        // the new daemon reads the configuration and keeps every other profile
+        // working.
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("codex");
         fs::create_dir(&home).unwrap();
         fs::write(
             home.join("config.toml"),
             "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\n\
-             base_url = 'https://api.deepseek.com'\nwire_api = 'responses'\nenv_key = 'DEEPSEEK_API_KEY'\n",
+             base_url = 'https://api.deepseek.com'\nwire_api = 'responses'\nenv_key = 'MJ_TEST_UNSET_PROVIDER_KEY'\n",
         )
         .unwrap();
         let path = directory.path().join("config.toml");
@@ -1422,7 +1423,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("DEEPSEEK_API_KEY = { from_env = \"DEEPSEEK_API_KEY\" }"),
+            error.contains(
+                "MJ_TEST_UNSET_PROVIDER_KEY = { from_secret = \"MJ_TEST_UNSET_PROVIDER_KEY\" }"
+            ),
             "{error}"
         );
         let error = format!(

@@ -2499,7 +2499,7 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
     std::fs::write(
         home.join("config.toml"),
         "model_provider = \"deepseek\"\n\n[model_providers.deepseek]\n\
-         base_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\nenv_key = \"DEEPSEEK_API_KEY\"\n",
+         base_url = \"https://api.deepseek.com\"\nwire_api = \"responses\"\nenv_key = \"MJ_TEST_UNSET_PROVIDER_KEY\"\n",
     )
     .unwrap();
     let config_path = directory.path().join("config.toml");
@@ -2525,7 +2525,7 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
     assert!(
         profile
             .detail
-            .contains("DEEPSEEK_API_KEY = { from_env = \"DEEPSEEK_API_KEY\" }"),
+            .contains("export MJ_TEST_UNSET_PROVIDER_KEY and run `mj daemon restart`"),
         "{}",
         profile.detail
     );

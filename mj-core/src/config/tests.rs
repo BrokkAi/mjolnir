@@ -201,7 +201,7 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
         .ensure_ready("glm")
         .expect_err("a missing key leaves the profile unusable")
         .to_string();
-    assert!(error.contains("ZAI_API_KEY = { from_env"), "{error}");
+    assert!(error.contains("ZAI_API_KEY = { from_secret"), "{error}");
     assert!(error.contains("[profiles.glm.environment]"), "{error}");
 
     let with_key = zai_profile(
@@ -229,6 +229,64 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     );
     assert_eq!(with_key.credential_freshness(b"{}"), None);
     assert_eq!(with_key.credential_expiry(b"{}"), None);
+}
+
+/// A Codex home that names its key variable works the way standalone Codex
+/// does: an exported key reaches the profile without an `environment` entry,
+/// and is never written to config.toml.
+#[test]
+fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_in() {
+    let home = tempfile::tempdir().expect("temporary home");
+    zai_profile(home.path(), BTreeMap::new());
+    let text = format!(
+        "version = {CONFIG_VERSION}\n\n[profiles.glm]\nkind = \"codex\"\nhome = {:?}\n",
+        home.path().to_string_lossy()
+    );
+    let read = |process: &[(&str, &str)]| -> Config {
+        let process = process
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        with_secret_resolver(SecretResolver::fixed(process, BTreeMap::new()), || {
+            toml::from_str(&text)
+        })
+        .expect("read the configuration")
+    };
+
+    let exported = read(&[("ZAI_API_KEY", "from-the-shell")]);
+    let profile = &exported.profiles["glm"];
+    assert_eq!(profile.environment["ZAI_API_KEY"], "from-the-shell");
+    profile
+        .ensure_ready("glm")
+        .expect("the exported key is enough");
+    let written = toml::to_string(&exported).expect("serialize");
+    assert!(!written.contains("ZAI_API_KEY"), "{written}");
+    assert!(!written.contains("from-the-shell"), "{written}");
+
+    // An entry the profile sets wins over the environment.
+    let explicit = format!("{text}\n[profiles.glm.environment]\nZAI_API_KEY = \"configured\"\n");
+    let configured: Config = with_secret_resolver(
+        SecretResolver::fixed(
+            [("ZAI_API_KEY".to_owned(), "from-the-shell".to_owned())].into(),
+            BTreeMap::new(),
+        ),
+        || toml::from_str(&explicit),
+    )
+    .expect("read the configuration");
+    assert_eq!(
+        configured.profiles["glm"].environment["ZAI_API_KEY"],
+        "configured"
+    );
+
+    // Unset everywhere: the configuration still reads, the profile says how
+    // to supply the key.
+    let unset = read(&[]);
+    let error = unset.profiles["glm"]
+        .ensure_ready("glm")
+        .expect_err("no key anywhere")
+        .to_string();
+    assert!(error.contains("export ZAI_API_KEY"), "{error}");
+    assert!(error.contains("from_secret"), "{error}");
 }
 
 #[test]

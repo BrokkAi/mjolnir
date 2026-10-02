@@ -820,6 +820,26 @@ impl HarnessProfile {
         Ok(())
     }
 
+    /// Supply the variable that this Codex home's custom provider names as its
+    /// key (`env_key`) from the environment Mjolnir runs in, as standalone
+    /// Codex reads it from its own, unless `environment` sets it. Workers
+    /// start harnesses with a cleared environment, so without this an
+    /// exported key never reaches Codex. Done once as the configuration is
+    /// read, exactly when `{ from_env = ... }` entries resolve;
+    /// [`Self::ensure_ready`] reports the key when neither supplies it.
+    pub(super) fn inherit_provider_key(&mut self) {
+        // A projection reads no files, and a malformed home is reported by
+        // `ensure_ready`.
+        if !super::secrets::resolves_values() {
+            return;
+        }
+        if let Ok(Some(provider)) = self.codex_provider()
+            && let Some(env_key) = provider.env_key
+        {
+            self.environment.inherit(&env_key);
+        }
+    }
+
     /// Whether a harness can start from this profile: every environment
     /// reference resolved, the harness home's own configuration readable, and
     /// the credential that configuration names supplied.
@@ -844,7 +864,7 @@ impl HarnessProfile {
                     .is_none_or(|value| value.trim().is_empty())
             {
                 bail!(
-                    "{} authenticates with {env_key}; add `{env_key} = {{ from_env = \"{env_key}\" }}` (or `{{ from_secret = \"{env_key}\" }}`) under [profiles.{id}.environment] in Mjolnir's config.toml",
+                    "{} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
                     self.home.join("config.toml").display()
                 );
             }

@@ -647,11 +647,14 @@ impl TryFrom<StoredConfig> for Config {
             jev,
             keys,
             legacy_startup,
-            profiles,
+            mut profiles,
             bundles,
             mut machines,
             targets,
         } = stored;
+        for profile in profiles.values_mut() {
+            profile.inherit_provider_key();
+        }
         let mut runtimes: BTreeMap<String, StoredTarget> = BTreeMap::new();
         for (id, entry) in targets {
             let runtime = match entry {
