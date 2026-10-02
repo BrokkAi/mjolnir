@@ -226,6 +226,27 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
         }
     }
 
+    let cpu = crate::session_cpu_report::cpu_summary(dashboard, &session.id);
+    let mut cpu_line = vec![
+        Span::styled(format!("{:<11}", "CPU"), theme::muted()),
+        cpu.main_span(),
+    ];
+    match &cpu.detail {
+        Some(detail) if cpu.tree => {
+            facts.push(Line::from(cpu_line));
+            facts.push(Line::from(vec![
+                Span::raw(" ".repeat(11)),
+                Span::styled(format!("({detail})"), theme::muted()),
+            ]));
+        }
+        detail => {
+            if let Some(detail) = detail {
+                cpu_line.push(Span::styled(format!(" ({detail})"), theme::muted()));
+            }
+            facts.push(Line::from(cpu_line));
+        }
+    }
+
     let mut container = Vec::new();
     if let Some(cpus) = &session.container_cpus {
         container.push(format!("{cpus} CPUs"));
@@ -1249,6 +1270,60 @@ mod tests {
                 .is_empty(),
             "a blank row separates the facts from the commands: {lines:#?}"
         );
+    }
+
+    fn measured(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpuView {
+        mj_client::runtime_feed::SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: recent,
+                hourly_permille: hourly,
+                hourly_covered_secs: 3600,
+                online_cpus: 8,
+            },
+        }
+    }
+
+    /// The menu says what the row's figure is made of: the tree total, the
+    /// session's own share, and how many members were measured.
+    #[test]
+    fn session_menu_shows_own_tree_and_coverage_cpu() {
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
+        cpu.insert(parent.clone(), measured(30, 20));
+        dashboard.set_session_cpu(cpu.clone());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        println!("{}", lines.join("\n"));
+        let row = row_of(&lines, "CPU").expect("CPU fact");
+        // The child is unmeasured, so the tree total is a lower bound.
+        assert!(
+            lines[row].contains("2.0%+ hourly / 3.0%+ recent"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[row + 1].contains("(tree of 2; own 3.0%, 1 of 2 measured)"),
+            "{lines:#?}"
+        );
+
+        // A session with no sub-agents shows its own figures.
+        let mut dashboard = dashboard_with_session(running_session());
+        let id = running_session().id;
+        cpu.insert(id, measured(230, 100));
+        dashboard.set_session_cpu(cpu);
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let row = row_of(&lines, "CPU").expect("CPU fact");
+        assert!(lines[row].contains("10% hourly / 23% recent"), "{lines:#?}");
+
+        // Unmeasured says so.
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let row = row_of(&lines, "CPU").expect("CPU fact");
+        assert!(lines[row].contains("no CPU data yet"), "{lines:#?}");
     }
 
     /// Copy session ID sits under the plain divider, directly above Destroy,

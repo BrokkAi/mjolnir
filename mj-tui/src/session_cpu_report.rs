@@ -91,7 +91,10 @@ pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
             theme::muted(),
         ));
     }
-    for (machine, sessions, sum) in groups {
+    for (index, (machine, sessions, sum)) in groups.into_iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
         lines.push(Line::styled(
             format!(
                 "{machine}  {} hourly",
@@ -101,36 +104,46 @@ pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
                 .fg(theme::palette().text)
                 .add_modifier(Modifier::BOLD),
         ));
-        for session in sessions {
+        // Each root with its nested sub-agents is a block; one empty line
+        // separates blocks.
+        for (index, session) in sessions.into_iter().enumerate() {
+            if index > 0 {
+                lines.push(Line::default());
+            }
             push_tree(dashboard, session, &listed, 1, &mut lines);
         }
     }
     lines
 }
 
-/// One session's line, then its live sub-agents indented below it.
-fn push_tree(
-    dashboard: &DashboardState,
-    session: &SessionRecord,
-    listed: &BTreeSet<&str>,
-    depth: usize,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let rollup = dashboard.cpu_rollup(&session.id);
-    let mut spans = vec![Span::raw(format!(
-        "{}{}  [{}]  ",
-        "  ".repeat(depth),
-        crate::render::session_name(session),
-        session.last_profile
-    ))];
-    let own = dashboard.session_cpu.get(&session.id);
+/// How one session's CPU reads, in the report and in the session menu.
+pub(crate) struct CpuSummary {
+    pub(crate) main: String,
+    /// True when `main` is a statement about missing data, not a figure.
+    pub(crate) muted: bool,
+    /// Context for `main`: tree membership, own share and coverage for a
+    /// parent, or the covered period of a short history.
+    pub(crate) detail: Option<String>,
+    /// True for the tree breakdown, which is too long to share a line.
+    pub(crate) tree: bool,
+}
+
+impl CpuSummary {
+    pub(crate) fn main_span(&self) -> Span<'static> {
+        if self.muted {
+            Span::styled(self.main.clone(), theme::muted())
+        } else {
+            Span::raw(self.main.clone())
+        }
+    }
+}
+
+/// The one wording of a session's CPU, read from the rollup owner.
+pub(crate) fn cpu_summary(dashboard: &DashboardState, session_id: &str) -> CpuSummary {
+    let rollup = dashboard.cpu_rollup(session_id);
+    let own = dashboard.session_cpu.get(session_id);
     if rollup.has_descendants() && rollup.measured > 0 {
         let marker = if rollup.is_partial() { "+" } else { "" };
-        spans.push(Span::raw(format!(
-            "{}{marker} hourly / {}{marker} recent",
-            format_cpu_permille(clamp_permille(rollup.hourly_permille)),
-            format_cpu_permille(clamp_permille(rollup.recent_permille)),
-        )));
         let own_text = match own {
             Some(SessionCpuView::Measured { usage }) => {
                 format!("own {}", format_cpu_permille(usage.recent_permille))
@@ -142,34 +155,73 @@ fn push_tree(
         } else {
             String::new()
         };
-        spans.push(Span::styled(
-            format!(" (tree of {}; {own_text}{measured})", rollup.members),
-            theme::muted(),
-        ));
-    } else {
-        match own {
-            Some(SessionCpuView::Measured { usage }) => {
-                spans.push(Span::raw(format!(
+        return CpuSummary {
+            main: format!(
+                "{}{marker} hourly / {}{marker} recent",
+                format_cpu_permille(clamp_permille(rollup.hourly_permille)),
+                format_cpu_permille(clamp_permille(rollup.recent_permille)),
+            ),
+            muted: false,
+            detail: Some(format!("tree of {}; {own_text}{measured}", rollup.members)),
+            tree: true,
+        };
+    }
+    match own {
+        Some(SessionCpuView::Measured { usage }) => {
+            let seconds = usage.hourly_covered_secs;
+            let detail = (seconds < 3600).then(|| {
+                if seconds < 60 {
+                    format!("{seconds}s")
+                } else {
+                    format!("{}m", seconds / 60)
+                }
+            });
+            CpuSummary {
+                main: format!(
                     "{} hourly / {} recent",
                     format_cpu_permille(usage.hourly_permille),
                     format_cpu_permille(usage.recent_permille)
-                )));
-                if usage.hourly_covered_secs < 3600 {
-                    let seconds = usage.hourly_covered_secs;
-                    let coverage = if seconds < 60 {
-                        format!("{seconds}s")
-                    } else {
-                        format!("{}m", seconds / 60)
-                    };
-                    spans.push(Span::styled(format!(" ({coverage})"), theme::muted()));
-                }
+                ),
+                muted: false,
+                detail,
+                tree: false,
             }
-            Some(SessionCpuView::Unavailable { reason }) => spans.push(Span::styled(
-                format!("CPU unavailable: {reason}"),
-                theme::muted(),
-            )),
-            None => spans.push(Span::styled("no CPU data yet", theme::muted())),
         }
+        Some(SessionCpuView::Unavailable { reason }) => CpuSummary {
+            main: format!("CPU unavailable: {reason}"),
+            muted: true,
+            detail: None,
+            tree: false,
+        },
+        None => CpuSummary {
+            main: "no CPU data yet".to_owned(),
+            muted: true,
+            detail: None,
+            tree: false,
+        },
+    }
+}
+
+/// One session's line, then its live sub-agents indented below it.
+fn push_tree(
+    dashboard: &DashboardState,
+    session: &SessionRecord,
+    listed: &BTreeSet<&str>,
+    depth: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let summary = cpu_summary(dashboard, &session.id);
+    let mut spans = vec![
+        Span::raw(format!(
+            "{}{}  [{}]  ",
+            "  ".repeat(depth),
+            crate::render::session_name(session),
+            session.last_profile
+        )),
+        summary.main_span(),
+    ];
+    if let Some(detail) = &summary.detail {
+        spans.push(Span::styled(format!(" ({detail})"), theme::muted()));
     }
     lines.push(Line::from(spans));
     let mut children: Vec<&SessionRecord> = dashboard

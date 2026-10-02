@@ -38,7 +38,6 @@ fn session_metadata_text(
         operation,
         now_epoch_seconds,
         &session_target_label(&State::default(), session, operation, config),
-        None,
         session_permission_badge(session, operation, config),
         None,
         120,
@@ -4964,37 +4963,83 @@ fn only_the_focused_pane_draws_the_focused_border() {
     );
 }
 
-#[test]
-fn session_cpu_rows_show_meaningful_load_and_stay_quiet_when_idle() {
-    let session = running_session();
-    let draw = |cpu: Option<u16>, width| {
-        let cpu = cpu.map(|permille| crate::session_view::CpuShare {
-            permille,
-            partial: false,
-        });
-        session_activity_line(
-            "",
-            &session,
-            None,
-            None,
-            false,
-            crate::AttentionLevel::Idle,
-            None,
-            0,
-            "local",
-            cpu,
-            None,
-            None,
-            width,
-            false,
-        )
-        .to_string()
+/// One session whose title is `title`, measured at `recent` permille.
+fn dashboard_with_measured_session(title: &str, recent: u16) -> DashboardState {
+    let mut session = running_session();
+    session.title = title.into();
+    session.acp_session_title = None;
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session);
+    set_cpu(&mut dashboard, &[(&id, recent, recent)]);
+    dashboard
+}
+
+fn row_texts(dashboard: &DashboardState, width: u16, minimized: bool) -> Vec<String> {
+    let options = if minimized {
+        SessionRowsRenderOptions::MINIMIZED
+    } else {
+        SessionRowsRenderOptions::DASHBOARD
     };
-    assert!(draw(Some(230), 80).contains("23%"));
-    assert!(!draw(Some(5), 80).contains('%'));
-    assert!(!draw(Some(230), 24).contains('%'));
-    assert!(!draw(None, 80).contains('%'));
-    assert!(draw(Some(42), 80).contains("4.2%"));
+    drawn_session_rows_with_options(dashboard, width, options)
+        .iter()
+        .flat_map(|row| row.lines.iter().map(ToString::to_string))
+        .collect()
+}
+
+/// The rows from the session's name line on, past the project heading.
+fn name_and_following(dashboard: &DashboardState, width: u16, minimized: bool) -> Vec<String> {
+    let lines = row_texts(dashboard, width, minimized);
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with('›'))
+        .unwrap_or(0);
+    lines[start..].to_vec()
+}
+
+#[test]
+fn session_row_name_line_ends_with_right_justified_cpu() {
+    let dashboard = dashboard_with_measured_session("Parser", 230);
+    let lines = name_and_following(&dashboard, 60, false);
+    println!("{}", lines.join("\n"));
+    // The title line leaves five cells for the pin and menu controls.
+    assert_eq!(Line::raw(lines[0].as_str()).width(), 55, "{lines:#?}");
+    assert!(lines[0].contains("Parser"), "{lines:#?}");
+    assert!(lines[0].ends_with("23%"), "{lines:#?}");
+    // It appears once: not on the status line.
+    assert!(
+        lines[1..].iter().all(|line| !line.contains('%')),
+        "{lines:#?}"
+    );
+    // Below the 1.0% threshold nothing is drawn.
+    let quiet = dashboard_with_measured_session("Parser", 5);
+    assert!(
+        row_texts(&quiet, 60, false)
+            .iter()
+            .all(|l| !l.contains('%'))
+    );
+}
+
+#[test]
+fn minimized_session_rows_omit_cpu() {
+    let dashboard = dashboard_with_measured_session("Parser", 230);
+    let lines = row_texts(&dashboard, 60, true);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| !line.contains('%')), "{lines:#?}");
+}
+
+#[test]
+fn a_narrow_session_row_truncates_the_name_before_dropping_cpu() {
+    let title = "Refactor the parser to stream tokens";
+    let dashboard = dashboard_with_measured_session(title, 230);
+    let narrow = name_and_following(&dashboard, 30, false);
+    assert!(narrow[0].ends_with("23%"), "{narrow:#?}");
+    assert!(!narrow[0].contains(title), "{narrow:#?}");
+    assert!(narrow[0].contains("Refactor"), "{narrow:#?}");
+    assert!(narrow[0].contains(theme::glyphs().ellipsis), "{narrow:#?}");
+    // Too narrow for even a minimal name beside the figure: the figure goes.
+    let tiny = name_and_following(&dashboard, 16, false);
+    assert!(tiny.iter().all(|line| !line.contains('%')), "{tiny:#?}");
+    assert!(tiny[0].contains("Refac"), "{tiny:#?}");
 }
 
 #[test]
@@ -5340,4 +5385,55 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
         let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
     }
     assert_eq!(dashboard.sessions_scroll.get(), 0);
+}
+
+#[test]
+fn session_cpu_report_separates_root_blocks_with_one_blank_line() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
+    let mut state = dashboard.state.clone();
+    let mut solo = state.sessions[&parent].clone();
+    solo.id = "solo".into();
+    solo.title = "solo".into();
+    solo.acp_session_title = None;
+    state.sessions.insert("solo".into(), solo);
+    dashboard.set_state(state);
+    set_cpu(
+        &mut dashboard,
+        &[
+            (&parent, 30, 20),
+            ("kid-a", 400, 300),
+            ("kid-b", 5, 5),
+            ("solo", 100, 90),
+        ],
+    );
+    let lines = crate::session_cpu_report::report_lines(&dashboard)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    println!("{}", lines.join("\n"));
+    let first = lines.iter().position(|l| l.contains("tree of 3")).unwrap();
+    let solo = lines.iter().position(|l| l.contains("solo  [")).unwrap();
+    let (block, rest) = if first < solo {
+        (first, solo)
+    } else {
+        (solo, first)
+    };
+    let _ = block;
+    assert!(lines[rest - 1].is_empty(), "{lines:#?}");
+    assert!(!lines[rest - 2].is_empty(), "{lines:#?}");
+    // No blank line inside the parent's block.
+    let kids: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("kid-"))
+        .collect();
+    assert_eq!(kids.len(), 2, "{lines:#?}");
+    for (index, _) in kids {
+        assert!(!lines[index - 1].is_empty(), "{lines:#?}");
+    }
+    assert_eq!(
+        lines.iter().filter(|l| l.is_empty()).count(),
+        1,
+        "{lines:#?}"
+    );
 }

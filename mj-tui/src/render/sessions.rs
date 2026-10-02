@@ -109,7 +109,7 @@ pub(crate) struct DrawnSessionRow {
     session: Option<usize>,
     /// Project key of the heading this row carries, if it opens a group.
     heading: Option<String>,
-    lines: Vec<Line<'static>>,
+    pub(super) lines: Vec<Line<'static>>,
     /// Blank rows drawn under this one, to separate groups.
     spacing: u16,
 }
@@ -263,7 +263,10 @@ pub(crate) fn drawn_session_rows_with_options(
                 let mut lines = Vec::new();
                 lines.extend(heading_line);
                 let spacing = u16::from(expanded && !options.summary_only);
-                let cpu = dashboard.cpu_share(&session.id);
+                // The minimized pane keeps one terse row per session, so it omits CPU.
+                let cpu = (!options.summary_only)
+                    .then(|| dashboard.cpu_share(&session.id))
+                    .flatten();
                 if session.configuration_issue(&dashboard.config).is_some() {
                     lines.push(Line::styled(
                         format!("{prefix}{}", session_name(session)),
@@ -522,20 +525,14 @@ pub(crate) fn expanded_session_lines(
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
     let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
-    let name_room = usize::from(title_width).saturating_sub(Line::raw(prefix).width());
-    let title = truncate_to_cells(&name, name_room, Truncate::PLAIN);
-    let mut title_spans = vec![Span::styled(format!("{prefix}{title}"), style)];
-    // The branch follows the name when the line has room. A name is rarely as
-    // wide as the sidebar, so this is where the branch costs nothing.
-    if let Some(git) = git
-        && let Some(text) = fit_git_row_text(
-            git,
-            name_room.saturating_sub(Line::raw(title.as_str()).width() + 2),
-        )
-    {
-        title_spans.push(Span::styled(format!("  {text}"), theme::muted()));
-    }
-    lines.push(Line::from(title_spans));
+    lines.push(Line::from(session_title_spans(
+        prefix,
+        &name,
+        style,
+        git,
+        cpu,
+        usize::from(title_width),
+    )));
     lines.push(session_activity_line(
         "  ",
         session,
@@ -546,7 +543,6 @@ pub(crate) fn expanded_session_lines(
         operation,
         now_epoch_seconds,
         target,
-        cpu,
         permission,
         spinner,
         width,
@@ -583,6 +579,64 @@ pub(crate) fn expanded_session_lines(
     }
 }
 
+/// The fewest name cells worth showing next to a CPU figure. A name that is
+/// shorter than this needs only its own width.
+const MIN_NAME_CELLS_WITH_CPU: usize = 8;
+
+/// The CPU text a row shows, or `None` below the display threshold (1.0%).
+fn cpu_row_label(cpu: Option<crate::session_view::CpuShare>) -> Option<String> {
+    cpu.filter(|share| share.permille >= 10)
+        .map(|share| share.label())
+}
+
+/// The first row of a session: the name, the branch when there is room, and
+/// the CPU figure right-justified to `title_width`, the edge the row's
+/// controls leave clear. A narrow row truncates the name before it gives up
+/// the CPU; the CPU goes only when the name would get fewer than
+/// [`MIN_NAME_CELLS_WITH_CPU`] cells (or its own width, if shorter).
+fn session_title_spans(
+    prefix: &str,
+    name: &str,
+    style: Style,
+    branch: Option<&str>,
+    cpu: Option<crate::session_view::CpuShare>,
+    title_width: usize,
+) -> Vec<Span<'static>> {
+    let prefix_width = Line::raw(prefix).width();
+    let name_room = title_width.saturating_sub(prefix_width);
+    let cpu = cpu_row_label(cpu).filter(|text| {
+        let cpu_width = Line::raw(text.as_str()).width() + 1;
+        let name_width = Line::raw(name).width();
+        name_room.saturating_sub(cpu_width) >= name_width.min(MIN_NAME_CELLS_WITH_CPU)
+    });
+    let cpu_width = cpu
+        .as_ref()
+        .map_or(0, |text| Line::raw(text.as_str()).width() + 1);
+    let title = truncate_to_cells(name, name_room.saturating_sub(cpu_width), Truncate::PLAIN);
+    let title_cells = Line::raw(title.as_str()).width();
+    let mut spans = vec![Span::styled(format!("{prefix}{title}"), style)];
+    let mut used = prefix_width + title_cells;
+    // The branch follows the name when the line has room before the CPU.
+    if let Some(branch) = branch
+        && let Some(text) = fit_git_row_text(
+            branch,
+            title_width
+                .saturating_sub(used + cpu_width)
+                .saturating_sub(2),
+        )
+    {
+        let text = format!("  {text}");
+        used += Line::raw(text.as_str()).width();
+        spans.push(Span::styled(text, theme::muted()));
+    }
+    if let Some(cpu) = cpu {
+        let pad = title_width.saturating_sub(used + Line::raw(cpu.as_str()).width());
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(cpu, theme::muted()));
+    }
+    spans
+}
+
 /// The second row of a session. Actionable state and queued work come first so
 /// a narrow pane cannot hide them behind the target or profile identity.
 #[allow(clippy::too_many_arguments)]
@@ -596,7 +650,6 @@ pub(crate) fn session_activity_line(
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
-    cpu: Option<crate::session_view::CpuShare>,
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
@@ -696,18 +749,10 @@ pub(crate) fn session_activity_line(
         Truncate::PLAIN,
     );
     let status_width = Line::raw(status.as_str()).width() + queue_width + 2;
-    let cpu = cpu
-        .filter(|value| !compact && value.permille >= 10)
-        .map(|value| value.label())
-        .filter(|text| {
-            Line::raw(prefix).width() + spinner_width + status_width + text.len() < available
-        });
-    let cpu_width = cpu.as_ref().map_or(0, |text| text.len() + 1);
     let identity_width = if compact {
         0
     } else {
-        available
-            .saturating_sub(Line::raw(prefix).width() + spinner_width + status_width + cpu_width)
+        available.saturating_sub(Line::raw(prefix).width() + spinner_width + status_width)
     };
     let badge_text = permission
         .as_ref()
@@ -753,9 +798,6 @@ pub(crate) fn session_activity_line(
             facts.style().add_modifier(Modifier::BOLD),
         ));
     }
-    if let Some(cpu) = cpu {
-        spans.push(Span::styled(format!(" {cpu}"), theme::muted()));
-    }
     if !identity.is_empty() || show_permission {
         spans.push(Span::styled(format!("  {identity}"), theme::muted()));
     }
@@ -797,17 +839,14 @@ pub(crate) fn compact_session_lines(
     // The ellipsis action occupies the last three cells of the first line;
     // retain the full width for the status line below it.
     let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
-    lines.push(Line::styled(
-        format!(
-            "{prefix}{}",
-            truncate_to_cells(
-                &name,
-                usize::from(title_width).saturating_sub(Line::raw(prefix).width()),
-                Truncate::PLAIN,
-            )
-        ),
+    lines.push(Line::from(session_title_spans(
+        prefix,
+        &name,
         style,
-    ));
+        None,
+        cpu,
+        usize::from(title_width),
+    )));
     lines.push(session_activity_line(
         "  ",
         session,
@@ -818,7 +857,6 @@ pub(crate) fn compact_session_lines(
         operation,
         now_epoch_seconds,
         target,
-        cpu,
         permission,
         spinner,
         width,
