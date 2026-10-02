@@ -863,6 +863,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "libc",
+ "mach2",
  "mimalloc",
  "proptest",
  "reqwest",
