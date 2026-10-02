@@ -85,6 +85,13 @@ impl<E> DaemonStageReportingExecutor<E> {
 }
 
 impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let _stage = command
+            .stage
+            .map(|stage| ProvisionStageGuard::new(self, stage));
+        self.inner.execute_cleanup(command)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
@@ -181,6 +188,12 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         Ok(())
+    }
+
+    fn before_move_source_stop(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(self.state.stop_subagents_for_suspend(&self.session_id))
     }
 
     fn reserve_move_destination(&self) {

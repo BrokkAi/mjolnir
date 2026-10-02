@@ -9,6 +9,33 @@ pub fn retire_move_target_plan(locator: &TargetLocator, session_id: &str) -> Res
     close_plan_scoped(locator, session_id, false)
 }
 
+/// Termination needs the durable AWS identity even before SSH has an address.
+pub fn terminate_ec2_instance_command(
+    profile: &str,
+    region: &str,
+    instance_id: &str,
+) -> Result<CommandSpec> {
+    ensure!(
+        valid_ec2_instance_id(instance_id),
+        "refusing cleanup: invalid EC2 instance ID"
+    );
+    // EC2 TerminateInstances is idempotent for an already-terminated instance.
+    Ok(CommandSpec::new(
+        "aws",
+        [
+            "--profile",
+            profile,
+            "--region",
+            region,
+            "ec2",
+            "terminate-instances",
+            "--instance-ids",
+            instance_id,
+        ],
+    )
+    .purpose("terminate exact EC2 session instance"))
+}
+
 fn close_plan_scoped(
     locator: &TargetLocator,
     session_id: &str,
@@ -168,24 +195,7 @@ exit "$status""#;
             region,
             instance_id,
             ..
-        } => {
-            // EC2 TerminateInstances is explicitly idempotent, including a
-            // repeated request for an already-terminated instance.
-            CommandSpec::new(
-                "aws",
-                [
-                    "--profile",
-                    profile,
-                    "--region",
-                    region,
-                    "ec2",
-                    "terminate-instances",
-                    "--instance-ids",
-                    instance_id,
-                ],
-            )
-            .purpose("terminate exact EC2 session instance")
-        }
+        } => terminate_ec2_instance_command(profile, region, instance_id)?,
         TargetLocator::SshBare { ssh, workspace, .. } => {
             // Same ordering constraint as the local bare target: stop the
             // daemon before deleting the root it keeps writing to.

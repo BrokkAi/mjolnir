@@ -594,7 +594,7 @@ pub(super) fn verify_target(
                 "describe-launch-template-versions".into(),
                 "--region".into(),
                 region.clone(),
-                "--launch-template-name".into(),
+                if launch_template.starts_with("lt-") { "--launch-template-id" } else { "--launch-template-name" }.into(),
                 launch_template.clone(),
                 "--versions".into(),
                 launch_template_version
@@ -1048,15 +1048,7 @@ pub(super) fn locator_after_provision_named(
             host: ssh.host.clone(),
             container_id: generated,
         },
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            ssh_user,
-            address_source,
-            identity_file,
-            ssh_args,
-            ..
-        } => {
+        TargetTemplate::AwsEc2 { .. } => {
             let output = first_output.context("AWS launch produced no output")?;
             let json: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .context("parse aws ec2 run-instances response")?;
@@ -1065,79 +1057,100 @@ pub(super) fn locator_after_provision_named(
                 .and_then(serde_json::Value::as_str)
                 .context("AWS response omitted instance ID")?
                 .to_string();
-            let profile = aws_profile.clone().unwrap_or_else(|| "default".into());
-            execute_checked(
-                executor,
-                CommandSpec::new(
-                    "aws",
-                    [
-                        "--profile".into(),
-                        profile.clone(),
-                        "--region".into(),
-                        region.clone(),
-                        "ec2".into(),
-                        "wait".into(),
-                        "instance-running".into(),
-                        "--instance-ids".into(),
-                        instance_id.clone(),
-                    ],
-                )
-                .purpose("wait for EC2 session instance to run")
-                .stage(ProvisionStage::Booting),
-            )?;
-            let field = match address_source {
-                AwsAddressSource::PublicDns => "PublicDnsName",
-                AwsAddressSource::PublicIp => "PublicIpAddress",
-                AwsAddressSource::PrivateDns => "PrivateDnsName",
-                AwsAddressSource::PrivateIp => "PrivateIpAddress",
-            };
-            let address = execute_checked(
-                executor,
-                CommandSpec::new(
-                    "aws",
-                    [
-                        "--profile".into(),
-                        profile.clone(),
-                        "--region".into(),
-                        region.clone(),
-                        "ec2".into(),
-                        "describe-instances".into(),
-                        "--instance-ids".into(),
-                        instance_id.clone(),
-                        "--query".into(),
-                        format!("Reservations[0].Instances[0].{field}"),
-                        "--output".into(),
-                        "text".into(),
-                    ],
-                )
-                .purpose("resolve EC2 session address")
-                .stage(ProvisionStage::Booting),
-            )?;
-            let address = String::from_utf8(address.stdout)
-                .context("AWS address was not UTF-8")?
-                .trim()
-                .to_string();
-            if address.is_empty() || address == "None" {
-                bail!("AWS instance {instance_id} has no configured address");
-            }
-            let ssh = SshTarget {
-                destination: format!("{ssh_user}@{address}"),
-                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-            };
-            wait_for_ssh_ready(
-                executor,
-                &crate::targets::ssh_command(&ssh, ["true"])
-                    .purpose("wait for EC2 SSH availability")
-                    .stage(ProvisionStage::Booting),
-                AWS_SSH_READY_TIMEOUT,
-                Instant::now,
-                std::thread::sleep,
-            )?;
-            TargetLocator::AwsEc2 {
-                instance_id,
-                address: Some(address),
-            }
+            return ec2_locator_after_launch(canonical, instance_id, executor);
         }
+    })
+}
+
+/// Resolve a created instance. Callers persist its ID before these long waits.
+pub(super) fn ec2_locator_after_launch(
+    canonical: &TargetTemplate,
+    instance_id: String,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<TargetLocator> {
+    let TargetTemplate::AwsEc2 {
+        aws_profile,
+        region,
+        ssh_user,
+        address_source,
+        identity_file,
+        ssh_args,
+        ..
+    } = canonical
+    else {
+        bail!("EC2 locator requires an EC2 target");
+    };
+    let profile = aws_profile.clone().unwrap_or_else(|| "default".into());
+    execute_checked(
+        executor,
+        CommandSpec::new(
+            "aws",
+            [
+                "--profile".into(),
+                profile.clone(),
+                "--region".into(),
+                region.clone(),
+                "ec2".into(),
+                "wait".into(),
+                "instance-running".into(),
+                "--instance-ids".into(),
+                instance_id.clone(),
+            ],
+        )
+        .purpose("wait for EC2 session instance to run")
+        .stage(ProvisionStage::Booting),
+    )?;
+    let field = match address_source {
+        AwsAddressSource::PublicDns => "PublicDnsName",
+        AwsAddressSource::PublicIp => "PublicIpAddress",
+        AwsAddressSource::PrivateDns => "PrivateDnsName",
+        AwsAddressSource::PrivateIp => "PrivateIpAddress",
+    };
+    let address = execute_checked(
+        executor,
+        CommandSpec::new(
+            "aws",
+            [
+                "--profile".into(),
+                profile.clone(),
+                "--region".into(),
+                region.clone(),
+                "ec2".into(),
+                "describe-instances".into(),
+                "--instance-ids".into(),
+                instance_id.clone(),
+                "--query".into(),
+                format!("Reservations[0].Instances[0].{field}"),
+                "--output".into(),
+                "text".into(),
+            ],
+        )
+        .purpose("resolve EC2 session address")
+        .stage(ProvisionStage::Booting),
+    )?;
+    let address = String::from_utf8(address.stdout)
+        .context("AWS address was not UTF-8")?
+        .trim()
+        .to_string();
+    if address.is_empty() || address == "None" {
+        bail!("AWS instance {instance_id} has no configured address");
+    }
+    let ssh = SshTarget {
+        destination: format!("{ssh_user}@{address}"),
+        ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
+    };
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(&ssh, ["true"])
+            .purpose("wait for EC2 SSH availability")
+            .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )?;
+    Ok(TargetLocator::AwsEc2 {
+        instance_id,
+        address: Some(address),
     })
 }
 

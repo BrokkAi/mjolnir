@@ -1122,6 +1122,9 @@ impl Controller {
         if session.state.is_active() {
             bail!("refusing to destroy active session {session_id}");
         }
+        if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
+            self.cleanup_prepared_move_destination(&mut operation, executor)?;
+        }
         let mut retained_checkout = None;
         if let Some(worktree) = &session.managed_worktree {
             let keep = checkout == CheckoutDisposition::KeepWhenDirty
@@ -1249,6 +1252,9 @@ impl Controller {
                     .get(session_id)
                     .with_context(|| format!("unknown session {session_id}"))?
                     .clone();
+                if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
+                    self.cleanup_prepared_move_destination(&mut operation, executor)?;
+                }
                 // A session destroyed for good keeps nothing, including a broker an
                 // earlier failure left running; retiring it first also stops a live
                 // writer from recreating files under the teardown below.

@@ -512,6 +512,7 @@ impl RuntimeState {
 
     /// Recovery is teardown only: never reconnect or reprovision a failed worker.
     pub(super) fn resume_startup_cleanups(self: &Arc<Self>, immediately: bool) {
+        self.resume_move_destination_cleanups(immediately);
         let ids = {
             let owner = self.owner();
             owner

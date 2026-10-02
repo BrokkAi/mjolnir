@@ -1222,6 +1222,18 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Breaking: older strict Move JSON readers discard prepared EC2 ownership.
+    if version < 71 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version=71 WHERE singleton=1;
+             INSERT INTO schema_migrations(version,applied_at)
+                 VALUES(71,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version=71;",
+        )?;
+        transaction.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1593,6 +1605,53 @@ mod reader_tests {
     }
 
     #[test]
+    fn ec2_move_ownership_upgrade_is_atomic_and_preserves_existing_moves() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ec2-move-migration.sqlite3");
+        save_session_to(&path, &super::super::tests::session("source", "project")).unwrap();
+        stamp_schema_version(&path, 70);
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version=69;
+             INSERT INTO session_moves(session_id,operation_id,operation_json)
+                 VALUES('source','existing-move','{\"operation_id\":\"existing-move\"}');
+             CREATE TRIGGER stop_ec2_move_migration BEFORE INSERT ON schema_migrations
+             WHEN NEW.version=71 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;",
+        )
+        .unwrap();
+        assert!(migrate_schema(&old).is_err());
+        let state = read_schema_state(&old).unwrap();
+        assert_eq!(state.revision, 70);
+        assert_eq!(state.minimum_compatible, Some(69));
+        old.execute_batch("DROP TRIGGER stop_ec2_move_migration")
+            .unwrap();
+        drop(old);
+        let upgraded = open_writer(&path).unwrap();
+        let state = read_schema_state(&upgraded).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(71));
+        assert!(state.ensure_supported_by(70).is_err());
+        let preserved: String = upgraded
+            .query_row(
+                "SELECT operation_json FROM session_moves WHERE session_id='source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, r#"{"operation_id":"existing-move"}"#);
+        assert_eq!(
+            upgraded
+                .query_row(
+                    "SELECT count(*) FROM sessions WHERE session_id='source'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn title_migration_caps_old_titles_preserves_short_titles_and_is_compatible() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("title-migration.sqlite3");
@@ -1610,6 +1669,12 @@ mod reader_tests {
         }
         stamp_schema_version(&path, 69);
         let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version=69;
+             CREATE TRIGGER stop_after_title_migration BEFORE INSERT ON schema_migrations
+             WHEN NEW.version=71 BEGIN SELECT RAISE(ABORT,'fixture boundary'); END;",
+        )
+        .unwrap();
         for (id, title) in &titles {
             old.execute(
                 "UPDATE sessions SET acp_session_title=?2 WHERE session_id=?1",
@@ -1617,9 +1682,8 @@ mod reader_tests {
             )
             .unwrap();
         }
-        drop(old);
-
-        let upgraded = open_writer(&path).unwrap();
+        assert!(migrate_schema(&old).is_err());
+        let upgraded = old;
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, 70);
         assert_eq!(state.minimum_compatible, Some(69));
@@ -1640,6 +1704,9 @@ mod reader_tests {
             assert_eq!(stored, expected, "session {id}");
             assert!(stored.is_none_or(|title| title.chars().count() <= 256));
         }
+        upgraded
+            .execute_batch("DROP TRIGGER stop_after_title_migration")
+            .unwrap();
         drop(upgraded);
         forget_verified_schema(&path);
         drop(open_writer(&path).unwrap());
@@ -1819,8 +1886,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 69 reconciles accounting and project histories.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 69;
+    /// `SCHEMA_VERSION`. Migration 71 adds durable EC2 Move ownership.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 71;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -1849,6 +1916,11 @@ mod reader_tests {
                     [],
                 )
                 .unwrap();
+        }
+        if matches!(version, 69 | 70) {
+            connection.execute(
+                "UPDATE schema_compatibility SET minimum_compatible_version=69 WHERE singleton=1", [],
+            ).unwrap();
         }
         drop(connection);
         forget_verified_schema(path);

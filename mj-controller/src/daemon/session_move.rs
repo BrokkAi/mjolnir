@@ -107,18 +107,6 @@ impl RuntimeState {
                 move_operation_id: Some(operation_id.clone()),
             },
             move |state, session_id, cancelled| async move {
-                // A sub-agent borrows its parent's environment, which Move
-                // replaces, so its children stop exactly as they do when the
-                // parent is suspended. The destination's resume tells the
-                // model which ones stopped.
-                let stopping = std::time::Instant::now();
-                state.stop_subagents_for_suspend(&session_id).await?;
-                tracing::info!(
-                    %session_id,
-                    phase = "stop sub-agents",
-                    elapsed_ms = stopping.elapsed().as_millis() as u64,
-                    "move phase finished"
-                );
                 let result = state
                     .clone()
                     .run_move_controller_work(
@@ -249,6 +237,107 @@ impl RuntimeState {
             });
         }
         Ok(owned)
+    }
+
+    pub(super) fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {
+        let ids = {
+            let owner = self.owner();
+            owner
+                .committed()
+                .into_iter()
+                .flat_map(|committed| committed.moves.values())
+                .filter(|op| {
+                    op.prepared_destination.as_ref().is_some_and(|d| {
+                        matches!(
+                            d.state,
+                            mj_core::state::PreparedDestinationState::CleanupPending { .. }
+                        )
+                    })
+                })
+                .filter(|op| {
+                    !owner
+                        .lifecycle
+                        .get(&op.selection.session_id)
+                        .is_some_and(|active| active.is_running())
+                })
+                .filter(|op| {
+                    immediately
+                        || chrono::DateTime::parse_from_rfc3339(&op.updated_at)
+                            .map(|at| {
+                                (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds()
+                                    >= 30
+                            })
+                            .unwrap_or(true)
+                })
+                .map(|op| op.selection.session_id.clone())
+                .collect::<Vec<_>>()
+        };
+        for id in ids {
+            let result = self.start_or_join_lifecycle(
+                id.clone(),
+                LifecycleKind::Cleanup,
+                |state, id, cancelled| async move {
+                    state
+                        .run_move_controller_work(
+                            id.clone(),
+                            cancelled,
+                            move |controller, executor, _manager| async move {
+                                let mut operation = crate::database::load_move_operation(&id)?
+                                    .context("Move cleanup intent missing")?;
+                                executor.begin_resumable_move_work()?;
+                                let result = controller
+                                    .cleanup_prepared_move_destination(&mut operation, &executor);
+                                operation.updated_at = chrono::Utc::now().to_rfc3339();
+                                if result.is_ok() {
+                                    crate::controller::move_session::record_finished_move_recovery(
+                                        &controller.state,
+                                        &mut operation,
+                                    )?;
+                                } else {
+                                    crate::database::save_move_operation(&operation)?;
+                                }
+                                executor.end_resumable_move_work()?;
+                                result?;
+                                Ok(MoveOutcome {
+                                    operation_id: operation.operation_id,
+                                    session_id: id,
+                                    profile_id: operation.selection.profile_id.unwrap_or_default(),
+                                    target_template_id: operation
+                                        .selection
+                                        .target_template_id
+                                        .unwrap_or_default(),
+                                    outcome: "cleaned_up".into(),
+                                    error: None,
+                                    recovery: None,
+                                })
+                            },
+                        )
+                        .await
+                        .map(DaemonLifecycleResult::Move)
+                },
+            );
+            match result {
+                Ok(result) => {
+                    let state = self.clone();
+                    tokio::spawn(async move {
+                        let channel = result.clone();
+                        if let Err(error) = Self::wait_lifecycle_result(result).await {
+                            tracing::warn!(session_id=%id, %error, "EC2 Move destination cleanup remains pending; retry in 30s");
+                            state.push_notice(
+                                &id,
+                                format!(
+                                    "EC2 destination cleanup will retry automatically: {error:#}"
+                                ),
+                            );
+                        }
+                        state.remove_completed_lifecycle(&channel);
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(session_id=%id, %error, "EC2 Move destination cleanup could not start")
+                }
+            }
+        }
     }
 
     /// The controller half of every Move lifecycle, started or recovered.

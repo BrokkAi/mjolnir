@@ -810,6 +810,11 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&preparation)?);
         return Ok(());
     }
+    if !args.json
+        && preparation.destination_checks == mj_core::state::DestinationChecks::AfterProvisioning
+    {
+        eprintln!("{}", mj_core::state::EC2_MOVE_PREPARATION_NOTICE);
+    }
     if let Some(workspace) = &preparation.workspace {
         use mj_core::move_workspace::format_bytes;
         eprintln!(

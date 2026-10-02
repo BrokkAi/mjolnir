@@ -277,6 +277,9 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             resource_allocation: None,
         };
         let operation = MoveOperation {
+            prepared_destination: None,
+            accepted_preparation: None,
+            acknowledge_interruption: false,
             workspace_transfer: None,
             handoff: None,
             in_place: false,
@@ -701,6 +704,9 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .move_configuration_fingerprint(&selection)
         .unwrap();
     let mut operation = MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         in_place: false,
@@ -1110,6 +1116,9 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
 #[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         in_place: false,
@@ -1923,6 +1932,9 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
     };
     let source = &controller.state.sessions[LATCH_RELAY_SESSION];
     MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         in_place: true,
@@ -3256,5 +3268,157 @@ fn in_place_move_with_oversized_file_exports_only_session_handoff() {
         fixture.controller.state.sessions[LATCH_RELAY_SESSION]
             .checkpoint
             .is_none()
+    );
+}
+
+#[cfg(unix)]
+struct Ec2PreviewExecutor(GitWithPodmanPreflightExecutor);
+
+#[cfg(unix)]
+impl CommandExecutor for Ec2PreviewExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        if command.program == "aws" {
+            assert!(
+                !command.args.iter().any(|a| a == "run-instances"),
+                "preview must not launch EC2"
+            );
+            return Ok(CommandOutput {
+                status: 0,
+                stdout: b"{}".to_vec(),
+                stderr: Vec::new(),
+            });
+        }
+        self.0.execute(command)
+    }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.0.execute_with_stdin(command, input)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing() {
+    let short =
+        "ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing";
+    if !isolated_test_child(&test_name(short), "MJ_MOVE_EC2_PREVIEW_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let repository = committed_repository();
+    let (_remote_parent, remote) =
+        crate::controller::test_support::network_remote_for(repository.path());
+    fs::write(
+        repository.path().join("selected-untracked.txt"),
+        vec![b'x'; 200 * 1024],
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut config = resume_compatibility_config();
+    add_codex_profile(&mut config, home.path());
+    config
+        .bundles
+        .insert("project".into(), local_bundle(repository.path()));
+    config
+        .targets
+        .insert("ec2".into(), super::destination::tests::ec2_target());
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
+    session.bundle_id = "project".into();
+    session.state = SessionState::Running;
+    session.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(id),
+    });
+    session.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+    });
+    let state = State {
+        sessions: [(id.into(), session)].into_iter().collect(),
+        ..Default::default()
+    };
+    crate::database::save_state(&state).unwrap();
+    let controller = Controller { config, state };
+    let selection = mj_core::state::MoveSelection {
+        session_id: id.into(),
+        target_template_id: Some("ec2".into()),
+        profile_id: Some("codex".into()),
+        additional_mounts: None,
+        resource_allocation: None,
+        clear_resource_allocation: false,
+        workspace: Default::default(),
+        subagents: None,
+    };
+    let executor = Ec2PreviewExecutor(GitWithPodmanPreflightExecutor { remote });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let preparation = runtime
+        .block_on(controller.prepare_move_session_controlled(selection.clone(), &executor))
+        .unwrap();
+    assert_eq!(
+        preparation.destination_checks,
+        mj_core::state::DestinationChecks::AfterProvisioning
+    );
+    assert!(preparation.selection.clear_resource_allocation);
+    assert_eq!(preparation.selection.resource_allocation, None);
+    assert!(preparation.workspace.as_ref().unwrap().blockers.is_empty());
+    assert!(
+        preparation
+            .selection
+            .workspace
+            .included_bytes(preparation.workspace.as_ref().unwrap())
+            > 64 * 1024
+    );
+    assert!(
+        crate::database::load_move_operation(id).unwrap().is_none(),
+        "preview creates no durable launch"
+    );
+    let mut explicit = selection;
+    explicit.resource_allocation = Some(SessionResourceAllocation::AwsEc2 {
+        instance_type: "m8i.large".into(),
+        vcpus: 2,
+        memory_bytes: 8 * 1024 * 1024 * 1024,
+    });
+    let preparation = runtime
+        .block_on(controller.prepare_move_session_controlled(explicit.clone(), &executor))
+        .unwrap();
+    assert_eq!(
+        preparation.selection.resource_allocation,
+        explicit.resource_allocation
+    );
+    assert!(!preparation.selection.clear_resource_allocation);
+
+    // A settings edit while EC2 boots must invalidate confirmation even when
+    // this controller still holds the original config snapshot.
+    controller.config.save().unwrap();
+    let mut operation = source_recovery_operation(&controller.state.sessions[id]);
+    operation.selection = preparation.selection;
+    operation.configuration_fingerprint = controller
+        .move_configuration_fingerprint(&operation.selection)
+        .unwrap();
+    controller
+        .verify_current_move_configuration(&operation)
+        .unwrap();
+    let mut changed = controller.config.clone();
+    let mj_core::config::TargetTemplate::AwsEc2 { region, .. } =
+        changed.targets.get_mut("ec2").unwrap()
+    else {
+        unreachable!()
+    };
+    *region = "us-west-2".into();
+    changed.save().unwrap();
+    assert!(
+        controller
+            .verify_current_move_configuration(&operation)
+            .is_err()
+    );
+    assert_eq!(
+        crate::database::load_session_state(id).unwrap(),
+        Some(SessionState::Running)
     );
 }

@@ -2510,6 +2510,7 @@ mod tests {
             action => panic!("entering move review should request preparation: {action:?}"),
         };
         let preparation = mj_core::state::MovePreparation {
+            destination_checks: Default::default(),
             workspace: None,
             in_place: false,
             source_unavailable: false,

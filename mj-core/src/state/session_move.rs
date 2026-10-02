@@ -147,9 +147,69 @@ fn format_conversion_bytes(bytes: u64) -> String {
     }
 }
 
+pub const EC2_MOVE_PREPARATION_NOTICE: &str =
+    "The EC2 instance will be created and checked after you confirm Move.";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DestinationChecks {
+    #[default]
+    Checked,
+    AfterProvisioning,
+}
+
+/// The launch request is immutable for an attempt, including its client token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedMoveDestination {
+    pub launch_args: Vec<String>,
+    pub runtime: TargetRuntimeSettings,
+    pub state: PreparedDestinationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PreparedDestinationState {
+    LaunchPending,
+    Created { instance_id: String },
+    Checked { target: TargetLocator },
+    Adopted { target: TargetLocator },
+    CleanupPending { instance_id: Option<String> },
+    Released,
+}
+
+impl PreparedMoveDestination {
+    pub fn target(&self) -> Option<&TargetLocator> {
+        match &self.state {
+            PreparedDestinationState::Checked { target }
+            | PreparedDestinationState::Adopted { target } => Some(target),
+            _ => None,
+        }
+    }
+
+    pub fn instance_id(&self) -> Option<&str> {
+        match &self.state {
+            PreparedDestinationState::Created { instance_id }
+            | PreparedDestinationState::CleanupPending {
+                instance_id: Some(instance_id),
+            } => Some(instance_id),
+            _ => match self.target() {
+                Some(TargetLocator::AwsEc2 { instance_id, .. }) => Some(instance_id),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn owns_resource(&self) -> bool {
+        !matches!(self.state, PreparedDestinationState::Released)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MovePreparation {
+    #[serde(default)]
+    pub destination_checks: DestinationChecks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::move_workspace::WorkspaceAssessment>,
     #[serde(default)]
@@ -208,6 +268,12 @@ pub enum MovePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveOperation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_destination: Option<PreparedMoveDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_preparation: Option<Box<MovePreparation>>,
+    #[serde(default)]
+    pub acknowledge_interruption: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_transfer: Option<crate::move_workspace::WorkspaceTransfer>,
     /// Move-owned session state, never a portable workspace checkpoint.

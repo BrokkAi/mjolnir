@@ -198,6 +198,9 @@ fn bare_preflight_config() -> Config {
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         in_place: false,
@@ -803,7 +806,11 @@ fn phone_snapshot_gates_the_terminal_session_actions() {
 
     // One workspace leaves nothing to move to.
     let snapshot = project(&controller, &one_workspace, &operational);
-    assert!(!snapshot.sessions.0["session-1"].capabilities.change_workspace);
+    assert!(
+        !snapshot.sessions.0["session-1"]
+            .capabilities
+            .change_workspace
+    );
 
     // A turn running only in the child still offers interrupt all on the
     // parent, which is the tree it reaches.
@@ -821,7 +828,11 @@ fn phone_snapshot_gates_the_terminal_session_actions() {
         .targets
         .insert("podman".into(), TargetTemplate::LocalBare);
     let snapshot = project(&controller, &two_workspaces, &operational);
-    assert!(!snapshot.sessions.0["session-1"].capabilities.container_settings);
+    assert!(
+        !snapshot.sessions.0["session-1"]
+            .capabilities
+            .container_settings
+    );
 
     // A suspended session without a recovery copy has nothing to restart
     // from.

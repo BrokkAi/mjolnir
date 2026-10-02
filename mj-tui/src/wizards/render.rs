@@ -253,6 +253,7 @@ pub(crate) fn render_new_wizard(
                     || wizard.remote_preflight_error.is_some()),
                 active_interruption: false,
                 in_place_move: false,
+                destination_checks_pending: false,
                 source_unavailable: false,
                 stopped_subagents: 0,
                 subagents: None,
@@ -676,6 +677,7 @@ pub(crate) struct ReviewWizardView<'a> {
     /// True when the prepared move keeps the environment and replaces only the
     /// harness and profile, so the review must not promise a fresh environment.
     in_place_move: bool,
+    destination_checks_pending: bool,
     source_unavailable: bool,
     /// Sub-agents the Move stops that had not handed back; idle ones are
     /// stopped without a word, as a suspend stops them.
@@ -719,6 +721,7 @@ pub(crate) fn render_review_wizard(
         submit_enabled,
         active_interruption,
         in_place_move,
+        destination_checks_pending,
         source_unavailable,
         stopped_subagents,
         subagents,
@@ -769,6 +772,13 @@ pub(crate) fn render_review_wizard(
         lines.push(Line::styled(
             "Source is unavailable; Move will recover its saved data without starting its old harness.",
             Style::default().fg(theme::palette().warning),
+        ));
+    }
+    if moving && destination_checks_pending {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            mj_core::state::EC2_MOVE_PREPARATION_NOTICE,
+            theme::muted(),
         ));
     }
     if moving && in_place_move {
@@ -1689,6 +1699,9 @@ pub(crate) fn render_resume_wizard(
                     .preparation
                     .as_ref()
                     .map_or(wizard.moving, |preparation| preparation.active),
+                destination_checks_pending: wizard.preparation.as_ref().is_some_and(|p| {
+                    p.destination_checks == mj_core::state::DestinationChecks::AfterProvisioning
+                }),
                 in_place_move: wizard
                     .preparation
                     .as_ref()

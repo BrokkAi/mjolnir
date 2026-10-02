@@ -754,7 +754,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        69
+        71
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -795,7 +795,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        69
+        71
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],

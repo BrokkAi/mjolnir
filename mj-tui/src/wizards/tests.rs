@@ -2655,6 +2655,7 @@ fn open_move_review(dashboard: &mut DashboardState) -> u64 {
 
 fn move_preparation() -> mj_core::state::MovePreparation {
     mj_core::state::MovePreparation {
+        destination_checks: Default::default(),
         workspace: None,
         in_place: false,
         source_unavailable: false,

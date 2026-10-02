@@ -230,6 +230,9 @@ fn state_with(sessions: Vec<SessionRecord>) -> State {
 
 fn incomplete_move() -> MoveOperation {
     MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         in_place: false,

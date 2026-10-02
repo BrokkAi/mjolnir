@@ -5794,6 +5794,9 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     );
     crate::database::save_session(&session).unwrap();
     let operation = mj_core::state::MoveOperation {
+        prepared_destination: None,
+        accepted_preparation: None,
+        acknowledge_interruption: false,
         workspace_transfer: None,
         handoff: None,
         source_checkpoint_only: false,

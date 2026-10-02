@@ -402,6 +402,15 @@ impl DashboardState {
         if wizard.resource_editor().target_id.as_deref() == Some(&target_id) {
             return DashboardAction::None;
         }
+        if matches!(
+            self.config.targets[&target_id],
+            TargetTemplate::AwsEc2 { .. }
+        ) && matches!(
+            wizard.resource_allocation(),
+            Some(SessionResourceAllocation::Container { .. })
+        ) {
+            *wizard.sizing_mut().1 = None;
+        }
         if let Some(allocation) = wizard.resource_allocation().cloned() {
             let editor = wizard.resource_editor_mut();
             editor.reset(Some(&allocation));

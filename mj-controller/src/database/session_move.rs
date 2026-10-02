@@ -64,6 +64,19 @@ pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     })
 }
 
+/// Publish destination adoption and ownership together, without changing client fields.
+pub fn adopt_move_destination(operation: &MoveOperation, session: &SessionRecord) -> Result<()> {
+    let operation = operation.clone();
+    let session = session.clone();
+    submit_database_write("adopt_move_destination", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        update_lifecycle_fields(&tx, &session)?;
+        save_move_operation_with(&tx, &operation)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 /// Publish a Move result and its session message as one committed outcome.
 /// Update only the message fields; other owners may have changed the session.
 pub fn save_move_outcome(operation: &MoveOperation, last_error: Option<&str>) -> Result<()> {
@@ -219,7 +232,12 @@ pub fn reap_finished_move_intents() -> Result<usize> {
 pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result<usize> {
     let mut reaped = 0;
     for operation in load_move_operations_with(connection)? {
-        if operation.retains_checkpoint()
+        if (operation.phase != mj_core::state::MovePhase::Completed
+            && operation
+                .prepared_destination
+                .as_ref()
+                .is_some_and(|destination| destination.owns_resource()))
+            || operation.retains_checkpoint()
             || operation
                 .restore_artifact()
                 .is_some_and(|checkpoint| checkpoint.archive_path.exists())
@@ -289,6 +307,9 @@ mod tests {
 
     fn operation(session: &SessionRecord) -> MoveOperation {
         MoveOperation {
+            prepared_destination: None,
+            accepted_preparation: None,
+            acknowledge_interruption: false,
             workspace_transfer: None,
             handoff: None,
             in_place: false,

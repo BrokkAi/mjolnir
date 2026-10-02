@@ -380,7 +380,7 @@ impl Controller {
     ) -> Result<WorkspaceAssessment> {
         let id = &selection.session_id;
         if let Some(operation) = crate::database::load_move_operation(id)?
-            && operation.phase != MovePhase::Completed
+            && operation.holds_source_environment()
             && let Some(transfer) = operation.workspace_transfer
         {
             return Ok(transfer.assessment);
@@ -460,7 +460,6 @@ impl Controller {
             .as_ref()
             .context("Move target missing")?];
         if matches!(target, mj_core::config::TargetTemplate::AwsEc2 { .. }) {
-            assessment.blockers.push("Move cannot inspect a not-yet-created EC2 instance's transfer tools or free disk space. Use a configured SSH target on an existing instance.".into());
             return Ok(assessment);
         }
         if matches!(target, mj_core::config::TargetTemplate::LocalBare)
@@ -587,6 +586,44 @@ impl Controller {
             );
         }
         Ok(assessment)
+    }
+
+    pub(super) fn assess_prepared_destination(
+        &self,
+        operation: &MoveOperation,
+        assessment: &mut WorkspaceAssessment,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let destination = operation
+            .prepared_destination
+            .as_ref()
+            .context("EC2 Move destination missing")?;
+        let backend = super::destination::prepared_backend(
+            destination
+                .target()
+                .context("EC2 Move target not checked")?,
+            &destination.runtime,
+            &operation.selection.session_id,
+        )?;
+        let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+        super::super::execute_checked(
+            executor,
+            targets::locator_command(&backend, rsync_probe())
+                .purpose("check prepared EC2 Move transport"),
+        )?;
+        let targets::TargetLocator::AwsEc2 { workspace, .. } = &backend else {
+            bail!("prepared target is not EC2");
+        };
+        storage_probe(
+            executor,
+            targets::locator_command(&backend, storage_arguments(Path::new(workspace)))
+                .purpose("check prepared EC2 Move staging and workspace space"),
+            "Destination",
+            "destination",
+            2,
+            assessment,
+        );
+        operation.selection.workspace.validate(assessment)
     }
 
     pub(super) fn new_workspace_transfer(
@@ -855,7 +892,19 @@ impl Controller {
                 if current.target == transfer.source.target {
                     return self.retain_failed_in_place_move(id, &transfer.source, error);
                 }
-                if let Some(locator) = &current.target {
+                let prepared = operation
+                    .prepared_destination
+                    .as_ref()
+                    .and_then(|d| d.target())
+                    .cloned();
+                if prepared.is_some() {
+                    let mut saved = crate::database::load_move_operation(id)?
+                        .context("Move cleanup intent missing")?;
+                    self.cleanup_prepared_move_destination(&mut saved, executor)?;
+                }
+                if let Some(locator) = &current.target
+                    && Some(locator) != prepared.as_ref()
+                {
                     let backend =
                         super::super::backend::backend_locator(locator, current, &self.config)?;
                     targets::retire_move_target_plan(&backend, id)?.execute(executor)?;

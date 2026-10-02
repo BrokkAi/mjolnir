@@ -146,41 +146,7 @@ pub fn provision_plan_named(
             }));
         }
         TargetTemplate::AwsEc2(aws) => {
-            validate_aws(aws)?;
-            let launch_key = if aws.launch_template.starts_with("lt-") {
-                "LaunchTemplateId"
-            } else {
-                "LaunchTemplateName"
-            };
-            let mut launch = format!("{launch_key}={}", aws.launch_template);
-            if let Some(version) = &aws.launch_template_version {
-                launch.push_str(",Version=");
-                launch.push_str(version);
-            }
-            let mut args = vec![
-                "--profile".to_owned(),
-                aws.profile.clone(),
-                "--region".to_owned(),
-                aws.region.clone(),
-                "ec2".to_owned(),
-                "run-instances".to_owned(),
-                "--launch-template".to_owned(),
-                launch,
-            ];
-            if let Some(instance_type) = &aws.instance_type {
-                args.extend(["--instance-type".to_owned(), instance_type.clone()]);
-            }
-            args.extend(managed_resource_identity_args(
-                ManagedResourceKind::Ec2Instance,
-                session_id,
-            ));
-            args.extend(["--output".to_owned(), "json".to_owned()]);
-            commands.push(
-                CommandSpec::new("aws", args)
-                    .purpose("launch EC2 session instance")
-                    .stage(ProvisionStage::Provisioning)
-                    .creates_target(),
-            );
+            commands.push(ec2_launch_command(aws, session_id)?);
         }
         TargetTemplate::SshBare {
             ssh,
@@ -583,4 +549,41 @@ pub(super) fn execute_checked(
         );
     }
     Ok(())
+}
+
+/// Shared EC2 creation request; Move adds its durable per-attempt client token.
+pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<CommandSpec> {
+    validate_aws(aws)?;
+    let launch_key = if aws.launch_template.starts_with("lt-") {
+        "LaunchTemplateId"
+    } else {
+        "LaunchTemplateName"
+    };
+    let mut launch = format!("{launch_key}={}", aws.launch_template);
+    if let Some(version) = &aws.launch_template_version {
+        launch.push_str(",Version=");
+        launch.push_str(version);
+    }
+    let mut args = vec![
+        "--profile".to_owned(),
+        aws.profile.clone(),
+        "--region".to_owned(),
+        aws.region.clone(),
+        "ec2".to_owned(),
+        "run-instances".to_owned(),
+        "--launch-template".to_owned(),
+        launch,
+    ];
+    if let Some(instance_type) = &aws.instance_type {
+        args.extend(["--instance-type".to_owned(), instance_type.clone()]);
+    }
+    args.extend(managed_resource_identity_args(
+        ManagedResourceKind::Ec2Instance,
+        session_id,
+    ));
+    args.extend(["--output".to_owned(), "json".to_owned()]);
+    Ok(CommandSpec::new("aws", args)
+        .purpose("launch EC2 session instance")
+        .stage(ProvisionStage::Provisioning)
+        .creates_target())
 }

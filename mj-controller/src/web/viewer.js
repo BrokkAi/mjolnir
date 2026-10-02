@@ -3657,6 +3657,9 @@ function renderMoveForm() {
     moveStep.append(el('p', 'dim', preparation.in_place
       ? 'Only the harness and profile are replaced; the environment and workspace are kept.'
       : 'The session is restored into a fresh environment.'));
+    if (preparation.destination_checks === 'after_provisioning') {
+      moveStep.append(el('p', 'dim', 'The EC2 instance will be created and checked after you confirm Move.'));
+    }
     if (preparation.workspace) {
       moveStep.append(el('p', '', `Workspace transfer: ${moveBytes(moveSelectedBytes(draft, preparation.workspace))}`));
       const choose = el('button', '', 'Choose files…');

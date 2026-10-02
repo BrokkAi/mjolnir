@@ -3232,9 +3232,10 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
 /// omitted while empty. The capability flags travel even while false.
 #[test]
 fn terminal_session_actions_have_their_documented_wire_shape() {
-    let parsed: ControllerAction =
-        serde_json::from_str(r#"{"action":"change-workspace","session_id":"s","workspace_id":"w"}"#)
-            .unwrap();
+    let parsed: ControllerAction = serde_json::from_str(
+        r#"{"action":"change-workspace","session_id":"s","workspace_id":"w"}"#,
+    )
+    .unwrap();
     assert_eq!(
         parsed,
         ControllerAction::ChangeWorkspace {
@@ -3470,6 +3471,7 @@ async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
     request
         .reply
         .send(Ok(MovePreparation {
+            destination_checks: Default::default(),
             workspace: None,
             in_place: false,
             source_unavailable: false,
@@ -3990,6 +3992,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
         resource_allocation: None,
     };
     let preparation = MovePreparation {
+        destination_checks: Default::default(),
         workspace: None,
         in_place: false,
         source_unavailable: false,

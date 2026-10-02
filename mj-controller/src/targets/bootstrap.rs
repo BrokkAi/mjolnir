@@ -144,3 +144,16 @@ pub(super) fn clone_commands(
     }
     commands
 }
+
+/// Install Move transport on newly provisioned Linux instances.
+pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
+    let script = "set -eu; if rsync --protect-args --version >/dev/null 2>&1; then exit 0; fi; SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'rsync installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y rsync; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y rsync; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y rsync; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache rsync; else echo 'Unsupported package manager; install rsync 3.0 or newer in the image' >&2; exit 1; fi; rsync --protect-args --version >/dev/null";
+    CommandPlan {
+        description: "install EC2 Move transport".into(),
+        commands: vec![
+            at_boundary(boundary, vec!["sh".into(), "-c".into(), script.into()])
+                .purpose("install supported rsync")
+                .stage(ProvisionStage::Provisioning),
+        ],
+    }
+}

@@ -36,11 +36,34 @@ impl Controller {
             instance_id: mj_core::config::instance_identity(),
             ..RecoveryScan::default()
         };
+        let moves = match crate::database::load_move_operations() {
+            Ok(moves) => moves,
+            Err(error) => {
+                scan.warnings
+                    .push(format!("cannot read Move resource ownership: {error:#}"));
+                return scan;
+            }
+        };
         for (target_id, template) in &self.config.targets {
             match scan_target_workers(target_id, template, executor) {
                 Ok(candidates) => {
                     for mut candidate in candidates {
-                        if self.state_represents(&candidate) {
+                        let move_owned = moves.iter().any(|op| {
+                            op.selection.session_id == candidate.session_id
+                                && op.prepared_destination.as_ref().is_some_and(|d| {
+                                    d.owns_resource()
+                                        && match &candidate.locator {
+                                            mj_core::state::TargetLocator::AwsEc2 {
+                                                instance_id,
+                                                ..
+                                            } => d
+                                                .instance_id()
+                                                .is_none_or(|owned| owned == instance_id),
+                                            _ => false,
+                                        }
+                                })
+                        });
+                        if move_owned || self.state_represents(&candidate) {
                             continue;
                         }
                         candidate.tracked_session = self
@@ -1575,8 +1598,25 @@ mod tests {
         record
     }
 
+    fn isolated_scan(name: &str) -> bool {
+        if std::env::var_os("MJ_TEST_MOVE_OWNERSHIP_SCAN").is_some() {
+            return true;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), name))
+            .env("MJ_TEST_MOVE_OWNERSHIP_SCAN", "1")
+            .isolated_store(directory.path())
+            .run();
+        false
+    }
+
     #[test]
     fn a_container_an_errored_session_no_longer_names_is_an_orphan() {
+        if !isolated_scan("a_container_an_errored_session_no_longer_names_is_an_orphan") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        crate::database::save_state(&State::default()).unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let (controller, executor) = podman_scan_controller(errored_podman_session(session_id));
 
@@ -1595,6 +1635,11 @@ mod tests {
 
     #[test]
     fn a_container_a_session_still_names_is_not_an_orphan() {
+        if !isolated_scan("a_container_a_session_still_names_is_not_an_orphan") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        crate::database::save_state(&State::default()).unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut record = errored_podman_session(session_id);
         // The same failure, except the record kept its locator: the session's
@@ -1616,6 +1661,11 @@ mod tests {
 
     #[test]
     fn a_container_being_provisioned_is_not_an_orphan() {
+        if !isolated_scan("a_container_being_provisioned_is_not_an_orphan") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        crate::database::save_state(&State::default()).unwrap();
         let session_id = "0123456789abcdef0123456789abcdef";
         let mut record = errored_podman_session(session_id);
         // Provisioning writes the locator as it runs, so a scan that catches

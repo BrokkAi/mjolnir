@@ -516,6 +516,12 @@ pub fn default_mount_destination(source: &Path, existing: &[AdditionalMount]) ->
 pub trait CommandExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput>;
 
+    /// Bound cleanup attempts while preserving supervisor cancellation. Durable
+    /// owners retry interrupted cleanup under the next lifecycle or daemon.
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.execute(command)
+    }
+
     /// Whether the operation supervising this executor has requested
     /// cancellation. Test executors and ordinary process execution are not
     /// cancellable unless they opt in.
@@ -535,6 +541,13 @@ pub trait CommandExecutor {
     /// Report a decision an operation made on the user's behalf. This is not a
     /// failure: the work continues, and the user is told what changed.
     fn notify_notice(&self, _notice: &str) {}
+
+    /// Stop the source's children only once destination preparation has succeeded.
+    fn before_move_source_stop(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// The Move source has been sealed; its destination belongs exclusively
     /// to the lifecycle until queue admission completes.
@@ -1157,6 +1170,12 @@ impl CancellableProcessExecutor {
 }
 
 impl CommandExecutor for CancellableProcessExecutor {
+    fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.clone()
+            .with_deadline(Duration::from_secs(15))
+            .execute(command)
+    }
+
     fn cancellation_requested(&self) -> bool {
         self.is_cancelled()
     }
