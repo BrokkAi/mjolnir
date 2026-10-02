@@ -421,7 +421,22 @@ fn upload_reviewer_profile(
                 targets::TargetLocator::SshDocker { .. } => "docker",
                 _ => unreachable!("matched remote container target"),
             };
-            let upload = format!("{worker_root}/.reviewer-upload-{generation}");
+            // `worker_root` is a path inside the container, so it does not exist
+            // on the SSH host; stage on the host the way checkpoint uploads do.
+            let worker = Path::new(worker_root)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("worker root {worker_root:?} names no worker"))?;
+            let upload = format!(
+                "{}/{worker}-reviewer-{generation}",
+                targets::REMOTE_UPLOAD_STAGING
+            );
+            execute_checked(
+                executor,
+                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
+                    .purpose("create remote reviewer staging"),
+            )?;
             execute_checked(
                 executor,
                 crate::targets::ssh_command(ssh, ["rm", "-rf", "--", &upload])
@@ -552,6 +567,10 @@ mod tests {
             mj_core::state::TargetLocator::LocalDocker { .. } => {
                 serde_json::from_str(r#"{"kind":"local-docker","image":"test"}"#).unwrap()
             }
+            mj_core::state::TargetLocator::SshPodman { .. } => serde_json::from_str(
+                r#"{"kind":"ssh-podman","host":"builder.test","image":"test"}"#,
+            )
+            .unwrap(),
             _ => TargetTemplate::LocalBare,
         };
         session.target = Some(locator);
@@ -642,6 +661,65 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("go-rwx") && line.contains(&home)),
             "the reviewer profile must not be world readable: {script:?}"
+        );
+    }
+
+    #[test]
+    fn remote_container_targets_stage_the_reviewer_on_the_host_not_in_the_worker_root() {
+        // The worker root is a path inside the container. Uploading to it over
+        // scp failed with "No such file" on every remote podman session, so no
+        // turn review could start there (2026-10-02).
+        let directory = tempfile::tempdir().unwrap();
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        let (controller, session_id) = fixture(
+            directory.path(),
+            mj_core::state::TargetLocator::SshPodman {
+                host: "builder.test".into(),
+                container_id: container_id.clone(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            },
+        );
+        let executor = RecordingExecutor::new();
+
+        controller
+            .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
+            .unwrap();
+
+        let script = executor.script();
+        let upload = script
+            .iter()
+            .find(|line| line.starts_with("scp "))
+            .expect("the profile is uploaded with scp")
+            .clone();
+        let staging = format!(
+            "{}/{session_id}-reviewer-3",
+            crate::targets::REMOTE_UPLOAD_STAGING
+        );
+        assert!(
+            upload.contains(&staging),
+            "the upload lands in host staging: {upload}"
+        );
+        assert!(
+            !upload.contains("/var/lib/hel/workers/"),
+            "the upload does not target the container's worker root: {upload}"
+        );
+        let copy = script
+            .iter()
+            .find(|line| line.contains("cp") && line.contains(&format!("{container_id}:")))
+            .unwrap_or_else(|| {
+                panic!("the engine copies the staged profile into the container: {script:?}")
+            });
+        assert!(
+            copy.contains(&format!("{staging}/.")) && copy.contains(&format!("{container_id}:")),
+            "the engine copies from host staging into the container: {copy}"
+        );
+        let last = script.last().unwrap();
+        assert!(
+            last.contains("'rm'")
+                && last.contains(&format!("'{staging}'"))
+                && !last.contains("podman"),
+            "host staging is removed afterwards: {script:?}"
         );
     }
 
