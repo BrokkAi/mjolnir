@@ -22,6 +22,20 @@ pub enum BlockingWork {
     Await,
     /// Leave the remaining blocking work behind (`shutdown_background`).
     Abandon,
+    /// Wait up to this long for the blocking pool, then leave what is still
+    /// running behind (`shutdown_timeout`). The returned report says whether
+    /// anything was left, so the caller can name it.
+    AwaitFor(Duration),
+}
+
+/// What a runtime shutdown could not finish.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShutdownReport {
+    /// Guarded [`block_on`] calls still running when the grace ran out.
+    pub awaits_left: usize,
+    /// Whether [`BlockingWork::AwaitFor`] ran out of time with blocking-pool
+    /// work still running.
+    pub blocking_left: bool,
 }
 
 /// Tracks the shutdown signal and the guarded `block_on` calls in flight.
@@ -94,7 +108,8 @@ impl ShutdownState {
         runtime: tokio::runtime::Runtime,
         work: BlockingWork,
         grace: Duration,
-    ) {
+    ) -> ShutdownReport {
+        let mut report = ShutdownReport::default();
         self.signalled.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
         let deadline = Instant::now() + grace;
@@ -120,11 +135,20 @@ impl ShutdownState {
                 break;
             }
         }
+        report.awaits_left = *in_flight;
         drop(in_flight);
         match work {
             BlockingWork::Await => drop(runtime),
             BlockingWork::Abandon => runtime.shutdown_background(),
+            BlockingWork::AwaitFor(limit) => {
+                let started = Instant::now();
+                runtime.shutdown_timeout(limit);
+                // The pool returns early once its last thread exits, so a wait
+                // that used the whole limit left threads running.
+                report.blocking_left = started.elapsed() >= limit;
+            }
         }
+        report
     }
 }
 
@@ -218,8 +242,12 @@ where
 /// Shut the process's runtime down in the order that keeps [`block_on`]
 /// callers safe: raise the shutdown signal, wait up to `grace` for every
 /// in-flight `block_on` to return, then shut the runtime down.
-pub fn shutdown(runtime: tokio::runtime::Runtime, work: BlockingWork, grace: Duration) {
-    SHUTDOWN.shutdown_with(runtime, work, grace);
+pub fn shutdown(
+    runtime: tokio::runtime::Runtime,
+    work: BlockingWork,
+    grace: Duration,
+) -> ShutdownReport {
+    SHUTDOWN.shutdown_with(runtime, work, grace)
 }
 
 #[cfg(test)]
@@ -384,5 +412,48 @@ mod tests {
             started.elapsed()
         );
         release_tx.send(()).unwrap();
+    }
+
+    /// `AwaitFor` is the daemon's exit: blocking work that finishes in time is
+    /// waited for, and work that does not is left behind and reported rather
+    /// than holding the process open.
+    #[test]
+    fn await_for_reports_blocking_work_it_left_running() {
+        let state = ShutdownState::new();
+        let stuck = runtime();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        stuck.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().unwrap();
+        let started = Instant::now();
+        let report = state.shutdown_with(
+            stuck,
+            BlockingWork::AwaitFor(Duration::from_millis(200)),
+            Duration::from_secs(1),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "bounded shutdown waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            report.blocking_left,
+            "the stuck blocking work was not reported"
+        );
+        release_tx.send(()).unwrap();
+
+        let state = ShutdownState::new();
+        let finished = runtime();
+        let done = finished.spawn_blocking(|| ());
+        finished.block_on(done).unwrap();
+        let report = state.shutdown_with(
+            finished,
+            BlockingWork::AwaitFor(Duration::from_secs(5)),
+            Duration::from_secs(1),
+        );
+        assert_eq!(report, ShutdownReport::default());
     }
 }

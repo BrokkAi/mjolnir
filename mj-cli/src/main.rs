@@ -446,8 +446,11 @@ fn run(cli: Cli) -> Result<()> {
         // successful upgrade never returns because the process re-execs.
         runtime.block_on(mj_controller::controller::update::check_prompt_and_apply());
     }
+    let daemon = matches!(cli.command, Some(Command::DaemonRun));
     let result = runtime.block_on(run_command(cli.command, cli.workspace));
-    if matches!(
+    if daemon {
+        shutdown_daemon_runtime(runtime);
+    } else if matches!(
         &result,
         Ok(DashboardExit::Detached | DashboardExit::Interrupted | DashboardExit::Restart { .. })
     ) {
@@ -542,6 +545,54 @@ fn command_name(command: Option<&Command>) -> &'static str {
 /// polling their timers before the runtime's timer driver goes away, or tokio
 /// asserts.
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the daemon's exit waits for guarded blocking awaits, and then for
+/// the rest of the blocking pool.
+///
+/// By the time the runtime shuts down, the daemon's epilogue has stopped every
+/// task it owns and the database writer has committed every accepted write.
+/// What still runs on the blocking pool is work no owner waits for, such as
+/// the `spawn_blocking` half of a task the epilogue aborted. Waiting for it
+/// without a bound kept the old daemon alive, and the next one waiting, for
+/// seconds after its epilogue had finished.
+const DAEMON_BLOCKING_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The daemon's runtime shutdown: bounded, and it names what it leaves behind.
+fn shutdown_daemon_runtime(runtime: tokio::runtime::Runtime) {
+    let started = std::time::Instant::now();
+    let report = mj_core::runtime::shutdown(
+        runtime,
+        mj_core::runtime::BlockingWork::AwaitFor(DAEMON_BLOCKING_GRACE),
+        DAEMON_BLOCKING_GRACE,
+    );
+    if report != mj_core::runtime::ShutdownReport::default() {
+        // Subprocesses and SSH admissions register their waits by name; other
+        // blocking work has no name, so the counts stand for it.
+        let operations = mj_core::targets::active_blocking_operations()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|operation| {
+                format!(
+                    "{} ({}, {} ms)",
+                    operation.purpose, operation.program, operation.elapsed_ms
+                )
+            })
+            .collect::<Vec<_>>();
+        tracing::warn!(
+            awaits_left = report.awaits_left,
+            blocking_left = report.blocking_left,
+            ?operations,
+            "the daemon exited leaving blocking work that no owner waits for"
+        );
+    }
+    let took = started.elapsed();
+    if took >= std::time::Duration::from_millis(250) {
+        tracing::info!(
+            duration_ms = took.as_millis(),
+            "daemon runtime shutdown finished"
+        );
+    }
+}
 
 fn shutdown_dashboard_runtime(runtime: tokio::runtime::Runtime) {
     mj_core::runtime::shutdown(

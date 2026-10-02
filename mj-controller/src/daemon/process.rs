@@ -26,8 +26,10 @@ pub async fn run_daemon_process() -> Result<()> {
     // Checked before the store is locked so a bad value fails fast and leaves
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
+    let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     let database_writer = guard.start_database_writer()?;
+    log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);
     let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid).await;
     if !epilogue_started.load(Ordering::Acquire) {
@@ -35,10 +37,21 @@ pub async fn run_daemon_process() -> Result<()> {
         // The same process-level bound still applies to closing the writer.
         spawn_shutdown_watchdog();
     }
+    // The writer commits every write it accepted before it stops, so this is
+    // the one wait after the epilogue that durability requires. Timed, so a
+    // slow exit says whether the writer or the runtime held it.
+    let writer_started = Instant::now();
     let writer_shutdown = tokio::task::spawn_blocking(move || database_writer.shutdown())
         .await
         .context("database writer shutdown task panicked")
         .and_then(std::convert::identity);
+    let writer_took = writer_started.elapsed();
+    if writer_took >= Duration::from_millis(250) {
+        tracing::info!(
+            duration_ms = writer_took.as_millis(),
+            "database writer shut down"
+        );
+    }
     record_daemon_cleanup(&mut outcome, "shut down database writer", writer_shutdown);
     outcome
 }
@@ -68,6 +81,7 @@ pub(super) async fn run_daemon_runtime(
     )?;
     crate::controller::reconcile_managed_checkpoint_archives()?;
 
+    let loading = Instant::now();
     let controller = tokio::task::spawn_blocking(|| {
         let mut controller = Controller::load()?;
         controller.prepare_persisted_sessions()?;
@@ -75,6 +89,7 @@ pub(super) async fn run_daemon_runtime(
     })
     .await
     .context("prepare persisted daemon sessions")??;
+    log_startup_phase("load persisted sessions", loading);
     // A local session an earlier release started from a profile home keeps
     // running from it until it is next staged. The link has to be in place
     // before any launch configuration is refreshed or any credential sync runs.
@@ -162,6 +177,7 @@ pub(super) async fn run_daemon_runtime(
     let cancellation = crate::termination::Coordinator::install().token();
     // Bootstrap already owns live managers. Capture its error so those owners
     // are shut down before the process-level writer can be closed.
+    let bootstrapping = Instant::now();
     let bootstrap = async {
         let move_operations = blocking(crate::database::load_move_operations).await?;
         let move_sessions = move_operations
@@ -175,6 +191,7 @@ pub(super) async fn run_daemon_runtime(
         Ok::<_, anyhow::Error>((move_sessions, move_owned))
     }
     .await;
+    log_startup_phase("recover moves and startup deliveries", bootstrapping);
     let (move_sessions, move_owned) = match bootstrap {
         Ok(ownership) => ownership,
         Err(error) => {
@@ -501,6 +518,7 @@ pub(super) async fn run_daemon_runtime(
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
+        tracing::info!("the daemon is serving");
         drop(startup_work);
         loop {
             progress.serving_tick();
@@ -813,6 +831,19 @@ pub(super) async fn run_daemon_runtime(
     );
     epilogue.finish();
     outcome
+}
+
+/// Log a startup phase that took long enough to matter, so a slow start after
+/// an upgrade records where its time went.
+fn log_startup_phase(phase: &'static str, started: Instant) {
+    let took = started.elapsed();
+    if took >= EpilogueClock::LOGGED_STEP {
+        tracing::info!(
+            phase,
+            duration_ms = took.as_millis(),
+            "daemon startup phase finished"
+        );
+    }
 }
 
 /// Sessions whose record is nothing but a tombstone: they ended without a

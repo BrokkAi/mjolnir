@@ -78,10 +78,25 @@ impl ApiClient {
         let deadline = std::time::Instant::now() + HANDOFF_FOLLOW_LIMIT;
         let mut replaced = 0;
         loop {
+            let started = std::time::Instant::now();
             let mut client = daemon::connect_or_start().await?;
             let pid = client.daemon_pid();
+            let daemon_ready = started.elapsed();
             let error = match Self::connect_to(&mut client).await {
-                Ok(connected) => return Ok(connected),
+                Ok(connected) => {
+                    // A slow command after a handoff has to say whether it
+                    // waited for the daemon or for its web API.
+                    let total = started.elapsed();
+                    if total >= Duration::from_millis(250) {
+                        tracing::info!(
+                            pid,
+                            daemon_ms = daemon_ready.as_millis(),
+                            api_ms = (total - daemon_ready).as_millis(),
+                            "connected to the daemon's API"
+                        );
+                    }
+                    return Ok(connected);
+                }
                 Err(error) => error,
             };
             // A daemon handing off refuses until it exits; one that went away
@@ -206,6 +221,10 @@ impl ApiClient {
                     if !announced {
                         announced = true;
                         (self.wait_notice)(&waiting_notice(failure.busy));
+                        tracing::info!(
+                            busy = ?failure.busy,
+                            "the daemon's action slots are full; retrying"
+                        );
                     }
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(self.busy_retry.max_delay);

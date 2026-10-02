@@ -2,6 +2,9 @@ use super::*;
 
 pub(super) const DATABASE_WRITE_QUEUE_CAPACITY: usize = 256;
 
+/// Writes that take at least this long are logged with their label.
+const SLOW_WRITE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A queued write, handed either the writer's connection or the reason it
 /// must not be used. The job -- not the lane -- decides what a refusal means
 /// to its caller.
@@ -265,6 +268,7 @@ pub(super) fn start_database_writer_at(
                     match receiver.recv() {
                         Ok(DatabaseWriterMessage::Run { label, job }) => {
                             tracing::trace!(operation = label, "running database writer operation");
+                            let job_started = std::time::Instant::now();
                             // Recheck compatibility even after startup, and
                             // remember forward progress to detect rollback.
                             match writer_schema_state(
@@ -275,6 +279,17 @@ pub(super) fn start_database_writer_at(
                             ) {
                                 Ok(()) => job(Ok(&mut connection)),
                                 Err(error) => job(Err(error)),
+                            }
+                            // Every write waits behind the one before it, so a
+                            // slow one delays all of them, the daemon's exit
+                            // included.
+                            let took = job_started.elapsed();
+                            if took >= SLOW_WRITE {
+                                tracing::info!(
+                                    operation = label,
+                                    duration_ms = took.as_millis(),
+                                    "slow database write"
+                                );
                             }
                             if let Err(error) = publication.committed_state() {
                                 break Err(error);

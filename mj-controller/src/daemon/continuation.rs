@@ -1043,8 +1043,21 @@ fn spawn_with_gate(
                 }
             }
         };
+        // Timed apart from the loop's own exit, so a slow join says whether
+        // the loop or its checks held the daemon's shutdown.
+        let stopping = std::time::Instant::now();
+        let running = (seed_jobs.len(), jobs.len());
         seed_jobs.shutdown().await;
         jobs.shutdown().await;
+        let took = stopping.elapsed();
+        if took >= Duration::from_millis(250) {
+            tracing::info!(
+                seed_jobs = running.0,
+                jobs = running.1,
+                duration_ms = took.as_millis(),
+                "continuation checks stopped"
+            );
+        }
 
         Ok(end)
     });

@@ -156,6 +156,8 @@ pub(super) async fn shutdown_session_actors(
         timeout_ms = SESSION_MANAGER_SHUTDOWN_GRACE.as_millis(),
         "session relay actors did not stop before the shutdown deadline; aborting them"
     );
+    let aborted = tasks.len();
+    let aborting = std::time::Instant::now();
     tasks.abort_all();
     while let Some(joined) = tasks.join_next().await {
         if let Err(error) = joined
@@ -164,4 +166,11 @@ pub(super) async fn shutdown_session_actors(
             tracing::error!(%error, "session relay actor failed while being aborted");
         }
     }
+    // An abort lands only when the actor's task is next polled, so a slow
+    // one here means an actor was busy without yielding.
+    tracing::info!(
+        aborted,
+        duration_ms = aborting.elapsed().as_millis(),
+        "aborted session relay actors stopped"
+    );
 }

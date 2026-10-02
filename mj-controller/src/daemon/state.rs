@@ -560,12 +560,17 @@ impl RuntimeState {
                 qr_login_url,
                 fallback_reason,
                 ..
-            } => WebViewerStatus::Ready {
-                viewer_url: viewer_url.clone(),
-                viewer_code: viewer_code.clone(),
-                qr_login_url: qr_login_url.clone(),
-                fallback_reason: fallback_reason.clone(),
-            },
+            } => {
+                // API clients wait for this after the daemon answers, so its
+                // time after startup is part of every command's.
+                tracing::info!("the web viewer and API are ready");
+                WebViewerStatus::Ready {
+                    viewer_url: viewer_url.clone(),
+                    viewer_code: viewer_code.clone(),
+                    qr_login_url: qr_login_url.clone(),
+                    fallback_reason: fallback_reason.clone(),
+                }
+            }
             WebViewerAccess::Failed {
                 address, message, ..
             } => WebViewerStatus::Error {
