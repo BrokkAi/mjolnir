@@ -448,6 +448,7 @@ fn probe_profile(
     model: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
+    profile.ensure_ready(profile_id)?;
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
     let home = root.path().join("profile");
     super::worker_binary::stage_profile(profile, &home)?;

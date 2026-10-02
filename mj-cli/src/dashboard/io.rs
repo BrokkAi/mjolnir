@@ -2142,6 +2142,27 @@ mod tests {
                 "{error:#}"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+            // A profile the edit leaves alone does not hold up the save, even
+            // when it cannot start because its secret is gone.
+            std::fs::write(directory.path().join("secrets.toml"), "").unwrap();
+            let unready = Config::load_from(&path).unwrap();
+            assert!(
+                unready.profiles["deepseek"]
+                    .ensure_ready("deepseek")
+                    .is_err()
+            );
+            let unready_json = serde_json::to_string(&unready).unwrap();
+            let mut value = serde_json::to_value(&unready).unwrap();
+            value["notify"] = serde_json::json!({"bell": !unready.notify.bell});
+            let saved =
+                save_setup_at(&path, &unready_json, &value.to_string(), &State::default()).unwrap();
+            assert_eq!(saved.notify.bell, !unready.notify.bell);
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("from_secret")
+            );
         });
     }
 

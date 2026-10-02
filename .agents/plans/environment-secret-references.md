@@ -28,6 +28,7 @@ The terminal settings editor works on a JSON projection of the configuration and
 - Decision: the secrets file is a flat TOML table of strings beside `config.toml`. Rationale: each `--instance` has its own, copying a configuration never copies a secret, and the shape is too small to get wrong. Date: 2026-09-28.
 - Decision: no configuration version bump. Rationale: plain strings keep working in every build, only a file that uses a reference needs this build, and a bump would make every older checkout sharing the same `config.toml` refuse it after the first save. Date: 2026-09-28.
 - Decision: the doctor warns about a shared secrets file instead of the loader refusing it. Rationale: refusing would stop sessions over a permission bit; the warning names the `chmod` to run. Date: 2026-09-28.
+- Decision: a reference that does not resolve no longer fails the load. `Environment` records the entry as unresolved; `HarnessProfile::ensure_ready` and `TargetTemplate::ensure_ready` refuse to start that profile or target with the entry and file named, and `mj doctor` reports it. The Codex `env_key` check and the harness-home reads behind `guardian_review_model` moved from `HarnessProfile::validate` into the same `ensure_ready`. Rationale: one profile's missing secret, unexported variable or Codex `config.toml` change refused the whole configuration, which stopped the daemon from starting or upgrading and took every other profile down with it (reported on the 2.26.0 upgrade). Configuration validation now covers only what config.toml itself declares. Date: 2026-10-02.
 
 ## Context and Orientation
 
@@ -35,7 +36,7 @@ The terminal settings editor works on a JSON projection of the configuration and
 
 ## Validation and Acceptance
 
-`cargo test -p brokk-mj-core --lib` runs the parsing, serialization, secrets-file, and round-trip tests. `cargo test -p brokk-mj-controller --lib doctor` runs the doctor checks. With a profile whose `environment` names a secret, `mj doctor` shows the secrets file check and no plain-text warning; with the value written as a string, it shows the warning with the reference to write. A configuration that names a missing secret fails to load with the entry and the file named.
+`cargo test -p brokk-mj-core --lib` runs the parsing, serialization, secrets-file, and round-trip tests. `cargo test -p brokk-mj-controller --lib doctor` runs the doctor checks. With a profile whose `environment` names a secret, `mj doctor` shows the secrets file check and no plain-text warning; with the value written as a string, it shows the warning with the reference to write. A configuration that names a missing secret still loads; `mj doctor` and any session on that profile or target name the entry and the file (see the 2026-10-02 decision).
 
 ## Outcomes & Retrospective
 

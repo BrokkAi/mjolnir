@@ -1,6 +1,6 @@
 //! Projects, containers and the target templates a session runs on.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -496,6 +496,20 @@ pub enum TargetTemplate {
 }
 
 impl TargetTemplate {
+    /// Whether a session can start on this target: every environment
+    /// reference its container names resolved. Like
+    /// [`HarnessProfile::ensure_ready`](super::HarnessProfile::ensure_ready),
+    /// this is not part of configuration validation, so a missing secret
+    /// stops only this target's sessions.
+    pub fn ensure_ready(&self, id: &str) -> Result<()> {
+        let Some(container) = self.container() else {
+            return Ok(());
+        };
+        container.environment.ensure_resolved().map_err(|error| {
+            crate::refusal::Refusal::precondition(format!("target {id:?}: {error:#}")).into()
+        })
+    }
+
     /// The container this runtime starts, for the container runtimes.
     pub fn container(&self) -> Option<&ContainerTemplate> {
         match self {
@@ -692,11 +706,11 @@ pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
     }
 }
 
-pub(super) fn validate_environment(
-    owner: &str,
-    environment: &BTreeMap<String, String>,
-) -> Result<()> {
+pub(super) fn validate_environment(owner: &str, environment: &Environment) -> Result<()> {
+    // The entries as written, so one whose reference did not resolve is
+    // checked too.
     if environment
+        .sources()
         .keys()
         .any(|key| key.trim().is_empty() || key.contains('='))
     {

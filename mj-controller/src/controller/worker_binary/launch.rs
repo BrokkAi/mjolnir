@@ -46,6 +46,7 @@ impl Controller {
             .profiles
             .get(&session.last_profile)
             .context("session profile is missing")?;
+        profile.ensure_ready(&session.last_profile)?;
         let (mut launch, project_memory, target_profile_home) =
             self.session_launch_config(session_id, backend)?;
 

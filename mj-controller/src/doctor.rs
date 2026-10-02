@@ -676,6 +676,14 @@ fn harness_profile_check(
             ),
         );
     }
+    if let Err(error) = profile.ensure_ready(id) {
+        return DoctorCheck::fixable(
+            format!("harness.{id}"),
+            title,
+            format!("{error:#}"),
+            "Make the change named above. Sessions on this profile are refused until then; the rest of Mjolnir keeps working.",
+        );
+    }
     if !harness_is_authenticated_with_executor(profile, executor) {
         return DoctorCheck::fixable(
             format!("harness.{id}"),
@@ -783,6 +791,18 @@ fn secret_checks(config: ConfigStatus<'_>, config_path: &Path) -> Vec<DoctorChec
     let Ok(config) = config else {
         return checks;
     };
+    // A profile's own references are reported with the rest of its
+    // readiness, in its harness check.
+    for (id, target) in &config.targets {
+        if let Err(error) = target.ensure_ready(id) {
+            checks.push(DoctorCheck::fixable(
+                format!("targets.{id}.environment"),
+                format!("Target {id} environment"),
+                format!("{error:#}"),
+                "Make the change named above. Sessions on this target are refused until then.",
+            ));
+        }
+    }
     let profiles = config
         .profiles
         .iter()

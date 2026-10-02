@@ -725,7 +725,7 @@ impl HarnessProfile {
                 None => AuthScheme::NativeLogin,
             },
             // An unreadable or malformed home is reported where it is read
-            // (validation, staging, doctor), not silently here.
+            // (`ensure_ready`, staging, doctor), not silently here.
             Ok(None) | Err(_) => AuthScheme::NativeLogin,
         }
     }
@@ -782,14 +782,16 @@ impl HarnessProfile {
         if self.home.as_os_str().is_empty() {
             bail!("profile {id:?} has an empty home path");
         }
-        if self
-            .environment
+        // The entries as written, so one whose reference did not resolve is
+        // checked too.
+        let environment = self.environment.sources();
+        if environment
             .keys()
             .any(|key| key.trim().is_empty() || key.contains('='))
         {
             bail!("profile {id:?} contains an invalid environment variable name");
         }
-        if self.environment.contains_key(self.kind.home_env()) {
+        if environment.contains_key(self.kind.home_env()) {
             bail!(
                 "profile {id:?} must use `home`, not override {} in `environment`",
                 self.kind.home_env()
@@ -801,35 +803,62 @@ impl HarnessProfile {
         {
             bail!("profile {id:?}: `context_window_bytes` must be at least 32768");
         }
-        let provider = self
-            .codex_provider()
-            .with_context(|| format!("profile {id:?}"))?;
-        if let Some(provider) = provider.as_ref()
-            && let Some(env_key) = provider.env_key.as_deref()
-            && self
-                .environment
-                .get(env_key)
-                .is_none_or(|value| value.trim().is_empty())
-        {
-            bail!(
-                "profile {id:?}: {} authenticates with {env_key}, so set it under [profiles.{id}.environment] in Mjolnir's config.toml",
-                self.home.join("config.toml").display()
-            );
-        }
         if let Some(reviewer) = self.guardian_review_model.as_deref() {
             if reviewer.trim().is_empty() {
                 bail!(
                     "profile {id:?}: `guardian_review_model` must be {GUARDIAN_REVIEW_NEWEST_FLASH:?}, {GUARDIAN_REVIEW_SESSION:?}, or a model slug from the provider's catalog"
                 );
             }
-            if provider.is_none() {
+            // Whether a Codex profile names a custom provider is up to its
+            // home, which `ensure_ready` reads; another harness never does.
+            if self.kind != HarnessKind::Codex {
                 bail!(
-                    "profile {id:?}: `guardian_review_model` applies only to a Codex profile whose {} names a custom model provider, because Mjolnir generates the model catalog only for those",
-                    self.home.join("config.toml").display()
+                    "profile {id:?}: `guardian_review_model` applies only to a Codex profile whose config.toml names a custom model provider, because Mjolnir generates the model catalog only for those"
                 );
             }
         }
         Ok(())
+    }
+
+    /// Whether a harness can start from this profile: every environment
+    /// reference resolved, the harness home's own configuration readable, and
+    /// the credential that configuration names supplied.
+    ///
+    /// These depend on files and variables outside Mjolnir's config.toml, so
+    /// they are not part of [`Config::validate`](super::Config::validate): a
+    /// profile that fails here is unusable, while the configuration, the
+    /// daemon and every other profile keep working. Everything that starts a
+    /// harness from a profile asks this first, and `mj doctor` reports it.
+    ///
+    /// The failure is a precondition refusal: the person fixes it, so it
+    /// travels to the client as the reason rather than as an internal error.
+    pub fn ensure_ready(&self, id: &str) -> Result<()> {
+        let ready = || -> Result<()> {
+            self.environment.ensure_resolved()?;
+            let provider = self.codex_provider()?;
+            if let Some(provider) = provider.as_ref()
+                && let Some(env_key) = provider.env_key.as_deref()
+                && self
+                    .environment
+                    .get(env_key)
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                bail!(
+                    "{} authenticates with {env_key}; add `{env_key} = {{ from_env = \"{env_key}\" }}` (or `{{ from_secret = \"{env_key}\" }}`) under [profiles.{id}.environment] in Mjolnir's config.toml",
+                    self.home.join("config.toml").display()
+                );
+            }
+            if self.guardian_review_model.is_some() && provider.is_none() {
+                bail!(
+                    "`guardian_review_model` applies only to a Codex profile whose {} names a custom model provider, because Mjolnir generates the model catalog only for those",
+                    self.home.join("config.toml").display()
+                );
+            }
+            Ok(())
+        };
+        ready().map_err(|error| {
+            crate::refusal::Refusal::precondition(format!("profile {id:?}: {error:#}")).into()
+        })
     }
 }
 

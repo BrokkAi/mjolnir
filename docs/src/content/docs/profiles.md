@@ -87,11 +87,19 @@ home = "/home/me/.codex-glm"
 ZAI_API_KEY = "<your Coding Plan key>"
 ```
 
-Mjolnir refuses to load a configuration whose provider names a variable the
-profile's `environment` does not set, and the error names both the profile and
-the variable. A provider may instead inline its key as
-`experimental_bearer_token`; prefer `env_key`, because the inline form writes the
-key into a file that is copied to every target.
+To keep the key out of `config.toml`, write the entry as a reference instead:
+`{ from_env = "ZAI_API_KEY" }` reads it from the daemon's environment, and
+`{ from_secret = "ZAI_API_KEY" }` reads it from `secrets.toml` beside
+`config.toml`.
+
+A profile whose provider names a variable its `environment` does not set cannot
+start: its sessions are refused with an error naming the profile, the variable
+and the line to add, and `mj doctor` reports the same. The rest of the
+configuration, the daemon and every other profile keep working.
+
+A provider may instead inline its key as `experimental_bearer_token`; prefer
+`env_key`, because the inline form writes the key into a file that is copied to
+every target.
 
 What changes for such a profile:
 

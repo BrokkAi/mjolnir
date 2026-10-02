@@ -1376,7 +1376,7 @@ mod tests {
             &path,
             format!(
                 "version = {}\n\n[profiles.codex]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
-                 [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\n",
+                 [profiles.codex.environment]\nFAKE_TOKEN = {{ from_secret = \"\" }}\n",
                 mj_core::config::CONFIG_VERSION
             ),
         )
@@ -1384,15 +1384,53 @@ mod tests {
         let error = ensure_config_loads(&path, "restarted")
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("FAKE_TOKEN = { from_secret"), "{error}");
-        assert!(error.contains("secrets.toml"), "{error}");
+        assert!(error.contains("from_secret names nothing"), "{error}");
         assert!(error.contains("was not restarted"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_that_cannot_start_does_not_refuse_the_replacement() {
+        // The reported failure: a Codex home that authenticates with an API key
+        // the profile does not supply, beside a secret that is not defined.
+        // Either makes only that profile unusable; the new daemon reads the
+        // configuration and keeps every other profile working.
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("codex");
+        fs::create_dir(&home).unwrap();
         fs::write(
-            directory.path().join("secrets.toml"),
-            "FAKE_TOKEN = \"x\"\n",
+            home.join("config.toml"),
+            "model_provider = 'deepseek'\n[model_providers.deepseek]\nname = 'DeepSeek'\n\
+             base_url = 'https://api.deepseek.com'\nwire_api = 'responses'\nenv_key = 'DEEPSEEK_API_KEY'\n",
         )
         .unwrap();
-        ensure_config_loads(&path, "restarted").unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "version = {}\n\n[profiles.codex]\nkind = \"codex\"\nhome = {:?}\n\n\
+                 [profiles.other]\nkind = \"codex\"\nhome = \"/home/me/.codex\"\n\n\
+                 [profiles.other.environment]\nFAKE_TOKEN = {{ from_secret = \"FAKE_TOKEN\" }}\n",
+                mj_core::config::CONFIG_VERSION,
+                home.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        ensure_config_loads(&path, "replaced").unwrap();
+        let config = mj_core::config::Config::load_from(&path).unwrap();
+        let error = config.profiles["codex"]
+            .ensure_ready("codex")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("DEEPSEEK_API_KEY = { from_env = \"DEEPSEEK_API_KEY\" }"),
+            "{error}"
+        );
+        let error = format!(
+            "{:#}",
+            config.profiles["other"].ensure_ready("other").unwrap_err()
+        );
+        assert!(error.contains("FAKE_TOKEN = { from_secret"), "{error}");
+        assert!(error.contains("secrets.toml"), "{error}");
     }
     #[test]
     fn a_restart_onto_this_build_succeeds_and_says_so() {
