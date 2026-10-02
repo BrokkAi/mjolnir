@@ -70,10 +70,25 @@ impl Drop for StartupNoticeRoute {
     }
 }
 
+/// The daemon startup lock held exclusively: the only hold under which a
+/// client may start, stop or replace the daemon.
 #[derive(Debug)]
-struct DaemonStartGuard(fs::File);
+struct DaemonStartGuard {
+    _lock: StartLock,
+}
 
-impl Drop for DaemonStartGuard {
+/// The daemon startup lock held shared: enough to use the running daemon,
+/// never to start or replace one. Any number of clients hold it at once, and
+/// none of them while a client holds it exclusively.
+#[derive(Debug)]
+struct SharedStartGuard {
+    _lock: StartLock,
+}
+
+#[derive(Debug)]
+struct StartLock(fs::File);
+
+impl Drop for StartLock {
     fn drop(&mut self) {
         if let Err(error) = self.0.unlock() {
             tracing::warn!(%error, "could not release daemon startup lock");
@@ -82,11 +97,23 @@ impl Drop for DaemonStartGuard {
 }
 
 async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
+    acquire_start_lock(path, false)
+        .await
+        .map(|lock| DaemonStartGuard { _lock: lock })
+}
+
+async fn acquire_shared_start_guard(path: PathBuf) -> Result<SharedStartGuard> {
+    acquire_start_lock(path, true)
+        .await
+        .map(|lock| SharedStartGuard { _lock: lock })
+}
+
+async fn acquire_start_lock(path: PathBuf, shared: bool) -> Result<StartLock> {
     let asked = Instant::now();
     let mut notice_at = asked + START_NOTICE_DELAY;
     loop {
         let path = path.clone();
-        let guard = tokio::task::spawn_blocking(move || -> Result<Option<DaemonStartGuard>> {
+        let guard = tokio::task::spawn_blocking(move || -> Result<Option<StartLock>> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -98,8 +125,13 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
                 options.mode(0o600);
             }
             let file = options.open(&path).context("open daemon startup lock")?;
-            match file.try_lock() {
-                Ok(()) => Ok(Some(DaemonStartGuard(file))),
+            let locked = if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            };
+            match locked {
+                Ok(()) => Ok(Some(StartLock(file))),
                 Err(std::fs::TryLockError::WouldBlock) => Ok(None),
                 Err(std::fs::TryLockError::Error(error)) => {
                     Err(error).context("lock daemon startup")
@@ -113,6 +145,7 @@ async fn acquire_start_guard(path: PathBuf) -> Result<DaemonStartGuard> {
             if waited >= LOGGED_PHASE {
                 tracing::info!(
                     waited_ms = waited.as_millis(),
+                    shared,
                     "waited for the daemon startup lock another client held"
                 );
             }
@@ -163,10 +196,32 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
 const LOGGED_PHASE: Duration = Duration::from_millis(250);
 
 pub async fn connect_or_start() -> Result<DaemonClient> {
-    // Serialize replacement and publication across clients, then re-read the
-    // endpoint. A client waiting here must reuse the winner's daemon.
-    let startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
-    connect_or_start_holding(&startup).await
+    let lock_path = data_dir().join("daemon-start.lock");
+    // Most clients find a daemon they can use. Deciding that needs only a
+    // shared hold, so a burst of clients reconnecting after a handoff checks
+    // the daemon side by side instead of one at a time, which multiplied each
+    // check by the number of clients waiting. A shared hold still waits out a
+    // client that holds the lock to start or replace the daemon, so every
+    // waiter uses the daemon that client publishes.
+    if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
+        let shared = acquire_shared_start_guard(lock_path.clone()).await?;
+        if let ExistingDaemon::Use(client) = inspect_existing_daemon(&shared).await? {
+            return Ok(client);
+        }
+    }
+    // Starting or replacing the daemon is serialized across clients, and the
+    // decision is taken again under the exclusive hold: another client may
+    // have published a daemon since the shared check.
+    let startup = acquire_start_guard(lock_path).await?;
+    let held = Instant::now();
+    let connected = connect_or_start_holding(&startup).await;
+    // Every other client waits while this one holds the lock, so how long it
+    // held it is what they waited for.
+    let held = held.elapsed();
+    if held >= LOGGED_PHASE {
+        tracing::info!(held_ms = held.as_millis(), "held the daemon startup lock");
+    }
+    connected
 }
 
 /// The body of [`connect_or_start`] for a caller that already holds the
@@ -177,7 +232,7 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
 /// replacement — must come through here instead of calling
 /// [`connect_or_start`] again. The guard is taken by reference only so the
 /// requirement is visible at every call site.
-async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonClient> {
+async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonClient> {
     if let Ok(metadata) = tokio::task::spawn_blocking(read_metadata_any)
         .await
         .context("read daemon metadata task failed")?
@@ -185,7 +240,7 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
         ensure_supported_daemon_protocol(&metadata)?;
     }
     maybe_replace_stale_development_daemon().await?;
-    if let Some(client) = prepare_existing_daemon().await? {
+    if let Some(client) = prepare_existing_daemon(startup).await? {
         return Ok(client);
     }
 
@@ -209,7 +264,7 @@ async fn connect_or_start_holding(_startup: &DaemonStartGuard) -> Result<DaemonC
             break;
         }
         // A daemon started outside this client's startup lock may be becoming ready.
-        if let Some(client) = prepare_existing_daemon().await? {
+        if let Some(client) = prepare_existing_daemon(startup).await? {
             return Ok(client);
         }
         ensure!(
@@ -389,16 +444,38 @@ fn kept_daemon_notice(message: String) {
     }
 }
 
-/// Called only while holding the startup lock. Wire compatibility alone does
+/// What the running daemon, if any, is to this client.
+enum ExistingDaemon {
+    /// None answers, so one has to be started.
+    Absent,
+    /// It answers and this client may use it.
+    Use(DaemonClient),
+    /// It answers but has to be replaced first. `notice` is what to tell the
+    /// person when the replacement starts.
+    Replace {
+        metadata: DaemonMetadata,
+        notice: Option<String>,
+    },
+}
+
+/// The one decision about the running daemon. Wire compatibility alone does
 /// not imply application readiness: an older release may lack migrations or
 /// fixes without changing the protocol. A same-version development build can
 /// also need a migration. Only the replacement daemon may perform that work.
-async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
+///
+/// Deciding needs the startup lock in either mode, so the daemon it looks at
+/// is not being started or replaced meanwhile. Only an exclusive holder may
+/// act on [`ExistingDaemon::Replace`], through [`prepare_existing_daemon`].
+async fn inspect_existing_daemon(_held: &SharedStartGuard) -> Result<ExistingDaemon> {
+    decide_existing_daemon().await
+}
+
+async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let metadata = tokio::task::spawn_blocking(read_metadata_any)
         .await
         .context("read daemon metadata task failed")?;
     let Ok(metadata) = metadata else {
-        return Ok(None);
+        return Ok(ExistingDaemon::Absent);
     };
     ensure_supported_daemon_protocol(&metadata)?;
     let build = daemon_build(&metadata)?;
@@ -408,20 +485,16 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
             "refusing to replace a newer daemon with this client: {}",
             daemon_build_notice(&metadata, "Run the daemon's build instead.")
         );
-        tracing::info!(
-            daemon_protocol = metadata.protocol_version,
-            client_protocol = PROTOCOL_VERSION,
-            daemon_build = %metadata.build_version,
-            "the daemon is an older protocol or release; replacing it"
-        );
-        replace_daemon(&metadata).await?;
-        return Ok(None);
+        return Ok(ExistingDaemon::Replace {
+            metadata,
+            notice: None,
+        });
     }
     let Ok(mut client) = DaemonClient::connect(metadata.clone()).await else {
-        return Ok(None);
+        return Ok(ExistingDaemon::Absent);
     };
     if ping_daemon(&mut client).await.is_err() {
-        return Ok(None);
+        return Ok(ExistingDaemon::Absent);
     }
     if let Err(error) = check_store_readiness().await {
         let needs_migration = error.chain().any(|cause| {
@@ -438,18 +511,22 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
             !build.daemon_is_newer(),
             "a newer daemon has not completed database initialization: {error:#}"
         );
-        replace_daemon(&metadata).await?;
-        return Ok(None);
+        return Ok(ExistingDaemon::Replace {
+            metadata,
+            notice: None,
+        });
     }
     match build.order {
         DaemonBuildOrder::Same => {}
         DaemonBuildOrder::Older => {
-            startup_notice(daemon_build_notice(
+            let notice = daemon_build_notice(
                 &metadata,
                 "This client's build is newer; replacing the daemon.",
-            ));
-            replace_daemon(&metadata).await?;
-            return Ok(None);
+            );
+            return Ok(ExistingDaemon::Replace {
+                metadata,
+                notice: Some(notice),
+            });
         }
         // Same release, protocol and readable store: the older client can use
         // the newer daemon, and must not replace it.
@@ -463,7 +540,30 @@ async fn prepare_existing_daemon() -> Result<Option<DaemonClient>> {
              client uses it. Run `mj daemon restart` to replace it with this build.",
         )),
     }
-    Ok(Some(client))
+    Ok(ExistingDaemon::Use(client))
+}
+
+/// Act on [`decide_existing_daemon`] while holding the startup lock
+/// exclusively: use the running daemon, or replace it and report that none is
+/// running yet.
+async fn prepare_existing_daemon(_startup: &DaemonStartGuard) -> Result<Option<DaemonClient>> {
+    match decide_existing_daemon().await? {
+        ExistingDaemon::Absent => Ok(None),
+        ExistingDaemon::Use(client) => Ok(Some(client)),
+        ExistingDaemon::Replace { metadata, notice } => {
+            match notice {
+                Some(notice) => startup_notice(notice),
+                None => tracing::info!(
+                    daemon_protocol = metadata.protocol_version,
+                    client_protocol = PROTOCOL_VERSION,
+                    daemon_build = %metadata.build_version,
+                    "the daemon is an older protocol or release, or its store needs a migration; replacing it"
+                ),
+            }
+            replace_daemon(&metadata).await?;
+            Ok(None)
+        }
+    }
 }
 
 /// Refuse to stop a daemon when the one that would replace it cannot read the
@@ -799,6 +899,37 @@ async fn replace_daemon(metadata: &DaemonMetadata) -> Result<()> {
         ),
     )?;
     ensure_config_loads(&mj_core::config::config_path(), "replaced")?;
+    // The replacement daemon pins this build's worker sources before it can
+    // serve; for a new build that is seconds of copying and hashing. Do it
+    // while the old daemon drains, and wait for it before the launch so the
+    // two never hash the same files at once.
+    let warming = tokio::task::spawn_blocking(|| {
+        let started = Instant::now();
+        (
+            mj_controller::controller::warm_worker_binary_sources(),
+            started.elapsed(),
+        )
+    });
+    let handed_off = hand_off_daemon(metadata).await;
+    match warming.await {
+        Ok((Ok(()), took)) if took >= LOGGED_PHASE => tracing::info!(
+            duration_ms = took.as_millis(),
+            "pinned this build's worker sources during the handoff"
+        ),
+        Ok((Ok(()), _)) => {}
+        // Startup pins the sources again and reports its own failure; this
+        // one only says the head start was lost.
+        Ok((Err(error), _)) => tracing::warn!(
+            error = format!("{error:#}"),
+            "could not pin this build's worker sources during the handoff"
+        ),
+        Err(error) => tracing::warn!(%error, "worker source pinning task failed"),
+    }
+    handed_off
+}
+
+/// Ask the daemon to hand off and follow it until it exits.
+async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
     let asked = Instant::now();
     let mut notice_at = asked + START_NOTICE_DELAY;
     let mut attempts = 0_u32;
@@ -1297,6 +1428,51 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(replacement);
+    }
+    /// Clients that only use the running daemon check it side by side, while a
+    /// client starting or replacing the daemon excludes all of them, and
+    /// they it. This is what lets a burst of reconnecting clients proceed
+    /// together yet still wait for a handoff to publish its daemon.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shared_holds_overlap_and_exclude_a_replacing_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon-start.lock");
+        let first = acquire_shared_start_guard(path.clone()).await.unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            acquire_shared_start_guard(path.clone()),
+        )
+        .await
+        .expect("a second shared hold waited for the first")
+        .unwrap();
+        let mut replacing = tokio::spawn(acquire_start_guard(path.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut replacing)
+                .await
+                .is_err(),
+            "an exclusive hold was granted beside shared ones"
+        );
+        drop((first, second));
+        let replacing = tokio::time::timeout(Duration::from_secs(2), replacing)
+            .await
+            .expect("the exclusive hold waited after the shared ones ended")
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                acquire_shared_start_guard(path.clone())
+            )
+            .await
+            .is_err(),
+            "a shared hold was granted while a client was replacing the daemon"
+        );
+        drop(replacing);
+        tokio::time::timeout(Duration::from_secs(2), acquire_shared_start_guard(path))
+            .await
+            .expect("a shared hold waited after the replacement ended")
+            .unwrap();
     }
     /// The restart holds one guard across its stop and its start. That is only
     /// safe because the lock is not reentrant: a second acquisition inside the

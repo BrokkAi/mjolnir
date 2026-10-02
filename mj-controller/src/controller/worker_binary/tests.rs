@@ -133,6 +133,54 @@ fn stale_pins_are_re_resolved() {
     assert!(path.starts_with(data_dir().join("workers/pinned")));
 }
 
+/// A client replacing the daemon pins the new build's workers during the
+/// handoff. The daemon it then starts must find them already indexed, and
+/// must still take the pinned snapshot itself.
+#[test]
+fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
+    const CHILD: &str = "MJ_WARM_WORKER_PIN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let workers = directory.path().join("workers");
+        std::fs::create_dir(&workers).unwrap();
+        std::fs::write(
+            workers.join("mj-worker-x86_64-unknown-linux-musl"),
+            stamped_worker(b"current"),
+        )
+        .unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot",
+        ))
+        .isolated_store(directory.path())
+        .env("MJ_INSTANCE", "handoff-warm-pins")
+        .env(CHILD, "1")
+        .env("MJ_WORKER_DIR", &workers)
+        .run();
+        return;
+    }
+    let source = std::path::PathBuf::from(std::env::var_os("MJ_WORKER_DIR").unwrap())
+        .join("mj-worker-x86_64-unknown-linux-musl");
+    let cache_root = data_dir().join("workers").join("pinned");
+    assert!(indexed_pinned_worker(&cache_root, &source).is_none());
+
+    warm_worker_binary_sources().unwrap();
+    let warmed = indexed_pinned_worker(&cache_root, &source)
+        .expect("warming indexed the source for the next daemon");
+    assert!(
+        PINNED_WORKER_BINARY_SOURCES.get().is_none(),
+        "warming must leave the pinned snapshot to the daemon"
+    );
+
+    pin_worker_binary_sources().unwrap();
+    let WorkerBinaryAvailability::Local { path, .. } =
+        worker_binary_prerequisite_for_arch("x86_64").unwrap()
+    else {
+        panic!("local source")
+    };
+    assert_eq!(path, warmed);
+}
+
 /// Test-and-fix M-4: the daemon log named neither the worker it chose for a
 /// target nor where it came from.
 #[test]

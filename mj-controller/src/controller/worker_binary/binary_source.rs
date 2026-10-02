@@ -359,18 +359,8 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     if PINNED_WORKER_BINARY_SOURCES.get().is_some() {
         return Ok(());
     }
-    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
-    let cache_root = data_dir().join("workers").join("pinned");
     let started = std::time::Instant::now();
-    let snapshot = WorkerBinarySourceSnapshot::capture(&cache_root, |arch, requirement| {
-        worker_binary_prerequisite_with_verifier(
-            arch,
-            requirement,
-            &current,
-            &|path| path.is_file(),
-            &|path| verify_worker_build_indexed(&cache_root, path),
-        )
-    });
+    let snapshot = capture_worker_binary_sources()?;
     tracing::info!(
         elapsed_ms = started.elapsed().as_millis(),
         "worker sources pinned"
@@ -379,6 +369,37 @@ pub fn pin_worker_binary_sources() -> Result<()> {
     // the first complete snapshot and never replace paths it may already use.
     let _ = PINNED_WORKER_BINARY_SOURCES.set(snapshot);
     Ok(())
+}
+
+/// Verify and pin this build's worker sources into the shared cache without
+/// keeping the snapshot, so the daemon this build starts next finds every
+/// source already indexed.
+///
+/// A client replacing the daemon runs this while the old daemon drains: the
+/// copying and hashing a new build needs then happens beside the handoff
+/// instead of on the new daemon's startup path. The cache is content-addressed
+/// and published atomically without replacing anything, so the old daemon's
+/// pins are unaffected. Startup still captures the sources itself and stays
+/// the only owner of the pinned snapshot.
+pub fn warm_worker_binary_sources() -> Result<()> {
+    capture_worker_binary_sources().map(drop)
+}
+
+fn capture_worker_binary_sources() -> Result<WorkerBinarySourceSnapshot> {
+    let current = std::env::current_exe().context("resolve Mjolnir controller binary")?;
+    let cache_root = data_dir().join("workers").join("pinned");
+    Ok(WorkerBinarySourceSnapshot::capture(
+        &cache_root,
+        |arch, requirement| {
+            worker_binary_prerequisite_with_verifier(
+                arch,
+                requirement,
+                &current,
+                &|path| path.is_file(),
+                &|path| verify_worker_build_indexed(&cache_root, path),
+            )
+        },
+    ))
 }
 
 /// Cached record of a source file this daemon already verified and pinned.
@@ -417,7 +438,7 @@ fn index_entry_path(cache_root: &Path, source: &Path) -> Option<PathBuf> {
 
 /// The pinned copy of `source` if the index says this exact file was already
 /// pinned and the copy is still present with the same length.
-fn indexed_pinned_worker(cache_root: &Path, source: &Path) -> Option<PathBuf> {
+pub(super) fn indexed_pinned_worker(cache_root: &Path, source: &Path) -> Option<PathBuf> {
     let entry = index_entry_path(cache_root, source)?;
     let digest = std::fs::read_to_string(entry).ok()?;
     let digest = digest.trim();
