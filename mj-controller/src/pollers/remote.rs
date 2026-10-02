@@ -57,7 +57,7 @@ pub fn spawn_remote_dashboard_worker_poller(
                     match update {
                         Some(RuntimeFeedUpdate::Snapshot(snapshot)) => {
                             let metadata = snapshot.metadata;
-                            send_if_changed(&config_tx, metadata.config);
+                            send_if_changed(&config_tx, metadata.installed_config());
                             native.update_snapshot(snapshot.native_agents);
                             health_tx.send_if_modified(|health| {
                                 let recovered = health.refresh_error.take().is_some();

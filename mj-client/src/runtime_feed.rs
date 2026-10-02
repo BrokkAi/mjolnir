@@ -46,6 +46,15 @@ pub struct RuntimeMetadata {
     #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     pub config: Config,
+    /// The ids in `config.targets` that the daemon supplied as default
+    /// candidates rather than the user's file naming them. `Config` never
+    /// serializes this set (it is not file content), so the feed carries it
+    /// beside the config. The daemon owns the origin; a client installs it
+    /// with [`RuntimeMetadata::installed_config`] and never recomputes it.
+    /// A daemon that predates the field sends none, which leaves every
+    /// target looking user-written.
+    #[serde(default)]
+    pub default_targets: std::collections::BTreeSet<String>,
     pub last_subagent_policy: SubagentPolicy,
     pub workspace_names: BTreeMap<String, String>,
     pub lifecycles: Vec<RuntimeLifecycleView>,
@@ -58,6 +67,16 @@ pub struct RuntimeMetadata {
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]
     pub launch_recency: Vec<LaunchRecency>,
+}
+
+impl RuntimeMetadata {
+    /// The configuration a client installs: the published config with the
+    /// daemon's default-candidate set.
+    pub fn installed_config(&self) -> Config {
+        let mut config = self.config.clone();
+        config.default_targets = self.default_targets.clone();
+        config
+    }
 }
 
 /// The newest creation time among the sessions launched with one project,
@@ -608,6 +627,24 @@ mod tests {
         value.as_object_mut().unwrap().remove("quotas");
         let metadata: RuntimeMetadata = serde_json::from_value(value).unwrap();
         assert_eq!(metadata.quotas, crate::quota::QuotaSnapshot::default());
+    }
+
+    #[test]
+    fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
+        let mut metadata = RuntimeMetadata {
+            config: Config::default().with_local_targets(),
+            ..Default::default()
+        };
+        metadata.default_targets = metadata.config.default_targets.clone();
+        assert!(metadata.default_targets.contains("docker"));
+        let mut value = serde_json::to_value(&metadata).unwrap();
+        let received: RuntimeMetadata = serde_json::from_value(value.clone()).unwrap();
+        // The config alone loses the origin; the field restores it.
+        assert!(!received.config.is_default_target("docker"));
+        assert!(received.installed_config().is_default_target("docker"));
+        value.as_object_mut().unwrap().remove("default_targets");
+        let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert!(!older.installed_config().is_default_target("docker"));
     }
 
     #[test]

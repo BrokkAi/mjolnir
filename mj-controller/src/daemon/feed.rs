@@ -292,6 +292,7 @@ impl RuntimeState {
                     moves,
                     metadata: RuntimeMetadata {
                         config: controller.config.clone(),
+                        default_targets: controller.config.default_targets.clone(),
                         last_subagent_policy: controller.state.last_subagent_policy.clone(),
                         lifecycles,
                         ..Default::default()

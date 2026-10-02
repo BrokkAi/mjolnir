@@ -3554,6 +3554,62 @@ fn host_row_hides_a_default_candidate_with_a_missing_runtime_but_keeps_a_configu
     assert!(!rendered.contains("docker,"), "{rendered}");
 }
 
+/// The config the dashboard installs comes off the runtime feed, which does
+/// not serialize `Config::default_targets`. The origin travels beside the
+/// config, so a host without Docker lists no `docker` the user never wrote,
+/// while a `[targets.docker]` the user wrote stays, marked unavailable.
+#[test]
+fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
+    let docker_missing_row = |user_wrote_docker: bool| {
+        let mut daemon_config = Config::default();
+        if user_wrote_docker {
+            let mut docker = Config::default().with_local_targets().targets["docker"].clone();
+            if let TargetTemplate::LocalDocker { container } = &mut docker {
+                container.image = "example.test/own:latest".into();
+            }
+            daemon_config.targets.insert("docker".into(), docker);
+        }
+        let daemon_config = daemon_config.with_local_targets();
+        let sent = mj_client::runtime_feed::RuntimeMetadata {
+            default_targets: daemon_config.default_targets.clone(),
+            config: daemon_config,
+            ..Default::default()
+        };
+        let received: mj_client::runtime_feed::RuntimeMetadata =
+            serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
+        let mut dashboard = DashboardState::new(
+            received.installed_config(),
+            State::default(),
+            BTreeMap::new(),
+        );
+        let mut target = test_capacity_target();
+        target.target_ids = vec!["docker".into(), "localhost".into()];
+        dashboard.set_deployment_capacity_targets(vec![target]);
+        let Some(crate::DashboardAction::CheckTargetReadiness {
+            generation,
+            target_ids,
+        }) = dashboard.take_target_availability_check()
+        else {
+            panic!("the Targets pane must check its local container targets");
+        };
+        assert!(target_ids.contains(&"docker".to_owned()));
+        dashboard.apply_target_runtime_missing(
+            generation,
+            "docker".into(),
+            "docker: not found".into(),
+        );
+        drawn_dashboard(&mut dashboard, 160)
+    };
+
+    let default_only = docker_missing_row(false);
+    assert!(!default_only.contains("docker"), "{default_only}");
+    let user_written = docker_missing_row(true);
+    assert!(
+        user_written.contains("docker (unavailable)"),
+        "{user_written}"
+    );
+}
+
 /// A capacity sample the poller keeps refreshing carries no clock column
 /// and no staleness marker: the number on screen is the current one.
 #[test]

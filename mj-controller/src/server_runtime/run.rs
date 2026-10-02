@@ -35,8 +35,8 @@ pub(crate) async fn run_server(
     publication.observe_runtime(&initial, &mut native_agents, &mut move_recoveries);
     controller.state.sessions = initial.records;
     controller.state.subagents = initial.subagents;
+    controller.config = initial.metadata.installed_config();
     controller.state.last_subagent_policy = initial.metadata.last_subagent_policy;
-    controller.config = initial.metadata.config;
     let mut operations = initial
         .metadata
         .lifecycles
@@ -286,8 +286,8 @@ pub(crate) async fn run_server(
                 publication.observe_runtime(&runtime, &mut native_agents, &mut move_recoveries);
                 controller.state.sessions = runtime.records;
                 controller.state.subagents = runtime.subagents;
+                controller.config = runtime.metadata.installed_config();
                 controller.state.last_subagent_policy = runtime.metadata.last_subagent_policy;
-                controller.config = runtime.metadata.config;
                 for (session_id, error) in &pending_action_errors {
                     if let Some(session) = controller.state.sessions.get_mut(session_id)
                         && session.last_error.is_none()
