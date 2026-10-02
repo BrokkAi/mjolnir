@@ -25,7 +25,8 @@ pub use scope::{
     apply_field_edit,
 };
 pub use scrollbar::{
-    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_scrollbar, scrollbar_geometry,
+    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, centered_offset, centered_unit_offset,
+    clamp_offset_to_last_page, render_scrollbar, scrollbar_geometry,
 };
 pub use text_layout::{
     Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,
@@ -117,8 +118,13 @@ impl PathField {
                 .iter()
                 .map(|candidate| ListItem::new(candidate.as_str()))
                 .collect::<Vec<_>>();
-            let mut state = ListState::default();
-            state.select(Some(input.completion_selected()));
+            let mut state = ListState::default()
+                .with_offset(scrollbar::centered_unit_offset(
+                    input.completion_selected(),
+                    candidates.len(),
+                    usize::from(inner.height),
+                ))
+                .with_selected(Some(input.completion_selected()));
             frame.render_stateful_widget(
                 List::new(items).highlight_style(crate::theme::selection(true)),
                 inner,

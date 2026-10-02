@@ -239,20 +239,15 @@ pub(crate) fn render_capacity(
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
     let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
-    let mut offset = crate::render::clamp_offset_to_last_page(
+    let row_heights = vec![1; dashboard.capacity_details.len()];
+    let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.targets_scroll.get(),
-        &vec![1; dashboard.capacity_details.len()],
+        &row_heights,
         viewport,
     );
-    if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Targets) {
-        let row_heights = vec![1; dashboard.capacity_details.len()];
-        offset = offset_with_directional_lookahead(
-            offset,
-            dashboard.capacity_index,
-            direction,
-            &row_heights,
-            usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
-        );
+    if take_selection_recenter(dashboard, Focus::Targets) {
+        offset =
+            mj_chat::components::centered_offset(dashboard.capacity_index, &row_heights, viewport);
     }
     let mut state = TableState::default().with_offset(offset).with_selected(
         (!dashboard.capacity_details.is_empty()).then_some(dashboard.capacity_index),

@@ -41,107 +41,23 @@ use crate::widgets::{Truncate, format_resource_bytes, truncate_to_cells};
 use crate::wizards::{render_new_wizard, render_resume_wizard};
 use crate::workspaces::render_workspace_manager;
 use crate::{
-    AttentionLevel, DashboardState, Focus, Mode, PaneSize, SelectionDirection,
-    SessionOperationKind, SessionsRow, SupportPane,
+    AttentionLevel, DashboardState, Focus, Mode, PaneSize, SessionOperationKind, SessionsRow,
+    SupportPane,
 };
 
 const SESSION_TABLE_CHROME_HEIGHT: u16 = 3;
 /// One fixed row at the top of Sessions for Create and Resume.
 pub(crate) const SESSION_ACTIONS_HEIGHT: u16 = 1;
 
-/// Clamp a table offset so the viewport never opens on a hidden head.
-///
-/// The largest useful offset is the first row from which every remaining row
-/// fits (the last page). Any larger offset leaves blank space below the
-/// content while earlier rows stay hidden, which is how a pane whose rows
-/// shrank, or whose viewport grew, kept hiding its first rows although all of
-/// them fit. For unit-height rows this is `max(0, len - viewport)`. Every
-/// stateful table pane passes its stored offset through here before rendering.
-fn clamp_offset_to_last_page(
-    offset: usize,
-    row_heights: &[usize],
-    viewport_height: usize,
-) -> usize {
-    let mut first = row_heights.len();
-    let mut used = 0usize;
-    while first > 0 {
-        used = used.saturating_add(row_heights[first - 1]);
-        if used > viewport_height {
-            break;
-        }
-        first -= 1;
-    }
-    offset.min(first)
-}
-
-/// Move a table viewport just far enough to show the row beyond the selection
-/// in the direction the user moved. Variable-height rows only get that margin
-/// when the selected row and its neighbor fit together.
-fn offset_with_directional_lookahead(
-    current_offset: usize,
-    selected: usize,
-    direction: SelectionDirection,
-    row_heights: &[usize],
-    viewport_height: usize,
-) -> usize {
-    if row_heights.is_empty() || viewport_height == 0 || selected >= row_heights.len() {
-        return current_offset;
-    }
-    let neighbor = match direction {
-        SelectionDirection::Up => selected.checked_sub(1),
-        SelectionDirection::Down => selected
-            .checked_add(1)
-            .filter(|index| *index < row_heights.len()),
-    };
-    let Some(neighbor) = neighbor else {
-        return current_offset;
-    };
-    let pair_start = selected.min(neighbor);
-    let pair_end = selected.max(neighbor);
-    let pair_height = row_heights[pair_start..=pair_end]
-        .iter()
-        .copied()
-        .sum::<usize>();
-    if pair_height > viewport_height {
-        return current_offset;
-    }
-
-    match direction {
-        SelectionDirection::Up => {
-            let offset = current_offset.min(neighbor);
-            if row_heights[offset..=selected]
-                .iter()
-                .copied()
-                .sum::<usize>()
-                <= viewport_height
-            {
-                offset
-            } else {
-                neighbor
-            }
-        }
-        SelectionDirection::Down => {
-            let mut offset = current_offset.min(selected);
-            let mut visible_height = row_heights[offset..=neighbor]
-                .iter()
-                .copied()
-                .sum::<usize>();
-            while offset < selected && visible_height > viewport_height {
-                visible_height = visible_height.saturating_sub(row_heights[offset]);
-                offset += 1;
-            }
-            offset
-        }
-    }
-}
-
-fn take_scroll_lookahead(dashboard: &DashboardState, focus: Focus) -> Option<SelectionDirection> {
-    let pending = dashboard.scroll_lookahead.get();
-    if pending.is_some_and(|(pending_focus, _)| pending_focus == focus) {
-        dashboard.scroll_lookahead.set(None);
-        pending.map(|(_, direction)| direction)
+/// Whether the selection of `focus` moved by keyboard since the last frame.
+/// Only then does a table re-centre on it; a click or a refresh leaves the
+/// rows where they are.
+fn take_selection_recenter(dashboard: &DashboardState, focus: Focus) -> bool {
+    if dashboard.recenter_on_selection.get() == Some(focus) {
+        dashboard.recenter_on_selection.set(None);
+        true
     } else {
-        None
+        false
     }
 }
 

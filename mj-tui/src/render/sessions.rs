@@ -1404,21 +1404,16 @@ pub(crate) fn render_sessions(
             usize::from(row.content_height().saturating_add(spacing))
         })
         .collect::<Vec<_>>();
-    let mut offset = crate::render::clamp_offset_to_last_page(
+    let viewport = usize::from(rows_area.height);
+    let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.sessions_scroll.get(),
         &row_heights,
-        usize::from(rows_area.height),
+        viewport,
     );
-    if let (Some(selected), Some(direction)) =
-        (selected, take_scroll_lookahead(dashboard, Focus::Sessions))
+    if let Some(selected) = selected
+        && take_selection_recenter(dashboard, Focus::Sessions)
     {
-        offset = offset_with_directional_lookahead(
-            offset,
-            selected,
-            direction,
-            &row_heights,
-            usize::from(rows_area.height),
-        );
+        offset = mj_chat::components::centered_offset(selected, &row_heights, viewport);
     }
     let mut state = TableState::default()
         .with_offset(offset)

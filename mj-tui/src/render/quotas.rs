@@ -607,20 +607,15 @@ pub(crate) fn render_quotas(
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
     let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
-    let mut offset = crate::render::clamp_offset_to_last_page(
+    let row_heights = vec![1; dashboard.config.enabled_profiles().count()];
+    let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.quota_scroll.get(),
-        &vec![1; dashboard.config.enabled_profiles().count()],
+        &row_heights,
         viewport,
     );
-    if let Some(direction) = take_scroll_lookahead(dashboard, Focus::Quota) {
-        let row_heights = vec![1; dashboard.config.enabled_profiles().count()];
-        offset = offset_with_directional_lookahead(
-            offset,
-            dashboard.quota_index,
-            direction,
-            &row_heights,
-            usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
-        );
+    if take_selection_recenter(dashboard, Focus::Quota) {
+        offset =
+            mj_chat::components::centered_offset(dashboard.quota_index, &row_heights, viewport);
     }
     let mut state = TableState::default().with_offset(offset).with_selected(
         dashboard

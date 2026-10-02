@@ -725,3 +725,79 @@ fn combobox_popup_without_overflow_draws_no_scrollbar() {
         "{column:?}"
     );
 }
+
+/// The popup's inner rows as text, top to bottom.
+fn popup_rows_text(selected: usize, rows: usize) -> Vec<String> {
+    let options = (0..rows)
+        .map(|n| Line::raw(format!("model-{n:02}")))
+        .collect::<Vec<_>>();
+    let mut terminal = Terminal::new(TestBackend::new(30, 14)).expect("terminal");
+    let mut outer = Rect::default();
+    terminal
+        .draw(|frame| {
+            let mut form = Form::new();
+            form.begin_frame();
+            outer = ComboBox::render(
+                frame,
+                frame.area(),
+                Rect::new(0, 0, 12, 1),
+                "model",
+                &options,
+                selected,
+                true,
+                true,
+                " choices ",
+                PopupSide::Below,
+                &mut form,
+                1,
+            )
+            .expect("popup")
+            .0;
+            form.end_frame(1);
+        })
+        .expect("draw popup");
+    (outer.y + 1..outer.bottom() - 1)
+        .map(|y| {
+            (outer.x + 1..outer.right() - 1)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn combobox_popup_centres_the_selection_and_pins_the_list_ends() {
+    // Eight rows are visible: the selection sits on row 4 while there is
+    // room above and below, then the list pins to its first or last item.
+    for selected in 4..=25 {
+        let rows = popup_rows_text(selected, 30);
+        assert!(
+            rows[4].contains(&format!("model-{selected:02}")),
+            "{rows:?}"
+        );
+    }
+    for selected in 0..4 {
+        let rows = popup_rows_text(selected, 30);
+        assert!(
+            rows[selected].contains(&format!("model-{selected:02}")),
+            "{rows:?}"
+        );
+        assert!(rows[0].contains("model-00"), "{rows:?}");
+    }
+    for selected in 26..30 {
+        let rows = popup_rows_text(selected, 30);
+        assert!(rows[7].contains("model-29"), "{rows:?}");
+        assert!(
+            rows[selected - 22].contains(&format!("model-{selected:02}")),
+            "{rows:?}"
+        );
+    }
+}
+
+#[test]
+fn combobox_popup_that_fits_never_scrolls() {
+    for selected in 0..6 {
+        let rows = popup_rows_text(selected, 6);
+        assert!(rows[0].contains("model-00"), "{rows:?}");
+    }
+}

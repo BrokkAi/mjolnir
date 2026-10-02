@@ -337,7 +337,7 @@ impl DashboardState {
     /// within `DOUBLE_CLICK_INTERVAL`, performs the same action Enter would.
     pub(crate) fn handle_row_click(&mut self, focus: Focus, index: usize) -> DashboardAction {
         // Clicking a row selects it wherever the dial has left the pane.
-        self.scroll_lookahead.set(None);
+        self.recenter_on_selection.set(None);
         self.focus = focus;
         self.set_session_action_focus(None);
         if focus == Focus::Sessions {

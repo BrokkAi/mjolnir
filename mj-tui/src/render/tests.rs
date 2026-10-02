@@ -77,27 +77,6 @@ fn minimize_all_panes(dashboard: &mut DashboardState) {
 }
 
 #[test]
-fn directional_lookahead_reserves_an_adjacent_variable_height_row() {
-    let heights = [2, 3, 4, 2];
-
-    assert_eq!(
-        offset_with_directional_lookahead(0, 1, SelectionDirection::Down, &heights, 7),
-        1,
-        "the row after the selection is brought fully into view"
-    );
-    assert_eq!(
-        offset_with_directional_lookahead(2, 2, SelectionDirection::Up, &heights, 7),
-        1,
-        "the row before the selection is brought fully into view"
-    );
-    assert_eq!(
-        offset_with_directional_lookahead(0, 1, SelectionDirection::Down, &heights, 6),
-        0,
-        "an impossible two-row margin does not displace the selected row"
-    );
-}
-
-#[test]
 fn grouped_dashboard_has_no_column_header_and_uses_fixed_session_summaries() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
@@ -5288,24 +5267,6 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
 }
 
 #[test]
-fn table_offset_never_hides_rows_that_fit_the_viewport() {
-    use super::clamp_offset_to_last_page as clamp;
-    // Content shrank below the viewport: show it all from the top.
-    assert_eq!(clamp(7, &[1; 3], 10), 0);
-    // The viewport grew past the content.
-    assert_eq!(clamp(2, &[1; 6], 6), 0);
-    // Exact fit.
-    assert_eq!(clamp(1, &[1; 5], 5), 0);
-    // One more row than fits: only the last page start is allowed.
-    assert_eq!(clamp(4, &[1; 6], 5), 1);
-    assert_eq!(clamp(1, &[1; 6], 5), 1);
-    assert_eq!(clamp(0, &[1; 6], 5), 0);
-    // Variable heights: the last page starts where the tail first fits.
-    assert_eq!(clamp(9, &[3, 3, 2, 2], 5), 2);
-    assert_eq!(clamp(1, &[], 5), 0);
-}
-
-#[test]
 fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
     let (mut dashboard, _parent) = dashboard_with_subagents(&["worker-a", "worker-b"]);
     // An earlier, longer list had scrolled the pane down.
@@ -5327,6 +5288,56 @@ fn subagents_pane_shows_every_child_from_the_top_with_a_stale_offset() {
     let text = crate::test_support::drawn(&mut dashboard, 120, 60).join("\n");
     for id in ["worker-a", "worker-b", "worker-c"] {
         assert!(text.contains(id), "{id} hidden:\n{text}");
+    }
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
+}
+
+/// The screen row of the line that draws `title` in the Sessions pane.
+fn row_of_title(lines: &[String], title: &str) -> Option<usize> {
+    lines.iter().position(|line| line.contains(title))
+}
+
+#[test]
+fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
+    let names = (0..30).map(|n| format!("child-{n:02}")).collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut dashboard, parent) = dashboard_with_subagents(&refs);
+    dashboard.open_subagent_workspace(parent);
+    dashboard.focus = Focus::Sessions;
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    let first = row_of_title(&lines, "child-00").expect("first child drawn at the top");
+    assert_eq!(dashboard.sessions_scroll.get(), 0);
+
+    // Walk down one key at a time. Once the selection passes the middle it
+    // holds one screen row until the list pins to its end.
+    let mut rows = Vec::new();
+    let mut offsets = Vec::new();
+    for _ in 0..29 {
+        dashboard.move_selection(1);
+        let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+        offsets.push(dashboard.sessions_scroll.get());
+        let selected = dashboard.selected_session_id().expect("selection");
+        let title = dashboard.state.sessions[selected].title.clone();
+        rows.push(row_of_title(&lines, &title).expect("selected child stays visible"));
+    }
+    assert!(
+        offsets.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{offsets:?}"
+    );
+    let middle = *rows
+        .iter()
+        .max_by_key(|candidate| rows.iter().filter(|row| row == candidate).count())
+        .expect("rows");
+    let held = rows.iter().filter(|row| **row == middle).count();
+    assert!(held >= 10, "selection holds the centre row: {rows:?}");
+    assert!(middle > first + 3, "{rows:?}");
+    // At the end the last child is the last row, so the selection has moved
+    // below the centre.
+    assert!(*rows.last().unwrap() > middle, "{rows:?}");
+    // Moving back up to the first child returns the list to its top.
+    for _ in 0..29 {
+        dashboard.move_selection(-1);
+        let _ = crate::test_support::drawn(&mut dashboard, 120, 40);
     }
     assert_eq!(dashboard.sessions_scroll.get(), 0);
 }

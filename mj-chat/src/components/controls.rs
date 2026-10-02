@@ -8,7 +8,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::scrollbar::{render_scrollbar, scrollbar_geometry};
+use super::scrollbar::{centered_unit_offset, render_scrollbar, scrollbar_geometry};
 use super::text_layout::multiline_rows;
 use super::{AutocompletePopup, ControlKind, Form, Interaction, PopupSide};
 use crate::text_input::TextInput;
@@ -855,8 +855,13 @@ impl ComboBox {
                 .iter()
                 .map(|row| ListItem::new(row.clone()))
                 .collect::<Vec<_>>();
-            let mut state = ListState::default();
-            state.select((!options.is_empty()).then_some(selected));
+            let mut state = ListState::default()
+                .with_offset(centered_unit_offset(
+                    selected,
+                    options.len(),
+                    usize::from(inner.height),
+                ))
+                .with_selected((!options.is_empty()).then_some(selected));
             let overflow = options.len() > usize::from(inner.height) && inner.width > 1;
             // Keep the last column for the scrollbar so it never covers row text.
             let list_area = if overflow {
@@ -1050,13 +1055,17 @@ impl ChoiceList {
                 }
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default();
         let selected_row = mapped
             .iter()
             .enumerate()
             .find(|(_, option)| **option == Some(selected))
             .map(|(index, _)| index);
-        state.select(selected_row);
+        let state_offset = selected_row.map_or(0, |row| {
+            centered_unit_offset(row, rows.len(), usize::from(area.height))
+        });
+        let mut state = ListState::default()
+            .with_offset(state_offset)
+            .with_selected(selected_row);
         frame.render_stateful_widget(
             List::new(items).highlight_style(if selected_row.is_some_and(|row| !enabled[row]) {
                 disabled_style()

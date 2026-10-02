@@ -1310,7 +1310,7 @@ impl DashboardState {
     /// Moves the focused list's selection to `index`, counted among the rows
     /// currently on screen.
     pub(crate) fn set_selection_for(&mut self, focus: Focus, index: usize) -> bool {
-        self.scroll_lookahead.set(None);
+        self.recenter_on_selection.set(None);
         if focus == Focus::Sessions {
             self.set_session_action_focus(None);
         }
@@ -1379,14 +1379,7 @@ impl DashboardState {
         move_index(&mut index, len, delta);
         self.set_selection_for(focus, index);
         if index != previous {
-            self.scroll_lookahead.set(Some((
-                focus,
-                if delta < 0 {
-                    SelectionDirection::Up
-                } else {
-                    SelectionDirection::Down
-                },
-            )));
+            self.recenter_on_selection.set(Some(focus));
         }
     }
 

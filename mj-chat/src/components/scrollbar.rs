@@ -127,6 +127,58 @@ impl ScrollbarDrag {
     }
 }
 
+/// Clamp a list offset so the viewport never opens on a hidden head.
+///
+/// The largest useful offset is the first row from which every remaining row
+/// fits (the last page). A larger offset leaves blank space below the content
+/// while earlier rows stay hidden. For unit-height rows this is
+/// `max(0, len - viewport)`, and a list that fits has offset 0. Row heights are
+/// in terminal rows.
+#[must_use]
+pub fn clamp_offset_to_last_page(
+    offset: usize,
+    row_heights: &[usize],
+    viewport_height: usize,
+) -> usize {
+    let mut first = row_heights.len();
+    let mut used = 0usize;
+    while first > 0 {
+        used = used.saturating_add(row_heights[first - 1]);
+        if used > viewport_height {
+            break;
+        }
+        first -= 1;
+    }
+    offset.min(first)
+}
+
+/// The offset that centres `selected` in the viewport, pinned to the list ends.
+///
+/// Near the top the list starts at its first row, near the bottom it ends at
+/// its last row, and a list that fits never scrolls. With variable row heights
+/// the selected row is centred as closely as whole rows allow.
+#[must_use]
+pub fn centered_offset(selected: usize, row_heights: &[usize], viewport_height: usize) -> usize {
+    if selected >= row_heights.len() {
+        return clamp_offset_to_last_page(usize::MAX, row_heights, viewport_height);
+    }
+    let room_above = viewport_height.saturating_sub(row_heights[selected]) / 2;
+    let mut offset = selected;
+    let mut above = 0usize;
+    while offset > 0 && above.saturating_add(row_heights[offset - 1]) <= room_above {
+        offset -= 1;
+        above += row_heights[offset];
+    }
+    clamp_offset_to_last_page(offset, row_heights, viewport_height)
+}
+
+/// [`centered_offset`] for `len` rows that are one terminal row each.
+#[must_use]
+pub fn centered_unit_offset(selected: usize, len: usize, viewport_height: usize) -> usize {
+    let max = len.saturating_sub(viewport_height);
+    selected.saturating_sub(viewport_height / 2).min(max)
+}
+
 /// Calculate scrollbar geometry using a proportional thumb and inclusive
 /// endpoints. A zero-height or zero-width track has no drawable geometry.
 /// Content shorter than the viewport produces a full-track thumb so callers
@@ -206,6 +258,81 @@ mod tests {
 
     fn track() -> Rect {
         Rect::new(7, 11, 1, 20)
+    }
+
+    #[test]
+    fn offset_never_hides_rows_that_fit_the_viewport() {
+        let clamp = clamp_offset_to_last_page;
+        // Content shrank below the viewport: show it all from the top.
+        assert_eq!(clamp(7, &[1; 3], 10), 0);
+        // The viewport grew past the content.
+        assert_eq!(clamp(2, &[1; 6], 6), 0);
+        // Exact fit.
+        assert_eq!(clamp(1, &[1; 5], 5), 0);
+        // One more row than fits: only the last page start is allowed.
+        assert_eq!(clamp(4, &[1; 6], 5), 1);
+        assert_eq!(clamp(1, &[1; 6], 5), 1);
+        assert_eq!(clamp(0, &[1; 6], 5), 0);
+        // Variable heights: the last page starts where the tail first fits.
+        assert_eq!(clamp(9, &[3, 3, 2, 2], 5), 2);
+        assert_eq!(clamp(1, &[], 5), 0);
+    }
+
+    #[test]
+    fn selection_stays_centred_while_moving_down_a_long_list() {
+        let (len, viewport) = (40, 9);
+        let heights = vec![1; len];
+        for selected in 4..=(len - 5) {
+            let offset = centered_offset(selected, &heights, viewport);
+            assert_eq!(
+                selected - offset,
+                4,
+                "selected {selected} sits on the centre row"
+            );
+            assert_eq!(offset, centered_unit_offset(selected, len, viewport));
+        }
+    }
+
+    #[test]
+    fn centring_pins_the_list_at_both_ends() {
+        let (len, viewport) = (40, 9);
+        let heights = vec![1; len];
+        // Near the top the list starts at its first item and the selection moves up.
+        for selected in 0..4 {
+            assert_eq!(centered_offset(selected, &heights, viewport), 0);
+        }
+        // Near the bottom the list ends at its last item.
+        for selected in (len - 4)..len {
+            assert_eq!(
+                centered_offset(selected, &heights, viewport),
+                len - viewport
+            );
+        }
+    }
+
+    #[test]
+    fn a_list_that_fits_never_scrolls_when_centring() {
+        for selected in 0..6 {
+            assert_eq!(centered_offset(selected, &[1; 6], 6), 0);
+            assert_eq!(centered_offset(selected, &[1; 6], 20), 0);
+            assert_eq!(centered_unit_offset(selected, 6, 6), 0);
+        }
+        // Rows of mixed height that fit together also stay put.
+        assert_eq!(centered_offset(2, &[2, 3, 2], 7), 0);
+    }
+
+    #[test]
+    fn centring_mixed_row_heights_keeps_the_selected_row_visible() {
+        let heights = [2, 3, 4, 2, 3, 2, 4, 3];
+        let viewport = 9;
+        for selected in 0..heights.len() {
+            let offset = centered_offset(selected, &heights, viewport);
+            let shown = heights[offset..=selected].iter().sum::<usize>();
+            assert!(
+                shown <= viewport,
+                "selected {selected} fits below offset {offset}"
+            );
+        }
     }
 
     #[test]

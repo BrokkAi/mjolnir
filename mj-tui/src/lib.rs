@@ -708,12 +708,6 @@ impl Focus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SelectionDirection {
-    Up,
-    Down,
-}
-
 /// Tab order starts with Workspaces, then Sessions, the composer, and the
 /// two support panes. Shift-Tab walks it backwards.
 pub(crate) const FOCUS_ORDER: [Focus; 5] = [
@@ -884,7 +878,7 @@ pub struct DashboardState {
     /// The next render keeps one row beyond the selection visible in the
     /// direction of the latest keyboard or wheel navigation, when it fits.
     /// This is consumed by that pane's renderer after the movement.
-    pub(crate) scroll_lookahead: Cell<Option<(Focus, SelectionDirection)>>,
+    pub(crate) recenter_on_selection: Cell<Option<Focus>>,
     pub(crate) capacity_index: usize,
     pub(crate) quota_index: usize,
     pub(crate) focus: Focus,
@@ -1162,7 +1156,7 @@ impl DashboardState {
             sessions_scroll: Cell::new(0),
             targets_scroll: Cell::new(0),
             quota_scroll: Cell::new(0),
-            scroll_lookahead: Cell::new(None),
+            recenter_on_selection: Cell::new(None),
             capacity_index: 0,
             quota_index: 0,
             focus: Focus::Sessions,
