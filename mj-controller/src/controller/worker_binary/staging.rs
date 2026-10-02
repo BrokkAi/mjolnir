@@ -140,6 +140,8 @@ pub(super) fn configure_claude_subagent_mcp(
                 // Delegation is part of the session's core toolset, like
                 // Claude's native Agent tool, rather than optional discovery.
                 "alwaysLoad":true,
+                // Remote roots are home-relative; worker startup resolves
+                // both paths on the target before launching Claude.
                 "command":Path::new(worker_root).join("hel"),
                 "args":[
                     "worker",
