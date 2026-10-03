@@ -31,21 +31,45 @@ fn mode_config(current: &str) -> Value {
     json!([{
         "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": current,
         "options": [
-            {"value": "plan", "name": "Plan"}, {"value": "auto", "name": "Auto"},
+            {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"},
+            {"value": "auto", "name": "Auto"}, {"value": "acceptEdits", "name": "Accept edits"},
             {"value": "bypassPermissions", "name": "Bypass"}
         ]
     }])
 }
 
+async fn set_claude_config_mode(probe: &mut PlanProbe, request_id: &str, mode: &str) {
+    probe
+        .commands
+        .send(CommandRequest::SetConfig {
+            request_id: request_id.into(),
+            key: "mode".into(),
+            value: mode.into(),
+        })
+        .await
+        .unwrap();
+    let request = probe.message().await;
+    assert_eq!(request["method"], "session/set_config_option");
+    assert_eq!(request["params"]["value"], mode);
+    probe
+        .result(&request, json!({"configOptions": mode_config(mode)}))
+        .await;
+    loop {
+        if let RuntimeEvent::ConfigApplied { key, value, .. } = probe.event().await {
+            assert_eq!(key, "mode");
+            assert_eq!(value, mode);
+            break;
+        }
+    }
+}
+
 #[tokio::test]
-async fn leaving_claude_plan_mode_restores_the_workers_execution_policy() {
+async fn claude_plan_mode_stays_active_and_exit_restores_the_pre_plan_mode() {
     for config in [false, true] {
-        for (policy, expected) in [
-            (ExecutionPolicy::ConfiguredApprovals, "auto"),
-            (ExecutionPolicy::Unconstrained, "bypassPermissions"),
-        ] {
-            let mut probe = PlanProbe::with_config(policy, config).await;
-            // Use the same control the terminal and web Plan toggle send.
+        let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, config).await;
+        if config {
+            set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+        } else {
             probe
                 .commands
                 .send(CommandRequest::SetSessionMode {
@@ -63,57 +87,118 @@ async fn leaving_claude_plan_mode_restores_the_workers_execution_policy() {
                     break;
                 }
             }
-            probe
-                .commands
-                .send(CommandRequest::RestoreExecutionMode {
-                    request_id: "exit-plan".into(),
-                })
-                .await
-                .unwrap();
-            let restoring = probe.message().await;
-            if config {
-                assert_eq!(restoring["method"], "session/set_config_option");
-                assert_eq!(restoring["params"]["value"], expected);
-            } else {
-                assert_eq!(restoring["method"], "session/set_mode");
-                assert_eq!(restoring["params"]["modeId"], expected);
+        }
+        // Entering Plan must not immediately send another request that
+        // restores the launch policy.
+        probe.no_message().await;
+        probe
+            .commands
+            .send(CommandRequest::RestoreExecutionMode {
+                request_id: "exit-plan".into(),
+            })
+            .await
+            .unwrap();
+        let restoring = probe.message().await;
+        if config {
+            assert_eq!(restoring["method"], "session/set_config_option");
+            assert_eq!(restoring["params"]["value"], "bypassPermissions");
+        } else {
+            assert_eq!(restoring["method"], "session/set_mode");
+            assert_eq!(restoring["params"]["modeId"], "bypassPermissions");
+        }
+        while let Ok(event) = probe.events.try_recv() {
+            assert!(!matches!(event, RuntimeEvent::ConfigApplied { .. }));
+        }
+        probe
+            .result(
+                &restoring,
+                if config {
+                    json!({"configOptions": mode_config("bypassPermissions")})
+                } else {
+                    json!({})
+                },
+            )
+            .await;
+        loop {
+            if let RuntimeEvent::ConfigApplied {
+                request_id,
+                key,
+                value,
+                ..
+            } = probe.event().await
+            {
+                assert_eq!(request_id, "exit-plan");
+                assert_eq!(key, "mode");
+                assert_eq!(value, "bypassPermissions");
+                break;
             }
-            // It must not announce success before the harness acknowledges.
-            while let Ok(event) = probe.events.try_recv() {
-                assert!(!matches!(event, RuntimeEvent::ConfigApplied { .. }));
-            }
-            probe
-                .result(
-                    &restoring,
-                    if config {
-                        json!({"configOptions": mode_config(expected)})
-                    } else {
-                        json!({})
-                    },
-                )
-                .await;
-            loop {
-                if let RuntimeEvent::ConfigApplied {
-                    request_id,
-                    key,
-                    value,
-                    ..
-                } = probe.event().await
-                {
-                    assert_eq!(request_id, "exit-plan");
-                    assert_eq!(key, "mode");
-                    assert_eq!(value, expected);
-                    break;
-                }
-            }
-            probe.no_message().await;
+        }
+        probe.no_message().await;
+        probe.close().await;
+    }
+}
+
+#[tokio::test]
+async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() {
+    let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
+    set_claude_config_mode(&mut probe, "before-plan", "acceptEdits").await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    let restoring = probe.message().await;
+    assert_eq!(restoring["method"], "session/set_config_option");
+    assert_eq!(restoring["params"]["value"], "acceptEdits");
+    probe
+        .result(
+            &restoring,
+            json!({"configOptions": mode_config("acceptEdits")}),
+        )
+        .await;
+    loop {
+        if let RuntimeEvent::ConfigApplied { value, .. } = probe.event().await {
+            assert_eq!(value, "acceptEdits");
+            break;
         }
     }
+    probe.no_message().await;
+    probe.close().await;
+}
+
+#[tokio::test]
+async fn explicit_mode_change_during_plan_is_not_reverted_at_plan_exit() {
+    let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    set_claude_config_mode(&mut probe, "user-mode", "acceptEdits").await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        if let RuntimeEvent::ConfigApplied {
+            request_id, value, ..
+        } = probe.event().await
+        {
+            assert_eq!(request_id, "exit-plan");
+            assert_eq!(value, "acceptEdits");
+            break;
+        }
+    }
+    probe.no_message().await;
+    probe.close().await;
 }
 
 #[tokio::test]
 async fn a_refused_claude_plan_exit_reports_failure_without_continuing() {
     let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
     probe
         .commands
         .send(CommandRequest::RestoreExecutionMode {
@@ -667,7 +752,7 @@ async fn rejected_mode_change_never_submits_the_approved_plan() {
     loop {
         match probe.event().await {
             RuntimeEvent::Warning { message }
-                if message.contains("could not restore bypassPermissions") =>
+                if message.contains("could not restore the pre-Plan mode") =>
             {
                 warned = true
             }

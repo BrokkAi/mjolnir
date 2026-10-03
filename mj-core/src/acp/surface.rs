@@ -28,7 +28,7 @@ pub enum PlanControl {
     SetSessionMode {
         mode_id: String,
     },
-    /// The worker restores the execution policy saved in its launch spec.
+    /// The worker restores the mode that was active before Plan began.
     RestoreExecutionMode,
 }
 
@@ -93,9 +93,18 @@ impl AcpSessionSurface {
         if self.mode_config_key() == "collaboration_mode" {
             return;
         }
-        self.current_mode = Some(mode.clone());
         if let Some(modes) = self.session_modes.as_mut() {
-            modes.current_mode_id = mode.into();
+            modes.current_mode_id = mode.clone().into();
+        }
+        if self.plan_mode_change_pending {
+            return;
+        }
+        if config_current_value(&self.config_options, self.mode_config_key()).is_some() {
+            // Claude can publish a mode change before its matching config-option
+            // update. Keep the selector authoritative when it exists.
+            self.sync_plan_mode();
+        } else {
+            self.current_mode = Some(mode);
         }
     }
 
@@ -311,7 +320,7 @@ pub fn config_current_value(options: &[SessionConfigOption], key: &str) -> Optio
 mod tests {
     use agent_client_protocol::schema::v1::{
         SessionConfigId, SessionConfigSelect, SessionConfigSelectOption,
-        SessionConfigSelectOptions, SessionConfigValueId,
+        SessionConfigSelectOptions, SessionConfigValueId, SessionMode, SessionModeState,
     };
 
     use super::*;
@@ -325,6 +334,7 @@ mod tests {
                 SessionConfigSelectOptions::Ungrouped(vec![
                     SessionConfigSelectOption::new("default", "Default"),
                     SessionConfigSelectOption::new("plan", "Plan"),
+                    SessionConfigSelectOption::new("bypassPermissions", "Bypass permissions"),
                 ]),
             )),
         )
@@ -357,6 +367,49 @@ mod tests {
 
         assert_eq!(surface.current_mode(), Some("plan"));
         surface.finish_plan_mode_change(true);
+        assert_eq!(surface.current_mode(), Some("plan"));
+    }
+
+    #[test]
+    fn claude_mode_update_does_not_revert_plan_config_to_permission_mode() {
+        let mut surface = AcpSessionSurface::default();
+        surface.set_harness_kind(HarnessKind::Claude);
+        surface.set_config_options(&[mode_option("mode", "bypassPermissions")]);
+        surface.set_session_modes(Some(SessionModeState::new(
+            "bypassPermissions",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("plan", "Plan"),
+                SessionMode::new("bypassPermissions", "Bypass permissions"),
+            ],
+        )));
+
+        surface.begin_plan_mode_change(true);
+        surface.set_config_options(&[mode_option("mode", "plan")]);
+        surface.finish_plan_mode_change(true);
+
+        // A delayed mode notification must not override the selector state.
+        surface.apply_current_mode_update("bypassPermissions".into());
+
+        assert_eq!(surface.current_mode(), Some("plan"));
+        assert!(surface.plan_mode_active());
+    }
+
+    #[test]
+    fn claude_mode_update_remains_authoritative_without_a_config_selector() {
+        let mut surface = AcpSessionSurface::default();
+        surface.set_harness_kind(HarnessKind::Claude);
+        surface.set_session_modes(Some(SessionModeState::new(
+            "bypassPermissions",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("plan", "Plan"),
+                SessionMode::new("bypassPermissions", "Bypass permissions"),
+            ],
+        )));
+
+        surface.apply_current_mode_update("plan".into());
+
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 

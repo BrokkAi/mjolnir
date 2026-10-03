@@ -43,6 +43,44 @@ pub(super) struct RestoredPlanMode {
     pub(super) config_options: Vec<SessionConfigOption>,
     pub(super) modes: Option<SessionModeState>,
     pub(super) plan: String,
+    pub(super) transition: PlanModeTransition,
+}
+
+/// Tracks the mode Claude had before Plan, including an explicit mode change
+/// made while planning so plan completion cannot overwrite the user's choice.
+#[derive(Debug, Clone, Default)]
+pub(super) enum PlanModeTransition {
+    #[default]
+    Inactive,
+    Planning {
+        restore_mode: Option<String>,
+    },
+    ExplicitModeChange,
+}
+
+impl PlanModeTransition {
+    pub(super) fn mode_applied(&mut self, mode: &str, previous: Option<String>) {
+        if mode == "plan" {
+            if previous.as_deref() != Some("plan") {
+                *self = Self::Planning {
+                    restore_mode: previous,
+                };
+            }
+        } else if matches!(self, Self::Planning { .. }) {
+            *self = Self::ExplicitModeChange;
+        }
+    }
+}
+
+pub(super) fn current_session_mode(
+    config_options: &[SessionConfigOption],
+    modes: &Option<SessionModeState>,
+) -> Option<String> {
+    surface::config_current_value(config_options, "mode").or_else(|| {
+        modes
+            .as_ref()
+            .map(|state| state.current_mode_id.to_string())
+    })
 }
 
 pub(super) type PlanModeRestoration<'a> =
@@ -58,19 +96,30 @@ pub(super) async fn restore_plan_execution_mode(
         permission_sent.await.unwrap_or(false),
         "Claude's plan permission response could not be delivered"
     );
-    // Only Claude's plan approval leads here, and nothing may stand in for
-    // bypassPermissions.
+    let transition = state.transition.clone();
+    let desired = match transition {
+        PlanModeTransition::Planning {
+            restore_mode: Some(mode),
+        } => mode,
+        PlanModeTransition::Planning { restore_mode: None } => {
+            bail!("Claude's mode before Plan was not reported")
+        }
+        PlanModeTransition::ExplicitModeChange => {
+            state.transition = PlanModeTransition::default();
+            return Ok(state);
+        }
+        PlanModeTransition::Inactive => "bypassPermissions".to_owned(),
+    };
     enforce_execution_mode(
         connection,
         &session_id,
         HarnessKind::Claude,
-        "bypassPermissions",
+        &desired,
         &mut state.config_options,
         &mut state.modes,
     )
     .await?;
-    // `enforce_execution_mode` checks that the harness reports the mode it
-    // was asked for, so a plan turn never resumes in the planning mode.
+    state.transition = PlanModeTransition::default();
     Ok(state)
 }
 
@@ -80,8 +129,8 @@ pub(super) enum PlanPermissionAnswer {
 }
 
 /// The Claude permission mode the session's execution policy enforces: Auto
-/// for Guardian, bypassPermissions for YOLO. Approving a plan continues in
-/// this mode, as `RestoreExecutionMode` does when Plan mode is left by hand.
+/// for Guardian, bypassPermissions for YOLO. It remains the fallback for a
+/// plan approval that did not enter through a recorded Mjolnir Plan control.
 fn claude_policy_mode(policy: ExecutionPolicy) -> &'static str {
     HarnessKind::Claude
         .execution_enforcement(policy)
