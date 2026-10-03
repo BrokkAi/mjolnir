@@ -1717,6 +1717,14 @@ enum ReviewCommand {
     /// Show the review the session has open: what it is doing, each reviewing
     /// role, and its verdict once it has one.
     Status(SessionArgs),
+    /// Send the open review's findings to the primary agent. Findings are
+    /// forwarded automatically; this retries a forward the agent refused.
+    Forward(SessionArgs),
+    /// Close the open review and accept the change as reviewed.
+    Dismiss(SessionArgs),
+    /// Close the open review without accepting the change, so a later review
+    /// covers it again.
+    Cancel(SessionArgs),
 }
 
 pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
@@ -1744,7 +1752,19 @@ pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
             }
             Ok(())
         }
+        ReviewCommand::Forward(args) => resolve_review(&client, &args, "forward").await,
+        ReviewCommand::Dismiss(args) => resolve_review(&client, &args, "dismiss").await,
+        ReviewCommand::Cancel(args) => resolve_review(&client, &args, "cancel").await,
     }
+}
+
+async fn resolve_review(client: &ApiClient, args: &SessionArgs, resolution: &str) -> Result<()> {
+    let resolved = client.resolve_review(&args.session, resolution).await?;
+    if args.json {
+        return print_json(&resolved);
+    }
+    println!("review on {}: {resolution}", args.session);
+    Ok(())
 }
 
 /// A review as plain lines: its tier and status, one line per role, then the
@@ -1994,9 +2014,27 @@ mod tests {
             let Some(Command::Review(args)) = cli.command else {
                 panic!("expected the review command");
             };
-            let (ReviewCommand::Start(session) | ReviewCommand::Status(session)) = args.command;
+            let (ReviewCommand::Start(session)
+            | ReviewCommand::Status(session)
+            | ReviewCommand::Forward(session)
+            | ReviewCommand::Dismiss(session)
+            | ReviewCommand::Cancel(session)) = args.command;
             assert_eq!(session.session, "s1");
             assert_eq!(session.json, json);
+        }
+        for verb in ["forward", "dismiss", "cancel"] {
+            let cli = Cli::try_parse_from(["mj", "review", verb, "--session", "s1"])
+                .expect("review resolutions parse");
+            let Some(Command::Review(args)) = cli.command else {
+                panic!("expected the review command");
+            };
+            let resolved = match args.command {
+                ReviewCommand::Forward(_) => "forward",
+                ReviewCommand::Dismiss(_) => "dismiss",
+                ReviewCommand::Cancel(_) => "cancel",
+                _ => panic!("{verb} parsed as another review command"),
+            };
+            assert_eq!(resolved, verb);
         }
         assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
     }

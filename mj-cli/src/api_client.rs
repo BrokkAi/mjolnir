@@ -714,6 +714,21 @@ impl ApiClient {
         decode(response).await
     }
 
+    /// Forward, dismiss, or cancel the review the session has open.
+    pub(crate) async fn resolve_review(
+        &self,
+        session_id: &str,
+        resolution: &str,
+    ) -> Result<mj_controller::server::api::ResolveReviewResponse> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/review/{resolution}"))),
+            )
+            .await?;
+        decode(response).await
+    }
+
     /// The review the session has open, if any.
     pub(crate) async fn review_status(
         &self,

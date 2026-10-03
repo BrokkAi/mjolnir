@@ -387,14 +387,22 @@ pub(super) async fn apply_phone_action(
             session_id,
             resolution,
         } => {
-            let resolution = crate::server::resolution_from_name(&resolution)
-                .context("a review is resolved by forward, dismiss, or cancel")?;
+            let resolution = crate::server::resolution_from_name(&resolution).ok_or_else(|| {
+                anyhow::Error::new(mj_core::refusal::Refusal::precondition(
+                    "a review is resolved by forward, dismiss, or cancel".to_owned(),
+                ))
+            })?;
+            // As with StartReview: "no review is open", "there are no
+            // findings to forward" are sentences for the caller, so they
+            // travel as refusals (409 on the API), not as internal errors.
             services
                 .daemon_runtime
                 .review_host()
                 .resolve(&session_id, resolution)
                 .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(|error| {
+                    anyhow::Error::new(mj_core::refusal::Refusal::precondition(error))
+                })?;
             Ok(())
         }
         ControllerAction::TurnControl {

@@ -548,6 +548,35 @@ pub(super) async fn start_review(
     ))
 }
 
+/// Forward, dismiss, or cancel the review the session has open, as the
+/// viewer's buttons do. A resolution the review does not allow (no review is
+/// open, no findings to forward) is refused with the reason, as 409.
+pub(super) async fn resolve_review(
+    State(state): State<ServerState>,
+    Path((session_id, resolution)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<ResolveReviewResponse>), ApiFailure> {
+    if !matches!(resolution.as_str(), "forward" | "dismiss" | "cancel") {
+        return Err(ApiFailure::bad_request(
+            "a review is resolved by forward, dismiss, or cancel",
+        ));
+    }
+    let status = send_action(
+        &state,
+        ControllerAction::ResolveReview {
+            session_id: session_id.clone(),
+            resolution: resolution.clone(),
+        },
+    )
+    .await?;
+    Ok((
+        status,
+        Json(ResolveReviewResponse {
+            session_id,
+            resolution,
+        }),
+    ))
+}
+
 /// The review the session has open, if any, as the viewer shows it.
 pub(super) async fn review_status(
     State(state): State<ServerState>,

@@ -657,6 +657,14 @@ pub struct StartReviewResponse {
     pub started: bool,
 }
 
+/// What `POST /sessions/{id}/review/{resolution}` was accepted as.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveReviewResponse {
+    pub session_id: String,
+    /// `forward`, `dismiss`, or `cancel`.
+    pub resolution: String,
+}
+
 /// The turn review a session has open, as `GET /sessions/{id}/review`
 /// reports it: the same view a phone renders, or `None` when no review is
 /// open (none was asked for, or the last one has closed).

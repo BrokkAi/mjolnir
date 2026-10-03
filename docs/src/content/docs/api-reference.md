@@ -678,6 +678,7 @@ through its dedicated authenticated endpoint, not the generic viewer actions.
 ```text
 POST /api/v1/sessions/{session_id}/review
 GET  /api/v1/sessions/{session_id}/review
+POST /api/v1/sessions/{session_id}/review/{forward|dismiss|cancel}
 ```
 
 `POST` starts a one-off review of the turn the session just finished, with the
@@ -716,6 +717,14 @@ A role's `state` is `pending`, `running`, `done`, `findings`, or `failed`.
 `verdict` appears once the review has one; its `kind` is `clean`, `findings`,
 or `failed`, and `allowed` lists the resolutions it accepts. An unknown session
 answers `404`.
+
+`POST …/review/{resolution}` resolves the open review as the viewer's buttons
+do and answers `202` with `{ "session_id": "…", "resolution": "dismiss" }`.
+Findings are forwarded automatically, so `forward` only retries a forward the
+primary refused. `cancel` is always accepted while a review is open; `forward`
+and `dismiss` only when the verdict's `allowed` lists them. No open review, a
+resolution the verdict does not allow, or another word answers `400`; a review
+that closed before the daemon reached it answers `409` with the reason.
 
 ### Resume a suspended session
 
@@ -844,6 +853,7 @@ Preconditions, all answering `409` with the reason:
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
 | `mj review start --session <id>` | `POST /sessions/{id}/review` |
 | `mj review status --session <id>` | `GET /sessions/{id}/review` |
+| `mj review forward\|dismiss\|cancel --session <id>` | `POST /sessions/{id}/review/{resolution}` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 
 These commands accept `--json`. `mj stop-task` prints its aggregate report of
