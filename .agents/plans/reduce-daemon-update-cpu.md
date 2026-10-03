@@ -20,7 +20,7 @@ The daemon is Mjolnir's background controller. Streaming a few lines must not ma
 - [x] (2026-10-02) Complete the final isolated performance comparison and merge concurrent upstream commits without conflicts.
 - [x] (2026-10-02) Correct wait filtering so a durable-only turn completion is never skipped.
 - [x] (2026-10-03) Finish combined validation and commit the final regression and evidence.
-- [ ] Push the validated current branch to origin/master.
+- [x] (2026-10-03) Push the validated current branch to origin/master (540c9202 to ea6e4499).
 
 ## Surprises & Discoveries
 
@@ -133,4 +133,4 @@ Concurrent upstream commits merged cleanly as 8591f237. Full merged dev tests pa
 
 Revision: Updated on 2026-10-02 with final CPU/memory measurements, explicit unmet performance target, clean upstream integration, and the durable-only completion regression.
 
-Revision: Updated on 2026-10-03 after the complete merged dev suite finished successfully. The four-path implementation and all required checks are complete; only the authorized push remains. The performance limitation is preserved explicitly.
+Revision: Updated on 2026-10-03 after the complete merged dev suite finished successfully. The four-path implementation and all required checks are complete, and the authorized push succeeded. The performance limitation is preserved explicitly.
