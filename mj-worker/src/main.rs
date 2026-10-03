@@ -403,6 +403,14 @@ fn main() -> Result<()> {
     result
 }
 
+/// Tokio worker threads for every `hel worker` process. Tokio's default is one
+/// per visible CPU, so on a 96-CPU host with no `--cpus` limit each of a
+/// session's five worker processes held about 96 threads. With sub-agents
+/// that filled the container's pids limit and killed the parent's harness.
+/// These processes mostly relay messages and wait on I/O, so a few threads
+/// are enough whatever the host size.
+const WORKER_RUNTIME_THREADS: usize = 4;
+
 fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if let Some(root) = exit_root {
         record_startup_step(root, "login-environment");
@@ -412,6 +420,7 @@ fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner
         record_startup_step(root, "runtime");
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_RUNTIME_THREADS)
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
