@@ -484,6 +484,61 @@ impl ReviewerSidecar {
         }
     }
 
+    /// Runs the change analysis beside the roles rather than inside one.
+    ///
+    /// It holds a reviewer admission, so the worker is not checkpointed or
+    /// replaced under it, and it outlives its requesting socket the way a
+    /// role operation does. A review abandoned mid-analysis still stops its
+    /// reviewer, as it did when the analysis ran under the reviewer's role.
+    async fn analyze(
+        &self,
+        repositories: Vec<mj_core::relay::AnalyzeDeltaRepository>,
+        disconnected: impl std::future::Future<Output = ReviewerCancellation>,
+    ) -> Result<RelayResponseBody> {
+        let admission =
+            ReviewerAdmission::acquire(self.primary_relay.clone(), "reviewer analysis".to_owned())?;
+        let cancellation = self.shutdown.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let placement = self.placement.clone();
+        let reviewer = self.role(DEFAULT_ROLE);
+        let (respond, response) = tokio::sync::oneshot::channel();
+        {
+            let mut operations = self
+                .operations
+                .lock()
+                .expect("reviewer operations lock poisoned");
+            anyhow::ensure!(
+                !self.shutdown.is_cancelled(),
+                "reviewer sidecar is stopping"
+            );
+            let cancelled = cancellation.clone();
+            operations.spawn(async move {
+                let _admission = admission;
+                let result = analyze_delta(&placement, repositories, &cancelled).await;
+                if cancelled.is_cancelled() {
+                    let mut reviewer = reviewer.lock().await;
+                    if let Err(error) = reviewer.pause().await {
+                        tracing::error!(%error, "the reviewer of an abandoned analysis remains stopping");
+                    }
+                }
+                if let Err(result) = respond.send(result)
+                    && let Err(error) = result
+                {
+                    tracing::warn!(%error, "reviewer analysis failed after its client disconnected");
+                }
+            });
+        }
+        tokio::pin!(disconnected);
+        tokio::select! {
+            biased;
+            result = response => result.context("reviewer analysis task stopped")?,
+            reason = &mut disconnected => {
+                cancellation.cancel();
+                bail!("{}; admitted cleanup continues", reason.message());
+            }
+        }
+    }
+
     async fn dispatch(
         &self,
         role: &str,
@@ -497,6 +552,13 @@ impl ReviewerSidecar {
                     requests: self.take_dispatches(),
                 },
             });
+        }
+        // The change analysis reads nothing from any role, so it takes no
+        // role's lock. Under the reviewer role's lock it made the reviewer's
+        // launch queue behind a Bifrost run that takes minutes on a loaded
+        // host, and the launch ran out of time (Series 34, 2026-10-03).
+        if let ReviewerRequest::AnalyzeDelta { repositories } = request {
+            return self.analyze(repositories, disconnected).await;
         }
         let handle = self.role(role);
         tokio::pin!(disconnected);
@@ -525,10 +587,7 @@ impl ReviewerSidecar {
         let (respond, response) = tokio::sync::oneshot::channel();
         // Journal reads and already accepted mutations never own the live
         // reviewer's lifetime. Losing their reply cannot cancel its turn.
-        let owns_runtime = matches!(
-            request,
-            ReviewerRequest::Start { .. } | ReviewerRequest::AnalyzeDelta { .. }
-        );
+        let owns_runtime = matches!(request, ReviewerRequest::Start { .. });
         {
             let mut operations = self
                 .operations
@@ -627,8 +686,8 @@ impl ReviewerRole {
             } => self.respond_elicitation(elicitation_id, response).await,
             ReviewerRequest::CaptureDelta { baselines } => self.capture_delta(baselines).await,
             ReviewerRequest::AdvanceBaseline { trees } => self.advance_baseline(trees).await,
-            ReviewerRequest::AnalyzeDelta { repositories } => {
-                self.analyze_delta(repositories).await
+            ReviewerRequest::AnalyzeDelta { .. } => {
+                unreachable!("the change analysis is answered by the sidecar, not by one role")
             }
             ReviewerRequest::TakeLaneDispatches => {
                 unreachable!("lane dispatches are answered by the sidecar, not by one role")
@@ -710,52 +769,51 @@ impl ReviewerRole {
             payload: RelayResponsePayload::ReviewBaselineAdvanced,
         })
     }
+}
 
-    /// Runs Bifrost's semantic diff analysis over the captured trees.
-    ///
-    /// A repository with no recorded baseline is analyzed against its own
-    /// empty tree, which is what "everything here is new" means to Bifrost.
-    async fn analyze_delta(
-        &mut self,
-        repositories: Vec<mj_core::relay::AnalyzeDeltaRepository>,
-    ) -> Result<RelayResponseBody> {
-        let mut requests = Vec::new();
-        for repository in repositories {
-            let base = match repository.baseline_tree {
-                Some(tree) => tree,
-                None => {
-                    let root = repository.root.clone();
-                    tokio::task::spawn_blocking(move || {
-                        mj_checkpoint::archive::empty_tree_id(
-                            &mj_checkpoint::archive::SystemGit,
-                            &root,
-                        )
-                    })
-                    .await
-                    .map_err(|error| anyhow::anyhow!("reading the empty tree stopped: {error}"))??
-                }
-            };
-            requests.push(mj_review::bifrost::AnalyzeRequest {
-                repository: repository.root,
-                base_tree: base,
-                target_tree: repository.current_tree,
-            });
-        }
-        let binary = self
-            .placement
-            .bifrost_binary
-            .clone()
-            .unwrap_or_else(mj_review::bifrost::default_bifrost_binary);
-        let packet = tokio::select! {
-            result = crate::review::bifrost::changed_functions_packet(&binary, &requests) =>
-                result.map_err(|error| anyhow::anyhow!("{error}"))?,
-            () = self.request_cancel.cancelled() => bail!("reviewer analysis cancelled"),
+/// Runs Bifrost's semantic diff analysis over the captured trees.
+///
+/// A repository with no recorded baseline is analyzed against its own
+/// empty tree, which is what "everything here is new" means to Bifrost.
+async fn analyze_delta(
+    placement: &ReviewerPlacement,
+    repositories: Vec<mj_core::relay::AnalyzeDeltaRepository>,
+    cancelled: &CancellationToken,
+) -> Result<RelayResponseBody> {
+    let mut requests = Vec::new();
+    for repository in repositories {
+        let base = match repository.baseline_tree {
+            Some(tree) => tree,
+            None => {
+                let root = repository.root.clone();
+                tokio::task::spawn_blocking(move || {
+                    mj_checkpoint::archive::empty_tree_id(&mj_checkpoint::archive::SystemGit, &root)
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("reading the empty tree stopped: {error}"))??
+            }
         };
-        Ok(RelayResponseBody::Ok {
-            payload: RelayResponsePayload::ReviewChangedFunctions { packet },
-        })
+        requests.push(mj_review::bifrost::AnalyzeRequest {
+            repository: repository.root,
+            base_tree: base,
+            target_tree: repository.current_tree,
+        });
     }
+    let binary = placement
+        .bifrost_binary
+        .clone()
+        .unwrap_or_else(mj_review::bifrost::default_bifrost_binary);
+    let packet = tokio::select! {
+        result = crate::review::bifrost::changed_functions_packet(&binary, &requests) =>
+            result.map_err(|error| anyhow::anyhow!("{error}"))?,
+        () = cancelled.cancelled() => bail!("reviewer analysis cancelled"),
+    };
+    Ok(RelayResponseBody::Ok {
+        payload: RelayResponsePayload::ReviewChangedFunctions { packet },
+    })
+}
 
+impl ReviewerRole {
     /// Answers a form the reviewer's harness is waiting on.
     ///
     /// The answer goes straight to the reviewer's ACP runtime, never through
