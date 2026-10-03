@@ -7,7 +7,7 @@ pub(super) struct PhoneSessionViews<'a> {
     pub(super) native_agents:
         &'a std::collections::BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>,
     pub(super) conversations:
-        &'a std::collections::BTreeMap<String, crate::server::BrowserTranscript>,
+        &'a mj_core::snapshot_map::SnapshotMap<String, crate::server::BrowserTranscript>,
     pub(super) queued_prompts:
         &'a std::collections::BTreeMap<String, Vec<mj_core::relay::QueuedPrompt>>,
     pub(super) active_user_shells:

@@ -375,13 +375,35 @@ pub(super) fn load_materialized_turn_outcome_from(
     session_id: &str,
 ) -> Result<Option<MaterializedTurnState>> {
     let connection = open_reader(path)?;
-    let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
+    read_materialized_turn_state(&connection, session_id)
+}
+
+/// Turn observation does not need configuration, forms, or transcript bodies.
+pub(super) fn read_materialized_turn_state(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<MaterializedTurnState>> {
+    let row = connection.query_row(
+        "SELECT execution_state, running_started_at_ms, active_turn_json, last_turn_outcome_json
+         FROM materialized_sessions WHERE session_id=?1",
+        [session_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?,
+                  row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),
+    ).optional()?;
+    let Some((execution, started, active, last)) = row else {
         return Ok(None);
     };
     Ok(Some((
-        fields.execution,
-        fields.active_turn,
-        fields.last_turn_outcome,
+        parse_materialized_execution(&execution, started)?,
+        active
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("parse active turn for session {session_id}"))?,
+        last.as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     )))
 }
 
@@ -397,6 +419,33 @@ pub(super) fn load_materialized_turn_outcome_from(
 /// span is recorded, and the caller decides what to show instead.
 pub fn load_materialized_finished_turn_message(session_id: &str) -> Result<Option<String>> {
     load_materialized_finished_turn_message_from(&database_path(), session_id)
+}
+
+/// Read answer text only when returning a child wait. Turn bounds are from
+/// the observation that decided completion, even if another turn starts now.
+pub(crate) struct ChildAnswerMessages {
+    pub latest: Option<String>,
+    pub finished: Option<String>,
+}
+
+pub(crate) fn load_child_answer_messages(
+    children: &[(String, Option<(u64, u64)>)],
+) -> Result<BTreeMap<String, ChildAnswerMessages>> {
+    let mut reader = open_reader(&database_path())?;
+    let connection = reader.transaction()?;
+    children
+        .iter()
+        .map(|(id, span)| {
+            let latest = last_materialized_agent_message(&connection, id)?.map(|(_, text)| text);
+            let finished = span
+                .map(|(start, end)| {
+                    last_materialized_agent_message_within(&connection, id, start, end)
+                })
+                .transpose()?
+                .flatten();
+            Ok((id.clone(), ChildAnswerMessages { latest, finished }))
+        })
+        .collect()
 }
 
 pub(super) fn load_materialized_finished_turn_message_from(

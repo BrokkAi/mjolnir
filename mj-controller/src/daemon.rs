@@ -122,10 +122,12 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
+    pub(crate) credential_targets:
+        Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
     committed: Option<
         tokio::sync::watch::Receiver<
-            std::result::Result<crate::database::CommittedState, Arc<str>>,
+            std::result::Result<Arc<crate::database::CommittedState>, Arc<str>>,
         >,
     >,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -142,8 +144,7 @@ pub struct RuntimeState {
     controller_loader: fn() -> Result<Controller>,
     config_mutation: tokio::sync::Mutex<()>,
     projects: Arc<crate::project_catalog::Catalog>,
-    profile_catalog:
-        std::sync::OnceLock<Arc<crate::server_runtime::profile_catalog::ProfileCatalog>>,
+    profile_catalog: crate::review_host::SharedProfileCatalog,
     recovery_observer: RecoveryObserver,
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.

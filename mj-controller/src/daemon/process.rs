@@ -982,6 +982,10 @@ pub(super) fn spawn_manager_target_refresher(
         let mut compatibility = tokio::time::interval(Duration::from_millis(500));
         compatibility.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut installed = None;
+        let mut credential_installed = None;
+        let mut auth = crate::pollers::ProviderAuthCache::default();
+        let mut auth_profiles = None;
+        let mut staged_sources = None;
         loop {
             let inputs = {
                 let owner = state.owner();
@@ -992,7 +996,31 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 owner.pollable_worker_inputs()
             };
-            if installed.as_ref() != Some(&inputs) {
+            let config = inputs.controller().config;
+            if auth_profiles.as_ref() != Some(&config.profiles) {
+                let mut cache = auth.clone();
+                let profiles = config.profiles.clone();
+                match tokio::task::spawn_blocking(move || {
+                    cache.refresh(&config);
+                    cache
+                })
+                .await
+                {
+                    Ok(cache) => {
+                        auth = cache;
+                        auth_profiles = Some(profiles);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "provider refresh task stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
+            }
+            if !installed
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &inputs))
+            {
                 let preparation = inputs.clone();
                 let refreshed =
                     match tokio::task::spawn_blocking(move || preparation.prepare()).await {
@@ -1011,7 +1039,7 @@ pub(super) fn spawn_manager_target_refresher(
                     let mut owner = state.owner();
                     // A lifecycle may have claimed a target while its commands
                     // were being prepared. Only the owner can authorize install.
-                    if owner.pollable_worker_inputs() != inputs {
+                    if !Arc::ptr_eq(&owner.pollable_worker_inputs(), &inputs) {
                         continue;
                     }
                     targets.send_if_modified(|current| {
@@ -1030,7 +1058,65 @@ pub(super) fn spawn_manager_target_refresher(
                     state.publish_revision();
                 }
                 state.review_host().retain_sessions(retained);
-                installed = Some(inputs);
+                installed = Some(inputs.clone());
+            }
+            let closing = state.owner().close_requested.clone();
+            if !staged_sources
+                .as_ref()
+                .is_some_and(|(current, _)| Arc::ptr_eq(current, &inputs))
+            {
+                let staging = inputs.clone();
+                match tokio::task::spawn_blocking(move || staging.staged_credentials()).await {
+                    Ok(staged) => staged_sources = Some((inputs.clone(), staged)),
+                    Err(error) => {
+                        tracing::error!(%error, "credential staging observation stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                }
+            }
+            let staged = &staged_sources
+                .as_ref()
+                .expect("credential sources observed")
+                .1;
+            let credential_key = (
+                inputs.clone(),
+                auth.schemes.clone(),
+                closing.clone(),
+                staged.clone(),
+            );
+            if !credential_installed.as_ref().is_some_and(
+                |(current, schemes, closed, previous_staged)| {
+                    Arc::ptr_eq(current, &inputs)
+                        && *schemes == auth.schemes
+                        && *closed == closing
+                        && previous_staged == staged
+                },
+            ) {
+                let preparation = inputs.clone();
+                let schemes = auth.schemes.clone();
+                let staged = staged.clone();
+                let prepared = match tokio::task::spawn_blocking(move || {
+                    preparation.prepare_credentials(&schemes, &staged)
+                })
+                .await
+                {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        tracing::error!(%error, "credential target preparation stopped");
+                        cancellation.cancel();
+                        return;
+                    }
+                };
+                if !state.owner().install_credentials(
+                    &inputs,
+                    &closing,
+                    prepared,
+                    &state.credential_targets,
+                ) {
+                    continue;
+                }
+                credential_installed = Some(credential_key);
             }
             tokio::select! {
                 _ = cancellation.cancelled() => return,
@@ -1047,12 +1133,20 @@ pub(super) fn spawn_manager_target_refresher(
                 }
                 _ = compatibility.tick() => {
                     let _config_mutation = state.config_mutation.lock().await;
-                    let refreshed = tokio::task::spawn_blocking(|| {
+                    let mut cache = auth.clone();
+                    let staging = inputs.clone();
+                    let refreshed = tokio::task::spawn_blocking(move || {
                         crate::database::check_read_compatibility()?;
-                        Config::load()
+                        let config = Config::load()?;
+                        cache.refresh(&config);
+                        let staged = staging.staged_credentials();
+                        Ok::<_, anyhow::Error>((config, cache, staged))
                     }).await;
                     match refreshed {
-                        Ok(Ok(config)) => {
+                        Ok(Ok((config, cache, staged))) => {
+                            staged_sources = Some((inputs.clone(), staged));
+                            auth = cache;
+                            auth_profiles = Some(config.profiles.clone());
                             state.review_config.lock().unwrap_or_else(PoisonError::into_inner)
                                 .clone_from(&config.review);
                             let changed = {

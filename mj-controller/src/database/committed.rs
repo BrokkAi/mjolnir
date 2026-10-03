@@ -59,6 +59,7 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
         ("native_agents", "native_agent", "owner"),
         ("startup_steps", "startup", "session_id"),
         ("subagent_handbacks", "report", "child_session_id"),
+        ("materialized_sessions", "turn", "session_id"),
     ] {
         // Observe tables that exist; opening a connection must not depend on
         // an unrelated optional table. Its own read/write still reports damage.
@@ -88,8 +89,17 @@ pub(super) fn observe_connection(connection: &Connection, path: &Path) -> Result
                     format!("SELECT mj_changed_record('{kind}', {key});")
                 })
                 .collect::<String>();
+            let condition = if kind == "turn" && event == "UPDATE" {
+                " WHEN OLD.session_id IS NOT NEW.session_id
+                   OR OLD.execution_state IS NOT NEW.execution_state
+                   OR OLD.running_started_at_ms IS NOT NEW.running_started_at_ms
+                   OR OLD.active_turn_json IS NOT NEW.active_turn_json
+                   OR OLD.last_turn_outcome_json IS NOT NEW.last_turn_outcome_json"
+            } else {
+                ""
+            };
             connection.execute_batch(&format!(
-                "CREATE TEMP TRIGGER mj_observe_{table}_{event} AFTER {event} ON main.{table}
+                "CREATE TEMP TRIGGER mj_observe_{table}_{event} AFTER {event} ON main.{table}{condition}
                  BEGIN {calls} END;"
             ))?;
         }
@@ -123,6 +133,45 @@ pub struct CommittedState {
     /// Each sub-agent child's recorded report, keyed by child session. A
     /// child with nothing recorded has no entry.
     pub subagent_reports: SnapshotMap<String, mj_core::subagent::SubagentReport>,
+    pub turns: SnapshotMap<String, CommittedTurn>,
+    /// Only this session's committed wait inputs advance this token.
+    pub wait_revisions: SnapshotMap<String, u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedTurn {
+    pub state: materialized::MaterializedTurnState,
+    /// Read once when a failed turn changes, never on each observation.
+    pub failed_message: Option<String>,
+}
+
+impl CommittedTurn {
+    fn read(connection: &Connection, id: &str, previous: Option<&Self>) -> Result<Option<Self>> {
+        let Some(state) = materialized::read_materialized_turn_state(connection, id)? else {
+            return Ok(None);
+        };
+        let failed_message = match state.2.as_ref() {
+            Some(turn) if mj_core::subagent::failed_turn(turn, None).is_some() => {
+                if let Some(previous) = previous.filter(|previous| previous.state.2 == state.2) {
+                    previous.failed_message.clone()
+                } else if let Some(start) = turn.turn_start_position {
+                    materialized::last_materialized_agent_message_within(
+                        connection,
+                        id,
+                        start,
+                        turn.completed_ordinal,
+                    )?
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok(Some(Self {
+            state,
+            failed_message,
+        }))
+    }
 }
 
 impl CommittedState {
@@ -130,6 +179,16 @@ impl CommittedState {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
         let state = state_io::load_state_with(&transaction)?;
+        let ids = transaction
+            .prepare("SELECT session_id FROM materialized_sessions")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut turns = SnapshotMap::new();
+        for id in ids {
+            if let Some(turn) = CommittedTurn::read(&transaction, &id, None)? {
+                turns.insert_shared(id, turn);
+            }
+        }
         let mut startup_groups = SnapshotMap::new();
         let session_ids = transaction
             .prepare("SELECT DISTINCT session_id FROM startup_steps WHERE group_id IS NOT NULL")?
@@ -181,6 +240,8 @@ impl CommittedState {
             native_agents,
             startup_groups,
             subagent_reports,
+            turns,
+            wait_revisions: SnapshotMap::new(),
         })
     }
 }
@@ -208,11 +269,26 @@ pub(super) fn finish_operation(
     let mut native_agents = previous.native_agents.clone();
     let mut startup_groups = previous.startup_groups.clone();
     let mut subagent_reports = previous.subagent_reports.clone();
+    let mut turns = previous.turns.clone();
     let mut changed_history = State::default();
     let mut changed = false;
     let mut relations = BTreeSet::new();
     for (kind, key) in &changes.keys {
         match kind.as_str() {
+            "turn" => {
+                let turn = CommittedTurn::read(&transaction, key, turns.get(key))?;
+                if turns.get(key) != turn.as_ref() {
+                    match turn {
+                        Some(turn) => {
+                            turns.insert_shared(key.clone(), turn);
+                        }
+                        None => {
+                            turns.remove_shared(key);
+                        }
+                    }
+                    changed = true;
+                }
+            }
             "move" => {
                 let operation = session_move::load_move_operation_with(&transaction, key)?;
                 if moves.get(key) != operation.as_ref() {
@@ -424,6 +500,35 @@ pub(super) fn finish_operation(
         state.validate_subagent(key)?;
     }
     changed_history.validate()?;
+    let mut wait_revisions = previous.wait_revisions.clone();
+    let affected = previous
+        .state
+        .sessions
+        .changes(&state.sessions)
+        .map(|(id, _)| id)
+        .chain(
+            previous
+                .state
+                .subagents
+                .changes(&state.subagents)
+                .map(|(id, _)| id),
+        )
+        .chain(
+            previous
+                .startup_groups
+                .changes(&startup_groups)
+                .map(|(id, _)| id),
+        )
+        .chain(
+            previous
+                .subagent_reports
+                .changes(&subagent_reports)
+                .map(|(id, _)| id),
+        )
+        .chain(previous.turns.changes(&turns).map(|(id, _)| id));
+    for id in affected {
+        wait_revisions.insert_shared(id.clone(), previous.sequence + 1);
+    }
     transaction.commit()?;
     Ok(changed.then(|| CommittedState {
         sequence: previous.sequence + 1,
@@ -432,12 +537,83 @@ pub(super) fn finish_operation(
         native_agents,
         startup_groups,
         subagent_reports,
+        turns,
+        wait_revisions,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_turn_publications_are_committed_and_session_specific() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.sqlite");
+        for id in ["first", "second"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let owner = start_database_writer_at(&path, false).unwrap();
+        let before = owner.writer.committed_state().unwrap();
+        let second = before.turns.get_shared("second").unwrap();
+        owner.writer.execute("transcript frontier only", |connection| {
+            connection.execute("UPDATE materialized_sessions SET applied_event_ordinal=99 WHERE session_id='first'", [])?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &owner.writer.committed_state().unwrap()),
+            "transcript updates do not change compact wait facts"
+        );
+        let rollback: Result<()> = owner.writer.execute("rollback turn", |connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute("UPDATE materialized_sessions SET execution_state='running',running_started_at_ms=7 WHERE session_id='first'", [])?;
+            bail!("rolled back");
+        });
+        assert!(rollback.is_err());
+        assert!(Arc::ptr_eq(
+            &before,
+            &owner.writer.committed_state().unwrap()
+        ));
+        owner.writer.execute("start first turn", |connection| {
+            connection.execute("UPDATE materialized_sessions SET execution_state='running',running_started_at_ms=7 WHERE session_id='first'", [])?;
+            Ok(())
+        }).unwrap();
+        let running = owner.writer.committed_state().unwrap();
+        assert_ne!(
+            running.wait_revisions["first"],
+            before.wait_revisions.get("first").copied().unwrap_or(0)
+        );
+        assert_eq!(
+            running.wait_revisions.get("second"),
+            before.wait_revisions.get("second")
+        );
+        assert!(Arc::ptr_eq(
+            &second,
+            &running.turns.get_shared("second").unwrap()
+        ));
+        owner.shutdown().unwrap();
+        let owner = start_database_writer_at(&path, false).unwrap();
+        assert_eq!(owner.writer.committed_state().unwrap().turns, running.turns);
+        owner
+            .writer
+            .execute("delete projection", |connection| {
+                connection.execute(
+                    "DELETE FROM materialized_sessions WHERE session_id='first'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !owner
+                .writer
+                .committed_state()
+                .unwrap()
+                .turns
+                .contains_key("first")
+        );
+        assert!(running.turns.contains_key("first"));
+    }
 
     #[test]
     fn publication_failure_stops_mutations_without_replaying_the_committed_write() {
@@ -608,6 +784,7 @@ mod tests {
             .unwrap();
         let after = owner.writer.committed_state().unwrap();
         assert_eq!(after.sequence, before.sequence);
+        assert!(Arc::ptr_eq(&before, &after));
         assert_eq!(after.state, before.state);
     }
 

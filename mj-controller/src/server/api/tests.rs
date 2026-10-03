@@ -1,6 +1,6 @@
 use super::*;
 use mj_core::state::TurnOutcomeKind;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use axum::body::Body;
@@ -537,6 +537,9 @@ struct FakeBackend {
     handed_back: BTreeSet<String>,
     /// How often `turn_state` read the store.
     turn_state_reads: std::sync::atomic::AtomicUsize,
+    startup_reads: std::sync::atomic::AtomicUsize,
+    report_reads: std::sync::atomic::AtomicUsize,
+    wait_revision: std::sync::atomic::AtomicU64,
     /// What `subagent_report` answers; tests change it as a report lands.
     child_report: Mutex<Option<(bool, mj_core::subagent::SubagentReport)>>,
 }
@@ -553,6 +556,12 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn wait_revision(&self, _: &str) -> AnyResult<Option<u64>> {
+        Ok(Some(
+            self.wait_revision.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+
     fn transcript_history(
         &self,
         _session_id: String,
@@ -667,6 +676,8 @@ impl SubagentBackend for FakeBackend {
         &self,
         _session_id: String,
     ) -> BoxFuture<'_, AnyResult<Option<(bool, mj_core::subagent::SubagentReport)>>> {
+        self.report_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Ok(self.child_report.lock().unwrap().clone()) })
     }
     fn subagent_handed_back(&self, child_session_id: String) -> BoxFuture<'_, AnyResult<bool>> {
@@ -715,6 +726,8 @@ impl SubagentBackend for FakeBackend {
         })
     }
     fn start_status(&self, _session_id: String) -> BoxFuture<'_, AnyResult<Option<StartStatus>>> {
+        self.startup_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Ok(self.start_status.clone()) })
     }
     fn transcript(
@@ -1127,7 +1140,8 @@ fn api_app_with_worker_check(
     snapshot.sessions[0].activity_state = Some(mj_core::activity::ActivityState::default());
     adjust(&mut snapshot);
     let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, action_rx) = mpsc::channel(8);
     let (bundle_tx, bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
@@ -5285,6 +5299,18 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     }
     assert_eq!(reads(), 1, "other sessions' revisions read nothing");
     assert_eq!(
+        backend
+            .startup_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        backend
+            .report_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
         super::wait::SKIPPED_WAIT_PASSES.with(std::cell::Cell::get),
         50,
         "every publication woke the waiter, and none needed a decision"
@@ -5303,6 +5329,57 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["outcome"], "input_required");
     assert_eq!(reads(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(actor_without_projection()),
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "task".into(),
+                accepted_ordinal: Some(5),
+                turn_start_position: 6,
+                started_at_ms: 10,
+                steered_into: None,
+            }),
+            last_turn_outcome: None,
+        })]),
+        summary: Some(TurnSummary {
+            turn_number: 1,
+            turn_started_at_ms: 10,
+            last_changed_at_ms: 900,
+            final_message: Some("Completed.".into()),
+            tool_calls: 0,
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let waiter = spawn_wait(app, r#"{"turn_id":5,"timeout_secs":600}"#);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!waiter.is_finished());
+    *backend.turn_states.lock().unwrap() = vec![Some(TurnState {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        last_turn_outcome: Some(finished_child_turn("task")),
+    })];
+    backend
+        .wait_revision
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    snapshot_tx.send_modify(|snapshot| snapshot.revision += 1);
+    let response = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the committed turn ends the wait without a changed viewer row")
+        .unwrap()
+        .unwrap();
+    assert_eq!(json_body(response).await["outcome"], "finished");
+    assert_eq!(
+        backend
+            .turn_state_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
 }
 
 /// A child's report lands in the durable records, which republish the
@@ -5347,6 +5424,9 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
             ..Default::default()
         },
     ));
+    backend
+        .wait_revision
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     snapshot_tx.send_modify(|snapshot| snapshot.revision += 1);
     let response = tokio::time::timeout(Duration::from_secs(1), waiter)
         .await

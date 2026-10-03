@@ -442,8 +442,11 @@ impl DashboardState {
 
     /// Replaces the remembered mount and project history with what the
     /// database holds now.
-    pub fn apply_mount_history(&mut self, history: BTreeMap<String, Vec<std::path::PathBuf>>) {
-        self.state.mount_history = history;
+    pub fn apply_mount_history(
+        &mut self,
+        history: impl IntoIterator<Item = (String, Vec<std::path::PathBuf>)>,
+    ) {
+        self.state.mount_history = history.into_iter().collect();
         let entries = self.recent_project_entries();
         if let Mode::New(wizard) = &mut self.mode {
             if wizard.step == WizardStep::NewBundle

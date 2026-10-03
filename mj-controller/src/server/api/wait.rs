@@ -25,6 +25,7 @@ struct WaitInputs {
     launch_failure: Option<crate::server::ViewerLaunchFailure>,
     start_status: Option<StartStatus>,
     child_report: Option<(bool, mj_core::subagent::SubagentReport)>,
+    durable_revision: Option<u64>,
 }
 
 #[cfg(test)]
@@ -80,8 +81,32 @@ async fn wait_for_turn(
     let mut report_deadline = None;
 
     loop {
-        let start_status = backend.start_status(session_id.clone()).await?;
-        let child_report = backend.subagent_report(session_id.clone()).await?;
+        let durable_revision = backend.wait_revision(&session_id)?;
+        // Check shared durable identity before copying reports or interpreting
+        // startup steps. Unrelated streaming sessions must cost no such reads.
+        let unchanged = {
+            let snapshot = snapshot_rx.borrow();
+            let session = require_session_record(&snapshot, &session_id)?;
+            let launch_failure = snapshot
+                .launch_failures
+                .iter()
+                .find(|failure| failure.session_id.as_deref() == Some(session_id.as_str()));
+            wake == Wake::Published
+                && durable_revision.is_some()
+                && decided.as_ref().is_some_and(|decided| {
+                    decided.durable_revision == durable_revision
+                        && decided.session == *session
+                        && decided.launch_failure.as_ref() == launch_failure
+                })
+        };
+        let (start_status, child_report) = if unchanged {
+            (None, None)
+        } else {
+            (
+                backend.start_status(session_id.clone()).await?,
+                backend.subagent_report(session_id.clone()).await?,
+            )
+        };
         let inputs = {
             let snapshot = snapshot_rx.borrow();
             let session = require_session_record(&snapshot, &session_id)?;
@@ -90,8 +115,10 @@ async fn wait_for_turn(
                 .iter()
                 .find(|failure| failure.session_id.as_deref() == Some(session_id.as_str()));
             match &decided {
+                _ if unchanged => None,
                 Some(decided)
                     if wake == Wake::Published
+                        && decided.durable_revision == durable_revision
                         && decided.session == *session
                         && decided.launch_failure.as_ref() == launch_failure
                         && decided.start_status == start_status
@@ -104,6 +131,7 @@ async fn wait_for_turn(
                     launch_failure: launch_failure.cloned(),
                     start_status: start_status.clone(),
                     child_report: child_report.clone(),
+                    durable_revision,
                 }),
             }
         };

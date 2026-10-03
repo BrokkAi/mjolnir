@@ -6,6 +6,12 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    /// Cheap token for this session's durable wait inputs. Backends without
+    /// a committed publication leave filtering to the detailed observation.
+    fn wait_revision(&self, _session_id: &str) -> AnyResult<Option<u64>> {
+        Ok(None)
+    }
+
     fn transcript_history(
         &self,
         session_id: String,

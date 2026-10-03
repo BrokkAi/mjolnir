@@ -28,7 +28,7 @@ pub struct DatabaseWriter {
     pub(super) id: u64,
     pub(super) sender: SyncSender<DatabaseWriterMessage>,
     path: Arc<PathBuf>,
-    committed: tokio::sync::watch::Sender<std::result::Result<CommittedState, Arc<str>>>,
+    committed: tokio::sync::watch::Sender<std::result::Result<Arc<CommittedState>, Arc<str>>>,
 }
 
 impl std::fmt::Debug for DatabaseWriter {
@@ -41,7 +41,7 @@ impl std::fmt::Debug for DatabaseWriter {
 }
 
 impl DatabaseWriter {
-    pub fn committed_state(&self) -> Result<CommittedState> {
+    pub fn committed_state(&self) -> Result<Arc<CommittedState>> {
         self.committed
             .borrow()
             .clone()
@@ -50,7 +50,7 @@ impl DatabaseWriter {
 
     pub fn committed_changes(
         &self,
-    ) -> tokio::sync::watch::Receiver<std::result::Result<CommittedState, Arc<str>>> {
+    ) -> tokio::sync::watch::Receiver<std::result::Result<Arc<CommittedState>, Arc<str>>> {
         self.committed.subscribe()
     }
 
@@ -71,7 +71,7 @@ impl DatabaseWriter {
                             committed::begin_operation(&publication.path);
                             let result = operation(connection);
                             match committed::finish_operation(connection, &previous) {
-                                Ok(Some(next)) => { drop(publication.committed.send_replace(Ok(next))); }
+                                Ok(Some(next)) => { drop(publication.committed.send_replace(Ok(Arc::new(next)))); }
                                 Ok(None) => {}
                                 Err(error) => {
                                     // The write may already be durable. Refuse all
@@ -179,7 +179,7 @@ pub(crate) fn database_writer_installed() -> bool {
 
 /// The daemon's current durable records. Client/offline readers have no writer
 /// and use explicit store reads; a failed daemon projection remains an error.
-pub fn committed_state() -> Result<Option<CommittedState>> {
+pub fn committed_state() -> Result<Option<Arc<CommittedState>>> {
     let writer = database_writer_slot()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -188,7 +188,7 @@ pub fn committed_state() -> Result<Option<CommittedState>> {
 }
 
 pub fn subscribe_committed_state()
--> Result<tokio::sync::watch::Receiver<std::result::Result<CommittedState, Arc<str>>>> {
+-> Result<tokio::sync::watch::Receiver<std::result::Result<Arc<CommittedState>, Arc<str>>>> {
     let writer = database_writer_slot()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -240,7 +240,7 @@ pub(super) fn start_database_writer_at(
     let mut connection = schema::open_writer(path)?;
     let mut observed_revision = schema::read_schema_state(&connection)?.revision;
     let initial = CommittedState::bootstrap(&mut connection)?;
-    let (committed, _) = tokio::sync::watch::channel(Ok(initial));
+    let (committed, _) = tokio::sync::watch::channel(Ok(Arc::new(initial)));
     let path = path.to_owned();
     let (sender, receiver) = sync_channel(DATABASE_WRITE_QUEUE_CAPACITY);
     let (stopped_tx, stopped) = sync_channel(1);

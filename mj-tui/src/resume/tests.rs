@@ -223,8 +223,8 @@ fn state_with(sessions: Vec<SessionRecord>) -> State {
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     }
 }
 

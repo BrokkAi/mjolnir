@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 pub fn dashboard_worker_targets(controller: &Controller) -> Vec<WorkerPollTarget> {
     controller
@@ -70,6 +71,27 @@ pub fn dashboard_worker_targets_excluding(
 /// skills tree; it is left out until it is next staged (see
 /// [`crate::controller::local_profile_homes`]).
 pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTarget> {
+    let schemes = controller
+        .config
+        .profiles
+        .iter()
+        .map(|(id, profile)| (id.clone(), profile.auth_scheme().is_api_key()))
+        .collect();
+    credential_sync_targets_with_auth(controller, &schemes)
+}
+
+pub(crate) fn credential_sync_targets_with_auth(
+    controller: &Controller,
+    schemes: &BTreeMap<String, bool>,
+) -> Vec<CredentialSyncTarget> {
+    credential_sync_targets_from_sources(
+        controller,
+        schemes,
+        &staged_credential_sessions(controller),
+    )
+}
+
+pub(crate) fn staged_credential_sessions(controller: &Controller) -> BTreeSet<String> {
     controller
         .state
         .sessions
@@ -83,6 +105,17 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
         .filter(|session| {
             crate::controller::local_profile_homes::session_has_a_staged_home_of_its_own(session)
         })
+        .map(|session| session.id.clone())
+        .collect()
+}
+
+pub(crate) fn credential_sync_targets_from_sources(
+    controller: &Controller,
+    schemes: &BTreeMap<String, bool>,
+    staged: &BTreeSet<String>,
+) -> Vec<CredentialSyncTarget> {
+    controller.state.sessions.values()
+        .filter(|session| staged.contains(&session.id))
         .filter_map(|session| {
             let profile = controller.config.profiles.get(&session.last_profile)?;
             let spec = match controller.reconnect_command(&session.id) {
@@ -98,7 +131,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
-                authenticates_with_api_key: profile.auth_scheme().is_api_key(),
+                authenticates_with_api_key: *schemes.get(&session.last_profile)?,
                 sync_github_token,
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,

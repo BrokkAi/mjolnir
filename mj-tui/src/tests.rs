@@ -657,8 +657,8 @@ fn ctrl_n_and_ctrl_p_move_the_focused_list() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -704,8 +704,8 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -821,8 +821,8 @@ fn digits_toggle_projects_independently() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -1713,8 +1713,8 @@ fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
             ]
             .into_iter()
             .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -1812,8 +1812,8 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
             ]
             .into_iter()
             .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -1913,8 +1913,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
             ]
             .into_iter()
             .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -1952,8 +1952,8 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         ]
         .into_iter()
         .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     });
 
     assert_eq!(
@@ -2070,8 +2070,8 @@ fn resolved_git_origin_groups_differently_named_raw_worktrees() {
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     let source =
@@ -2119,8 +2119,8 @@ fn bundle_and_checkout_share_one_canonical_project_heading() {
             sessions: [(bundle_session.id.clone(), bundle_session.clone())]
                 .into_iter()
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2147,8 +2147,8 @@ fn bundle_and_checkout_share_one_canonical_project_heading() {
                 .into_iter()
                 .map(|session| (session.id.clone(), session))
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2301,8 +2301,8 @@ fn the_tab_ring_visits_every_pane_and_keeps_the_session_selection() {
             sessions: [(active.id.clone(), active), (other.id.clone(), other)]
                 .into_iter()
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2359,8 +2359,8 @@ fn keyboard_selection_stops_at_the_active_panes_ends_instead_of_wrapping() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2418,8 +2418,8 @@ fn enter_opens_the_selected_session_even_inside_a_collapsed_project() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2459,8 +2459,8 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2635,8 +2635,8 @@ fn dashboard_with_conversations(count: usize) -> DashboardState {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2666,8 +2666,8 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(other.id.clone(), other)].into_iter().collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -3624,8 +3624,8 @@ fn dashboard_with_attention_mix() -> DashboardState {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );

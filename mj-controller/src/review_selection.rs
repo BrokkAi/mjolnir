@@ -23,6 +23,46 @@ struct Candidate {
     group: u8,
     quota: UtilityQuotaClass,
     score: u8,
+    /// The daemon's catalog lists the pinned model for this profile, so trying
+    /// it first needs no discovery to rule it out.
+    advertised: bool,
+}
+
+/// What the daemon's profile catalog says about a pinned model, per profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogVerdict {
+    /// The catalog lists the model: try this profile first.
+    Offers,
+    /// The catalog is ready and does not list the model: skip without staging.
+    Lacks,
+    /// No ready catalog entry: discovery has to decide, after the known ones.
+    Unknown,
+}
+
+/// Judges one profile against a pinned model using the daemon's catalog, so
+/// Auto never stages or launches a profile only to learn it lacks the model
+/// (2026-10-02: a DeepSeek session asking for gpt-6-luna staged eight other
+/// profiles, then retried a broken Muse discovery every minute, and its
+/// review never started).
+fn catalog_verdict(
+    offered: Option<&mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
+    key: &str,
+    model: &str,
+) -> CatalogVerdict {
+    use mj_core::profile_capabilities::CapabilityState;
+    match offered
+        .and_then(|snapshot| snapshot.profiles.get(key))
+        .map(|entry| &entry.choices)
+    {
+        Some(CapabilityState::Ready(choices)) => {
+            if choices.models.iter().any(|choice| choice.value == model) {
+                CatalogVerdict::Offers
+            } else {
+                CatalogVerdict::Lacks
+            }
+        }
+        _ => CatalogVerdict::Unknown,
+    }
 }
 
 fn rank(candidates: &mut [Candidate]) {
@@ -41,6 +81,7 @@ pub(crate) async fn resolve(
     settings: Option<ReviewConfig>,
     specialists: bool,
     cancelled: Arc<AtomicBool>,
+    offered: Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
 ) -> Result<ResolvedReviewSettings> {
     let controller = Arc::new(tokio::task::spawn_blocking(Controller::load).await??);
     let settings = settings.unwrap_or_else(|| controller.config.review.clone());
@@ -89,11 +130,13 @@ pub(crate) async fn resolve(
             group: 0,
             quota: UtilityQuotaClass::Unknown,
             score: 0,
+            advertised: true,
         });
     } else {
         // A model named without a profile can come from any enabled profile
         // that offers it, not only from providers Auto has a policy for.
         let pinned_model = settings.model.is_some();
+        let mut advertised = std::collections::BTreeSet::new();
         let supported = controller
             .config
             .enabled_profiles()
@@ -101,6 +144,22 @@ pub(crate) async fn resolve(
                 providers
                     .get(*id)
                     .is_some_and(|p| pinned_model || p.main_policy().is_some())
+            })
+            .filter(|(id, profile)| {
+                let Some(model) = settings.model.as_deref() else {
+                    return true;
+                };
+                match catalog_verdict(offered.as_ref(), &profile.capabilities_key(id), model) {
+                    CatalogVerdict::Offers => {
+                        advertised.insert((*id).to_owned());
+                        true
+                    }
+                    CatalogVerdict::Lacks => {
+                        reasons.push(format!("{id}: does not advertise model {model}"));
+                        false
+                    }
+                    CatalogVerdict::Unknown => true,
+                }
             })
             .collect::<Vec<_>>();
         let quotas = UtilityLlmRuntime::shared()
@@ -126,9 +185,12 @@ pub(crate) async fn resolve(
                 },
                 quota,
                 score,
+                advertised: advertised.contains(id),
             });
         }
         rank(&mut candidates);
+        // Profiles the catalog confirms come first; unknown ones only if they all fail.
+        candidates.sort_by_key(|candidate| !candidate.advertised);
     }
     for candidate in candidates {
         ensure!(
@@ -344,6 +406,7 @@ mod tests {
             group,
             quota,
             score,
+            advertised: false,
         }
     }
     #[test]
@@ -386,6 +449,103 @@ mod tests {
         assert_eq!(family_model(&choices, "luna").unwrap(), "gpt-5.10-luna");
         assert!(family_model(&choices, "sonnet").is_err());
     }
+    fn snapshot(
+        entries: &[(
+            &str,
+            mj_core::profile_capabilities::CapabilityState<Vec<&str>>,
+        )],
+    ) -> mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
+        use mj_core::profile_capabilities::{CapabilityState, ProfileCapabilities};
+        mj_core::profile_capabilities::ProfileCapabilitiesSnapshot {
+            profiles: entries
+                .iter()
+                .map(|(key, state)| {
+                    let choices = match state {
+                        CapabilityState::Pending => CapabilityState::Pending,
+                        CapabilityState::Failed(error) => CapabilityState::Failed(error.clone()),
+                        CapabilityState::Ready(models) => {
+                            CapabilityState::Ready(mj_core::worker_launch::ProfileConfig {
+                                model: None,
+                                models: catalog(models).model_choices,
+                                efforts: Vec::new(),
+                                observed_at: 0,
+                            })
+                        }
+                    };
+                    (
+                        (*key).to_owned(),
+                        ProfileCapabilities {
+                            choices,
+                            efforts: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_pinned_model_rules_profiles_in_or_out_from_the_catalog_alone() {
+        use mj_core::profile_capabilities::CapabilityState;
+        let offered = snapshot(&[
+            (
+                "codex3",
+                CapabilityState::Ready(vec!["gpt-6-luna", "gpt-6.1-sol"]),
+            ),
+            ("kimi", CapabilityState::Ready(vec!["k3", "k3-256k"])),
+            (
+                "muse",
+                CapabilityState::Failed("discovery harness stopped".into()),
+            ),
+            ("claude", CapabilityState::Pending),
+        ]);
+        let verdict = |key| catalog_verdict(Some(&offered), key, "gpt-6-luna");
+        assert_eq!(verdict("codex3"), CatalogVerdict::Offers);
+        // A ready catalog without the model is skipped before anything is staged.
+        assert_eq!(verdict("kimi"), CatalogVerdict::Lacks);
+        // Failed, pending or absent entries leave the decision to discovery.
+        assert_eq!(verdict("muse"), CatalogVerdict::Unknown);
+        assert_eq!(verdict("claude"), CatalogVerdict::Unknown);
+        assert_eq!(verdict("glm"), CatalogVerdict::Unknown);
+        assert_eq!(
+            catalog_verdict(None, "codex3", "gpt-6-luna"),
+            CatalogVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn confirmed_profiles_are_tried_before_unknown_ones_whatever_their_rank() {
+        let mut candidates = vec![
+            candidate(
+                "muse",
+                ReviewProvider::Other,
+                0,
+                UtilityQuotaClass::Unknown,
+                0,
+            ),
+            Candidate {
+                advertised: true,
+                ..candidate(
+                    "codex3",
+                    ReviewProvider::Codex,
+                    1,
+                    UtilityQuotaClass::Unknown,
+                    0,
+                )
+            },
+            candidate(
+                "glm",
+                ReviewProvider::Other,
+                0,
+                UtilityQuotaClass::Unknown,
+                0,
+            ),
+        ];
+        rank(&mut candidates);
+        candidates.sort_by_key(|candidate| !candidate.advertised);
+        assert_eq!(candidates[0].id, "codex3");
+    }
+
     fn catalog(ids: &[&str]) -> ReviewCapabilityChoices {
         ReviewCapabilityChoices {
             model_choices: ids

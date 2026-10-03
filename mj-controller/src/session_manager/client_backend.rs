@@ -59,6 +59,7 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
             None,
             false,
             cancelled,
+            None,
         ))
     }
 

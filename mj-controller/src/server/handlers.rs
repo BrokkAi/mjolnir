@@ -347,7 +347,6 @@ pub(super) async fn conversation(
     let transcript = conversations
         .get(&session_id)
         .ok_or_else(|| ApiError::not_found("conversation unavailable"))?;
-    let mut response = transcript.clone();
     // Presentation grouping can remove or reorder rows without moving the
     // relay cursor. A client carrying a key from the previous Rich topology
     // must replace its append-only DOM when that topology changed.
@@ -355,14 +354,27 @@ pub(super) async fn conversation(
         .presentation_key
         .as_deref()
         .is_some_and(|key| key != transcript.presentation_key);
-    if let Some(after) = query.after_seq {
-        response.reset = presentation_mismatch || after < response.window_start_seq;
-        if !response.reset {
-            response.entries.retain(|entry| entry.updated_seq > after);
-        }
-    } else if presentation_mismatch {
-        response.reset = true;
-    }
+    let reset = match query.after_seq {
+        Some(after) => presentation_mismatch || after < transcript.window_start_seq,
+        None => presentation_mismatch || transcript.reset,
+    };
+    let response = BrowserTranscript {
+        latest_seq: transcript.latest_seq,
+        presentation_key: transcript.presentation_key.clone(),
+        window_start_seq: transcript.window_start_seq,
+        reset,
+        entries: transcript
+            .entries
+            .iter()
+            .filter(|entry| {
+                reset
+                    || query
+                        .after_seq
+                        .is_none_or(|after| entry.updated_seq > after)
+            })
+            .cloned()
+            .collect(),
+    };
     Ok(Json(response))
 }
 

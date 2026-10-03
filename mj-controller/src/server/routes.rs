@@ -3,7 +3,8 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct ServerState {
     pub(super) snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    pub(super) conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+    pub(super) conversation_rx:
+        watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     pub(super) action_tx: mpsc::Sender<ControllerRequest>,
     pub(super) bundle_tx: mpsc::Sender<BundleRequest>,
     pub(super) receipt_tx: mpsc::Sender<ReadReceiptRequest>,

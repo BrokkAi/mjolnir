@@ -202,8 +202,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         )]
         .into_iter()
         .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     (config, state)
 }
@@ -225,7 +225,8 @@ fn app_with_move_receiver() -> (Router, mpsc::Receiver<MovePreparationRequest>) 
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     snapshot.sessions[0].capabilities.move_session = true;
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(8);
     let (bundle_tx, _bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
@@ -262,7 +263,7 @@ fn app_with(
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     adjust(&mut snapshot);
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) = watch::channel(conversations);
+    let (_conversation_tx, conversation_rx) = watch::channel(conversations.into_iter().collect());
     let (action_tx, action_rx) = mpsc::channel(8);
     let (bundle_tx, _bundle_rx) = mpsc::channel(8);
     let (receipt_tx, receipt_rx) = mpsc::channel(8);
@@ -305,7 +306,8 @@ fn app_with_bundle_and_action_receivers(
     let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     adjust(&mut snapshot);
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, action_rx) = mpsc::channel(8);
     let (bundle_tx, bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
@@ -331,7 +333,7 @@ fn app_with_bundle_and_action_receivers(
 #[allow(clippy::too_many_arguments)]
 fn test_options(
     snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+    conversation_rx: watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     action_tx: mpsc::Sender<ControllerRequest>,
     bundle_tx: mpsc::Sender<BundleRequest>,
     receipt_tx: mpsc::Sender<ReadReceiptRequest>,
@@ -355,7 +357,7 @@ fn test_options(
 #[allow(clippy::too_many_arguments)]
 fn test_options_with_dictation(
     snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+    conversation_rx: watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     action_tx: mpsc::Sender<ControllerRequest>,
     bundle_tx: mpsc::Sender<BundleRequest>,
     receipt_tx: mpsc::Sender<ReadReceiptRequest>,
@@ -386,7 +388,8 @@ fn app_with_dictation_receiver() -> (Router, mpsc::Receiver<DictationRequest>) {
     let (config, state) = sample_config_state();
     let (_snapshot_tx, snapshot_rx) =
         watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(8);
     let (bundle_tx, _bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
@@ -413,7 +416,8 @@ fn detached_options() -> ServerOptions {
     let (config, state) = sample_config_state();
     let (_snapshot_tx, snapshot_rx) =
         watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(1);
     let (bundle_tx, _bundle_rx) = mpsc::channel(1);
     let (receipt_tx, _receipt_rx) = mpsc::channel(1);
@@ -662,7 +666,8 @@ fn app_with_background_stop_receiver(
         can_stop,
     }];
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) = watch::channel(BTreeMap::new());
+    let (_conversation_tx, conversation_rx) =
+        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
     let (action_tx, _action_rx) = mpsc::channel(8);
     let (bundle_tx, _bundle_rx) = mpsc::channel(8);
     let (receipt_tx, _receipt_rx) = mpsc::channel(8);
@@ -4155,7 +4160,7 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 role: "user",
                 label: "You".into(),
                 recorded_at_ms: None,
-                lines: vec!["begin".into()],
+                lines: vec!["retained history ".repeat(10_000)],
                 glyph: "\u{276f}",
                 tone: "user",
                 tool_status: None,
@@ -4196,6 +4201,25 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
     assert_eq!(body["reset"], false);
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
     assert_eq!(body["entries"][0]["lines"][0], "live");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/conversations/session-1?after_seq=8&presentation_key=key-1")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        body.len() < 1024,
+        "an unchanged large conversation returns only metadata"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["reset"], false);
+    assert!(body["entries"].as_array().unwrap().is_empty());
 
     let response = app
         .oneshot(
@@ -5279,7 +5303,7 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
     for format in ["changes", "revision"] {
         for shutdown in [false, true] {
             let (snapshots, snapshot_rx) = watch::channel(ViewerSnapshot::default());
-            let (_, conversation_rx) = watch::channel(BTreeMap::new());
+            let (_, conversation_rx) = watch::channel(mj_core::snapshot_map::SnapshotMap::new());
             let options = test_options(
                 snapshot_rx,
                 conversation_rx,

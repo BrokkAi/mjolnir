@@ -4,6 +4,61 @@ use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, tes
 use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
+#[test]
+fn child_progress_uses_the_published_turn_and_report_together() {
+    let mut committed = crate::database::CommittedState {
+        sequence: 0,
+        state: Default::default(),
+        moves: Default::default(),
+        native_agents: Default::default(),
+        startup_groups: Default::default(),
+        subagent_reports: Default::default(),
+        turns: Default::default(),
+        wait_revisions: Default::default(),
+    };
+    let turn = mj_core::state::MaterializedTurnOutcome {
+        diagnostic: None,
+        usage: None,
+        command_id: "task".into(),
+        accepted_ordinal: Some(7),
+        turn_start_position: Some(8),
+        completed_ordinal: 12,
+        completed_at_ms: 10,
+        outcome: mj_core::state::TurnOutcomeKind::Interrupted {
+            reason: None,
+            message: "worker stopped".into(),
+        },
+    };
+    committed.turns.insert_shared(
+        "child".into(),
+        crate::database::CommittedTurn {
+            state: (MaterializedExecutionState::Idle, None, Some(turn)),
+            failed_message: Some("owned failure details".into()),
+        },
+    );
+    committed.subagent_reports.insert_shared(
+        "child".into(),
+        mj_core::subagent::SubagentReport {
+            awaited_ordinal: Some(15),
+            report_dir: Some("/reports/child".into()),
+            ..Default::default()
+        },
+    );
+    let progress = child_progress(&committed, "child");
+    assert_eq!(progress.finished_span, Some((8, 12)));
+    assert_eq!(progress.answered_ordinal, Some(7));
+    assert!(
+        progress.awaiting_prompt(None),
+        "an older completed turn cannot answer the new prompt"
+    );
+    assert_eq!(
+        progress.failed_turn.as_ref().map(|(state, _)| *state),
+        Some("interrupted")
+    );
+    assert_eq!(progress.report_dir.as_deref(), Some("/reports/child"));
+    assert_eq!(child_progress(&committed, "other").failed_turn, None);
+}
+
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
         banked_resets: None,
@@ -1877,6 +1932,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
     let progress =
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
+                finished_span: None,
                 report: ReportState::Fallback,
                 awaited_ordinal: awaited,
                 answered_ordinal: answered,
@@ -1944,6 +2000,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         interruption_event_ordinals: Vec::new(),
     };
     let progress = ChildProgress {
+        finished_span: None,
         report: ReportState::Fallback,
         awaited_ordinal: Some(20),
         answered_ordinal: Some(20),

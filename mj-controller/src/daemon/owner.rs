@@ -1,7 +1,7 @@
 use super::record_index::RecordIndexes;
 use super::*;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub(super) struct PollableWorkerInputs {
     ids: Vec<String>,
     config: Config,
@@ -9,7 +9,27 @@ pub(super) struct PollableWorkerInputs {
     moves: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::MoveOperation>,
 }
 
+struct WorkerInputsPublication {
+    records: mj_core::state::State,
+    moves: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::MoveOperation>,
+    inputs: Arc<PollableWorkerInputs>,
+}
+
 impl PollableWorkerInputs {
+    pub(super) fn staged_credentials(&self) -> BTreeSet<String> {
+        let mut staged = crate::pollers::staged_credential_sessions(&self.controller());
+        // Ancestors describe command routing, while the owner authorizes IDs.
+        staged.retain(|id| self.ids.binary_search(id).is_ok());
+        staged
+    }
+
+    pub(super) fn prepare_credentials(
+        &self,
+        schemes: &BTreeMap<String, bool>,
+        staged: &BTreeSet<String>,
+    ) -> Vec<mj_core::credentials::CredentialSyncTarget> {
+        crate::pollers::credential_sync_targets_from_sources(&self.controller(), schemes, staged)
+    }
     pub(super) fn controller(&self) -> Controller {
         Controller {
             config: self.config.clone(),
@@ -52,15 +72,41 @@ pub(super) struct RuntimeStateOwner {
     pub(super) background_policies: BTreeMap<String, snapshot::BackgroundPolicyState>,
     completed: VecDeque<(String, String)>,
     store: StoreState,
+    credential_inputs: Option<(Arc<PollableWorkerInputs>, BTreeSet<String>)>,
+    worker_inputs: std::cell::RefCell<Option<WorkerInputsPublication>>,
 }
 
 enum StoreState {
     Bootstrap,
-    Current(Box<crate::database::CommittedState>),
+    Current(Arc<crate::database::CommittedState>),
     Unavailable(Arc<str>),
 }
 
 impl RuntimeStateOwner {
+    pub(super) fn install_credentials(
+        &mut self,
+        inputs: &Arc<PollableWorkerInputs>,
+        closing: &BTreeSet<String>,
+        mut targets: Vec<mj_core::credentials::CredentialSyncTarget>,
+        publication: &tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.pollable_worker_inputs(), inputs) || self.close_requested != *closing
+        {
+            return false;
+        }
+        targets.retain(|target| !closing.contains(&target.session_id));
+        self.credential_inputs = Some((inputs.clone(), closing.clone()));
+        publication.send_if_modified(|current| {
+            if *current == targets {
+                false
+            } else {
+                *current = targets;
+                true
+            }
+        });
+        true
+    }
+
     pub(super) fn projected_records(
         &self,
     ) -> mj_core::snapshot_map::SnapshotMap<String, SessionRecord> {
@@ -160,6 +206,8 @@ impl RuntimeStateOwner {
             background_policies: BTreeMap::new(),
             completed: VecDeque::new(),
             store: StoreState::Bootstrap,
+            credential_inputs: None,
+            worker_inputs: Default::default(),
         }
     }
 
@@ -173,7 +221,7 @@ impl RuntimeStateOwner {
         self.records_changed(&before);
     }
 
-    fn observe_committed(&mut self, committed: &crate::database::CommittedState) {
+    fn observe_committed(&mut self, committed: &Arc<crate::database::CommittedState>) {
         if self
             .committed()
             .is_some_and(|current| current.sequence == committed.sequence)
@@ -183,7 +231,7 @@ impl RuntimeStateOwner {
         let before = self.controller.state.clone();
         self.controller.state = committed.state.clone();
         self.records_changed(&before);
-        self.store = StoreState::Current(Box::new(committed.clone()));
+        self.store = StoreState::Current(committed.clone());
     }
 
     fn records_changed(&mut self, before: &mj_core::state::State) {
@@ -261,8 +309,32 @@ impl RuntimeStateOwner {
             .collect()
     }
 
-    pub(super) fn pollable_worker_inputs(&self) -> PollableWorkerInputs {
+    pub(super) fn pollable_worker_inputs(&self) -> Arc<PollableWorkerInputs> {
         let ids = self.pollable_worker_ids();
+        let empty_moves = Default::default();
+        let source_moves = self
+            .committed()
+            .map(|committed| &committed.moves)
+            .unwrap_or(&empty_moves);
+        if let Some(publication) = self.worker_inputs.borrow().as_ref()
+            && publication.inputs.ids == ids
+            && publication.inputs.config == self.controller.config
+            && publication
+                .records
+                .sessions
+                .changes(&self.controller.state.sessions)
+                .next()
+                .is_none()
+            && publication
+                .records
+                .subagents
+                .changes(&self.controller.state.subagents)
+                .next()
+                .is_none()
+            && publication.moves.changes(source_moves).next().is_none()
+        {
+            return publication.inputs.clone();
+        }
         let mut records = mj_core::state::State::default();
         let mut moves = mj_core::snapshot_map::SnapshotMap::new();
         for id in &ids {
@@ -287,16 +359,39 @@ impl RuntimeStateOwner {
                 current = &relation.parent_session_id;
             }
         }
-        PollableWorkerInputs {
+        let inputs = Arc::new(PollableWorkerInputs {
             ids,
             config: self.controller.config.clone(),
             records,
             moves,
-        }
+        });
+        *self.worker_inputs.borrow_mut() = Some(WorkerInputsPublication {
+            records: self.controller.state.clone(),
+            moves: source_moves.clone(),
+            inputs: inputs.clone(),
+        });
+        inputs
     }
 }
 
 impl RuntimeState {
+    pub(crate) fn credential_target_is_current(
+        &self,
+        target: &mj_core::credentials::CredentialSyncTarget,
+    ) -> Result<bool> {
+        let owner = self.owner();
+        owner.ensure_available()?;
+        Ok(owner
+            .credential_inputs
+            .as_ref()
+            .is_some_and(|(prepared, closing)| {
+                Arc::ptr_eq(prepared, &owner.pollable_worker_inputs())
+                    && *closing == owner.close_requested
+                    && !closing.contains(&target.session_id)
+                    && self.credential_targets.borrow().contains(target)
+            }))
+    }
+
     /// A record publication is visible before its writer reply. Refreshing at
     /// this boundary ensures every decision observes that publication together
     /// with control ownership, even before the background subscriber wakes up.
@@ -316,6 +411,95 @@ impl RuntimeState {
 mod tests {
     use super::super::tests::runtime_test_session;
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_staging_changes_are_observed_without_record_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let original = root.path().join("original");
+        std::fs::create_dir(&original).unwrap();
+        std::os::unix::fs::symlink(&original, &profile).unwrap();
+        let mut state = mj_core::state::State::default();
+        let mut active = runtime_test_session("active", "workspace", SessionState::Running);
+        active.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().to_owned(),
+        });
+        state.sessions.insert(active.id.clone(), active);
+        let owner = RuntimeStateOwner::new(Controller {
+            config: Config::default(),
+            state,
+        });
+        let inputs = owner.pollable_worker_inputs();
+        assert!(inputs.staged_credentials().is_empty());
+        std::fs::remove_file(&profile).unwrap();
+        std::fs::create_dir(&profile).unwrap();
+        assert_eq!(
+            inputs.staged_credentials(),
+            BTreeSet::from(["active".into()])
+        );
+        assert!(Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()));
+        std::fs::remove_dir(&profile).unwrap();
+        std::os::unix::fs::symlink(&original, &profile).unwrap();
+        assert!(inputs.staged_credentials().is_empty());
+    }
+
+    #[test]
+    fn credential_preparation_cannot_install_after_ownership_or_config_changes() {
+        let mut state = mj_core::state::State::default();
+        let mut active = runtime_test_session("active", "workspace", SessionState::Running);
+        active.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: "/worker".into(),
+        });
+        state.sessions.insert(active.id.clone(), active);
+        let mut owner = RuntimeStateOwner::new(Controller {
+            config: Config::default(),
+            state,
+        });
+        let inputs = owner.pollable_worker_inputs();
+        assert!(
+            Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()),
+            "unchanged input records retain publication identity"
+        );
+        let closing = BTreeSet::new();
+        for connected in [false, true, false] {
+            owner.publish_view(
+                "active".into(),
+                ManagedSessionView {
+                    connected,
+                    ..Default::default()
+                },
+            );
+            assert!(
+                Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()),
+                "operational views cannot rebuild worker input records"
+            );
+        }
+        let (publication, receiver) = tokio::sync::watch::channel(Vec::new());
+        assert!(owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        assert!(
+            !receiver.has_changed().unwrap(),
+            "an unchanged target set publishes nothing"
+        );
+        owner.close_requested.insert("active".into());
+        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        owner.close_requested.clear();
+        assert!(Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()));
+        owner.edit_sessions(|sessions| {
+            sessions.get_mut("active").unwrap().state = SessionState::Parked;
+        });
+        assert!(!owner.install_credentials(&inputs, &closing, Vec::new(), &publication));
+        let parked = owner.pollable_worker_inputs();
+        owner.controller.config.profiles.insert(
+            "new".into(),
+            serde_json::from_value(serde_json::json!({"kind":"codex", "home":"/profile"})).unwrap(),
+        );
+        assert!(!owner.install_credentials(&parked, &closing, Vec::new(), &publication));
+        assert!(
+            !receiver.has_changed().unwrap(),
+            "stale preparation never changes the published targets"
+        );
+    }
 
     #[test]
     fn polling_visits_no_historical_records_at_any_history_size() {
@@ -339,6 +523,7 @@ mod tests {
             });
             crate::pollers::take_pollability_visits();
             let held = owner.pollable_worker_inputs();
+            assert!(Arc::ptr_eq(&held, &owner.pollable_worker_inputs()));
             assert_eq!(held.ids, ["active"]);
             assert_eq!(held.records.sessions.len(), 1);
             assert_eq!(

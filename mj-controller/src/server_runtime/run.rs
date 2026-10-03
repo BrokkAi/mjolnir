@@ -20,7 +20,7 @@ pub(crate) async fn run_server(
     let mut quotas = quota_updates.borrow_and_update().clone();
     let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
-    let mut conversations = std::collections::BTreeMap::new();
+    let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
     let mut queued_prompts = projected_queued_prompts(&controller)?;
     let mut active_user_shells = std::collections::BTreeMap::new();
     let mut pending_elicitations = std::collections::BTreeMap::new();
@@ -273,7 +273,7 @@ pub(crate) async fn run_server(
                         materialized_activity.remove(id);
                     }
                     if record.is_none_or(|record| !record.state.is_active()) {
-                        conversations_changed |= conversations.remove(id).is_some();
+                        conversations_changed |= conversations.remove_shared(id).is_some();
                         conversation_projections.forget(id);
                     }
                 }
@@ -501,11 +501,11 @@ pub(crate) async fn run_server(
                         conversation_projections.finish(projected, session_active)
                     {
                         publication.dirty.insert(session_id.clone());
-                        conversations.insert(session_id, transcript);
+                        conversations.insert_shared(session_id, transcript);
                         revision = daemon_runtime.allocate_revision();
                         conversation_tx.send_replace(conversations.clone());
                         publish_snapshot!('control, revision);
-                    } else if !session_active && conversations.remove(&session_id).is_some() {
+                    } else if !session_active && conversations.remove_shared(&session_id).is_some() {
                         publication.dirty.insert(session_id.clone());
                         // Controller reload normally removes inactive rows
                         // first, but this also covers a worker result racing
@@ -580,7 +580,6 @@ pub(crate) async fn run_server(
                             operational_state,
                         );
                         revision = daemon_runtime.allocate_revision();
-                        conversation_tx.send_replace(conversations.clone());
                         publish_snapshot!('control, revision);
                     }
                     // The session update receiver can return pending entries
@@ -1496,7 +1495,6 @@ pub(crate) async fn run_server(
                             // The capacity service follows the reload itself;
                             // its new targets arrive on `capacity_targets_rx`.
                             revision = daemon_runtime.allocate_revision();
-                            conversation_tx.send_replace(conversations.clone());
                             publish_snapshot!('control, revision);
                         }
                         Err(error) => {

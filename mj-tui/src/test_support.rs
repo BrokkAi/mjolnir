@@ -477,8 +477,8 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(session.id.clone(), session)].into_iter().collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );

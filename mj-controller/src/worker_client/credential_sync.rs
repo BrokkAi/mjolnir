@@ -20,21 +20,28 @@ pub struct CredentialSyncCoordinator {
 impl CredentialSyncCoordinator {
     #[cfg(test)]
     pub fn spawn() -> Self {
-        Self::spawn_inner(SessionRelays::Direct, None)
+        Self::spawn_inner(SessionRelays::Direct, None, None)
     }
 
     pub fn spawn_guarded(
         manager: SessionManagerControl,
         gate: Arc<crate::recovery_gate::RecoveryGate>,
+        runtime: Arc<crate::daemon::RuntimeState>,
     ) -> Self {
-        Self::spawn_inner(SessionRelays::Actors(manager), Some(gate))
+        Self::spawn_inner(SessionRelays::Actors(manager), Some(gate), Some(runtime))
     }
 
     fn spawn_inner(
         relays: SessionRelays,
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+        runtime: Option<Arc<crate::daemon::RuntimeState>>,
     ) -> Self {
-        let (targets_tx, mut targets_rx) = watch::channel(Vec::new());
+        let targets_tx = runtime
+            .as_ref()
+            .map(|runtime| runtime.credential_targets.clone())
+            .unwrap_or_else(|| Arc::new(watch::channel(Vec::new()).0));
+        let mut targets_rx = targets_tx.subscribe();
+        let handle_targets = targets_tx.clone();
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
         let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
@@ -141,6 +148,7 @@ impl CredentialSyncCoordinator {
                     let triggered_by = trigger.cause.as_ref().map(|cause| cause.session_id.clone());
                     let gate = gate.clone();
                     let relays = relays.clone();
+                    let runtime = runtime.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
                             reconcile_profile_guarded(
@@ -148,6 +156,7 @@ impl CredentialSyncCoordinator {
                                 &targets,
                                 triggered_by.as_deref(),
                                 gate.as_ref(),
+                                runtime.as_ref(),
                             )
                             .await
                         })
@@ -179,7 +188,7 @@ impl CredentialSyncCoordinator {
         });
         Self {
             handle: CredentialSyncHandle {
-                targets: Arc::new(targets_tx),
+                targets: handle_targets,
                 triggers: triggers_tx,
             },
             results: results_rx,
@@ -209,7 +218,7 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_guarded(&SessionRelays::Direct, targets, triggered_by, None).await
+    reconcile_profile_guarded(&SessionRelays::Direct, targets, triggered_by, None, None).await
 }
 
 /// Reconcile one profile with every live session that runs it.
@@ -228,6 +237,7 @@ pub(super) async fn reconcile_profile_guarded(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
 ) -> Vec<CredentialSyncOutcome> {
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
@@ -259,22 +269,26 @@ pub(super) async fn reconcile_profile_guarded(
             let result = match gate {
                 Some(gate) => gate
                     .run_background(&target.session_id, async {
-                        let candidate = target.clone();
-                        let current = tokio::task::spawn_blocking(move || {
-                            // Read only: cancellation may leave this blocking
-                            // read finishing after admission has been released.
-                            let controller = crate::controller::Controller {
-                                config: mj_core::config::Config::load()?,
-                                state: crate::database::load_state()?,
-                            };
-                            Ok::<_, anyhow::Error>(
-                                crate::pollers::credential_sync_target_is_current(
-                                    controller, &candidate,
-                                ),
-                            )
-                        })
-                        .await
-                        .context("reload credential sync target")??;
+                        let current = if let Some(runtime) = runtime {
+                            runtime.credential_target_is_current(target)?
+                        } else {
+                            let candidate = target.clone();
+                            tokio::task::spawn_blocking(move || {
+                                // Read only: cancellation may leave this blocking
+                                // read finishing after admission has been released.
+                                let controller = crate::controller::Controller {
+                                    config: mj_core::config::Config::load()?,
+                                    state: crate::database::load_state()?,
+                                };
+                                Ok::<_, anyhow::Error>(
+                                    crate::pollers::credential_sync_target_is_current(
+                                        controller, &candidate,
+                                    ),
+                                )
+                            })
+                            .await
+                            .context("reload credential sync target")??
+                        };
                         if !current {
                             return Ok(None);
                         }

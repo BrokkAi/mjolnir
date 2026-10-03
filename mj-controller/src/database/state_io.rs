@@ -2,7 +2,7 @@ use super::*;
 
 pub fn load_state() -> Result<State> {
     if let Some(committed) = committed_state()? {
-        return Ok(committed.state);
+        return Ok(committed.state.clone());
     }
     load_state_from(&database_path())
 }
@@ -79,7 +79,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
     load_targets(connection, &mut state)?;
     load_mounts(connection, &mut state)?;
     load_checkpoints(connection, &mut state)?;
-    state.mount_history = read_mount_history(connection)?;
+    state.mount_history = read_mount_history(connection)?.into_iter().collect();
     let mut statement = connection
         .prepare("SELECT host, cpus, memory_bytes FROM host_container_sizes ORDER BY host")?;
     let rows = statement.query_map([], |row| {
