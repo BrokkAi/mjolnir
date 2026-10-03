@@ -5495,3 +5495,30 @@ fn session_cpu_report_separates_root_blocks_with_one_blank_line() {
         "{lines:#?}"
     );
 }
+
+#[test]
+fn session_row_cpu_pin_and_menu_are_one_space_apart() {
+    let mut dashboard = dashboard_with_measured_session("Parser", 230);
+    let glyphs = theme::glyphs();
+    let row_with_cpu = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw dashboard");
+        buffer_lines(terminal.backend().buffer())
+            .into_iter()
+            .find(|line| line.contains("23%"))
+            .expect("a row shows the CPU figure")
+    };
+    let menu = glyphs.row_menu.trim();
+
+    let unpinned = row_with_cpu(&mut dashboard);
+    let expected = format!("23% {} {menu}", glyphs.pin);
+    assert!(unpinned.contains(&expected), "{unpinned:?}");
+
+    // A pinned badge is two cells wide; the gaps stay one space each.
+    dashboard.pin_ids.insert("session-1".into(), 0);
+    let pinned = row_with_cpu(&mut dashboard);
+    let expected = format!("23% {}A {menu}", glyphs.pinned);
+    assert!(pinned.contains(&expected), "{pinned:?}");
+}

@@ -4,7 +4,8 @@ use crossterm::event::{Event, MouseEvent};
 use mj_chat::components::{ControlKind, Interaction, TextField};
 use mj_chat::theme;
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -410,24 +411,22 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
             );
             let control = SurfaceControl::SessionPin(index);
             form.register(control, ControlKind::Button, pin_area, true);
-            let badge = dashboard
+            let pin = dashboard
                 .session_menu_ids
                 .get(index)
                 .and_then(|session| dashboard.pin_id(session));
-            let (text, style) = badge.map_or_else(
-                || (theme::glyphs().pin.to_owned(), theme::actionable()),
-                |id| {
-                    (
-                        if id < 26 {
-                            format!("{}{}", theme::glyphs().pinned, theme::pin_label(id))
-                        } else {
-                            theme::pin_label(id)
-                        },
-                        ratatui::style::Style::default().fg(theme::pin_color(id)),
-                    )
-                },
+            let (text, style) = session_pin_badge(pin);
+            // Beside the menu, the badge sits against the menu's leading space
+            // so one space separates the two whatever the badge's width.
+            let alignment = if row.width < 24 {
+                Alignment::Left
+            } else {
+                Alignment::Right
+            };
+            frame.render_widget(
+                Paragraph::new(text).style(style).alignment(alignment),
+                pin_area,
             );
-            frame.render_widget(Paragraph::new(text).style(style), pin_area);
         }
         if row.width < 24 {
             continue;
@@ -444,6 +443,35 @@ pub(crate) fn render_session_row_actions(frame: &mut Frame, dashboard: &Dashboar
             area,
         );
     }
+}
+
+/// The pin badge at a session row's right edge: the pin glyph for an
+/// unpinned session, or the session's pin label in its pin colour.
+fn session_pin_badge(pin: Option<u32>) -> (String, Style) {
+    pin.map_or_else(
+        || (theme::glyphs().pin.to_owned(), theme::actionable()),
+        |id| {
+            (
+                if id < 26 {
+                    format!("{}{}", theme::glyphs().pinned, theme::pin_label(id))
+                } else {
+                    theme::pin_label(id)
+                },
+                Style::default().fg(theme::pin_color(id)),
+            )
+        },
+    )
+}
+
+/// The cells of a session row's first line left of the controls that
+/// [`render_session_row_actions`] draws over its right edge. A wide row keeps
+/// one space between its text and the pin badge.
+pub(crate) fn session_title_width(row_width: u16, pin: Option<u32>) -> u16 {
+    if row_width < 24 {
+        return row_width.saturating_sub(3);
+    }
+    let badge = Line::raw(session_pin_badge(pin).0).width();
+    row_width.saturating_sub(3 + u16::try_from(badge).unwrap_or(u16::MAX) + 1)
 }
 
 /// The width a pane title has to leave clear for [`render_pane_close_control`].

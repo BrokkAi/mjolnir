@@ -270,6 +270,10 @@ pub(crate) fn drawn_session_rows_with_options(
                 let cpu = (!options.summary_only)
                     .then(|| dashboard.cpu_share(&session.id))
                     .flatten();
+                let title_width = crate::surface_controls::session_title_width(
+                    width,
+                    dashboard.pin_id(&session.id),
+                );
                 if session.configuration_issue(&dashboard.config).is_some() {
                     lines.push(Line::styled(
                         format!("{prefix}{}", session_name(session)),
@@ -326,6 +330,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         cpu,
                         permission,
                         width,
+                        title_width,
                         &prefix,
                         spinner,
                         dashboard.config.advanced.detailed_activity_clocks,
@@ -348,6 +353,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         permission,
                         spinner,
                         width,
+                        title_width,
                     );
                 }
                 if dashboard.session_outside_filter(session) {
@@ -518,6 +524,7 @@ pub(crate) fn expanded_session_lines(
     cpu: Option<crate::session_view::CpuShare>,
     permission: Option<Span<'static>>,
     width: u16,
+    title_width: u16,
     prefix: &str,
     spinner: Option<&'static str>,
     detailed_activity_clocks: bool,
@@ -527,10 +534,9 @@ pub(crate) fn expanded_session_lines(
         .fg(session_band_color(attention, detail, session.state))
         .add_modifier(Modifier::BOLD);
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
-    // The ellipsis action occupies the last three cells of the first line.
+    // The pin and ellipsis actions occupy the right of the first line only.
     // Keep the activity and output lines at the full content width so a
     // running clock and queued count remain readable in a compact pane.
-    let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
     lines.push(Line::from(session_title_spans(
         prefix,
         &name,
@@ -837,6 +843,7 @@ pub(crate) fn compact_session_lines(
     permission: Option<Span<'static>>,
     spinner: Option<&'static str>,
     width: u16,
+    title_width: u16,
 ) {
     let facts = SessionRowFacts {
         detail,
@@ -847,9 +854,8 @@ pub(crate) fn compact_session_lines(
     };
     let style = facts.style().add_modifier(Modifier::BOLD);
     let name = recovery_warning_name(session, session_name(session).to_owned(), now_epoch_seconds);
-    // The ellipsis action occupies the last three cells of the first line;
+    // The pin and ellipsis actions occupy the right of the first line only;
     // retain the full width for the status line below it.
-    let title_width = width.saturating_sub(if width < 24 { 3 } else { 5 });
     lines.push(Line::from(session_title_spans(
         prefix,
         &name,
