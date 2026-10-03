@@ -382,12 +382,7 @@ pub(super) const BACKGROUND_WORK_WAIT: std::time::Duration = std::time::Duration
 /// recovery gate does not coordinate, so a retry does not spin.
 const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether a refusal only says another operation held the session: a lease
-/// refused the reviewer action, or a lease taken meanwhile cancelled it.
-pub(super) fn preempted_by_lifecycle(reason: &str) -> bool {
-    reason.contains("session is reserved for a lifecycle operation")
-        || reason.contains("cancelled for session lifecycle change")
-}
+pub(super) use crate::review_selection::preempted_by_lifecycle;
 
 /// Runs one step of review preparation once no background work holds the
 /// session.

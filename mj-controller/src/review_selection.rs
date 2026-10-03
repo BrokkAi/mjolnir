@@ -212,6 +212,10 @@ pub(crate) async fn resolve(
                 return Ok(resolved);
             }
             Err(error) if settings.profile.is_some() => return Err(error),
+            // The session was busy, not the candidate: stop here so the
+            // caller waits for that operation and asks again, instead of
+            // refusing every candidate while a checkpoint holds the worker.
+            Err(error) if preempted_by_lifecycle(&format!("{error:#}")) => return Err(error),
             Err(error) => {
                 tracing::warn!(profile = %candidate.id, %error, "Auto reviewer candidate unavailable");
                 reasons.push(format!("{}: {error:#}", candidate.id));
@@ -388,6 +392,16 @@ async fn resolve_candidate(
         automatic,
         same_provider: false,
     })
+}
+
+/// Whether a refusal only says another operation held the session: a lease
+/// refused the reviewer action, a lease taken meanwhile cancelled it, or the
+/// worker turned reviewer work away during a checkpoint or replacement (the
+/// recovery copy a finished turn starts, or an upgrade to the current build).
+pub(crate) fn preempted_by_lifecycle(reason: &str) -> bool {
+    reason.contains("session is reserved for a lifecycle operation")
+        || reason.contains("cancelled for session lifecycle change")
+        || reason.contains("worker is reserved for checkpoint or replacement")
 }
 
 #[cfg(test)]
@@ -669,5 +683,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod preemption_tests {
+    use super::preempted_by_lifecycle;
+
+    /// The worker's refusal while a finished turn's recovery copy or a build
+    /// upgrade holds it is about the session, not the reviewer candidate, so
+    /// an Auto choice waits and asks again instead of skipping every
+    /// candidate (Series 34 #3444, 2026-10-03: four Codex profiles refused in
+    /// five seconds, then "No usable Auto reviewer").
+    #[test]
+    fn a_worker_reserved_for_checkpoint_is_a_lifecycle_preemption() {
+        let refusal = "relay 2.28.0 could not perform reviewer_start: relay rejected request \
+                       (InvalidState): worker is reserved for checkpoint or replacement; \
+                       reviewer work was not admitted";
+        assert!(preempted_by_lifecycle(refusal));
+        assert!(preempted_by_lifecycle(
+            "session is reserved for a lifecycle operation"
+        ));
+        assert!(!preempted_by_lifecycle(
+            "does not advertise model gpt-6-luna"
+        ));
     }
 }
