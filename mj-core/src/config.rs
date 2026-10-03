@@ -172,6 +172,11 @@ pub enum SessionReview {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Quick or extended, for this session's automatic reviews and its
+        /// `/review`. Stored only when chosen, so choices made before tiers
+        /// could be set per session read back unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<crate::review::lanes::ReviewTier>,
     },
 }
 
@@ -183,13 +188,20 @@ impl ReviewConfig {
         match session {
             None => {}
             Some(SessionReview::Off) => config.enabled = false,
-            Some(SessionReview::On { model, effort }) => {
+            Some(SessionReview::On {
+                model,
+                effort,
+                tier,
+            }) => {
                 config.enabled = true;
                 if model.is_some() {
                     config.model.clone_from(model);
                 }
                 if effort.is_some() {
                     config.effort.clone_from(effort);
+                }
+                if let Some(tier) = tier {
+                    config.tier = *tier;
                 }
             }
         }

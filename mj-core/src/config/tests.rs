@@ -2077,6 +2077,7 @@ fn a_session_review_choice_overrides_only_what_it_names() {
     let on = SessionReview::On {
         model: Some("session-model".into()),
         effort: None,
+        tier: None,
     };
     let off_globally = ReviewConfig {
         enabled: false,
@@ -2087,9 +2088,28 @@ fn a_session_review_choice_overrides_only_what_it_names() {
         ReviewConfig {
             enabled: true,
             model: Some("session-model".into()),
-            ..global
+            ..global.clone()
         },
         "on arms review and keeps the effort it did not name"
+    );
+    let quick_globally = ReviewConfig {
+        tier: crate::review::lanes::ReviewTier::Quick,
+        ..global.clone()
+    };
+    let extended = SessionReview::On {
+        model: None,
+        effort: None,
+        tier: Some(crate::review::lanes::ReviewTier::Extended),
+    };
+    assert_eq!(
+        quick_globally.for_session(Some(&extended)).tier,
+        crate::review::lanes::ReviewTier::Extended,
+        "a session's tier overrides the configured one"
+    );
+    assert_eq!(
+        quick_globally.for_session(Some(&on)).tier,
+        crate::review::lanes::ReviewTier::Quick,
+        "a session that names no tier keeps the configured one"
     );
 }
 
@@ -2099,6 +2119,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     let on = SessionReview::On {
         model: Some("gpt-6-astra".into()),
         effort: None,
+        tier: None,
     };
     assert_eq!(
         serde_json::to_string(&on).unwrap(),
@@ -2112,8 +2133,35 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
         serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
         SessionReview::On {
             model: None,
-            effort: None
+            effort: None,
+            tier: None,
         }
+    );
+    // A choice stored before tiers could be set per session reads back
+    // unchanged; a tier is stored only when one was chosen.
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(
+            r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
+        )
+        .unwrap(),
+        SessionReview::On {
+            model: Some("gpt-6-luna".into()),
+            effort: Some("max".into()),
+            tier: None,
+        }
+    );
+    let extended = SessionReview::On {
+        model: None,
+        effort: None,
+        tier: Some(crate::review::lanes::ReviewTier::Extended),
+    };
+    assert_eq!(
+        serde_json::to_string(&extended).unwrap(),
+        r#"{"mode":"on","tier":"extended"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
+        extended
     );
 }
 

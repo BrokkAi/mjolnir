@@ -154,9 +154,14 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
+    /// Review every turn of this session at this tier, even when `[review]`
+    /// is off: `quick` (one reviewer and a validator) or `extended` (a
+    /// supervisor that can dispatch specialist lanes).
+    #[arg(long, value_parser = ["quick", "extended"])]
+    review_tier: Option<String>,
     /// Do not review this session's turns automatically, even when `[review]`
     /// is on. `/review` still reviews on request.
-    #[arg(long, conflicts_with_all = ["review_model", "review_effort"])]
+    #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
     no_review: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 8 CPUs, capped at the host's.
@@ -840,13 +845,36 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
 
 /// The session's own turn-review choice, or `None` to follow `[review]`.
 fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> {
+    session_review(
+        args.no_review,
+        args.review_model.as_deref(),
+        args.review_effort.as_deref(),
+        args.review_tier.as_deref(),
+    )
+}
+
+/// A session's own turn-review choice from the `--review-*` flags `mj new`
+/// and `mj import` share: off, on with what was named, or `None` to follow
+/// `[review]` when nothing was named. Clap has already limited `tier` to
+/// `quick` and `extended`.
+pub(crate) fn session_review(
+    off: bool,
+    model: Option<&str>,
+    effort: Option<&str>,
+    tier: Option<&str>,
+) -> Option<mj_core::config::SessionReview> {
     use mj_core::config::SessionReview;
-    if args.no_review {
+    if off {
         return Some(SessionReview::Off);
     }
-    (args.review_model.is_some() || args.review_effort.is_some()).then(|| SessionReview::On {
-        model: args.review_model.clone(),
-        effort: args.review_effort.clone(),
+    let tier = tier.map(|tier| match tier {
+        "extended" => mj_core::review::lanes::ReviewTier::Extended,
+        _ => mj_core::review::lanes::ReviewTier::Quick,
+    });
+    (model.is_some() || effort.is_some() || tier.is_some()).then(|| SessionReview::On {
+        model: model.map(str::to_owned),
+        effort: effort.map(str::to_owned),
+        tier,
     })
 }
 
@@ -2382,6 +2410,7 @@ mod tests {
             Some(SessionReview::On {
                 model: Some("gpt-6-astra".into()),
                 effort: None,
+                tier: None,
             })
         );
         assert_eq!(
@@ -2389,8 +2418,22 @@ mod tests {
             Some(SessionReview::On {
                 model: None,
                 effort: Some("high".into()),
+                tier: None,
             })
         );
+        assert_eq!(
+            parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
+            Some(SessionReview::On {
+                model: Some("gpt-6-luna".into()),
+                effort: None,
+                tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+            })
+        );
+        assert!(
+            parse(&["--review-tier", "thorough"]).is_err(),
+            "only quick and extended are tiers"
+        );
+        assert!(parse(&["--no-review", "--review-tier", "quick"]).is_err());
         let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
             .expect_err("off and a reviewer model contradict each other");
         assert!(error.to_string().contains("--review-model"), "{error}");

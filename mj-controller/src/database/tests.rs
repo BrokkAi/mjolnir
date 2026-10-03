@@ -1211,6 +1211,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     record.review = Some(mj_core::config::SessionReview::On {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
+        tier: Some(mj_core::review::lanes::ReviewTier::Extended),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;

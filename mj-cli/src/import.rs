@@ -82,6 +82,20 @@ pub(crate) struct NativeImportArgs {
     /// Proceed after acknowledging edited non-Git or scratch directories will be omitted.
     #[arg(long)]
     allow_omitted_non_git: bool,
+    /// Review every turn of the imported session with this model, as
+    /// `mj new --review-model` does.
+    #[arg(long)]
+    review_model: Option<String>,
+    /// Review every turn of the imported session at this reasoning effort.
+    #[arg(long)]
+    review_effort: Option<String>,
+    /// Review every turn of the imported session at this tier: `quick` or
+    /// `extended`.
+    #[arg(long, value_parser = ["quick", "extended"])]
+    review_tier: Option<String>,
+    /// Do not review the imported session's turns automatically.
+    #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
+    no_review: bool,
     #[command(flatten)]
     pub(crate) workspace: crate::WorkspaceName,
 }
@@ -208,6 +222,10 @@ pub(crate) fn import_named_native_session(
             title: None,
             allow_dirty_local: false,
             allow_omitted_non_git: false,
+            review_model: None,
+            review_effort: None,
+            review_tier: None,
+            no_review: false,
             workspace: crate::WorkspaceName::default(),
         },
         &source,
@@ -295,6 +313,12 @@ fn import_native(
         .get_mut(&imported.session_id)
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
+    session.review = crate::api_commands::session_review(
+        args.no_review,
+        args.review_model.as_deref(),
+        args.review_effort.as_deref(),
+        args.review_tier.as_deref(),
+    );
     persist_imported_session(session)?;
     println!("{}", import_success_message(&imported));
     Ok(Some(imported.session_id))
@@ -963,6 +987,62 @@ mod tests {
         assert!(
             import_source(&config, HarnessKind::Codex, Some("claude")).is_err(),
             "a profile for another harness holds none of its sessions"
+        );
+    }
+
+    /// An imported session can choose its own turn review, with the flags
+    /// `mj new` takes, and they build the same stored choice.
+    #[test]
+    fn an_import_can_choose_the_sessions_review() {
+        let (_, args) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--review-model",
+            "gpt-6-luna",
+            "--review-effort",
+            "max",
+            "--review-tier",
+            "extended",
+        ]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                args.no_review,
+                args.review_model.as_deref(),
+                args.review_effort.as_deref(),
+                args.review_tier.as_deref(),
+            ),
+            Some(mj_core::config::SessionReview::On {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("max".into()),
+                tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+            })
+        );
+        let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                plain.no_review,
+                plain.review_model.as_deref(),
+                plain.review_effort.as_deref(),
+                plain.review_tier.as_deref(),
+            ),
+            None,
+            "an import that names nothing follows [review]"
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "mj",
+                "import",
+                "codex",
+                "--session",
+                "native-1",
+                "--no-review",
+                "--review-tier",
+                "quick",
+            ])
+            .is_err()
         );
     }
 

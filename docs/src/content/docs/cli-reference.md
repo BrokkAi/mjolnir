@@ -103,6 +103,8 @@ mj import <harness> (--session <uuid> | --latest) [options]
 | `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Review every turn of the imported session with that model, effort or tier, as `mj new` does. |
+| `--no-review` | Do not review the imported session's turns automatically. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
 Import never edits the harness's source transcript. It builds and verifies a Mjolnir recovery archive, creates a suspended session record, and makes that record available through `prefix+g`.
@@ -208,8 +210,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--title <text>]
        [--model <name>] [--effort <name>] [--subagents native|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
-       [--review-model <name>] [--review-effort <name>] [--no-review]
-       [--cpus <count>] [--memory-gib <GiB>]
+       [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
+       [--no-review] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -262,11 +264,12 @@ cannot be combined with a session that runs directly in the selected directory.
   session without changing its settings. `all-models` is no longer accepted.
   The old `--mj-subagents` and
   `--native-subagents` flags are no longer accepted.
-- `mj new --review-model <name>` and `--review-effort <name>` review every
-  turn of the new session with that model or effort, even when `[review]` is
-  off. `--no-review` turns off automatic review for the session, even when
-  `[review]` is on; `/review` still works. See
-  [per-session settings](/turn-review/#per-session-settings).
+- `mj new --review-model <name>`, `--review-effort <name>` and
+  `--review-tier quick|extended` review every turn of the new session with
+  that model, effort or tier, even when `[review]` is off. `--no-review` turns
+  off automatic review for the session, even when `[review]` is on; `/review`
+  still works. `mj import <harness>` takes the same four flags for the session
+  it adopts. See [per-session settings](/turn-review/#per-session-settings).
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
   that host, else 8 CPUs and 32 GiB, capped at the host's totals.

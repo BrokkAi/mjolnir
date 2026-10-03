@@ -417,7 +417,7 @@ fn validate_action_against(
             subagents: _,
             review,
         } => {
-            if let Some(mj_core::config::SessionReview::On { model, effort }) = review
+            if let Some(mj_core::config::SessionReview::On { model, effort, .. }) = review
                 && [model, effort].into_iter().flatten().any(|value| {
                     value.trim().is_empty()
                         || value.len() > 256

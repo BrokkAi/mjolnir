@@ -54,9 +54,10 @@ With `enabled = false`, both `/review` and plan second opinion remain available.
 
 ### Per-session settings
 
-`mj new` can override these settings for the session it creates:
+`mj new` can override these settings for the session it creates, and `mj import <harness>` for the session it adopts:
 
 - `--review-model <model>` and `--review-effort <effort>` turn on automatic review for that session, even when `enabled = false`. They replace `model` and `effort` for that session's turn reviews. When `[review]` names a profile, the model must be one that profile offers. In Auto, Mjolnir uses the first enabled profile, in Auto's usual order, that offers the model, including profiles Auto has no policy for. A named effort replaces the policy's effort.
+- `--review-tier quick|extended` turns on automatic review for that session at that tier, even when `enabled = false`, and replaces `tier` for its automatic reviews and its `/review`.
 - `--no-review` turns off automatic review for that session, even when `enabled = true`. `/review` still reviews a turn on request.
 
 The choice is stored with the session and kept when it resumes. A session created without these flags follows `[review]`. Plan second opinion always uses `[review]`.
