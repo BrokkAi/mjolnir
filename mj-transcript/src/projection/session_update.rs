@@ -193,6 +193,40 @@ pub(super) fn project_session_update(
                     mutation.session_title = Some(normalize_session_title(title));
                 }
             }
+            // A bridge that sends typed failures sends its warnings, retries
+            // and errors outside a turn this way rather than as agent text.
+            // One line per record: a later revision rewrites it in place.
+            if let Some(failure) =
+                mj_core::diagnostic::SessionFailure::from_meta(update.meta.as_ref())
+            {
+                let label = if failure.is_error() {
+                    "error"
+                } else {
+                    "warning"
+                };
+                let mut text = format!("{label}: {}", failure.title.trim());
+                if let Some(details) = &failure.details {
+                    text = format!("{text}: {}", details.trim());
+                }
+                let stable_id = format!("session-failure:{}", failure.id);
+                let item = match index.get(&stable_id) {
+                    Some(existing) => {
+                        let mut item = TranscriptItem::clone(existing);
+                        item.body = TranscriptBody::System { text };
+                        item.last_changed_at_ms = event.recorded_at_ms;
+                        item
+                    }
+                    None => TranscriptItem {
+                        stable_id,
+                        position: event.ordinal,
+                        latest_content_event_ordinal: None,
+                        created_at_ms: event.recorded_at_ms,
+                        last_changed_at_ms: event.recorded_at_ms,
+                        body: TranscriptBody::System { text },
+                    },
+                };
+                upsert(mutation, item);
+            }
         }
         SessionUpdate::UsageUpdate(update) => {
             if let Some(cost) = &update.cost {

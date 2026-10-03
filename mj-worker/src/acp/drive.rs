@@ -1392,19 +1392,46 @@ pub(super) fn prompt_error_outcome(
     diagnostic: &mj_core::diagnostic::TurnDiagnostic,
     last_agent_message: &str,
 ) -> (String, Option<String>) {
-    let stop_reason = if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex)
-        && diagnostic.is_usage_limit()
-    {
-        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
-    } else {
-        PROMPT_ERROR_STOP_REASON.to_owned()
-    };
+    let stop_reason = failed_turn_stop_reason(harness, diagnostic);
     let warning = prompt_failure_warning(harness, error);
     let repeated = readable_prompt_error(error).is_some_and(|line| {
         warning == format!("prompt failed: {line}")
             && single_spaced(last_agent_message).contains(&line)
     });
     (stop_reason, (!repeated).then_some(warning))
+}
+
+/// The stop reason of a turn the bridge failed: a usage limit puts Kimi and
+/// Codex sessions in the quota-blocked state, anything else is an error.
+fn failed_turn_stop_reason(
+    harness: HarnessKind,
+    diagnostic: &mj_core::diagnostic::TurnDiagnostic,
+) -> String {
+    if matches!(harness, HarnessKind::Kimi | HarnessKind::Codex) && diagnostic.is_usage_limit() {
+        mj_core::diagnostic::QUOTA_STOP_REASON.to_owned()
+    } else {
+        PROMPT_ERROR_STOP_REASON.to_owned()
+    }
+}
+
+/// The stop reason and warning of a turn the bridge answered as an ordinary
+/// end of turn but with a typed failure record (codex-acp does this for every
+/// failed turn once Mjolnir asks for `sessionFailure`; issue 1217). The
+/// bridge no longer streams the error as agent text, so the warning line is
+/// the only place the conversation shows it.
+pub(super) fn session_failure_outcome(
+    harness: HarnessKind,
+    diagnostic: &mj_core::diagnostic::TurnDiagnostic,
+) -> (String, String) {
+    let label = if diagnostic.is_usage_limit() {
+        "prompt failed (usage limit reached)"
+    } else {
+        "prompt failed"
+    };
+    (
+        failed_turn_stop_reason(harness, diagnostic),
+        format!("{label}: {}", single_spaced(&diagnostic.message)),
+    )
 }
 
 /// The warning a failed prompt leaves in the conversation.

@@ -588,6 +588,42 @@ fn only_harness_observations_request_credential_sync() {
     );
 }
 
+/// A bridge that sends typed failures reports a rejected login outside a
+/// turn as an `access` record, not as text a signature could match.
+#[test]
+fn a_typed_login_failure_record_asks_for_a_credential_sync() {
+    let event = |observation| RelayEvent {
+        format: crate::relay::RELAY_EVENT_FORMAT_V1,
+        ordinal: 1,
+        previous_digest: crate::relay::RELAY_EVENT_GENESIS_DIGEST.into(),
+        digest: "a".repeat(64),
+        recorded_at_ms: 1,
+        command_id: None,
+        observation,
+    };
+    let record = |category: &str, title: &str| {
+        let meta = serde_json::json!({"jetbrains": {"air": {"version": 1, "sessionFailure": {
+            "id": "session:error:1", "revision": 1, "category": category,
+            "severity": "error", "title": title, "actions": []}}}});
+        event(RelayObservation::SessionUpdate {
+            update: Box::new(
+                agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(
+                    agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                        .meta(meta.as_object().cloned()),
+                ),
+            ),
+        })
+    };
+    assert_eq!(
+        relay_event_credential_sync_reason(&record("access", "Sign in again.")),
+        Some(CredentialSyncReason::AuthenticationFailure)
+    );
+    assert_eq!(
+        relay_event_credential_sync_reason(&record("service", "Codex is overloaded.")),
+        None
+    );
+}
+
 #[test]
 fn login_commands_match_each_harness_cli() {
     let profile = |kind: HarnessKind| HarnessProfile {

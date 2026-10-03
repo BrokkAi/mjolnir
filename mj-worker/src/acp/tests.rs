@@ -7970,3 +7970,133 @@ async fn a_form_the_harness_withdraws_still_resolves() {
     let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
     bridge.abort();
 }
+
+/// A codex-acp that, once asked for typed failures, ends the first prompt the
+/// way it ended issue 1217's: `end_turn`, no agent text, and the provider's
+/// error as a `sessionFailure` record on the response. Reports whether the
+/// worker's `initialize` asked for the records.
+async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    let mut asked = false;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let request: serde_json::Value =
+            serde_json::from_str(&line).expect("fake adapter input is JSON-RPC");
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let result = match method {
+            "initialize" => {
+                asked = request
+                    .pointer("/params/clientCapabilities/_meta/jetbrains/air/capabilities")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|names| names.iter().any(|name| name == "sessionFailure"));
+                serde_json::json!({"protocolVersion": 1})
+            }
+            "session/new" => serde_json::json!({
+                "sessionId": "typed-failure",
+                "modes": {
+                    "currentModeId": "agent",
+                    "availableModes": [{"id": "agent", "name": "Agent"}],
+                },
+            }),
+            "session/prompt" => serde_json::json!({
+                "stopReason": "end_turn",
+                "_meta": {"quota": {}, "jetbrains": {"air": {"version": 1, "sessionFailure": {
+                    "id": "turn-1:error", "revision": 1, "category": "service",
+                    "severity": "error", "actions": ["retry"],
+                    "title": "{\"type\":\"error\",\"error\":{\"message\":\"model 'gpt-6-luna' is not enabled in rustponsesapi\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null},\"status\":400}",
+                }}}},
+            }),
+            _ if !id.is_null() => serde_json::json!({}),
+            _ => continue,
+        };
+        let message = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        if write
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    asked
+}
+
+/// Issue 1217: codex-acp answered a turn whose model request failed with an
+/// ordinary end of turn, so the turn counted as finished and a sub-agent was
+/// told to hand back. With typed failures the turn fails, carries the
+/// provider's sentence and status, and the conversation gets one line.
+#[tokio::test]
+async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(typed_failure_bridge(bridge_stream));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = reload_fallback_spec(HarnessKind::Codex);
+    spec.resume_session = None;
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "task".into(),
+            prompt: vec![ContentBlock::Text(TextContent::new("Do the task."))],
+        })
+        .await
+        .unwrap();
+    let mut warnings = Vec::new();
+    let (stop_reason, diagnostic) = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("the runtime keeps reporting")
+            .expect("the runtime keeps its event channel");
+        match event {
+            RuntimeEvent::Warning { message } if message.starts_with("prompt") => {
+                warnings.push(message)
+            }
+            RuntimeEvent::PromptFinished {
+                stop_reason,
+                diagnostic,
+                ..
+            } => break (stop_reason, diagnostic),
+            _ => {}
+        }
+    };
+    assert_eq!(stop_reason, PROMPT_ERROR_STOP_REASON);
+    let diagnostic = diagnostic.expect("a failed turn carries its diagnostic");
+    assert_eq!(
+        diagnostic.message,
+        "model 'gpt-6-luna' is not enabled in rustponsesapi"
+    );
+    assert_eq!(diagnostic.http_status, Some(400));
+    assert_eq!(
+        warnings,
+        vec!["prompt failed: model 'gpt-6-luna' is not enabled in rustponsesapi".to_owned()],
+        "one line, not the empty-response warning"
+    );
+
+    drop(request_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), driver).await;
+    assert!(
+        bridge.await.unwrap(),
+        "a Codex worker asks the bridge for typed failures"
+    );
+}

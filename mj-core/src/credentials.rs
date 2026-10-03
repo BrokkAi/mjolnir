@@ -494,7 +494,7 @@ pub fn text_reports_auth_failure(text: &str) -> bool {
 /// rejected its login. Codex sends `codexErrorInfo: "unauthorized"` (R14-1),
 /// and a turn's diagnostic keeps that kind as its code. Matched against the
 /// code only, never against free text, where "401 Unauthorized" is common.
-const AUTH_FAILURE_ERROR_KINDS: [&str; 1] = ["unauthorized"];
+const AUTH_FAILURE_ERROR_KINDS: [&str; 1] = [crate::diagnostic::AUTH_FAILURE_KIND];
 
 /// Whether a failed turn's diagnostic says the provider rejected the
 /// session's login: by its error kind, or by an auth failure phrase in its
@@ -564,6 +564,17 @@ pub fn relay_event_credential_sync_reason(event: &RelayEvent) -> Option<Credenti
                 }
                 _ => None,
             },
+            // A bridge's typed failure record, here one that arrived outside a
+            // turn; a failed turn's record reaches the turn's diagnostic.
+            SessionUpdate::SessionInfoUpdate(update) => {
+                crate::diagnostic::SessionFailure::from_meta(update.meta.as_ref())
+                    .filter(|failure| {
+                        turn_diagnostic_reports_auth_failure(&TurnDiagnostic::from_session_failure(
+                            failure,
+                        ))
+                    })
+                    .map(|_| CredentialSyncReason::AuthenticationFailure)
+            }
             _ => None,
         },
         _ => None,

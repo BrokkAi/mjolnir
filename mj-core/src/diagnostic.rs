@@ -92,6 +92,105 @@ impl TurnDiagnostic {
     }
 }
 
+/// A failure record a bridge attaches under `_meta.jetbrains.air.sessionFailure`
+/// when the client lists `sessionFailure` among its AIR capabilities: on the
+/// prompt response of a turn that failed (whose stop reason still says
+/// `end_turn`), and on `session_info_update` for warnings and retries. Records
+/// that share an `id` are revisions of one notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFailure {
+    pub id: String,
+    /// `connection`, `access`, `limit`, `request`, `service` or `unknown`.
+    pub category: String,
+    /// `error` or `warning`; a record without one is an error.
+    pub severity: String,
+    pub title: String,
+    pub details: Option<String>,
+    /// What the bridge says may help: `retry`, `login`, `new_session`.
+    pub actions: Vec<String>,
+}
+
+impl SessionFailure {
+    pub fn from_meta(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<Self> {
+        let record = meta?.get("jetbrains")?.get("air")?.get("sessionFailure")?;
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Some(Self {
+            id: text("id").unwrap_or_default(),
+            category: text("category").unwrap_or_default(),
+            severity: text("severity").unwrap_or_else(|| "error".to_owned()),
+            title: text("title")?,
+            details: text("details").filter(|details| !details.trim().is_empty()),
+            actions: record
+                .get("actions")
+                .and_then(serde_json::Value::as_array)
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.severity != "warning"
+    }
+}
+
+impl TurnDiagnostic {
+    /// The diagnostic of a turn the bridge reported as failed with a typed
+    /// record. The record leaves out Codex's error kind, which quota handling
+    /// and credential sync read from the code, so the two kinds they need are
+    /// recovered from the bridge's policy table, where each maps to exactly
+    /// one category and action set: only an exhausted plan is `limit` with no
+    /// actions (a rate limit offers `retry`, a full context `new_session`), and
+    /// only a rejected login is `access`. Any other failure keeps its category.
+    ///
+    /// Codex often passes the provider's error body through as the title
+    /// (`{"type":"error","error":{"message":...},"status":400}`); the
+    /// diagnostic then takes the provider's sentence and status from it.
+    pub fn from_session_failure(failure: &SessionFailure) -> Self {
+        let code = match failure.category.as_str() {
+            "limit" if failure.actions.is_empty() => "usageLimitExceeded",
+            "access" => AUTH_FAILURE_KIND,
+            "" => "session_failure",
+            category => category,
+        };
+        let mut diagnostic = Self {
+            message: failure.title.clone(),
+            code: Some(code.to_owned()),
+            http_status: None,
+            reset_at: None,
+        };
+        if let Ok(body) = serde_json::from_str::<serde_json::Value>(&failure.title)
+            && let Some(message) = body
+                .pointer("/error/message")
+                .or_else(|| body.get("message"))
+                .and_then(serde_json::Value::as_str)
+        {
+            diagnostic.message = message.to_owned();
+            diagnostic.http_status = body
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok());
+        }
+        if let Some(details) = &failure.details {
+            diagnostic.message = format!("{}: {details}", diagnostic.message);
+        }
+        diagnostic
+    }
+}
+
+/// Codex's error kind for a rejected login, which credential sync matches.
+pub const AUTH_FAILURE_KIND: &str = "unauthorized";
+
 /// The kind of error the Codex bridge names beside the JSON-RPC code, in
 /// either spelling its versions use: a string such as `usageLimitExceeded`,
 /// or an object whose single key is the kind.
@@ -158,5 +257,72 @@ mod tests {
             };
             assert!(!ordinary.is_usage_limit(), "{message}");
         }
+    }
+
+    fn record(category: &str, actions: &[&str], title: &str) -> SessionFailure {
+        let meta = serde_json::json!({"quota": {}, "jetbrains": {"air": {"version": 1,
+            "sessionFailure": {"id": "turn:error", "revision": 1, "category": category,
+                "severity": "error", "title": title, "actions": actions}}}});
+        SessionFailure::from_meta(meta.as_object()).expect("a failure record")
+    }
+
+    /// Issue 1217: the failed turn's record, as codex-acp sends it.
+    #[test]
+    fn a_typed_provider_failure_keeps_the_providers_sentence_and_status() {
+        let failure = record(
+            "service",
+            &["retry"],
+            r#"{"type":"error","error":{"message":"model 'gpt-6-luna' is not enabled in rustponsesapi","type":"invalid_request_error","param":null,"code":null},"status":400}"#,
+        );
+        assert!(failure.is_error());
+        let diagnostic = TurnDiagnostic::from_session_failure(&failure);
+        assert_eq!(
+            diagnostic.message,
+            "model 'gpt-6-luna' is not enabled in rustponsesapi"
+        );
+        assert_eq!(diagnostic.http_status, Some(400));
+        assert_eq!(diagnostic.code.as_deref(), Some("service"));
+        assert!(!diagnostic.is_usage_limit());
+    }
+
+    /// The record drops Codex's error kind; the two kinds Mjolnir acts on
+    /// come back from the bridge's category and actions.
+    #[test]
+    fn a_typed_usage_limit_or_login_failure_keeps_the_kind_mjolnir_acts_on() {
+        let exhausted = TurnDiagnostic::from_session_failure(&record(
+            "limit",
+            &[],
+            "You've hit your usage limit.",
+        ));
+        assert!(exhausted.is_usage_limit());
+        let throttled = TurnDiagnostic::from_session_failure(&record(
+            "limit",
+            &["retry"],
+            "Rate limit reached for requests.",
+        ));
+        assert!(!throttled.is_usage_limit());
+        let login = TurnDiagnostic::from_session_failure(&record(
+            "access",
+            &["login"],
+            "Your access token could not be refreshed.",
+        ));
+        assert!(crate::credentials::turn_diagnostic_reports_auth_failure(
+            &login
+        ));
+    }
+
+    #[test]
+    fn a_warning_record_is_not_a_failed_turn_and_other_meta_is_not_a_record() {
+        let meta = serde_json::json!({"jetbrains": {"air": {"sessionFailure": {
+            "id": "turn:error", "category": "connection", "severity": "warning",
+            "title": "Reconnecting... 1/5", "actions": []}}}});
+        assert!(
+            !SessionFailure::from_meta(meta.as_object())
+                .unwrap()
+                .is_error()
+        );
+        let goal = serde_json::json!({"jetbrains": {"air": {"goal": null}}});
+        assert!(SessionFailure::from_meta(goal.as_object()).is_none());
+        assert!(SessionFailure::from_meta(None).is_none());
     }
 }

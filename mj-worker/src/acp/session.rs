@@ -38,7 +38,10 @@ pub(super) async fn serve_session(
             serde_json::json!({
                 "air": {
                     "version": 1,
-                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions", "nativeSubagentAvailability"] } else { vec!["nativeSubagentSessions", "nativeSubagentAvailability"] }
+                    // `sessionFailure` makes codex-acp report a failed turn
+                    // with a typed record instead of an ordinary end of turn
+                    // whose error is agent text (issue 1217).
+                    "capabilities": if spec.harness == HarnessKind::Claude { vec!["asyncTasks", "nativeSubagentSessions", "nativeSubagentAvailability"] } else { vec!["nativeSubagentSessions", "nativeSubagentAvailability", "sessionFailure"] }
                 }
             }),
         );
@@ -871,7 +874,19 @@ pub(super) async fn serve_session(
                                             }).await?,
                                         }
                                     }
-                                    if !asked_to_compact
+                                    let failure = mj_core::diagnostic::SessionFailure::from_meta(response.meta.as_ref())
+                                        .filter(mj_core::diagnostic::SessionFailure::is_error);
+                                    if let Some(failure) = failure {
+                                        // The bridge failed the turn; its stop
+                                        // reason says end_turn only because ACP
+                                        // has no failed one.
+                                        tracing::warn!(harness = ?spec.harness, category = %failure.category, title = %failure.title, "prompt failed");
+                                        let failed = mj_core::diagnostic::TurnDiagnostic::from_session_failure(&failure);
+                                        let (stop_reason, message) = session_failure_outcome(spec.harness, &failed);
+                                        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+                                        diagnostic = Some(failed);
+                                        stop_reason
+                                    } else if !asked_to_compact
                                         && prompt_returned_without_updates(
                                             &response.stop_reason,
                                             updates_before,

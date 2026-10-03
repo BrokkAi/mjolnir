@@ -3127,3 +3127,42 @@ fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
         TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT
     )));
 }
+
+/// With typed failures, codex-acp sends its warnings and retry notices as
+/// records instead of agent text. Each shows as one line, and a later
+/// revision of the same record rewrites that line.
+#[test]
+fn a_bridge_failure_record_is_one_line_that_its_revisions_rewrite() {
+    let record = |revision: u64, severity: &str, title: &str| {
+        let meta = json!({"jetbrains": {"air": {"version": 1, "sessionFailure": {
+            "id": "turn-1:error", "revision": revision, "category": "connection",
+            "severity": severity, "title": title, "actions": []}}}});
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::SessionInfoUpdate(
+                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                    .meta(meta.as_object().cloned()),
+            )),
+        }
+    };
+    let lines = |session: &MaterializedSession| -> Vec<String> {
+        session
+            .transcript
+            .iter()
+            .filter_map(|item| match &item.body {
+                TranscriptBody::System { text }
+                    if item.stable_id.starts_with("session-failure:") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let mut session = MaterializedSession::empty("session-1");
+    apply_observation(&mut session, record(1, "warning", "Reconnecting... 1/5"));
+    assert_eq!(lines(&session), vec!["warning: Reconnecting... 1/5"]);
+    apply_observation(&mut session, record(2, "warning", "Reconnecting... 2/5"));
+    assert_eq!(lines(&session), vec!["warning: Reconnecting... 2/5"]);
+    apply_observation(&mut session, record(3, "error", "stream disconnected"));
+    assert_eq!(lines(&session), vec!["error: stream disconnected"]);
+}
