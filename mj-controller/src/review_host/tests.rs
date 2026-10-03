@@ -415,8 +415,10 @@ struct FakeEnvironment {
     subagent: std::sync::atomic::AtomicBool,
     /// Refusals the next reviewer resolutions answer with, in order.
     resolve_refusals: Mutex<std::collections::VecDeque<String>>,
-    /// How many times the host waited for background work on the session.
-    background_waits: std::sync::atomic::AtomicUsize,
+    /// How many background holds the host took on the session.
+    background_holds: std::sync::atomic::AtomicUsize,
+    /// How many of those holds are still held.
+    live_holds: Arc<std::sync::atomic::AtomicUsize>,
     /// Set to make reviewer resolution wait forever, the way an Auto
     /// reviewer choice can take minutes on a real host (I2-10).
     resolve_hangs: std::sync::atomic::AtomicBool,
@@ -473,7 +475,8 @@ impl FakeEnvironment {
             save_gate: Mutex::new(None),
             subagent: std::sync::atomic::AtomicBool::new(false),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
-            background_waits: std::sync::atomic::AtomicUsize::new(0),
+            background_holds: std::sync::atomic::AtomicUsize::new(0),
+            live_holds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             resolve_hangs: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -485,9 +488,13 @@ impl FakeEnvironment {
             .push_back(reason.to_owned());
     }
 
-    fn background_waits(&self) -> usize {
-        self.background_waits
+    fn background_holds(&self) -> usize {
+        self.background_holds
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn live_holds(&self) -> usize {
+        self.live_holds.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn state(&self) -> TurnReviewState {
@@ -637,14 +644,26 @@ impl ReviewEnvironment for FakeEnvironment {
         Ok(owner.filter(|_| interrupted).into_iter().collect())
     }
 
-    fn background_work_settled<'a>(
+    fn hold_background_work<'a>(
         &'a self,
         _session_id: &'a str,
         _deadline: tokio::time::Instant,
-    ) -> mj_client::session::BoxFuture<'a, ()> {
-        self.background_waits
+    ) -> mj_client::session::BoxFuture<'a, Option<BackgroundHold>> {
+        self.background_holds
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Box::pin(async {})
+        self.live_holds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let hold: BackgroundHold = Box::new(LiveHold(self.live_holds.clone()));
+        Box::pin(async move { Some(hold) })
+    }
+}
+
+/// Counts itself out of the fake's live holds when the host drops it.
+struct LiveHold(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for LiveHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -678,9 +697,9 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert_eq!(
-        environment.background_waits(),
+        environment.background_holds(),
         1,
-        "the capture waited for background work, and no reviewer choice has"
+        "the review holds background work off before it captures"
     );
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
         repositories: vec![mj_core::relay::RepoDelta {
@@ -708,9 +727,14 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
         ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
     ));
     assert_eq!(
-        environment.background_waits(),
-        3,
-        "after the capture's wait, the refused choice and its retry each waited"
+        environment.background_holds(),
+        1,
+        "the retried choice runs under the same hold"
+    );
+    assert_eq!(
+        environment.live_holds(),
+        1,
+        "the open review keeps its hold"
     );
     assert!(
         host.view(session)
@@ -761,10 +785,11 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
     })
     .await
     .expect("the refused review releases prompts");
+    assert_eq!(environment.background_holds(), 1);
     assert_eq!(
-        environment.background_waits(),
-        2,
-        "one wait before the capture and one before the only choice"
+        environment.live_holds(),
+        0,
+        "a review that could not start releases its hold"
     );
     host.shutdown().await.unwrap();
 }
@@ -1127,9 +1152,9 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
     assert_eq!(
-        environment.background_waits(),
-        2,
-        "each capture waited for background work first"
+        environment.background_holds(),
+        1,
+        "the retried capture runs under the same hold"
     );
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
         repositories: vec![mj_core::relay::RepoDelta {
@@ -2036,6 +2061,11 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     .await
     .expect("a clean review releases and durably closes the turn by itself");
     assert!(host.view(session).is_none());
+    assert_eq!(
+        environment.live_holds(),
+        0,
+        "closing the review lets recovery copies and upgrades start again"
+    );
     assert!(
         publications.load(std::sync::atomic::Ordering::SeqCst) > before_identical,
         "closing removes the view and wakes surfaces"

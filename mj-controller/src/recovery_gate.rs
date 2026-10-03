@@ -119,6 +119,51 @@ impl RecoveryGate {
         }
     }
 
+    /// Reserves the session for foreground work that needs its worker to
+    /// itself for a while, such as a turn review, once no background work
+    /// holds it.
+    ///
+    /// Unlike [`Self::reserve`], it does not preempt work already running:
+    /// a recovery copy protects the session's work and finishes in seconds,
+    /// so this waits for it, up to `deadline`. The check and the reservation
+    /// happen under one lock, so no copy or upgrade can start between them.
+    /// Work that is still running at `deadline` is left to finish; the
+    /// reservation is taken anyway, and the caller meets that work's own
+    /// refusal. Background work turned away meanwhile is offered again by the
+    /// daemon's periodic refresh once the reservation is dropped.
+    pub async fn reserve_when_idle(
+        self: &Arc<Self>,
+        session_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> RecoveryReservation {
+        // Subscribing before the first check means a holder that finishes
+        // between the check and the wait still wakes this waiter.
+        let mut busy = self.subscribe();
+        loop {
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !state.busy.contains_key(session_id) || tokio::time::Instant::now() >= deadline {
+                    *state.reservations.entry(session_id.to_owned()).or_default() += 1;
+                    return RecoveryReservation {
+                        session_id: session_id.to_owned(),
+                        gate: self.clone(),
+                    };
+                }
+            }
+            if tokio::time::timeout_at(deadline, busy.changed())
+                .await
+                .is_ok_and(|changed| changed.is_err())
+            {
+                // The gate owns the sender, so this only happens while the
+                // gate is being torn down; stop waiting.
+                tokio::time::sleep_until(deadline).await;
+            }
+        }
+    }
+
     fn release(&self, session_id: &str) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let Some(count) = state.reservations.get_mut(session_id) else {
@@ -571,5 +616,63 @@ mod tests {
         assert!(receiver.try_recv().is_none());
         drop(sender);
         assert_eq!(receiver.recv().await, None);
+    }
+
+    /// A review waits for a recovery copy already running, then holds the
+    /// session so no copy or worker upgrade can start until it is done.
+    #[tokio::test]
+    async fn reserving_when_idle_waits_for_running_work_then_blocks_new_work() {
+        let gate = Arc::new(RecoveryGate::default());
+        let copy = gate.try_start("session-1").expect("the slot starts free");
+        let waiter = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.reserve_when_idle(
+                    "session-1",
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the running copy is not preempted");
+        drop(copy);
+        let reservation = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("the reservation follows the copy")
+            .unwrap();
+        assert!(
+            gate.try_start("session-1").is_none(),
+            "no copy or upgrade starts while the review holds the session"
+        );
+        assert!(
+            gate.try_start("session-2").is_some(),
+            "other sessions are free"
+        );
+        drop(reservation);
+        assert!(gate.try_start("session-1").is_some());
+    }
+
+    /// Work still running at the deadline is not waited for any longer.
+    #[tokio::test]
+    async fn reserving_when_idle_stops_waiting_at_the_deadline() {
+        let gate = Arc::new(RecoveryGate::default());
+        let _copy = gate.try_start("session-1").unwrap();
+        let reservation = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gate.reserve_when_idle(
+                "session-1",
+                tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("the deadline ends the wait");
+        drop(_copy);
+        assert!(
+            gate.try_start("session-1").is_none(),
+            "the reservation holds"
+        );
+        drop(reservation);
+        assert!(gate.try_start("session-1").is_some());
     }
 }

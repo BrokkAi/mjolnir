@@ -114,6 +114,8 @@ New eligible primary sessions capture a review baseline even when automatic revi
 
 Suspending a session while a reviewer conversation is open preserves its result for reference, but that reviewer's native conversation cannot continue after the target is destroyed. A later review starts a new reviewer conversation.
 
+While a review is preparing or running, Mjolnir starts no recovery copy or worker upgrade for that session; a copy already running when the review begins is finished first. Deferred copies and upgrades start as soon as the review closes.
+
 If Mjolnir restarts during a review, it clears the interrupted in-flight marker, releases the prompt hold, and leaves the reviewed boundary unchanged. The next review therefore covers the same changes instead of silently skipping them.
 
 Review traffic is charged through the selected reviewer profile. A different profile ID may still share account-level limits with the primary profile, so check the Profiles pane before selecting an extended review for a large turn. See [configuration](/configuration/#automatic-review-review) for schema details.

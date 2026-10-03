@@ -179,6 +179,11 @@ pub(super) async fn prepare(
     // The capture and the reviewer choice share one bound on waiting for
     // background work.
     let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
+    // From here until the review closes, no recovery copy or worker upgrade
+    // starts on this session: the same finished turn starts both, and either
+    // one would turn the reviewer's work away mid-review. A copy already
+    // running is waited for, not preempted.
+    let background = environment.hold_background_work(session_id, deadline).await;
     // Capture what the turn changed before choosing a reviewer. Choosing one
     // can take minutes (an Auto choice asks each candidate profile), and a
     // turn that changed nothing needs no reviewer at all (I2-10). The capture
@@ -189,20 +194,14 @@ pub(super) async fn prepare(
     let captured = {
         let handle = &handle;
         let baselines = &state.baselines;
-        after_background_work(
-            environment,
-            session_id,
-            deadline,
-            &cancelled,
-            move || async move {
-                handle
-                    .reviewer(ReviewerAction::CaptureDelta {
-                        baselines: baselines.clone(),
-                    })
-                    .await
-                    .map_err(|error| format!("{error:#}"))
-            },
-        )
+        after_background_work(session_id, deadline, &cancelled, move || async move {
+            handle
+                .reviewer(ReviewerAction::CaptureDelta {
+                    baselines: baselines.clone(),
+                })
+                .await
+                .map_err(|error| format!("{error:#}"))
+        })
         .await
     };
     let captured = match captured {
@@ -224,9 +223,10 @@ pub(super) async fn prepare(
             materialized: Box::new(snapshot.materialized),
             resume_forward: None,
             captured,
+            background,
         });
     }
-    let reviewer = after_background_work(environment, session_id, deadline, &cancelled, || {
+    let reviewer = after_background_work(session_id, deadline, &cancelled, || {
         environment.resolve(handle.clone(), config.clone(), cancelled.clone())
     })
     .await
@@ -248,6 +248,7 @@ pub(super) async fn prepare(
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
         captured,
+        background,
     })
 }
 
@@ -302,6 +303,9 @@ pub(super) async fn prepare_recovery(
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
         captured: None,
+        // A handoff only prompts the primary; no reviewer work needs the
+        // worker held.
+        background: None,
     }))
 }
 
@@ -384,16 +388,15 @@ const LEASE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(
 
 pub(super) use crate::review_selection::preempted_by_lifecycle;
 
-/// Runs one step of review preparation once no background work holds the
-/// session.
+/// Runs one step of review preparation, trying again while a lifecycle
+/// operation holds the session.
 ///
-/// A finished turn also starts the automatic recovery copy, and its lease
-/// refuses or cancels the reviewer actions preparation makes: the capture
-/// and the reviewer choice (R4-9). The step waits for that copy and tries
-/// again instead of giving up, until `deadline`. The copy is not held back
-/// for the review: it protects the work, and it takes seconds.
+/// The review's background hold keeps recovery copies and worker upgrades
+/// from starting, but a foreground lifecycle operation (a suspend, a move, a
+/// copy still running when the hold's wait ran out) can still refuse or
+/// cancel the capture or the reviewer choice. The step tries again until
+/// `deadline` instead of giving up.
 async fn after_background_work<T, Step, Attempt>(
-    environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
     deadline: tokio::time::Instant,
     cancelled: &std::sync::atomic::AtomicBool,
@@ -409,9 +412,6 @@ where
             tokio::time::sleep(LEASE_RETRY_PAUSE).await;
         }
         attempt += 1;
-        environment
-            .background_work_settled(session_id, deadline)
-            .await;
         match step().await {
             Err(reason)
                 if preempted_by_lifecycle(&reason)

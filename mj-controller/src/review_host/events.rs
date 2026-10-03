@@ -118,6 +118,9 @@ pub(super) struct Prepared {
     /// What the turn changed, when preparation captured it before choosing a
     /// reviewer. The review starts from this capture instead of asking again.
     pub(super) captured: Option<Vec<mj_core::relay::RepoDelta>>,
+    /// Keeps recovery copies and worker upgrades off the session from
+    /// preparation until the review closes; moved into the review's slot.
+    pub(super) background: Option<BackgroundHold>,
 }
 
 pub(super) struct PendingOpen {
@@ -140,6 +143,8 @@ pub(super) struct ReviewSlot {
     pub(super) roles: BTreeMap<String, RoleTranscript>,
     pub(super) reviewer: ReviewerIdentity,
     pub(super) state: TurnReviewState,
+    /// Released when the slot is removed, which is how every review ends.
+    pub(super) _background: Option<BackgroundHold>,
     /// The sidecar reads a new generation as "this is a different reviewer".
     /// Fresh role launches receive a random nonce, so a later review cannot
     /// reuse the native conversation left by an earlier one.

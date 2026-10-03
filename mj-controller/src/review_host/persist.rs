@@ -157,6 +157,7 @@ impl HostState {
                         roles: BTreeMap::new(),
                         reviewer: pending.prepared.reviewer,
                         state: pending.prepared.state,
+                        _background: pending.prepared.background,
                         // `start_role` assigns a process-wide generation before
                         // every fresh role. Zero remains the explicit
                         // generation for a role that resumes in place.
