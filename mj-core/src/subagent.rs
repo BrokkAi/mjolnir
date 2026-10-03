@@ -580,8 +580,11 @@ impl std::str::FromStr for SubagentMcpRole {
 pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
 
 /// The reminder itself, sent as an ordinary prompt so the child's transcript
-/// shows it.
-pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your report has not been delivered. Call the mj-agents handback tool now with your full report, then stop.";
+/// shows it. A turn can end before the task is done (a harness failure, a
+/// question in plain text), so the reminder must not order a child that has
+/// not finished to stop: that turned a failed first turn into an empty report
+/// (issue 1217).
+pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your turn ended without delivering a report. If your assigned task is finished, call the mj-agents handback tool now with your full report, then stop. If it is not finished, continue working on it, and hand back when it is done.";
 
 /// A child's delegated authority and reporting requirements. Shared
 /// by the first-prompt note, the child's server instructions and the handback

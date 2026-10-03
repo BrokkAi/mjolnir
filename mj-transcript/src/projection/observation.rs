@@ -81,8 +81,10 @@ pub(super) fn project_observation(
                 });
                 push_system(mutation, event, "Clearing context…");
             }
-            command @ (RelayCommand::Prompt { .. }
-            | RelayCommand::ContinueAuthorizedWork { .. }) => {
+            // Every command that carries a prompt starts a user turn, so the
+            // transcript shows what the harness was told. Mjolnir's own
+            // prompts (a handback reminder, a quota resume) included.
+            command if command.prompt_blocks().is_some() => {
                 let prompt = command.prompt_blocks().expect("prompt command");
                 if let RelayCommand::ContinueAuthorizedWork { attempt, .. } = command {
                     push_system(

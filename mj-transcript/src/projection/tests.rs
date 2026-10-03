@@ -3085,3 +3085,45 @@ fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
     );
     assert_eq!(session.transcript.len(), 1);
 }
+
+/// Issue 1217: the reminder ran as "Agent continued on its own", so the
+/// transcript hid the prompt the child was obeying.
+#[test]
+fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
+    let mut session = MaterializedSession::empty("child");
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "handback-reminder-36".into(),
+            command: RelayCommand::HandbackReminder {
+                completed_command_id: "task".into(),
+                completed_ordinal: 36,
+            },
+            created_at_ms: 10,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "handback-reminder-36".into(),
+            started_at_ms: 20,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 21 },
+    );
+
+    let turn = session.active_turn.clone().expect("the reminder's turn");
+    assert_eq!(turn.command_id, "handback-reminder-36");
+    assert!(session.transcript.iter().any(|item| matches!(
+        &item.body,
+        TranscriptBody::User { content }
+            if crate::transcript::materialized_content_text(content)
+                == mj_core::subagent::HANDBACK_REMINDER_TEXT
+    )));
+    assert!(!session.transcript.iter().any(|item| matches!(
+        &item.body,
+        TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT
+    )));
+}
