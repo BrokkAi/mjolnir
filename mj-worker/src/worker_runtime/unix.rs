@@ -557,7 +557,6 @@ pub async fn run_daemon_owned(
             worker_executable: worker_executable.clone(),
             harness_runtime: config.harness_runtime,
             review_capture: config.review_capture,
-            bifrost_binary: config.bifrost_binary.clone(),
             untracked_at_start: untracked_at_start.clone(),
         },
         relay.clone(),

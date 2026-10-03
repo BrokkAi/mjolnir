@@ -20,16 +20,17 @@
 //!
 //! Two tiers share the machine. The *quick* tier runs one general reviewer,
 //! and its findings go straight to the primary agent, which checks them
-//! against source when it acts on them; nothing else runs, not even Bifrost's
-//! change analysis. The *extended* tier runs an intent analyst and Bifrost's
-//! analysis concurrently, then a supervisor that launches the specialist lanes
-//! it thinks are worth running and synthesizes their reports; it may not
-//! conclude while a launched lane is outstanding.
+//! against source when it acts on them. The *extended* tier runs an intent
+//! analyst when the turn's intent needs reconciling, then a supervisor that
+//! launches the specialist lanes it thinks are worth running and synthesizes
+//! their reports; it may not conclude while a launched lane is outstanding.
+//! Every role reads the change from the capture itself: the diff and Git's
+//! per-file line counts. Reviewers navigate the code with Bifrost's MCP tools.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use mj_core::relay::{AnalyzeDeltaRepository, RepoDelta};
+use mj_core::relay::RepoDelta;
 
 use super::delta;
 use super::lanes::{
@@ -45,14 +46,6 @@ use super::verdict::{
 
 pub use mj_core::review::driver::*;
 
-/// What Bifrost's analysis is doing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Analysis {
-    Running,
-    Ready(String),
-    Failed(String),
-}
-
 /// One turn review, from the capture that starts it to the action that ends it.
 #[derive(Debug, Clone)]
 pub struct TurnReviewDriver {
@@ -62,7 +55,6 @@ pub struct TurnReviewDriver {
     /// notice emitted after the resolved phase replaces it.
     last_verdict: Option<ReviewVerdict>,
     deltas: Vec<RepoDelta>,
-    analysis: Analysis,
     /// The intent brief, once the analyst has produced one or been skipped.
     intent: Option<SupplementalContext>,
     /// Who produces this review's findings, which decides how the corrective
@@ -107,7 +99,6 @@ impl TurnReviewDriver {
             phase: TurnReviewPhase::CapturingDelta,
             last_verdict: None,
             deltas: Vec::new(),
-            analysis: Analysis::Running,
             intent: None,
             provenance,
             queued_reports: Vec::new(),
@@ -160,7 +151,6 @@ impl TurnReviewDriver {
             },
             last_verdict: Some(last_verdict),
             deltas,
-            analysis: Analysis::Ready(String::new()),
             intent: None,
             provenance: pending.provenance,
             queued_reports: Vec::new(),
@@ -287,6 +277,7 @@ impl TurnReviewDriver {
             trajectory: self.seed.trajectory.clone(),
             diff: delta::workspace_diff(&self.deltas),
             diffstat: delta::combined_diffstat(&self.deltas),
+            changed_files: delta::changed_files_table(&self.deltas),
             changed_lines: delta::changed_line_count(&self.deltas),
             repository_roots: self.repository_roots(),
             prior_review: self.seed.prior_review.clone(),
@@ -314,7 +305,7 @@ impl TurnReviewDriver {
     }
 
     /// The capture landed. An empty capture ends the review before any agent
-    /// runs; anything else starts the first agents and the analysis together.
+    /// runs; anything else starts the first agent.
     pub fn delta_captured(&mut self, deltas: Vec<RepoDelta>) -> Vec<ReviewRequest> {
         if !matches!(self.phase, TurnReviewPhase::CapturingDelta) {
             return Vec::new();
@@ -350,34 +341,19 @@ impl TurnReviewDriver {
         self.phase = TurnReviewPhase::LaunchingReviewer;
         self.status = "starting the reviewer…".to_string();
         match self.seed.tier {
-            // The quick reviewer reads the diff and navigates with Bifrost's
-            // tools; nothing in the quick tier reads the change analysis, so
-            // it is not run.
             ReviewTier::Quick => vec![self.start_role(REVIEWER_ROLE, true)],
             ReviewTier::Extended => {
-                let repositories = self
-                    .deltas
-                    .iter()
-                    .map(|delta| AnalyzeDeltaRepository {
-                        root: delta.root.clone(),
-                        baseline_tree: delta.baseline_tree.clone(),
-                        current_tree: delta.current_tree.clone(),
-                    })
-                    .collect();
-                let mut requests = vec![ReviewRequest::AnalyzeDelta { repositories }];
-                // mj's own shape: the intent analyst runs concurrently with
-                // the analysis rather than after it. The supervisor waits for
-                // both because its prompt embeds both, which is a data
-                // dependency, not a scheduling one.
+                // The supervisor's prompt embeds the intent brief, so it
+                // starts once the analyst has produced one, or at once when
+                // the turn has one self-contained governing prompt.
                 if super::lanes::should_extract_intent(&self.job()) {
-                    requests.push(self.start_role(INTENT_ROLE, true));
+                    vec![self.start_role(INTENT_ROLE, true)]
                 } else {
                     self.intent = Some(SupplementalContext::available(
                         DIRECT_INTENT_CONTEXT.to_string(),
                     ));
-                    requests.push(self.start_role(SUPERVISOR_ROLE, true));
+                    vec![self.start_role(SUPERVISOR_ROLE, true)]
                 }
-                requests
             }
         }
     }
@@ -416,12 +392,10 @@ impl TurnReviewDriver {
                 vec![self.prompt_role(INTENT_ROLE, "intent", prompt)]
             }
             SUPERVISOR_ROLE => {
-                let (Some(intent), Some(changed_functions)) =
-                    (self.intent.clone(), self.changed_functions())
-                else {
+                let Some(intent) = self.intent.clone() else {
                     return Vec::new();
                 };
-                let prompt = supervisor_prompt(&self.job(), &intent, &changed_functions);
+                let prompt = supervisor_prompt(&self.job(), &intent);
                 self.mark_role(SUPERVISOR_ROLE, "Supervisor", RoleState::Running);
                 self.supervisor_idle = false;
                 self.status = "the supervisor is reviewing the change…".to_string();
@@ -439,47 +413,10 @@ impl TurnReviewDriver {
         }
     }
 
-    /// Bifrost's analysis, as the prompts see it.
-    fn changed_functions(&self) -> Option<SupplementalContext> {
-        match &self.analysis {
-            Analysis::Ready(packet) => Some(SupplementalContext::available(packet.clone())),
-            Analysis::Failed(reason) => Some(SupplementalContext::unavailable(reason.clone())),
-            Analysis::Running => None,
-        }
-    }
-
-    /// Bifrost's analysis finished. Only the extended tier runs it: the
-    /// supervisor's prompt embeds it, so it is a data dependency.
-    pub fn analysis_completed(&mut self, result: Result<String, String>) -> Vec<ReviewRequest> {
-        self.analysis = match result {
-            Ok(packet) => Analysis::Ready(packet),
-            // Bifrost is required, not optional: a review whose instruments
-            // failed reports that rather than quietly reviewing with less.
-            Err(reason) => Analysis::Failed(reason),
-        };
-        match self.seed.tier {
-            // The quick tier never asks for an analysis; a late answer to
-            // one is ignored.
-            ReviewTier::Quick => Vec::new(),
-            ReviewTier::Extended => self.maybe_start_supervisor(),
-        }
-    }
-
-    /// Starts the supervisor once both its inputs exist.
     fn maybe_start_supervisor(&mut self) -> Vec<ReviewRequest> {
-        if self.finished()
-            || self.started_roles.contains(SUPERVISOR_ROLE)
-            || self.intent.is_none()
-            || self.changed_functions().is_none()
+        if self.finished() || self.started_roles.contains(SUPERVISOR_ROLE) || self.intent.is_none()
         {
             return Vec::new();
-        }
-        if let Analysis::Failed(reason) = self.analysis.clone() {
-            // The supervisor is the extended tier's whole verdict path, and it
-            // is told to inspect changed code with Bifrost's tools. Starting it
-            // without them would be the degraded mode this design refuses.
-            return self
-                .request_failed(format!("the review could not analyze the change: {reason}"));
         }
         self.status = "starting the supervisor…".to_string();
         vec![self.start_role(SUPERVISOR_ROLE, true)]

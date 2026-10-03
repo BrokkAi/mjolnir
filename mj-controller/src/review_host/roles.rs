@@ -15,18 +15,6 @@ impl HostState {
                     },
                 );
             }
-            ReviewRequest::AnalyzeDelta { repositories } => {
-                self.review_step(
-                    session_id,
-                    ReviewerAction::AnalyzeDelta { repositories },
-                    |outcome| {
-                        ReviewStep::Analysis(match outcome {
-                            Ok(ReviewerOutcome::ChangedFunctions { packet }) => Ok(packet),
-                            other => Err(unexpected(other)),
-                        })
-                    },
-                );
-            }
             ReviewRequest::StartRole { role, fresh } => self.start_role(session_id, role, fresh),
             ReviewRequest::PromptRole {
                 role,

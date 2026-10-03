@@ -449,7 +449,7 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `MJ_DESKTOP_BINARY` | Explicit `mj-desktop` executable used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Explicit controller executable used by companion launchers. |
 | `MJ_VOICE_WORKER` | Explicit local voice-worker executable. |
-| `MJ_BIFROST_BIN` | Set on the daemon (`MJ_BIFROST_BIN=/path/to/bifrost mj daemon restart`), not in a profile. The daemon passes it to each new session's worker, which runs Bifrost for turn review; the path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. It needs Bifrost 0.12.0 or later, and `mj doctor` warns when the Bifrost on this machine is older. |
+| `MJ_BIFROST_BIN` | Set on the daemon (`MJ_BIFROST_BIN=/path/to/bifrost mj daemon restart`), not in a profile. The daemon starts each reviewing agent's Bifrost code-navigation server with it; the path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. It needs Bifrost 0.12.0 or later, and `mj doctor` warns when the Bifrost on this machine is older. |
 | `CODEX_HOME` | Codex home used by setup discovery and native import. |
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |

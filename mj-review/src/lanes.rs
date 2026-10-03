@@ -29,8 +29,8 @@ use std::path::PathBuf;
 
 use super::verdict::{CLEAN_SENTINEL, LANE_CLEAN_SENTINEL, LaneOutcome};
 use super::{
-    INTENT_BRIEF_LIMIT, LANE_DIFF_LIMIT, LANE_REPORT_LIMIT, USER_MESSAGES_LIMIT,
-    bound_review_section, bound_tail,
+    CHANGED_FILES_LIMIT, INTENT_BRIEF_LIMIT, LANE_DIFF_LIMIT, LANE_REPORT_LIMIT,
+    USER_MESSAGES_LIMIT, bound_review_section, bound_tail,
 };
 
 /// Tool steps a lane may spend before it must report what it verified. Keeps a
@@ -209,6 +209,9 @@ pub struct ReviewJob {
     pub diff: String,
     /// Deterministic file and line totals for the same capture.
     pub diffstat: String,
+    /// Every changed file with its added and removed lines, from Git, for the
+    /// same capture (see [`crate::delta::changed_files_table`]).
+    pub changed_files: String,
     pub changed_lines: usize,
     /// The repositories the capture covers, which are also the roots the
     /// attached Bifrost servers answer for.
@@ -308,8 +311,9 @@ pub fn lane_context(job: &ReviewJob) -> String {
         ("same-user-turn; cumulative", String::new())
     };
     format!(
-        "<original_task>\n{}\n</original_task>\n\n<review_oracle>\n{REVIEW_ORACLE}\n</review_oracle>\n\n<workspace_diff scope=\"{scope}\">\n{diff}\n</workspace_diff>{prior}\n\n<trajectory projection=\"shared transcript summary; eight latest tool calls retain details\">\n{trajectory}\n</trajectory>",
+        "<original_task>\n{}\n</original_task>\n\n<review_oracle>\n{REVIEW_ORACLE}\n</review_oracle>\n\n{files}\n\n<workspace_diff scope=\"{scope}\">\n{diff}\n</workspace_diff>{prior}\n\n<trajectory projection=\"shared transcript summary; eight latest tool calls retain details\">\n{trajectory}\n</trajectory>",
         job.task,
+        files = changed_files_section(job),
     )
 }
 
@@ -515,51 +519,41 @@ pub fn review_agent_roster() -> String {
 
 /// The change evidence the supervisor prompt embeds.
 ///
-/// A small change carries its whole diff; a large one carries the deterministic
-/// diffstat plus Bifrost's changed-callable packet, so the supervisor spends its
+/// Both carry Git's per-file line counts. A small change also carries its whole
+/// diff; a large one carries the table alone, so the supervisor spends its
 /// budget navigating rather than reading a wall of text.
 #[must_use]
-pub fn change_packet(job: &ReviewJob, changed_functions: &SupplementalContext) -> String {
+pub fn change_packet(job: &ReviewJob) -> String {
     let scope = review_diff_scope(job);
     let changed_lines = job.changed_lines;
+    let files = changed_files_section(job);
     if job.changed_lines <= SMALL_DIFF_CHANGED_LINES {
         format!(
-            "<workspace_diff scope=\"{scope}\" changed_lines=\"{changed_lines}\">\n{}\n</workspace_diff>\n\n\
-             <changed_functions status=\"{status}\" source=\"bifrost analyze_diff CLI\" trust=\"supplemental evidence\">\n{}\n</changed_functions>",
+            "<workspace_diff scope=\"{scope}\" changed_lines=\"{changed_lines}\">\n{}\n</workspace_diff>\n\n{files}",
             bound_review_section(&job.diff, LANE_DIFF_LIMIT, "workspace diff"),
-            changed_functions.body,
-            status = if changed_functions.unavailable {
-                "unavailable"
-            } else {
-                "available"
-            },
         )
     } else {
-        format!(
-            "<captured_diffstat status=\"complete\" source=\"immutable turn snapshot\" trust=\"deterministic\">\n{}\n</captured_diffstat>\n\n\
-             <changed_functions status=\"{status}\" source=\"bifrost analyze_diff CLI\" trust=\"supplemental evidence\" changed_lines=\"{changed_lines}\">\n{}\n</changed_functions>",
-            job.diffstat,
-            changed_functions.body,
-            status = if changed_functions.unavailable {
-                "unavailable"
-            } else {
-                "available"
-            },
-        )
+        files
     }
 }
 
+/// Every changed file with its line counts, which Git computes over the whole
+/// change. A role whose diff was cut short still sees the change's full extent.
+fn changed_files_section(job: &ReviewJob) -> String {
+    format!(
+        "<changed_files source=\"git diff --numstat of the captured trees\" trust=\"deterministic\" changed_lines=\"{}\">\n{}\n</changed_files>",
+        job.changed_lines,
+        bound_review_section(&job.changed_files, CHANGED_FILES_LIMIT, "changed files"),
+    )
+}
+
 /// Below this many changed lines the supervisor reads the whole diff rather
-/// than the diffstat plus changed-callable packet.
+/// than the per-file table alone.
 pub const SMALL_DIFF_CHANGED_LINES: usize = 200;
 
 /// The extended tier's supervisor prompt.
 #[must_use]
-pub fn supervisor_prompt(
-    job: &ReviewJob,
-    intent: &SupplementalContext,
-    changed_functions: &SupplementalContext,
-) -> String {
+pub fn supervisor_prompt(job: &ReviewJob, intent: &SupplementalContext) -> String {
     let roster = review_agent_roster();
     let pass_context = review_pass_context(job);
     // The full stated-contract sweep belongs to the pass that first reads the
@@ -576,7 +570,7 @@ pub fn supervisor_prompt(
     } else {
         ""
     };
-    let packet = change_packet(job, changed_functions);
+    let packet = change_packet(job);
     format!(
         "{SUPERVISOR_PREAMBLE}\n\n\
          Perform a defect-first review of this completed turn before its changes are committed. Test the implementation against the relevant user intent, inspect changed code with the attached Bifrost `core` tools, and follow material leads. Base conclusions on inspected evidence and apply the qualification gates consistently. This is not permission to nitpick—reject style preferences, speculation, low-impact polish, and unrelated pre-existing issues.\n\n\
@@ -699,6 +693,8 @@ mod tests {
             diff: "Repository: /w/app\ndiff --git a/src/lib.rs b/src/lib.rs\n@@\n+retry\n"
                 .to_string(),
             diffstat: "1 file changed, 1 insertion(+)".to_string(),
+            changed_files: "Repository: /w/app -- 1 file changed, 1 insertion(+)\n       +1      -0  src/lib.rs"
+                .to_string(),
             changed_lines: 1,
             repository_roots: vec![PathBuf::from("/w/app")],
             prior_review: None,
@@ -777,7 +773,6 @@ mod tests {
         let prompt = supervisor_prompt(
             &job,
             &SupplementalContext::available("Goal: add a retry".into()),
-            &SupplementalContext::available("- edited retry()".into()),
         );
         assert!(prompt.contains("spawn_specialist"));
         for lane in &REVIEW_LANES {
@@ -790,27 +785,32 @@ mod tests {
     }
 
     #[test]
-    fn a_large_change_reaches_the_supervisor_as_a_diffstat_and_symbol_packet() {
+    fn a_large_change_reaches_the_supervisor_as_its_per_file_line_counts() {
         let mut job = job();
         job.changed_lines = SMALL_DIFF_CHANGED_LINES + 1;
-        let packet = change_packet(&job, &SupplementalContext::available("- edited f".into()));
-        assert!(packet.contains("<captured_diffstat"));
+        let packet = change_packet(&job);
+        assert!(packet.contains("<changed_files"));
+        assert!(packet.contains("+1      -0  src/lib.rs"));
         assert!(!packet.contains("<workspace_diff"));
         job.changed_lines = SMALL_DIFF_CHANGED_LINES;
-        let small = change_packet(&job, &SupplementalContext::available("- edited f".into()));
+        let small = change_packet(&job);
         assert!(small.contains("<workspace_diff"));
         assert!(small.contains("+retry"));
+        assert!(
+            small.contains("<changed_files"),
+            "a small change carries the table too"
+        );
+        assert!(!small.contains("changed_functions"));
     }
 
+    /// Every role that reads the shared evidence sees every changed file, even
+    /// when its copy of the diff is cut short.
     #[test]
-    fn an_unavailable_analysis_is_labelled_rather_than_hidden() {
-        let job = job();
-        let packet = change_packet(
-            &job,
-            &SupplementalContext::unavailable("bifrost timed out".into()),
-        );
-        assert!(packet.contains("status=\"unavailable\""));
-        assert!(packet.contains("Unavailable: bifrost timed out"));
+    fn the_shared_lane_context_lists_every_changed_file() {
+        let context = lane_context(&job());
+        assert!(context.contains("<changed_files"));
+        assert!(context.contains("src/lib.rs"));
+        assert!(quick_review_prompt(&job()).contains("<changed_files"));
     }
 
     #[test]

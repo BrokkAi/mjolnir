@@ -679,6 +679,33 @@ pub fn diff_between_trees(
     Ok(String::from_utf8_lossy(&patch).into_owned())
 }
 
+/// `git diff --numstat -z` between two trees, with rename detection: one
+/// record per changed file, as Git emits it. A rename's record carries an
+/// empty path followed by the old and new paths; a binary file's counts are
+/// `-`. [`diff_between_trees`] supplies the same comparison as a patch.
+pub fn numstat_between_trees(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+    current: &str,
+) -> Result<Vec<u8>> {
+    git_bytes(
+        runner,
+        repository,
+        [
+            "diff",
+            "--numstat",
+            "-z",
+            "-M",
+            "--no-ext-diff",
+            base,
+            current,
+        ],
+        &[],
+        "count the captured review trees' changed lines per file",
+    )
+}
+
 #[derive(Clone)]
 struct GitHistorySelection {
     /// Informational only; an empty string for session deltas.

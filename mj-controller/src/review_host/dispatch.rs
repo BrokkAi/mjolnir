@@ -88,14 +88,6 @@ impl HostState {
                 };
                 self.run(&session_id, requests);
             }
-            ReviewStep::Analysis(result) => {
-                let requests = self
-                    .reviews
-                    .get_mut(&session_id)
-                    .map(|slot| slot.driver.analysis_completed(result))
-                    .unwrap_or_default();
-                self.run(&session_id, requests);
-            }
             ReviewStep::RoleStarted { role, result } => {
                 let requests = match self.reviews.get_mut(&session_id) {
                     Some(slot) => match result {

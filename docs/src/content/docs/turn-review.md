@@ -70,8 +70,10 @@ Choose **Second opinion** before approving a proposed plan. Mj starts the review
 
 | Tier | How it works | Use it for |
 | --- | --- | --- |
-| `quick` | One general reviewer checks the turn. Its findings go straight to the primary harness, marked as one reviewer's unverified findings; the harness checks each against source as it fixes them. No change analysis runs. | Routine turns and the lowest review cost. |
+| `quick` | One general reviewer checks the turn. Its findings go straight to the primary harness, marked as one reviewer's unverified findings; the harness checks each against source as it fixes them. | Routine turns and the lowest review cost. |
 | `extended` | A supervisor examines the change and can dispatch focused specialists for control flow, duplication, error handling, dead code, tests, and contracts. When the message history makes intent ambiguous, a separate analyst first reconciles the governing intent. | Larger or riskier changes where wider coverage is worth more time and tokens. |
+
+Every reviewing agent reads the change from the capture: the diff, and Git's added and removed line counts for every changed file, which list the whole change even when a large diff is cut short in the prompt. A small change's supervisor reads the whole diff; a large one starts from the per-file counts. Reviewers navigate the code with Bifrost's tools.
 
 Both tiers apply the same qualification bar. A concern must have meaningful correctness, security, performance, or maintainability impact; it must be introduced by the reviewed turn, demonstrable from inspected evidence, and concrete enough to act on. Tests changed in the same turn are evidence to inspect, not an oracle for the intended behavior.
 

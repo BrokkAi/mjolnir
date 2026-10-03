@@ -54,10 +54,6 @@ const RELAY_ACKNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Capturing a review delta runs Git over every workspace repository, which is
 /// filesystem work on a possibly large tree rather than relay bookkeeping.
 const REVIEW_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Bifrost's semantic diff analysis has its own 600-second budget inside the
-/// worker; this leaves room for it to report a timeout as an error rather than
-/// having the call time out underneath it.
-const REVIEW_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(660);
 const RELAY_PROXY_DETACH_GRACE: Duration = Duration::from_millis(500);
 const RELAY_PROXY_REAP_POLL: Duration = Duration::from_millis(10);
 

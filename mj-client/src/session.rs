@@ -12,9 +12,7 @@ use mj_core::config::Config;
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::state::{ManagedSessionSnapshot, SessionRecord};
 
-use mj_core::relay::{
-    AnalyzeDeltaRepository, RelayCommand, RelayCursor, RelayEvent, RelayOperationalState, RepoDelta,
-};
+use mj_core::relay::{RelayCommand, RelayCursor, RelayEvent, RelayOperationalState, RepoDelta};
 use mj_core::worker_launch::ReviewerLaunchConfig;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -94,9 +92,6 @@ pub enum ReviewerAction {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    AnalyzeDelta {
-        repositories: Vec<AnalyzeDeltaRepository>,
-    },
     TakeLaneDispatches,
 }
 
@@ -112,7 +107,6 @@ impl ReviewerAction {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
             Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
@@ -134,9 +128,6 @@ pub enum ReviewerOutcome {
         repositories: Vec<RepoDelta>,
     },
     BaselineAdvanced,
-    ChangedFunctions {
-        packet: String,
-    },
     LaneDispatches {
         requests: Vec<mj_core::review::lanes::ReviewSubagentRequest>,
     },

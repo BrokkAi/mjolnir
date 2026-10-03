@@ -1815,8 +1815,8 @@ pub use git::{
     NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
     SessionDiff, SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, pin_review_tree, push_branch,
-    remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
+    diff_between_trees, empty_tree_id, has_origin_refs, numstat_between_trees, pin_review_tree,
+    push_branch, remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
     validate_symlink_target,
 };
 #[cfg(test)]

@@ -3,10 +3,10 @@
 use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
     CaptureBase, GitCommandRunner, REVIEW_BASELINE_REF, capture_paths, diff_between_trees,
-    pin_review_tree,
+    numstat_between_trees, pin_review_tree,
 };
 use mj_core::refusal::Refusal;
-use mj_core::relay::RepoDelta;
+use mj_core::relay::{FileLineChange, RepoDelta};
 use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
 use mj_review::delta::{captured_trees, has_changes};
@@ -56,13 +56,18 @@ pub fn capture_repository_deltas(
         // that `git status` no longer calls dirty.
         let current = capture_paths(git, root, CaptureBase::Head, &changed)
             .with_context(|| format!("capture the changed paths of {}", root.display()))?;
-        let patch = match &baseline {
-            Some(baseline) => diff_between_trees(git, root, Some(baseline), &current)
-                .with_context(|| format!("diff the captured trees of {}", root.display()))?,
+        let (patch, files) = match &baseline {
+            Some(baseline) => {
+                let patch = diff_between_trees(git, root, Some(baseline), &current)
+                    .with_context(|| format!("diff the captured trees of {}", root.display()))?;
+                let numstat = numstat_between_trees(git, root, baseline, &current)
+                    .with_context(|| format!("count the changed lines of {}", root.display()))?;
+                (patch, parse_numstat(&numstat))
+            }
             // Neither baseline is usable. Keep the coverage reset honest: an
             // empty-tree diff would report the restored or pre-existing
             // repository as work from this turn.
-            None => String::new(),
+            None => (String::new(), Vec::new()),
         };
         let summary = RawDiffSummary::from_patch(&patch);
         deltas.push(RepoDelta {
@@ -72,9 +77,50 @@ pub fn capture_repository_deltas(
             patch: bound_review_section(&patch, LANE_DIFF_LIMIT, "workspace diff"),
             diffstat: summary.diffstat(),
             changed_lines: summary.changed_line_count(),
+            files,
         });
     }
     Ok(deltas)
+}
+
+/// Reads `git diff --numstat -z -M` output: `added\tdeleted\tpath\0` per file,
+/// or `added\tdeleted\t\0old path\0new path\0` for a rename or copy, with
+/// `-` for both counts on a binary file.
+fn parse_numstat(output: &[u8]) -> Vec<FileLineChange> {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut files = Vec::new();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(record);
+        let mut parts = text.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let binary = added == "-" && deleted == "-";
+        let (path, old_path) = if path.is_empty() {
+            let old_path = fields
+                .next()
+                .map(|old| String::from_utf8_lossy(old).into_owned());
+            let new_path = fields
+                .next()
+                .map(|new| String::from_utf8_lossy(new).into_owned())
+                .unwrap_or_default();
+            (new_path, old_path)
+        } else {
+            (path.to_owned(), None)
+        };
+        files.push(FileLineChange {
+            path,
+            old_path,
+            insertions: added.parse().unwrap_or(0),
+            deletions: deleted.parse().unwrap_or(0),
+            binary,
+        });
+    }
+    files
 }
 
 /// Pins the current worktree as the baseline for a fresh worker workspace.
@@ -281,6 +327,91 @@ mod capture_tests {
             baselines.values().next().map(String::as_str)
         );
         assert_eq!(second[0].changed_lines, 2);
+        assert_eq!(
+            second[0].files,
+            vec![FileLineChange {
+                path: "tracked.rs".into(),
+                insertions: 1,
+                deletions: 1,
+                ..Default::default()
+            }],
+            "the capture counts each changed file's lines"
+        );
+    }
+
+    /// Every changed file is counted, whatever kind of change it is, so a
+    /// prompt whose diff was cut short still names it.
+    #[test]
+    fn a_capture_counts_new_renamed_and_binary_files() {
+        let temp = repository();
+        std::fs::write(
+            temp.path().join("moved.rs"),
+            "fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\n",
+        )
+        .unwrap();
+        git(temp.path(), &["add", "."]);
+        git(temp.path(), &["commit", "-qm", "more"]);
+        let roots = vec![temp.path().to_path_buf()];
+        let baselines = captured_trees(
+            &capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap(),
+        );
+        git(temp.path(), &["mv", "moved.rs", "renamed.rs"]);
+        std::fs::write(temp.path().join("logo.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+        std::fs::write(temp.path().join("new.rs"), "fn new() {}\nfn other() {}\n").unwrap();
+        let deltas =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &BTreeMap::new()).unwrap();
+        let mut files = deltas[0].files.clone();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            files,
+            vec![
+                FileLineChange {
+                    path: "logo.bin".into(),
+                    binary: true,
+                    ..Default::default()
+                },
+                FileLineChange {
+                    path: "new.rs".into(),
+                    insertions: 2,
+                    ..Default::default()
+                },
+                FileLineChange {
+                    path: "renamed.rs".into(),
+                    old_path: Some("moved.rs".into()),
+                    ..Default::default()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn numstat_records_are_read_with_renames_and_binaries() {
+        let output = b"3\t1\tsrc/lib.rs\0-\t-\tlogo.png\x002\t0\t\0old name.rs\0new name.rs\0";
+        assert_eq!(
+            parse_numstat(output),
+            vec![
+                FileLineChange {
+                    path: "src/lib.rs".into(),
+                    insertions: 3,
+                    deletions: 1,
+                    ..Default::default()
+                },
+                FileLineChange {
+                    path: "logo.png".into(),
+                    binary: true,
+                    ..Default::default()
+                },
+                FileLineChange {
+                    path: "new name.rs".into(),
+                    old_path: Some("old name.rs".into()),
+                    insertions: 2,
+                    deletions: 0,
+                    binary: false,
+                },
+            ]
+        );
+        assert!(parse_numstat(b"").is_empty());
     }
 
     #[test]

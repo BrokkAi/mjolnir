@@ -2,7 +2,6 @@
 
 use super::lanes::{PriorReviewContext, ReviewTier, UserMessage};
 use super::verdict::{ReviewPassEvidence, ReviewVerdict};
-use crate::relay::AnalyzeDeltaRepository;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -12,13 +11,6 @@ pub enum ReviewRequest {
     /// Ask the worker what changed since these baselines.
     CaptureDelta {
         baselines: BTreeMap<PathBuf, String>,
-    },
-    /// Start Bifrost's semantic analysis of the captured trees. Only the
-    /// extended tier asks for it: it runs alongside the intent analyst, and
-    /// the supervisor's prompt embeds its result. The quick tier's reviewer
-    /// never reads it, so a quick review never runs it.
-    AnalyzeDelta {
-        repositories: Vec<AnalyzeDeltaRepository>,
     },
     /// Start the reviewer harness for `role`, with a fresh session when
     /// `fresh` is set: every role of a new review starts without another

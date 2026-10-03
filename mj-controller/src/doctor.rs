@@ -3104,9 +3104,9 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 }
 
 /// The Bifrost a turn review would run on this machine, and whether it is new
-/// enough. A review needs Bifrost's `analyze_diff`, which older releases lack,
-/// and an old `bifrost` on the login `PATH` is otherwise found only when the
-/// first review fails. This is a warning: containers carry their own Bifrost,
+/// enough. Every reviewing agent navigates the code through Bifrost's MCP
+/// tools, and an old `bifrost` on the login `PATH` is otherwise found only when
+/// a review's agents cannot use them. This is a warning: containers carry their own Bifrost,
 /// and reviews may be off. The check reads `MJ_BIFROST_BIN` from the
 /// environment `mj doctor` runs in, which is the daemon's environment when the
 /// daemon was started from the same shell.

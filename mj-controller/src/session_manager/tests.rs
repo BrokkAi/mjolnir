@@ -319,13 +319,6 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
         ReviewerAction::AdvanceBaseline {
             trees: BTreeMap::from([(std::path::PathBuf::from("/w/app"), "tree".into())]),
         },
-        ReviewerAction::AnalyzeDelta {
-            repositories: vec![mj_core::relay::AnalyzeDeltaRepository {
-                root: std::path::PathBuf::from("/w/app"),
-                baseline_tree: Some("base".into()),
-                current_tree: "target".into(),
-            }],
-        },
     ];
     for action in actions {
         let encoded = serde_json::to_string(&action).unwrap();
@@ -352,6 +345,7 @@ fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
             patch: "diff --git a/a b/a\n".into(),
             diffstat: "1 file changed".into(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     };
     let encoded = serde_json::to_string(&delta).unwrap();

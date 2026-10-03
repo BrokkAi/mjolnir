@@ -322,9 +322,6 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
         ReviewerAction::CaptureDelta { .. } => Ok(ReviewerOutcome::Delta {
             repositories: Vec::new(),
         }),
-        ReviewerAction::AnalyzeDelta { .. } => Ok(ReviewerOutcome::ChangedFunctions {
-            packet: "- edited retry()".to_owned(),
-        }),
         ReviewerAction::AdvanceBaseline { .. } => Ok(ReviewerOutcome::BaselineAdvanced),
         ReviewerAction::TakeLaneDispatches => Ok(ReviewerOutcome::LaneDispatches {
             requests: Vec::new(),
@@ -709,23 +706,16 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
 
     // The copy's lease cancels the first choice. The review waits, chooses
     // again, opens, and starts work on the capture.
     let (_, action, _reply) = manager
-        .next_reviewer(|_, action| {
-            matches!(
-                action,
-                ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
-            )
-        })
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
         .await;
-    assert!(matches!(
-        action,
-        ReviewerAction::AnalyzeDelta { .. } | ReviewerAction::Start { .. }
-    ));
+    assert!(matches!(action, ReviewerAction::Start { .. }));
     assert_eq!(
         environment.background_holds(),
         1,
@@ -776,6 +766,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1028,6 +1019,7 @@ async fn a_headless_turn_is_reviewed_and_resolves_itself() {
             patch: String::new(),
             diffstat: "0 files changed".to_owned(),
             changed_lines: 0,
+            files: Vec::new(),
         }],
     }));
 
@@ -1096,6 +1088,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
             patch: String::new(),
             diffstat: "0 files changed".to_owned(),
             changed_lines: 0,
+            files: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1164,6 +1157,7 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
             patch: String::new(),
             diffstat: "0 files changed".to_owned(),
             changed_lines: 0,
+            files: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1299,6 +1293,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     starting
@@ -1343,6 +1338,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), open_gate.entered())
@@ -1454,6 +1450,7 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     let _first_request = manager.next().await;
@@ -1758,6 +1755,7 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
 
@@ -1828,6 +1826,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1952,6 +1951,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
 
@@ -2134,6 +2134,7 @@ async fn open_a_quick_review_to_its_first_poll(
             patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
+            files: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -2665,6 +2666,7 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
                             patch: "diff --git a/a b/a\n@@\n+retry()\n".to_owned(),
                             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
                             changed_lines: 1,
+                            files: Vec::new(),
                         }],
                     }),
                     ReviewerAction::Start { .. } => Ok(ReviewerOutcome::Started(Box::new(

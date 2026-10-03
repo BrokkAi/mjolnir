@@ -12,7 +12,6 @@ async fn stopping_timeout_retains_the_runtime_and_lane_until_actual_completion()
         worker_executable: PathBuf::from("/unused"),
         harness_runtime: HarnessRuntimePolicy::Ambient,
         review_capture: false,
-        bifrost_binary: None,
         untracked_at_start: Default::default(),
     };
     let primary = Arc::new(Mutex::new(

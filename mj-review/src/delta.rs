@@ -122,6 +122,50 @@ pub fn combined_diffstat(deltas: &[RepoDelta]) -> String {
     }
 }
 
+/// Every changed file with its added and removed line counts, one section per
+/// repository headed by that repository's totals. Git counts the whole change,
+/// so the table lists every file even where the patch a prompt shows was cut
+/// short.
+#[must_use]
+pub fn changed_files_table(deltas: &[RepoDelta]) -> String {
+    let sections = deltas
+        .iter()
+        .filter(|delta| !delta.patch.trim().is_empty())
+        .map(|delta| {
+            let mut lines = vec![format!(
+                "Repository: {} -- {}",
+                delta.root.display(),
+                delta.diffstat
+            )];
+            if delta.files.is_empty() {
+                lines.push("  (this worker did not report per-file counts)".to_string());
+            }
+            for file in &delta.files {
+                let counts = if file.binary {
+                    format!("{:>15}", "binary")
+                } else {
+                    format!(
+                        "{:>7} {:>7}",
+                        format!("+{}", file.insertions),
+                        format!("-{}", file.deletions)
+                    )
+                };
+                let path = match &file.old_path {
+                    Some(old_path) => format!("{old_path} -> {}", file.path),
+                    None => file.path.clone(),
+                };
+                lines.push(format!("  {counts}  {path}"));
+            }
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>();
+    if sections.is_empty() {
+        "No files changed.".to_string()
+    } else {
+        sections.join("\n\n")
+    }
+}
+
 /// Total changed lines across every repository in the delta.
 #[must_use]
 pub fn changed_line_count(deltas: &[RepoDelta]) -> usize {
@@ -195,7 +239,53 @@ mod tests {
             patch: patch.to_string(),
             diffstat: summary.diffstat(),
             changed_lines: summary.changed_line_count(),
+            files: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_changed_files_table_lists_each_file_under_its_repository_totals() {
+        let mut app = delta("/w/app", PATCH);
+        app.files = vec![
+            mj_core::relay::FileLineChange {
+                path: "src/lib.rs".into(),
+                insertions: 12,
+                deletions: 3,
+                ..Default::default()
+            },
+            mj_core::relay::FileLineChange {
+                path: "src/new.rs".into(),
+                old_path: Some("src/old.rs".into()),
+                insertions: 1,
+                deletions: 1,
+                ..Default::default()
+            },
+            mj_core::relay::FileLineChange {
+                path: "logo.png".into(),
+                binary: true,
+                ..Default::default()
+            },
+        ];
+        let old_worker = delta("/w/lib", PATCH);
+        let table = changed_files_table(&[app, old_worker, delta("/w/quiet", "")]);
+        let lines = table.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("Repository: /w/app -- "), "{table}");
+        assert!(lines[1].ends_with("+12      -3  src/lib.rs"), "{table}");
+        assert!(lines[2].ends_with("src/old.rs -> src/new.rs"), "{table}");
+        assert!(lines[3].contains("binary  logo.png"), "{table}");
+        assert!(
+            table.contains("Repository: /w/lib -- ")
+                && table.contains("did not report per-file counts"),
+            "{table}"
+        );
+        assert!(
+            !table.contains("/w/quiet"),
+            "an unchanged repository is left out"
+        );
+        assert_eq!(
+            changed_files_table(&[delta("/w/quiet", "")]),
+            "No files changed."
+        );
     }
 
     #[test]

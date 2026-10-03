@@ -229,27 +229,10 @@ pub enum ReviewerRequest {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    /// Run Bifrost's one-shot semantic diff analysis over captured trees and
-    /// return the changed-callable packet the review prompts embed.
-    AnalyzeDelta {
-        repositories: Vec<AnalyzeDeltaRepository>,
-    },
     /// Collect the specialist lanes the review supervisor asked for through
     /// its MCP tool since the last time the controller asked. This request is
     /// answered by the sidecar itself rather than by any one role.
     TakeLaneDispatches,
-}
-
-/// One repository's captured endpoints for the Bifrost analysis pre-pass.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AnalyzeDeltaRepository {
-    pub root: std::path::PathBuf,
-    /// Absent for a repository with no recorded baseline, which the worker
-    /// resolves to that repository's empty tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_tree: Option<String>,
-    pub current_tree: String,
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -266,6 +249,29 @@ pub struct RepoDelta {
     /// patch so bounding cannot make a change look smaller than it is.
     pub diffstat: String,
     pub changed_lines: usize,
+    /// Lines added and removed in each changed file, from `git diff --numstat`
+    /// between the baseline and the captured tree. Like `diffstat` it is
+    /// computed from the whole change, so it lists every file even when
+    /// `patch` was cut short. Empty when there is no usable baseline, and from
+    /// a worker that predates it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileLineChange>,
+}
+
+/// One changed file's line counts in a review capture.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileLineChange {
+    /// The file's path in the captured tree, relative to the repository root.
+    pub path: String,
+    /// The path it was renamed or copied from, when Git detected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub insertions: usize,
+    pub deletions: usize,
+    /// Git reports no line counts for a binary file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
 }
 
 impl ReviewerRequest {
@@ -280,7 +286,6 @@ impl ReviewerRequest {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::AnalyzeDelta { .. } => "reviewer_analyze_delta",
             Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
@@ -514,10 +519,6 @@ pub enum RelayResponsePayload {
     },
     /// The review baselines now name the trees the controller sent.
     ReviewBaselineAdvanced,
-    /// Bifrost's changed-callable packet for the captured trees.
-    ReviewChangedFunctions {
-        packet: String,
-    },
     /// Specialist lanes the review supervisor asked for.
     LaneDispatches {
         requests: Vec<crate::review::lanes::ReviewSubagentRequest>,

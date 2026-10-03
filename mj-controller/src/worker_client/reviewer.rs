@@ -242,24 +242,6 @@ impl RelayClient {
         }
     }
 
-    /// Run Bifrost's semantic diff analysis over the captured trees. It can
-    /// take minutes on a large changeset, so it carries its own budget.
-    pub async fn analyze_review_delta(
-        &mut self,
-        role: Option<&str>,
-        repositories: Vec<mj_core::relay::AnalyzeDeltaRepository>,
-    ) -> Result<String> {
-        let request =
-            self.reviewer_request(role, ReviewerRequest::AnalyzeDelta { repositories })?;
-        match self
-            .call_with_timeout(request, REVIEW_ANALYSIS_TIMEOUT)
-            .await?
-        {
-            RelayResponsePayload::ReviewChangedFunctions { packet } => Ok(packet),
-            _ => bail!("relay returned an unexpected review analysis response"),
-        }
-    }
-
     /// Collect the specialist lanes the review supervisor asked for since the
     /// last call.
     pub async fn take_lane_dispatches(

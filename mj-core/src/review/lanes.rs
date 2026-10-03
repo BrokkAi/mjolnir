@@ -3,8 +3,8 @@
 use super::verdict::ReviewPassEvidence;
 
 /// Which tier a review runs at. Quick is one general reviewer whose findings
-/// go straight to the primary agent; extended adds an intent analyst, Bifrost's
-/// change analysis and a supervisor that chooses specialist lanes.
+/// go straight to the primary agent; extended adds an intent analyst and a
+/// supervisor that chooses specialist lanes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTier {

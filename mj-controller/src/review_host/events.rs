@@ -86,7 +86,6 @@ pub(super) enum PersistenceRequest {
 /// One asynchronous step's result, belonging to exactly one review.
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
-    Analysis(Result<String, String>),
     RoleStarted {
         role: String,
         result: Result<(), String>,

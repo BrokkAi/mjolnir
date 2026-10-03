@@ -232,12 +232,6 @@ impl Fixture {
     /// harness. `stage` controls whether the profile directory exists, since
     /// starting without one has to fail.
     fn new(stage: bool) -> Self {
-        Self::with_blocking_bifrost(stage, false)
-    }
-
-    /// As [`Self::new`], with the launch configuration naming the blocking
-    /// Bifrost script (see `blocking_bifrost_script`) as the review's analyzer.
-    fn with_blocking_bifrost(stage: bool, blocking_bifrost: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let worker_root = temp.path().join("worker");
         let workspace = temp.path().join("workspace");
@@ -270,7 +264,6 @@ impl Fixture {
                 worker_executable: bridge,
                 harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
                 review_capture: true,
-                bifrost_binary: blocking_bifrost.then(|| temp.path().join("blocking-bifrost")),
                 untracked_at_start: Default::default(),
             },
             primary_relay.clone(),
@@ -514,34 +507,6 @@ async fn wait_for_marker(path: &Path) {
     .unwrap_or_else(|_| panic!("marker {} did not appear", path.display()));
 }
 
-fn blocking_bifrost_script(directory: &Path) -> PathBuf {
-    let path = directory.join("blocking-bifrost.py");
-    std::fs::write(
-        &path,
-        r#"#!/usr/bin/env python3
-import os
-import time
-
-here = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(here, "bifrost-pid"), "w") as handle:
-    handle.write(str(os.getpid()))
-open(os.path.join(here, "bifrost-started"), "w").close()
-while True:
-    time.sleep(1)
-"#,
-    )
-    .unwrap();
-    mj_core::test_hooks::install_fake_command(
-        directory,
-        "blocking-bifrost",
-        &format!(
-            "exec python3 {} \"$@\"\n",
-            mj_core::targets::posix_quote(path.to_str().unwrap())
-        ),
-    );
-    directory.join("blocking-bifrost")
-}
-
 #[tokio::test]
 async fn a_reviewer_cannot_start_before_its_profile_is_staged() {
     let mut fixture = Fixture::new(false);
@@ -673,96 +638,6 @@ async fn disconnecting_during_start_pauses_only_the_in_flight_role() {
         .await;
     let (_, reused) = started_options(&other_again.body);
     assert!(reused, "the unrelated role was not torn down");
-    fixture.sidecar.pause_all().await;
-}
-
-#[tokio::test]
-async fn disconnecting_during_analysis_kills_bifrost_before_pausing_the_reviewer() {
-    let mut fixture = Fixture::with_blocking_bifrost(true, true);
-    let directory = fixture.script_directory();
-    write_options(&directory, "options.json", &[]);
-    fixture.start(config(0)).await;
-    blocking_bifrost_script(&directory);
-
-    let (mut client, server) = reviewer_socket(&fixture).await;
-    send_reviewer_request(
-        &mut client,
-        None,
-        ReviewerRequest::AnalyzeDelta {
-            repositories: vec![mj_core::relay::AnalyzeDeltaRepository {
-                root: directory.clone(),
-                baseline_tree: Some("base".to_owned()),
-                current_tree: "target".to_owned(),
-            }],
-        },
-    )
-    .await;
-    wait_for_marker(&directory.join("bifrost-started")).await;
-    let bifrost_pid: i32 = std::fs::read_to_string(directory.join("bifrost-pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let harness_pid: i32 = std::fs::read_to_string(directory.join("harness-pid-default"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-
-    drop(client);
-    let _ = tokio::time::timeout(Duration::from_secs(5), server)
-        .await
-        .expect("disconnecting analysis must finish promptly");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while process_alive(bifrost_pid) || process_alive(harness_pid) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("disconnecting analysis must reap Bifrost and the reviewer promptly");
-    assert!(!process_alive(bifrost_pid));
-}
-
-/// The change analysis runs Bifrost, which can take minutes on a loaded
-/// host. The reviewer's launch, sent right after it under the same default
-/// role, must not wait for it (Series 34, 2026-10-03: launches queued behind
-/// five-minute analyses and ran out of their 300 s).
-#[tokio::test]
-async fn a_running_analysis_does_not_hold_up_the_reviewer_launch() {
-    let mut fixture = Fixture::with_blocking_bifrost(true, true);
-    let directory = fixture.script_directory();
-    write_options(&directory, "options.json", &[]);
-    blocking_bifrost_script(&directory);
-
-    let (mut client, server) = reviewer_socket(&fixture).await;
-    send_reviewer_request(
-        &mut client,
-        None,
-        ReviewerRequest::AnalyzeDelta {
-            repositories: vec![mj_core::relay::AnalyzeDeltaRepository {
-                root: directory.clone(),
-                baseline_tree: Some("base".to_owned()),
-                current_tree: "target".to_owned(),
-            }],
-        },
-    )
-    .await;
-    wait_for_marker(&directory.join("bifrost-started")).await;
-
-    let body = tokio::time::timeout(Duration::from_secs(10), fixture.start(config(0)))
-        .await
-        .expect("the launch does not queue behind the analysis");
-    let (_, reused) = started_options(&body);
-    assert!(!reused, "a fresh reviewer started");
-    let bifrost_pid: i32 = std::fs::read_to_string(directory.join("bifrost-pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(process_alive(bifrost_pid), "the analysis is still running");
-
-    drop(client);
-    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
     fixture.sidecar.pause_all().await;
 }
 
@@ -1633,7 +1508,6 @@ async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
             worker_executable: PathBuf::from("/bin/false"),
             harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
             review_capture: true,
-            bifrost_binary: None,
             untracked_at_start: Default::default(),
         },
         Arc::new(std::sync::Mutex::new(

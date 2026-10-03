@@ -23,6 +23,11 @@ fn changed_delta() -> Vec<RepoDelta> {
         patch: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n+retry\n".to_string(),
         diffstat: "1 file changed, 1 insertion(+)".to_string(),
         changed_lines: 1,
+        files: vec![mj_core::relay::FileLineChange {
+            path: "src/lib.rs".to_string(),
+            insertions: 1,
+            ..Default::default()
+        }],
     }]
 }
 
@@ -34,6 +39,7 @@ fn empty_delta() -> Vec<RepoDelta> {
         patch: String::new(),
         diffstat: "0 files changed".to_string(),
         changed_lines: 0,
+        files: Vec::new(),
     }]
 }
 
@@ -102,39 +108,33 @@ fn supervising() -> (TurnReviewDriver, String) {
         .push(UserMessage::prompt("bound the retry"));
     let (mut driver, _) = TurnReviewDriver::start(seed);
     let requests = driver.delta_captured(changed_delta());
-    assert!(
-        matches!(requests.first(), Some(ReviewRequest::AnalyzeDelta { .. })),
-        "the extended tier runs the change analysis its supervisor reads: {requests:?}"
-    );
-    assert!(
-        requests.contains(&ReviewRequest::StartRole {
+    assert_eq!(
+        requests,
+        vec![ReviewRequest::StartRole {
             role: INTENT_ROLE.to_string(),
             fresh: true
-        }),
-        "a turn with several governing messages runs the intent analyst: {requests:?}"
+        }],
+        "a turn with several governing messages runs the intent analyst first, \
+         and nothing else: the review runs no change analysis"
     );
     let requests = driver.role_started(INTENT_ROLE);
     let intent_command = prompted(&requests, INTENT_ROLE);
-    // The analysis lands while the analyst is still working, which is the
-    // concurrency mj's own shape has.
-    assert!(
-        driver
-            .analysis_completed(Ok("- edited retry()".to_string()))
-            .is_empty(),
-        "the supervisor waits for the intent brief its prompt embeds"
-    );
     let requests = driver.role_turn_completed(&intent_command, "Goal: bound the retry");
     assert!(
         requests.contains(&ReviewRequest::StartRole {
             role: SUPERVISOR_ROLE.to_string(),
             fresh: true
         }),
-        "the supervisor starts once both inputs exist: {requests:?}"
+        "the supervisor starts once the intent brief exists: {requests:?}"
     );
     let requests = driver.role_started(SUPERVISOR_ROLE);
     let prompt = prompt_text(&requests, SUPERVISOR_ROLE);
     assert!(prompt.contains("Goal: bound the retry"));
-    assert!(prompt.contains("- edited retry()"));
+    assert!(
+        prompt.contains("<changed_files") && prompt.contains("src/lib.rs"),
+        "the supervisor reads Git's per-file line counts"
+    );
+    assert!(!prompt.contains("changed_functions"));
     assert!(prompt.contains("spawn_specialist"));
     let command_id = prompted(&requests, SUPERVISOR_ROLE);
     (driver, command_id)
@@ -173,6 +173,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
         patch: String::new(),
         diffstat: "0 files changed".to_string(),
         changed_lines: 0,
+        files: Vec::new(),
     }]);
     assert_eq!(
         driver.phase(),
@@ -242,26 +243,6 @@ fn quick_findings_are_the_verdict_without_a_second_pass() {
         }],
         "a verdict keeps the completed role state available to surfaces"
     );
-}
-
-/// The quick tier never asks for an analysis, so an answer to one (from a
-/// worker still finishing an older request) changes nothing.
-#[test]
-fn the_quick_tier_ignores_an_analysis_answer() {
-    let (mut driver, command_id) = running();
-    assert!(
-        driver
-            .analysis_completed(Err("bifrost exited with 1".to_string()))
-            .is_empty()
-    );
-    let requests = driver.role_turn_completed(&command_id, "No findings.");
-    assert!(
-        requests
-            .iter()
-            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. })),
-        "a clean report is a clean review whatever the analysis did: {requests:?}"
-    );
-    assert_eq!(driver.last_verdict(), Some(&ReviewVerdict::Clean));
 }
 
 #[test]
@@ -555,7 +536,6 @@ fn one_governing_message_skips_the_intent_analyst() {
     let mut seed = seed();
     seed.tier = ReviewTier::Extended;
     let (mut driver, _) = TurnReviewDriver::start(seed);
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
     let requests = driver.delta_captured(changed_delta());
     assert!(
         requests.contains(&ReviewRequest::StartRole {
@@ -582,7 +562,6 @@ fn an_empty_intent_brief_fails_the_review_rather_than_proceeding_without_one() {
     seed.user_messages.push(UserMessage::prompt("bound it"));
     let (mut driver, _) = TurnReviewDriver::start(seed);
     driver.delta_captured(changed_delta());
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
     let requests = driver.role_started(INTENT_ROLE);
     let command_id = prompted(&requests, INTENT_ROLE);
     driver.role_turn_completed(&command_id, "   ");

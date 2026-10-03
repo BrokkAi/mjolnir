@@ -41,8 +41,10 @@ pub const LANE_REPORT_LIMIT: usize = 16 * 1024;
 pub const INTENT_BRIEF_LIMIT: usize = 16 * 1024;
 /// How much of the primary's user messages a review prompt embeds.
 pub const USER_MESSAGES_LIMIT: usize = 128 * 1024;
-/// How much of Bifrost's changed-callable packet a prompt embeds.
-pub const CHANGED_FUNCTIONS_LIMIT: usize = 32 * 1024;
+/// How much of the per-file line-count table a prompt embeds. At roughly 60
+/// bytes a row that is several hundred files; each repository's totals come
+/// first in its section, so a cut table still says how large the change is.
+pub const CHANGED_FILES_LIMIT: usize = 32 * 1024;
 /// How much of a synthesis is retained as the review's verdict text.
 pub const SYNTHESIS_LIMIT: usize = 32 * 1024;
 /// How much captured diff any one reviewing role sees. Six copies of an
