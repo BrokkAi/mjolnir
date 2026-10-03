@@ -104,6 +104,7 @@ impl RuntimeState {
             notices: Mutex::new(VecDeque::new()),
             next_notice_id: AtomicU64::new(1),
             quota: Mutex::new(QuotaBoard::default()),
+            capacity: std::sync::OnceLock::new(),
             review_config,
             review_host,
             wiki: crate::sessionwiki::WikiIndexer::spawn(),

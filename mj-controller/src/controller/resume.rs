@@ -714,6 +714,22 @@ impl Controller {
             let backend_ref = &backend;
             let worker_root_ref = worker_root.as_str();
             let local_spec_ref = local_spec.as_path();
+            // The archive lands in the worker root and unpacks into the
+            // workspace and the harness home; each filesystem needs room.
+            crate::target_storage::ensure_room_for(
+                &backend,
+                [
+                    worker_root.as_str(),
+                    workspace_root.as_str(),
+                    harness_home.as_str(),
+                ],
+                || {
+                    Ok(std::fs::metadata(restored_archive)
+                        .with_context(|| format!("measure {}", restored_archive.display()))?
+                        .len())
+                },
+                "restore the checkpoint",
+            )?;
             execute_concurrent_lanes(
                 || {
                     let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);

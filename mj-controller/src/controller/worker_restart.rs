@@ -723,6 +723,7 @@ mod tests {
             },
             target: None,
             workspace: None,
+            exit_record: None,
             liveness_probe: CommandSpec::new("probe", std::iter::empty::<&str>()),
             binary_refresh: None,
             launch_refresh: None,

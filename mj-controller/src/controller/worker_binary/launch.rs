@@ -286,6 +286,7 @@ impl Controller {
             target: targets::target_recovery_plan(&backend, session_id)?,
             workspace,
             liveness_probe: worker_liveness_command(&backend, &worker_root),
+            exit_record: Some(worker_exit_record_command(&backend, &worker_root)),
             binary_refresh: worker_binary_refresh_plan(&backend, session_id)?,
             launch_refresh: Some(worker_launch_refresh_plan(&backend, session_id, &launch)?),
             restart: CommandPlan {

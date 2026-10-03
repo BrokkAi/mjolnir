@@ -270,11 +270,31 @@ impl Controller {
             .context("reconnect plan is empty")
     }
 
+    /// The directories the live sessions on one target write to.
+    fn session_storage_paths(&self, target_id: &str) -> Vec<String> {
+        self.state
+            .sessions
+            .values()
+            .filter(|session| session.target_template_id == target_id && session.state.is_active())
+            .filter_map(|session| {
+                let paths = mj_core::targets::storage::session_storage_paths(
+                    session.target.as_ref()?,
+                    &session.id,
+                    session.project_directory.as_deref(),
+                );
+                Some(paths.all().map(str::to_owned).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect()
+    }
+
     pub fn deployment_capacity_targets(&self) -> Vec<targets::DeploymentCapacityTarget> {
         use targets::{DeploymentCapacityKind, DeploymentCapacityTarget};
 
         let mut local_ids = Vec::new();
-        let mut ssh_hosts: BTreeMap<String, (Vec<String>, Vec<CommandSpec>)> = BTreeMap::new();
+        // Per host: its target ids, and per SSH connection the paths to measure.
+        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>)>);
+        let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
             match template {
@@ -289,10 +309,18 @@ impl Controller {
                 | TargetTemplate::SshDocker { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
-                    let command = targets::ssh_host_capacity_command(&SshTarget::from(ssh));
-                    if !entry.1.contains(&command) {
-                        entry.1.push(command);
-                    }
+                    let connection = SshTarget::from(ssh);
+                    let paths = match entry.1.iter_mut().find(|(known, _)| *known == connection) {
+                        Some((_, paths)) => paths,
+                        None => {
+                            entry.1.push((connection, Vec::new()));
+                            &mut entry.1.last_mut().expect("just pushed").1
+                        }
+                    };
+                    push_unique(paths, ssh_storage_paths(template));
+                    // Each live session's own directories: a project or
+                    // clone can sit on a filesystem of its own.
+                    push_unique(paths, self.session_storage_paths(target_id));
                 }
                 TargetTemplate::AwsEc2 { .. } => {
                     let mut probes = Vec::new();
@@ -328,27 +356,52 @@ impl Controller {
             }
         }
         if !local_ids.is_empty() {
+            // CPU and memory come from sysinfo; the one probe measures storage.
+            let mut paths = Vec::new();
+            for target_id in &local_ids {
+                if let Some(template) = self.config.targets.get(target_id) {
+                    push_unique(&mut paths, local_storage_paths(template));
+                }
+                push_unique(&mut paths, self.session_storage_paths(target_id));
+            }
+            let mut probe = CommandSpec::new(
+                "sh",
+                [
+                    "-c",
+                    mj_core::targets::storage::STORAGE_PROBE_SCRIPT,
+                    "mj-storage",
+                ],
+            )
+            .purpose("measure local free space");
+            probe.args.extend(paths);
             targets.push(DeploymentCapacityTarget {
                 id: "local".into(),
                 host: "local".into(),
                 target_ids: local_ids,
                 kind: DeploymentCapacityKind::Host,
                 local: true,
-                probes: Vec::new(),
+                probes: vec![probe],
                 probe_error: None,
             });
         }
-        targets.extend(ssh_hosts.into_iter().map(|(host, (target_ids, probes))| {
-            DeploymentCapacityTarget {
-                id: format!("ssh:{host}"),
-                host,
-                target_ids,
-                kind: DeploymentCapacityKind::Host,
-                local: false,
-                probes,
-                probe_error: None,
-            }
-        }));
+        targets.extend(
+            ssh_hosts
+                .into_iter()
+                .map(
+                    |(host, (target_ids, connections))| DeploymentCapacityTarget {
+                        id: format!("ssh:{host}"),
+                        host,
+                        target_ids,
+                        kind: DeploymentCapacityKind::Host,
+                        local: false,
+                        probes: connections
+                            .iter()
+                            .map(|(ssh, paths)| targets::ssh_host_capacity_command(ssh, paths))
+                            .collect(),
+                        probe_error: None,
+                    },
+                ),
+        );
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets
     }
@@ -402,6 +455,78 @@ impl TargetCheck {
         match self {
             Self::BeforeLaunch => "",
             Self::Launch => ", then Retry launch",
+        }
+    }
+}
+
+/// The directories Mjolnir writes to on an SSH host for one target, relative
+/// to the SSH user's home where they live there: worker roots, the upload
+/// staging and binary caches, and the workspace prefix or the container
+/// engine's storage. Each is measured at its nearest existing ancestor.
+pub(crate) fn ssh_storage_paths(template: &TargetTemplate) -> Vec<String> {
+    use mj_core::targets::storage::{
+        ContainerStorage, DEFAULT_BUILD_CACHE_DIRECTORY, REMOTE_CACHE_DIRECTORY,
+        REMOTE_PROFILES_DIRECTORY, REMOTE_WORKERS_DIRECTORY, TEMPORARY_DIRECTORY,
+    };
+    let mut paths = vec![
+        REMOTE_CACHE_DIRECTORY.to_owned(),
+        DEFAULT_BUILD_CACHE_DIRECTORY.to_owned(),
+        TEMPORARY_DIRECTORY.to_owned(),
+    ];
+    match template {
+        TargetTemplate::SshBare {
+            workspace_prefix, ..
+        } => {
+            paths.push(REMOTE_WORKERS_DIRECTORY.to_owned());
+            paths.push(REMOTE_PROFILES_DIRECTORY.to_owned());
+            paths.push(workspace_prefix.to_string_lossy().into_owned());
+        }
+        TargetTemplate::SshPodman { .. } => paths.push(ContainerStorage::Podman.path().to_owned()),
+        TargetTemplate::SshDocker { .. } => paths.push(ContainerStorage::Docker.path().to_owned()),
+        _ => {}
+    }
+    paths.extend(build_cache_directory(template));
+    paths
+}
+
+/// A target's configured mbx cache directory, when it names one.
+fn build_cache_directory(template: &TargetTemplate) -> Option<String> {
+    template
+        .container()?
+        .build_cache
+        .as_ref()?
+        .directory
+        .as_ref()
+        .map(|directory| directory.to_string_lossy().into_owned())
+}
+
+/// The paths the local probe measures for one local target.
+fn local_storage_paths(template: &TargetTemplate) -> Vec<String> {
+    use mj_core::targets::storage::{
+        ContainerStorage, DEFAULT_BUILD_CACHE_DIRECTORY, TEMPORARY_DIRECTORY, local_home_path,
+    };
+    let mut paths = vec![
+        data_dir().to_string_lossy().into_owned(),
+        TEMPORARY_DIRECTORY.to_owned(),
+        local_home_path(DEFAULT_BUILD_CACHE_DIRECTORY),
+    ];
+    match template {
+        TargetTemplate::LocalPodman { .. } => {
+            paths.push(local_home_path(ContainerStorage::Podman.path()));
+        }
+        TargetTemplate::LocalDocker { .. } => {
+            paths.push(ContainerStorage::Docker.path().to_owned());
+        }
+        _ => {}
+    }
+    paths.extend(build_cache_directory(template));
+    paths
+}
+
+fn push_unique(paths: &mut Vec<String>, more: impl IntoIterator<Item = String>) {
+    for path in more {
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
         }
     }
 }

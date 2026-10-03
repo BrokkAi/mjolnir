@@ -959,6 +959,78 @@ impl DashboardState {
         self.quotas.insert(quota.profile_id.clone(), quota);
     }
 
+    /// Install the daemon's storage verdicts, replacing what was held.
+    pub fn set_target_storage(&mut self, views: Vec<mj_core::targets::storage::TargetStorageView>) {
+        self.target_storage = views;
+    }
+
+    /// The filesystems a session writes to, with the daemon's verdict on
+    /// each: its worker root, workspace, staged profile home and `/tmp`.
+    pub(crate) fn session_filesystems(
+        &self,
+        session_id: &str,
+    ) -> Vec<(
+        &mj_core::targets::storage::TargetStorageView,
+        &mj_core::targets::storage::FilesystemView,
+    )> {
+        let Some(record) = self.state.sessions.get(session_id) else {
+            return Vec::new();
+        };
+        let Some(locator) = record.target.as_ref() else {
+            return Vec::new();
+        };
+        let paths = mj_core::targets::storage::session_storage_paths(
+            locator,
+            session_id,
+            record.project_directory.as_deref(),
+        );
+        let Some(view) = self
+            .target_storage
+            .iter()
+            .find(|view| view.host == paths.host)
+        else {
+            return Vec::new();
+        };
+        let mut filesystems: Vec<(_, &mj_core::targets::storage::FilesystemView)> = Vec::new();
+        for path in paths.all().filter(|path| !path.is_empty()) {
+            if let Some(filesystem) = view.filesystem_for(path)
+                && !filesystems
+                    .iter()
+                    .any(|(_, known)| known.space.mount == filesystem.space.mount)
+            {
+                filesystems.push((view, filesystem));
+            }
+        }
+        filesystems
+    }
+
+    /// "disk full: …" while one of the session's own filesystems is full.
+    pub(crate) fn session_storage_problem(&self, session_id: &str) -> Option<String> {
+        let record = self.state.sessions.get(session_id)?;
+        let paths = mj_core::targets::storage::session_storage_paths(
+            record.target.as_ref()?,
+            session_id,
+            record.project_directory.as_deref(),
+        );
+        self.target_storage
+            .iter()
+            .find(|view| view.host == paths.host)?
+            .problem_for(paths.all())
+    }
+
+    /// The storage verdicts a Targets row shows: its host's, or each fleet
+    /// instance's.
+    pub(crate) fn capacity_storage(
+        &self,
+        detail: &CapacityDetail,
+    ) -> Vec<&mj_core::targets::storage::TargetStorageView> {
+        let hosts = mj_core::targets::storage::capacity_storage_hosts(
+            &detail.target,
+            detail.usage.as_ref(),
+        );
+        mj_core::targets::storage::views_for(&self.target_storage, &hosts)
+    }
+
     pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {
         let mut previous = std::mem::take(&mut self.capacity_details);
         self.capacity_details = targets

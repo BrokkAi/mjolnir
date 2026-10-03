@@ -1005,6 +1005,7 @@ fn snapshot_targets_carry_the_availability_the_options_report() {
         refreshing: false,
         stale: false,
         has_error,
+        storage: Vec::new(),
     };
     let capacity = [reading("answering", false), reading("silent", true)];
     let sources = PhoneProjectSources::default();
@@ -1334,18 +1335,16 @@ async fn phone_projects_log_a_repeated_failure_once() {
 }
 
 #[test]
-fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() {
+fn capacity_state_follows_the_probed_targets_and_preserves_readings() {
     let mut controller = controller_with_profiles(&[]);
     controller
         .config
         .targets
         .insert("raw".into(), TargetTemplate::LocalBare);
-    let (targets_tx, mut targets_rx) = tokio::sync::watch::channel(Vec::new());
     let mut state = std::collections::BTreeMap::new();
 
-    publish_capacity_targets(&controller, &targets_tx, &mut state);
-    assert!(targets_rx.has_changed().expect("target sender is alive"));
-    assert_eq!(targets_rx.borrow_and_update().len(), 1);
+    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
+    assert_eq!(state.len(), 1);
 
     let usage = crate::targets::DeploymentCapacityUsage {
         cpu_percent: Some(37),
@@ -1353,6 +1352,7 @@ fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() 
         memory_total_bytes: 4,
         logical_cores: 8,
         disk_total_bytes: Some(5),
+        storage: Vec::new(),
     };
     let local = state.get_mut("local").expect("local capacity state");
     local.usage = Some(usage.clone());
@@ -1360,8 +1360,7 @@ fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() 
     local.sampled_at_epoch_seconds = Some(42);
     local.refreshing = false;
 
-    publish_capacity_targets(&controller, &targets_tx, &mut state);
-    assert!(!targets_rx.has_changed().expect("target sender is alive"));
+    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
     let local_capacity = viewer_capacity(&state)
         .into_iter()
         .find(|capacity| capacity.id == "local")
@@ -1378,9 +1377,8 @@ fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() 
         .config
         .targets
         .insert("second-local".into(), TargetTemplate::LocalBare);
-    publish_capacity_targets(&controller, &targets_tx, &mut state);
-    assert!(targets_rx.has_changed().expect("target sender is alive"));
-    assert_eq!(targets_rx.borrow_and_update().len(), 1);
+    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
+    assert_eq!(state.len(), 1);
     assert_eq!(state["local"].usage, Some(usage.clone()));
 
     controller.config.targets.insert(
@@ -1396,16 +1394,14 @@ fn capacity_target_publication_skips_unchanged_targets_and_preserves_readings() 
             ssh_args: Vec::new(),
         },
     );
-    publish_capacity_targets(&controller, &targets_tx, &mut state);
-    assert!(targets_rx.has_changed().expect("target sender is alive"));
-    assert_eq!(targets_rx.borrow_and_update().len(), 2);
+    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
+    assert_eq!(state.len(), 2);
     assert!(state.contains_key("aws:fleet"));
     assert_eq!(state["local"].usage, Some(usage.clone()));
 
     controller.config.targets.remove("fleet");
-    publish_capacity_targets(&controller, &targets_tx, &mut state);
-    assert!(targets_rx.has_changed().expect("target sender is alive"));
-    assert_eq!(targets_rx.borrow_and_update().len(), 1);
+    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
+    assert_eq!(state.len(), 1);
     assert!(!state.contains_key("aws:fleet"));
     assert_eq!(state["local"].usage, Some(usage));
 }

@@ -191,6 +191,20 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     }
     facts.push(fact("Sub-agents", delegation));
 
+    // A full or low filesystem the session writes to changes what every
+    // write-bearing action can do.
+    for (view, filesystem) in dashboard.session_filesystems(&session.id) {
+        let label = match filesystem.condition {
+            mj_core::targets::storage::StorageCondition::Ok => continue,
+            mj_core::targets::storage::StorageCondition::Low => "disk low",
+            mj_core::targets::storage::StorageCondition::Full => "disk full",
+        };
+        facts.push(fact(
+            "Disk",
+            format!("{label}: {}", view.explanation(filesystem)),
+        ));
+    }
+
     if let Some(worktree) = &session.managed_worktree {
         let kind = match worktree.kind {
             ManagedCheckoutKind::Worktree => "Worktree",
@@ -1099,6 +1113,32 @@ mod tests {
             return None;
         };
         palette.entries.get(palette.selected).map(|entry| entry.id)
+    }
+
+    /// The session menu names a full disk on the session's host, with the
+    /// figures the daemon's storage owner measured.
+    #[test]
+    fn session_facts_name_a_full_disk_on_the_sessions_host() {
+        let session = crate::test_support::precision_session();
+        let mut dashboard = dashboard_with_session(session.clone());
+        let text = |dashboard: &DashboardState| {
+            session_facts(dashboard, &session)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!text(&dashboard).contains("Disk"));
+        dashboard.set_target_storage(vec![crate::test_support::precision_storage(40 << 30, 0)]);
+        let facts = text(&dashboard);
+        assert!(
+            facts.contains(
+                "Disk       disk full: precision-3260 has 0 B free on /home/jonathan/Projects"
+            ),
+            "{facts}"
+        );
+        // A healthy filesystem the session writes to says nothing.
+        assert_eq!(facts.matches("Disk ").count(), 1, "{facts}");
     }
 
     /// The query is a text field, so readline's Ctrl-U and Ctrl-D keep editing

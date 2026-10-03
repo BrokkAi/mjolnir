@@ -10,6 +10,7 @@ pub mod worker_runtime;
 pub mod relay;
 
 pub mod acp;
+pub mod exit_record;
 pub mod terminal;
 
 pub mod checkpoint;

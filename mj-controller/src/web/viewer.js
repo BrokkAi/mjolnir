@@ -997,6 +997,8 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (pendingLifecycleActions.has(`destroy:${session.id}`)) return 'Destroying…';
   if (pendingLifecycleActions.has(`suspend:${session.id}`)) return 'Suspending…';
   if (session.launch_error) return session.launch_error;
+  // The disk this session writes to is full: say so, not "unreachable".
+  if (session.storage_problem) return session.storage_problem;
   if (session.configuration_issue) return 'Needs configuration repair';
   // A sub-agent whose turn ended: idle, with its processes stopped until its
   // parent sends it more input.
@@ -3910,6 +3912,16 @@ function renderTargets() {
       if (reading.disk_total_bytes) {
         rows.push(['Disk', formatBytes(reading.disk_total_bytes), '']);
       }
+      // One row per filesystem Mjolnir writes to, flagged when full or low.
+      for (const filesystem of reading.storage || []) {
+        const className = { full: 'reading-low', low: 'reading-mid' }[filesystem.condition] || '';
+        const flag = { full: ' · full', low: ' · low' }[filesystem.condition] || '';
+        const reserve = filesystem.reserved_bytes >= 2 ** 30
+          ? ` (${formatBytes(filesystem.reserved_bytes)} reserved for root)`
+          : '';
+        const where = filesystem.machine ? `${filesystem.machine} ${filesystem.mount}` : filesystem.mount;
+        rows.push([`Free on ${where}`, `${formatBytes(filesystem.available_bytes)}${reserve}${flag}`, className]);
+      }
       if (reading.virtual_machines !== undefined) {
         rows.push([
           'Machines',
@@ -3925,6 +3937,9 @@ function renderTargets() {
           list.append(el('dt', '', term), el('dd', className, value));
         }
         card.append(list);
+      }
+      for (const filesystem of reading.storage || []) {
+        if (filesystem.detail) card.append(el('p', 'dim', filesystem.detail));
       }
       card.append(refreshRow('refresh-capacity', { target_id: reading.id }));
       return card;

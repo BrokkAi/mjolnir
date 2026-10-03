@@ -34,6 +34,7 @@ fn session_metadata_text(
         detail,
         None,
         false,
+        false,
         crate::AttentionLevel::Idle,
         operation,
         now_epoch_seconds,
@@ -2264,6 +2265,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
         memory_total_bytes: 4,
         logical_cores: 8,
         disk_total_bytes: Some(64),
+        storage: Vec::new(),
     }
 }
 
@@ -3066,6 +3068,7 @@ fn a_fleet_reports_how_many_machines_it_is_running() {
                     memory_total_bytes: 8,
                     logical_cores: 4,
                     disk_total_bytes: Some(64),
+                    storage: Vec::new(),
                 })),
                 now_seconds(),
             );
@@ -3588,6 +3591,58 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
     );
 }
 
+/// precision-3260: an unreachable session on a full disk read as plain
+/// "Unreachable". Its row now says "Disk full", and the Targets row shows the
+/// host as full, both from the daemon's one storage verdict.
+#[test]
+fn an_unreachable_session_on_a_full_disk_says_disk_full() {
+    let session = precision_session();
+    let mut dashboard = dashboard_with_session(session.clone());
+    dashboard.set_session_connectivity(&session.id, false);
+    dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
+        id: "ssh:precision-3260".into(),
+        host: "precision-3260".into(),
+        target_ids: vec!["precision".into()],
+        kind: mj_core::targets::DeploymentCapacityKind::Host,
+        local: false,
+        probes: Vec::new(),
+        probe_error: None,
+    }]);
+    let draw = |dashboard: &mut DashboardState| {
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, dashboard))
+            .expect("draw dashboard");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    let rendered = draw(&mut dashboard);
+    assert!(rendered.contains("Unreachable"), "{rendered}");
+    assert!(!rendered.contains("Disk full"));
+
+    // A full filesystem the session does not write to changes nothing.
+    let mut elsewhere = precision_storage(40 << 30, 40 << 30);
+    elsewhere.filesystems[1].space.paths = vec!["/srv".into()];
+    elsewhere.filesystems[1].condition = mj_core::targets::storage::StorageCondition::Full;
+    dashboard.set_target_storage(vec![elsewhere]);
+    assert!(!draw(&mut dashboard).contains("Disk full"));
+
+    // Its managed clone's filesystem is full: the row and the Targets pane
+    // say so.
+    dashboard.set_target_storage(vec![precision_storage(40 << 30, 0)]);
+    let rendered = draw(&mut dashboard);
+    assert!(rendered.contains("Disk full"), "{rendered}");
+    assert!(
+        rendered.contains("/home/jonathan/Projects 0B free full"),
+        "the Targets row: {rendered}"
+    );
+}
+
 /// A capacity sample the poller keeps refreshing carries no clock column
 /// and no staleness marker: the number on screen is the current one.
 #[test]
@@ -3604,6 +3659,7 @@ fn capacity_pane_renders_grouped_host_load_without_sample_clock() {
             memory_total_bytes: 4,
             logical_cores: 8,
             disk_total_bytes: None,
+            storage: Vec::new(),
         })),
         now_epoch_seconds(),
     );
@@ -3776,6 +3832,7 @@ fn host_capacity_usage() -> DeploymentCapacityUsage {
         memory_total_bytes: 4,
         logical_cores: 8,
         disk_total_bytes: None,
+        storage: Vec::new(),
     }
 }
 
@@ -3791,6 +3848,7 @@ fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
             memory_total_bytes: 0,
             logical_cores: 8,
             disk_total_bytes: None,
+            storage: Vec::new(),
         })),
         now_epoch_seconds(),
     );

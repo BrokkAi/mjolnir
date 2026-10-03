@@ -81,6 +81,13 @@ pub(super) fn run_checkpoint_staging_command<T: serde::Serialize>(
     worker_binary: Option<&Path>,
 ) -> Result<CommandOutput> {
     let body = serde_json::to_vec(spec).with_context(|| format!("serialize {operation} spec"))?;
+    // The archive's size is known only once the worker has captured it.
+    crate::target_storage::ensure_room(
+        locator,
+        &targets::worker_root(locator, session_id)?,
+        0,
+        operation,
+    )?;
     let mut replaced_worker = false;
     loop {
         let command = command(locator, session_id)?;
@@ -179,6 +186,16 @@ pub(in crate::controller) fn upload_checkpoint_spec(
     local: &Path,
     remote: &str,
 ) -> Result<()> {
+    crate::target_storage::ensure_room_for(
+        locator,
+        [remote],
+        || {
+            Ok(std::fs::metadata(local)
+                .with_context(|| format!("measure {}", local.display()))?
+                .len())
+        },
+        "upload the checkpoint",
+    )?;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
             std::fs::copy(local, remote)

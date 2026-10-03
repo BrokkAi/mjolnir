@@ -57,15 +57,14 @@ pub(super) struct PhoneCapacity {
 /// How old a reading may be before the page says so.
 pub(super) const CAPACITY_STALE_AFTER: Duration = Duration::from_secs(120);
 
-/// Tell the poller which targets to probe, and keep the state map in step.
-pub(super) fn publish_capacity_targets(
-    controller: &Controller,
-    targets_tx: &tokio::sync::watch::Sender<Vec<crate::targets::DeploymentCapacityTarget>>,
+/// Keep the state map in step with the targets the daemon's capacity service
+/// probes.
+pub(super) fn track_capacity_targets(
+    targets: &[crate::targets::DeploymentCapacityTarget],
     state: &mut std::collections::BTreeMap<String, PhoneCapacity>,
 ) {
-    let targets = controller.deployment_capacity_targets();
     state.retain(|id, _| targets.iter().any(|target| target.id == *id));
-    for target in &targets {
+    for target in targets {
         state
             .entry(target.id.clone())
             .and_modify(|entry| entry.target = target.clone())
@@ -79,9 +78,6 @@ pub(super) fn publish_capacity_targets(
                 failed: false,
             });
     }
-    if targets_tx.borrow().as_slice() != targets.as_slice() {
-        targets_tx.send_replace(targets);
-    }
 }
 
 /// Project the capacity readings for the phone.
@@ -92,11 +88,20 @@ pub(super) fn viewer_capacity(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let storage = crate::target_storage::views();
     state
         .values()
         .map(|entry| {
             let usage = entry.usage.as_ref();
+            let hosts = mj_core::targets::storage::capacity_storage_hosts(&entry.target, usage);
             crate::server::ViewerTargetCapacity {
+                storage: crate::server::ViewerTargetStorage::list(
+                    &mj_core::targets::storage::views_for(&storage, &hosts),
+                    matches!(
+                        entry.target.kind,
+                        crate::targets::DeploymentCapacityKind::AwsFleet
+                    ),
+                ),
                 id: entry.target.id.clone(),
                 label: entry.target.host.clone(),
                 target_ids: entry.target.target_ids.clone(),
@@ -660,6 +665,11 @@ pub(super) fn viewer_snapshot_selected(
             session.state = crate::server::LAUNCHING_STATE.to_owned();
         }
         let live = operational.get(&session.id);
+        session.storage_problem = controller
+            .state
+            .sessions
+            .get(&session.id)
+            .and_then(crate::target_storage::session_problem);
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
             live.is_some_and(|state| state.supports_targeted_turn_control());

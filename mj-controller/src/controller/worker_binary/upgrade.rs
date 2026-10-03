@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::hex::lower_hex;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Replace `{worker_root}/hel` with the controller's current worker binary.
 ///
@@ -30,6 +31,90 @@ pub(crate) struct PreparedWorkerBinary<'a, E: CommandExecutor> {
     executor: &'a E,
     locator: targets::TargetLocator,
     session_id: String,
+    _live: LiveStaging,
+}
+
+/// The private staging names this daemon is writing or holding, per session.
+///
+/// Recovery stages under the worker permit and an upgrade stages before taking
+/// it, so two preparations for one session can overlap. This registry is the
+/// one owner of "which staged files are still in use": a new staging removes
+/// every other `hel.prepared-*` file in the worker root, which can only be a
+/// leftover from an attempt that failed or a daemon that stopped mid-upload.
+struct LiveStaging {
+    key: (PathBuf, String),
+    name: String,
+}
+
+type LiveStagingRegistry = std::sync::Mutex<BTreeMap<(PathBuf, String), BTreeSet<String>>>;
+
+fn live_stagings() -> &'static LiveStagingRegistry {
+    static LIVE: std::sync::OnceLock<LiveStagingRegistry> = std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+impl LiveStaging {
+    /// Register `name` and return every name live for the session, this one
+    /// included, from the same locked view.
+    fn register(session_id: &str, name: &str) -> (Self, Vec<String>) {
+        let key = (mj_core::config::data_dir(), session_id.to_owned());
+        let mut live = live_stagings()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let names = live.entry(key.clone()).or_default();
+        names.insert(name.to_owned());
+        let names = names.iter().cloned().collect();
+        (
+            Self {
+                key,
+                name: name.to_owned(),
+            },
+            names,
+        )
+    }
+}
+
+impl Drop for LiveStaging {
+    fn drop(&mut self) {
+        let mut live = live_stagings()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(names) = live.get_mut(&self.key) {
+            names.remove(&self.name);
+            if names.is_empty() {
+                live.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Remove the `hel.prepared-*` files in `worker_root` that no live staging
+/// owns. A failed upload once left its partial `.next` file behind, and on a
+/// full disk those accumulated by the dozen.
+fn sweep_stale_stagings_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    live: &[String],
+) -> CommandSpec {
+    let script = r#"root=$1; shift
+for path in "$root"/hel.prepared-*; do
+    [ -e "$path" ] || continue
+    name=${path##*/}
+    keep=0
+    for live in "$@"; do
+        case $name in "$live"|"$live".next) keep=1 ;; esac
+    done
+    [ "$keep" = 1 ] || rm -f -- "$path"
+done"#;
+    let mut args = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script.to_owned(),
+        "mj-staging-sweep".to_owned(),
+        worker_root.to_owned(),
+    ];
+    args.extend(live.iter().cloned());
+    targets::locator_command(locator, args).purpose("remove stale private worker staging")
 }
 
 impl<E: CommandExecutor> PreparedWorkerBinary<'_, E> {
@@ -77,6 +162,13 @@ impl<E: CommandExecutor> Drop for PreparedWorkerBinary<'_, E> {
     }
 }
 
+/// The bytes a local file will take on the target.
+pub(in crate::controller) fn file_size(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path)
+        .with_context(|| format!("measure {}", path.display()))?
+        .len())
+}
+
 pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecutor>(
     executor: &'a E,
     locator: &targets::TargetLocator,
@@ -87,10 +179,18 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
         "hel.prepared-{}",
         crate::session_manager::new_command_id("upgrade-stage")?
     );
-    worker_binary_replacement_plan(locator, session_id, worker_binary, &staging)?
-        .execute(executor)?;
+    let plan = worker_binary_replacement_plan(locator, session_id, worker_binary, &staging)?;
     let root = targets::worker_root(locator, session_id)?;
-    Ok(PreparedWorkerBinary {
+    crate::target_storage::ensure_room_for(
+        locator,
+        [format!("{root}/{staging}.next").as_str()],
+        || file_size(worker_binary),
+        "stage the replacement Mjolnir worker",
+    )?;
+    let (live, live_names) = LiveStaging::register(session_id, &staging);
+    // The guard exists before the first byte is written, so a failed or
+    // cancelled upload removes its partial `.next` file on the way out.
+    let prepared = PreparedWorkerBinary {
         cleanup: targets::locator_command(
             locator,
             vec![
@@ -106,7 +206,14 @@ pub(in crate::controller) fn stage_worker_binary_for_upgrade<'a, E: CommandExecu
         executor,
         locator: locator.clone(),
         session_id: session_id.to_owned(),
-    })
+        _live: live,
+    };
+    execute_checked(
+        executor,
+        sweep_stale_stagings_command(locator, &root, &live_names),
+    )?;
+    plan.execute(executor)?;
+    Ok(prepared)
 }
 
 pub(in crate::controller) fn install_staged_worker_binary(
@@ -171,6 +278,16 @@ pub(in crate::controller) fn prepare_managed_harness_for_upgrade(
     if !launch.requires_harness_preparation() {
         return Ok(());
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [
+            targets::worker_root(locator, session_id)?.as_str(),
+            crate::target_storage::harness_cache_path(locator).as_str(),
+            launch.harness_home.to_string_lossy().as_ref(),
+        ],
+        || file_size(worker_binary),
+        "prepare the managed harness",
+    )?;
     if locator.container_engine().is_some() {
         return prepare_container_harness_for_upgrade(
             executor,
@@ -357,6 +474,15 @@ pub(super) fn prepare_installed_managed_harness(
     if !launch.requires_harness_preparation() {
         return Ok(());
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [
+            crate::target_storage::harness_cache_path(locator).as_str(),
+            launch.harness_home.to_string_lossy().as_ref(),
+        ],
+        || Ok(0),
+        "install the managed harness",
+    )?;
     let worker_binary = format!("{worker_root}/hel");
     let launch_config = format!("{worker_root}/launch.json");
     let command = targets::locator_command(
@@ -680,6 +806,12 @@ pub(super) fn replace_target_worker_binary_if_stale(
     if matches {
         return Ok(false);
     }
+    crate::target_storage::ensure_room_for(
+        locator,
+        [targets::worker_root(locator, session_id)?.as_str()],
+        || file_size(source),
+        "replace the stale Mjolnir worker",
+    )?;
     installed_worker_binary_replacement_plan(locator, session_id, source)?
         .execute(executor)
         .context("replace stale relay worker binary")?;

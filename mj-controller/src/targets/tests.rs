@@ -2534,25 +2534,71 @@ fn host_capacity_counts_zfs_arc_above_its_minimum_as_available_memory() {
 #[test]
 fn parses_host_and_aws_capacity_outputs() {
     let host = parse_host_capacity(
-        b"cpu.percent=62.6\nmemory.current=300\nmemory.max=1000\nlogical.cores=8\n",
+        b"home=/home/u\nstorage=0\t491134172\t467026656\t/\t/tmp\n\
+cpu.percent=62.6\nmemory.current=300\nmemory.max=1000\nlogical.cores=8\n",
+        "precision-3260",
     )
     .unwrap();
     assert_eq!(host.cpu_percent, Some(63));
     assert_eq!(host.memory_used_bytes, 300);
     assert_eq!(host.memory_total_bytes, 1_000);
     assert_eq!(host.logical_cores, 8);
+    assert_eq!(host.storage.len(), 1);
+    assert_eq!(host.storage[0].host, "precision-3260");
+    assert_eq!(host.storage[0].filesystems[0].available_bytes, 0);
 
     let aws = parse_aws_allocated_capacity(
         b"memory.total=34359738368\nlogical.cores=16\ndisk.total=214748364800\n",
+        "10.0.0.1",
     )
     .unwrap();
     assert_eq!(aws.cpu_percent, None);
     assert_eq!(aws.memory_total_bytes, 34_359_738_368);
     assert_eq!(aws.logical_cores, 16);
     assert_eq!(aws.disk_total_bytes, Some(214_748_364_800));
+    assert!(aws.storage.is_empty());
 
-    assert!(parse_host_capacity(b"cpu.percent=nan\n").is_err());
-    assert!(parse_aws_allocated_capacity(b"memory.total=nope\n").is_err());
+    assert!(parse_host_capacity(b"cpu.percent=nan\n", "host").is_err());
+    assert!(parse_aws_allocated_capacity(b"memory.total=nope\n", "host").is_err());
+}
+
+/// The host probe measures storage and still samples CPU and memory: the
+/// storage loop must not leave its paths where the resource script reads
+/// its optional /proc override.
+#[cfg(target_os = "linux")]
+#[test]
+fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let ssh = SshTarget {
+        destination: "host".into(),
+        ssh_args: Vec::new(),
+    };
+    let remote = ssh_host_capacity_command(
+        &ssh,
+        &[
+            directory
+                .path()
+                .join("missing")
+                .to_string_lossy()
+                .into_owned(),
+            ".cache/mjolnir".into(),
+        ],
+    );
+    // Run the remote words locally rather than over SSH.
+    let words = remote.args.last().unwrap().clone();
+    let output = ProcessExecutor
+        .execute(&CommandSpec::new("sh", ["-c", &words]).purpose("test host probe"))
+        .unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = parse_host_capacity(&output.stdout, "host").unwrap();
+    assert!(usage.memory_total_bytes > 0);
+    assert!(!usage.storage.is_empty());
+    assert!(usage.storage[0].filesystems[0].total_bytes > 0);
 }
 
 #[test]

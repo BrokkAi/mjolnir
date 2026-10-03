@@ -1211,6 +1211,9 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
     if let Some(error) = &session.error {
         lines.push(format!("error: {error}"));
     }
+    if let Some(problem) = &session.storage_problem {
+        lines.push(problem.clone());
+    }
     if let Some(outcome) = &session.last_turn_outcome {
         lines.push(format!("last turn {}", outcome.outcome));
     }
@@ -1367,7 +1370,7 @@ pub(crate) async fn sessions(
     let state_width = list
         .sessions
         .iter()
-        .map(|session| session.state.chars().count())
+        .map(|session| listed_state(session).chars().count())
         .chain(std::iter::once(5))
         .max()
         .unwrap_or(5);
@@ -1375,10 +1378,21 @@ pub(crate) async fn sessions(
     for session in &list.sessions {
         println!(
             "{:id_width$}  {:state_width$}  {}",
-            session.id, session.state, session.title
+            session.id,
+            listed_state(session),
+            session.title
         );
     }
     Ok(())
+}
+
+/// The STATE column: the session's state, and "disk full" when its target
+/// cannot take writes. `--session` prints the whole reason.
+fn listed_state(session: &ApiSession) -> String {
+    match session.storage_problem {
+        Some(_) => format!("{} (disk full)", session.state),
+        None => session.state.clone(),
+    }
 }
 
 /// Report one SessionWiki row for an id that names no Mjolnir session.
@@ -2428,6 +2442,23 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("an older failure")),
             "a finished turn prints no failure reason"
+        );
+    }
+
+    /// precision-3260: sessions on a full disk read as "unreachable" with
+    /// nothing saying why. The list marks them and the report says why.
+    #[test]
+    fn a_session_on_a_full_disk_says_so_in_the_list_and_the_report() {
+        let mut session = wait_response("finished", serde_json::json!({})).session;
+        assert_eq!(listed_state(&session), "running");
+        session.storage_problem = Some("disk full: precision-3260 has 0 B free on /".to_owned());
+        assert_eq!(listed_state(&session), "running (disk full)");
+        assert_eq!(
+            session_report_lines(&session, 0),
+            [
+                "s1  running  t",
+                "disk full: precision-3260 has 0 B free on /"
+            ]
         );
     }
 

@@ -49,8 +49,17 @@ pub(crate) async fn run_server(
     // target that disappears from the configuration disappears from the page.
     let mut capacity_state: std::collections::BTreeMap<String, PhoneCapacity> =
         std::collections::BTreeMap::new();
-    let (capacity_targets_tx, capacity_triggers_tx, mut capacity_updates_rx) =
-        crate::pollers::spawn_dashboard_capacity_poller();
+    // The daemon's capacity service probes each host once per interval; the
+    // page shows its readings rather than probing again.
+    let capacity_feed = daemon_runtime
+        .capacity_feed()
+        .context("the daemon capacity service is not running")?;
+    let mut capacity_targets_rx = capacity_feed.targets.clone();
+    let mut capacity_updates_rx = capacity_feed.updates.subscribe();
+    track_capacity_targets(
+        &capacity_targets_rx.borrow_and_update(),
+        &mut capacity_state,
+    );
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
@@ -91,11 +100,6 @@ pub(crate) async fn run_server(
         updates: mut worker_updates_rx,
         shutdown: worker_shutdown,
     } = worker;
-    publish_capacity_targets(
-        &daemon_runtime.active_controller_projection(),
-        &capacity_targets_tx,
-        &mut capacity_state,
-    );
     // Captured before `options` is moved into the server.
     let options_session_ttl = crate::server::default_session_ttl();
     let activity_snapshots = snapshot_rx.clone();
@@ -422,10 +426,28 @@ pub(crate) async fn run_server(
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
-                update = capacity_updates_rx.recv() => {
-                    let Some(update) = update else {
-                        failure = feed_stopped(termination.is_cancelled(), "the capacity poller stopped while the phone server was running");
+                changed = capacity_targets_rx.changed() => {
+                    if changed.is_err() {
+                        failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
                         break;
+                    }
+                    track_capacity_targets(&capacity_targets_rx.borrow_and_update(), &mut capacity_state);
+                    revision = daemon_runtime.allocate_revision();
+                    publish_snapshot!('control, revision);
+                }
+                update = capacity_updates_rx.recv() => {
+                    let update = match update {
+                        Ok(update) => update,
+                        // Readings are latest-wins; a skipped one is replaced
+                        // by the next poll.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::debug!(skipped, "phone server skipped capacity readings");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            failure = feed_stopped(termination.is_cancelled(), "the capacity service stopped while the phone server was running");
+                            break;
+                        }
                     };
                     if let Some(entry) = capacity_state.get_mut(&update.target_id) {
                         entry.refreshing = false;
@@ -1079,21 +1101,18 @@ pub(crate) async fn run_server(
                         failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering actions");
                         break;
                     };
-                    // A refresh nudges a poller this loop owns. It takes no
-                    // session slot and starts no lifecycle work, so it is
+                    // A refresh nudges the daemon's capacity poller. It takes
+                    // no session slot and starts no lifecycle work, so it is
                     // answered here rather than admitted as an action.
                     match &request.action {
                         ControllerAction::RefreshCapacity { target_id } => {
                             let known = capacity_state.contains_key(target_id);
                             // One queued nudge refreshes every target. Do not
                             // block the consumer while readings wait for it.
-                            let accepted = known && match capacity_triggers_tx.try_send(()) {
-                                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => true,
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                                    tracing::warn!("phone capacity refresh rejected: poller stopped");
-                                    false
-                                }
-                            };
+                            let accepted = known && capacity_feed.request_refresh();
+                            if known && !accepted {
+                                tracing::warn!("phone capacity refresh rejected: poller stopped");
+                            }
                             if known {
                                 if let Some(entry) = capacity_state.get_mut(target_id) {
                                     entry.refreshing = accepted;
@@ -1473,12 +1492,8 @@ pub(crate) async fn run_server(
                             }
                             controller = reloaded;
                             quotas.retain(|id, _| controller.config.enabled_profile(id).is_some());
-
-                            publish_capacity_targets(
-                                &daemon_runtime.active_controller_projection(),
-                                &capacity_targets_tx,
-                                &mut capacity_state,
-                            );
+                            // The capacity service follows the reload itself;
+                            // its new targets arrive on `capacity_targets_rx`.
                             revision = daemon_runtime.allocate_revision();
                             publish_snapshot!('control, revision);
                         }

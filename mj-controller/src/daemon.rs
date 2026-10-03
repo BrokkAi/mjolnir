@@ -155,6 +155,9 @@ pub struct RuntimeState {
     /// is the only process that asks a provider for quota; everything else
     /// reads this.
     quota: Mutex<QuotaBoard>,
+    /// The one capacity poller and what it shares; set once the daemon
+    /// starts it.
+    capacity: std::sync::OnceLock<capacity::CapacityFeed>,
     /// What `[review]` last said, republished by the target refresher.
     review_config: Arc<Mutex<mj_core::config::ReviewConfig>>,
     /// Turn review runs here, in the process that owns every session, so a
@@ -556,6 +559,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
     }
 }
 
+mod capacity;
 mod close;
 mod close_workspace;
 mod create;

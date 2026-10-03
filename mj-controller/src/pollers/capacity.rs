@@ -10,9 +10,9 @@ pub fn spawn_dashboard_capacity_poller() -> (
             bail!("capacity probe is unavailable: {error}");
         }
         if target.local {
-            return collect_local_capacity_with(collect_local_capacity)
-                .await
-                .map(Some);
+            let mut usage = collect_local_capacity_with(collect_local_capacity).await?;
+            usage.storage = collect_local_storage(&target).await;
+            return Ok(Some(usage));
         }
         tokio::time::timeout(RESOURCE_POLL_TIMEOUT, collect_capacity(&target))
             .await
@@ -168,7 +168,11 @@ pub(super) async fn collect_capacity(
             for command in &target.probes {
                 match execute_resource_command(command).await {
                     Ok(output) => {
-                        return crate::targets::parse_host_capacity(&output.stdout).map(Some);
+                        return crate::targets::parse_host_capacity(
+                            &output.stdout,
+                            &probe_storage_host(command),
+                        )
+                        .map(Some);
                     }
                     Err(error) => last_error = Some(error),
                 }
@@ -183,7 +187,10 @@ pub(super) async fn collect_capacity(
             for command in target.probes.clone() {
                 tasks.spawn(async move {
                     let output = execute_resource_command(&command).await?;
-                    crate::targets::parse_aws_allocated_capacity(&output.stdout)
+                    crate::targets::parse_aws_allocated_capacity(
+                        &output.stdout,
+                        &probe_storage_host(&command),
+                    )
                 });
             }
             let mut usages = Vec::new();
@@ -204,8 +211,10 @@ pub fn aggregate_aws_capacity(
         memory_total_bytes: 0,
         logical_cores: 0,
         disk_total_bytes: Some(0),
+        storage: Vec::new(),
     };
     for usage in usages {
+        total.storage.extend(usage.storage.iter().cloned());
         total.memory_total_bytes = total
             .memory_total_bytes
             .checked_add(usage.memory_total_bytes)
@@ -244,7 +253,36 @@ pub(super) fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
             .try_into()
             .context("logical CPU count overflow")?,
         disk_total_bytes: None,
+        storage: Vec::new(),
     })
+}
+
+/// The storage owner's name for the machine a probe ran on.
+fn probe_storage_host(command: &CommandSpec) -> String {
+    mj_core::targets::storage::storage_host_of_destination(command.ssh_destination.as_deref())
+}
+
+/// Measure local free space with the local target's storage probe. A failed
+/// measurement leaves storage unknown; CPU and memory still publish.
+async fn collect_local_storage(
+    target: &DeploymentCapacityTarget,
+) -> Vec<mj_core::targets::storage::HostStorageSample> {
+    let Some(command) = target.probes.first() else {
+        return Vec::new();
+    };
+    match execute_resource_command(command).await {
+        Ok(output) => crate::targets::storage_samples(
+            &output.stdout,
+            mj_core::targets::storage::LOCAL_STORAGE_HOST,
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "local free-space probe failed"
+            );
+            Vec::new()
+        }
+    }
 }
 
 pub(super) async fn collect_local_capacity_with(

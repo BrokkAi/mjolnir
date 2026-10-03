@@ -184,24 +184,8 @@ fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Opt
     if !root.is_dir() {
         return;
     }
-    let record = serde_json::json!({
-        "reason": reason,
-        "refusal": refusal,
-        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "version": env!("CARGO_PKG_VERSION"),
-    });
-    let bytes = match serde_json::to_vec_pretty(&record) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("Mjolnir: could not serialize worker exit record: {error}");
-            return;
-        }
-    };
-    // Atomic, like the startup record: the controller parses what it reads.
-    if let Err(error) =
-        mj_core::config::atomic_write(&root.join(mj_core::relay::WORKER_EXIT_FILE), &bytes)
-    {
-        eprintln!("Mjolnir: could not write worker exit record: {error}");
+    if let Err(error) = mj_worker::exit_record::write(root, reason, refusal) {
+        eprintln!("Mjolnir: could not write worker exit record: {error:#}");
     }
 }
 

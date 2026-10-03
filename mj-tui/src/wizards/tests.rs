@@ -3980,6 +3980,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
             memory_total_bytes: 48 * gib,
             logical_cores: 12,
             disk_total_bytes: None,
+            storage: Vec::new(),
         })),
         0,
     );
@@ -6192,6 +6193,7 @@ fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limit
             memory_total_bytes: 4 << 30,
             logical_cores: 2,
             disk_total_bytes: None,
+            storage: Vec::new(),
         })),
         0,
     );
@@ -6269,6 +6271,7 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
             memory_total_bytes: 64 << 30,
             logical_cores: cpus,
             disk_total_bytes: None,
+            storage: Vec::new(),
         }))
     };
     dashboard.apply_deployment_capacity("local", sample(4), 0);

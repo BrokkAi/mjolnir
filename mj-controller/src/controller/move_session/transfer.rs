@@ -310,6 +310,12 @@ impl Controller {
                     let backend =
                         super::super::backend::backend_locator(locator, source, &self.config)?;
                     targets::retire_move_target_plan(&backend, session_id)?.execute(executor)?;
+                    self.release_retired_move_target(
+                        source,
+                        &backend,
+                        self.state.sessions.get(session_id),
+                        executor,
+                    );
                 }
                 if let Some(checkout) = &source.managed_worktree {
                     ensure!(
@@ -325,6 +331,52 @@ impl Controller {
                 crate::database::forget_retained_move_source(operation_id)
             },
         )
+    }
+
+    /// Release the mbx build state of a target a Move has just retired,
+    /// keeping whatever the placement the session goes on running in,
+    /// `live`, can still build in. When that placement cannot be resolved,
+    /// nothing is released: a stale target costs disk until mbx ages it out,
+    /// while a wrong release costs a live session its build output.
+    fn release_retired_move_target(
+        &self,
+        retired: &mj_core::state::SessionRecord,
+        backend: &targets::TargetLocator,
+        live: Option<&mj_core::state::SessionRecord>,
+        executor: &impl CommandExecutor,
+    ) {
+        let Some(release) = super::super::mbx::release::BuildStateRelease::for_target(
+            retired,
+            backend,
+            &self.config,
+        ) else {
+            return;
+        };
+        let live_backend = match live
+            .and_then(|live| live.target.as_ref().map(|target| (live, target)))
+        {
+            None => None,
+            Some((live, target)) => {
+                match super::super::backend::backend_locator(target, live, &self.config) {
+                    Ok(backend) => Some((live, backend)),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %retired.id,
+                            error = format!("{error:#}"),
+                            "the Move's live target could not be resolved, so the retired target's build state is kept"
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        if let Some(release) = release.excluding(
+            live_backend
+                .as_ref()
+                .map(|(live, backend)| (*live, backend)),
+        ) {
+            release.run(executor);
+        }
     }
 
     pub(in crate::controller) fn move_destination_bundle(
@@ -859,6 +911,12 @@ impl Controller {
                 let backend =
                     super::super::backend::backend_locator(locator, source, &self.config)?;
                 targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
+                self.release_retired_move_target(
+                    source,
+                    &backend,
+                    self.state.sessions.get(id),
+                    executor,
+                );
             }
             if let Some(checkout) = &source.managed_worktree {
                 super::super::worktree::retire_managed_worktree(executor, checkout)?;
@@ -908,6 +966,14 @@ impl Controller {
                     let backend =
                         super::super::backend::backend_locator(locator, current, &self.config)?;
                     targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
+                    // The source becomes the session again, so it is the
+                    // placement whose build state must survive.
+                    self.release_retired_move_target(
+                        current,
+                        &backend,
+                        Some(&transfer.source),
+                        executor,
+                    );
                 }
                 if let Some(checkout) = &current.managed_worktree
                     && Some(checkout) != transfer.source.managed_worktree.as_ref()

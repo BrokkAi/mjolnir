@@ -369,6 +369,62 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
         stamped_worker(b"replacement-worker")
     );
 }
+
+/// The incident on precision-3260: every failed upload left a truncated
+/// `hel.prepared-*.next` behind, 39 of them in one worker root. A failed
+/// upload now removes its own partial file, and the next staging removes any
+/// left by an earlier daemon, while a staging still in use is kept.
+#[cfg(unix)]
+#[test]
+fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
+    /// Runs commands for real, except that the upload writes 32 KiB of its
+    /// file and then fails the way scp does on a full disk.
+    struct FullDiskUpload {
+        fail: std::cell::Cell<bool>,
+    }
+    impl CommandExecutor for FullDiskUpload {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if self.fail.get() && command.purpose == "stage replacement Mjolnir worker" {
+                std::fs::write(&command.args[1], vec![0; 32 * 1024]).unwrap();
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"cp: error writing: No space left on device".to_vec(),
+                });
+            }
+            targets::ProcessExecutor.execute(command)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "34343434343434343434343434343434";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir(&worker_root).unwrap();
+    let source = directory.path().join("new-worker");
+    std::fs::write(&source, stamped_worker(b"replacement-worker")).unwrap();
+    let stale = worker_root.join("hel.prepared-upgrade-stage-0123.next");
+    std::fs::write(&stale, vec![0; 32 * 1024]).unwrap();
+    std::fs::write(worker_root.join("hel"), b"running-worker").unwrap();
+    let locator = targets::TargetLocator::LocalBare {
+        worker_root: worker_root.to_string_lossy().into_owned(),
+    };
+    let executor = FullDiskUpload {
+        fail: std::cell::Cell::new(false),
+    };
+    let held = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source).unwrap();
+    assert!(!stale.exists(), "a stale partial upload survived staging");
+    executor.fail.set(true);
+    let error = stage_worker_binary_for_upgrade(&executor, &locator, session_id, &source)
+        .err()
+        .expect("the upload fails");
+    assert!(format!("{error:#}").contains("No space left on device"));
+    let mut remaining = std::fs::read_dir(&worker_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(remaining, vec!["hel".to_owned(), held.to_string()]);
+}
 use crate::controller::test_support::{IsolatedTest, test_name};
 use mj_core::hex::lower_hex;
 use mj_core::targets::ProcessExecutor;
@@ -2150,6 +2206,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             },
             target: targets::target_recovery_plan(&locator, &session)?,
             workspace: None,
+            exit_record: None,
             liveness_probe: worker_liveness_command(&locator, &root),
             binary_refresh: worker_binary_refresh_plan(&locator, &session)?,
             launch_refresh: Some(worker_launch_refresh_plan(&locator, &session, &launch)?),
@@ -4912,6 +4969,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         source_target: mj_core::state::TargetLocator::LocalBare { worker_root: root },
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["dead\n"]),
         binary_refresh: worker_binary_refresh_plan(&locator, session_id).unwrap(),
         launch_refresh: Some(WorkerLaunchRefreshPlan {

@@ -341,6 +341,7 @@ impl RuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot
             .clone();
+        full.metadata.storage = crate::target_storage::views();
         full.metadata.profile_capabilities = self
             .profile_catalog
             .get()

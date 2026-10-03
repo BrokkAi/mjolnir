@@ -941,6 +941,7 @@ async fn capacity_timeout_retains_blocking_sample_until_it_exits() {
             memory_total_bytes: 2,
             logical_cores: 4,
             disk_total_bytes: None,
+            storage: Vec::new(),
         })
     }));
     started_rx.await.unwrap();
@@ -1587,6 +1588,7 @@ fn aws_capacity_sums_live_instance_allocations() {
             memory_total_bytes: 8,
             logical_cores: 2,
             disk_total_bytes: Some(100),
+            storage: Vec::new(),
         },
         DeploymentCapacityUsage {
             cpu_percent: None,
@@ -1594,6 +1596,7 @@ fn aws_capacity_sums_live_instance_allocations() {
             memory_total_bytes: 16,
             logical_cores: 4,
             disk_total_bytes: Some(200),
+            storage: Vec::new(),
         },
     ])
     .unwrap();

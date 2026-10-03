@@ -218,6 +218,9 @@ pub(crate) fn drawn_session_rows_with_options(
                 let detail = dashboard.session_details.get(&session.id);
                 let review = dashboard.session_review(&session.id);
                 let unreachable = dashboard.unreachable_sessions.contains(&session.id);
+                // An unreachable session on a full disk says why.
+                let disk_full =
+                    unreachable && dashboard.session_storage_problem(&session.id).is_some();
                 let attention = dashboard.attention_level(&session.id);
                 let facts = SessionRowFacts {
                     detail,
@@ -315,6 +318,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         detail,
                         review,
                         unreachable,
+                        disk_full,
                         attention,
                         operation,
                         now_epoch_seconds,
@@ -335,6 +339,7 @@ pub(crate) fn drawn_session_rows_with_options(
                         detail,
                         review,
                         unreachable,
+                        disk_full,
                         attention,
                         operation,
                         now_epoch_seconds,
@@ -505,6 +510,7 @@ pub(crate) fn expanded_session_lines(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    disk_full: bool,
     attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -539,6 +545,7 @@ pub(crate) fn expanded_session_lines(
         detail,
         review,
         unreachable,
+        disk_full,
         attention,
         operation,
         now_epoch_seconds,
@@ -646,6 +653,7 @@ pub(crate) fn session_activity_line(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    disk_full: bool,
     attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -680,6 +688,8 @@ pub(crate) fn session_activity_line(
             "Launch {}",
             mj_client::usage_format::format_clock(now_epoch_seconds.saturating_sub(started_at))
         )
+    } else if facts.unreachable && disk_full {
+        "Disk full".to_owned()
     } else if facts.unreachable {
         "Unreachable".to_owned()
     } else if detail.is_some_and(|d| {
@@ -818,6 +828,7 @@ pub(crate) fn compact_session_lines(
     detail: Option<&SessionDetail>,
     review: Option<&RuntimeReviewView>,
     unreachable: bool,
+    disk_full: bool,
     attention: AttentionLevel,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
@@ -853,6 +864,7 @@ pub(crate) fn compact_session_lines(
         detail,
         review,
         unreachable,
+        disk_full,
         attention,
         operation,
         now_epoch_seconds,

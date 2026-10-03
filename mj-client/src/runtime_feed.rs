@@ -63,6 +63,11 @@ pub struct RuntimeMetadata {
     /// The daemon's quota reports. The daemon is the only prober.
     #[serde(default)]
     pub quotas: crate::quota::QuotaSnapshot,
+    /// Free space on each target host, and whether it is full. The daemon's
+    /// storage board is the only judge; a daemon that predates the field
+    /// sends none.
+    #[serde(default)]
+    pub storage: Vec<mj_core::targets::storage::TargetStorageView>,
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]

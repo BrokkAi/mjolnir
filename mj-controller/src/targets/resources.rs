@@ -46,11 +46,34 @@ printf 'logical.cores=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
 df -B1 -P -- "$1" | awk 'NR == 2 { print "disk.total=" $2 }'
 "#;
 
-pub fn ssh_host_capacity_command(ssh: &SshTarget) -> CommandSpec {
+/// Where Mjolnir writes on an EC2 instance besides its workspace.
+const EC2_STORAGE_PATHS: [&str; 5] = [
+    mj_core::targets::storage::REMOTE_WORKERS_DIRECTORY,
+    mj_core::targets::storage::REMOTE_PROFILES_DIRECTORY,
+    mj_core::targets::storage::REMOTE_CACHE_DIRECTORY,
+    mj_core::targets::storage::DEFAULT_BUILD_CACHE_DIRECTORY,
+    mj_core::targets::storage::TEMPORARY_DIRECTORY,
+];
+
+/// Sample a host's CPU and memory, and the free space at each of
+/// `storage_paths` (relative paths are under the SSH user's home). One SSH
+/// command per host and poll: storage rides on the capacity probe rather
+/// than adding round trips.
+pub fn ssh_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> CommandSpec {
+    let storage = mj_core::targets::storage::STORAGE_PROBE_SCRIPT;
+    // The storage loop reads the paths from the arguments; the resource
+    // scripts read an optional /proc override from `$1`, so clear them first.
     let script = format!(
-        "set -eu\ncase $(uname -s) in\nDarwin)\n{DARWIN_HOST_RESOURCE_USAGE_SCRIPT}\n;;\nLinux)\n{HOST_RESOURCE_USAGE_SCRIPT}\n;;\n*) echo 'unsupported host operating system for capacity sampling' >&2; exit 1;;\nesac"
+        "set -eu\n{storage}\nset --\ncase $(uname -s) in\nDarwin)\n{DARWIN_HOST_RESOURCE_USAGE_SCRIPT}\n;;\nLinux)\n{HOST_RESOURCE_USAGE_SCRIPT}\n;;\n*) echo 'unsupported host operating system for capacity sampling' >&2; exit 1;;\nesac"
     );
-    ssh_command(ssh, ["sh", "-c", &script]).purpose("sample deployment host capacity")
+    let mut words = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script,
+        "mj-capacity".to_owned(),
+    ];
+    words.extend(storage_paths.iter().cloned());
+    ssh_command(ssh, words).purpose("sample deployment host capacity")
 }
 
 // vm_stat reports pages, whose size differs between Intel and Apple silicon.
@@ -95,15 +118,37 @@ pub fn aws_allocated_capacity_command(
         vec![
             "sh".into(),
             "-c".into(),
-            AWS_ALLOCATED_CAPACITY_SCRIPT.into(),
+            format!(
+                "{AWS_ALLOCATED_CAPACITY_SCRIPT}\n{}",
+                mj_core::targets::storage::STORAGE_PROBE_SCRIPT
+            ),
             "sh".into(),
             workspace.clone(),
-        ],
+        ]
+        .into_iter()
+        .chain(EC2_STORAGE_PATHS.iter().map(|path| (*path).to_owned()))
+        .collect(),
         "sample EC2 allocated capacity",
     )
 }
 
-pub fn parse_host_capacity(output: &[u8]) -> Result<DeploymentCapacityUsage> {
+/// The storage lines of a probe's output, as one sample for `host`.
+pub fn storage_samples(
+    output: &[u8],
+    host: &str,
+) -> Vec<mj_core::targets::storage::HostStorageSample> {
+    let (home, filesystems) = mj_core::targets::storage::parse_storage_lines(output);
+    if filesystems.is_empty() {
+        return Vec::new();
+    }
+    vec![mj_core::targets::storage::HostStorageSample {
+        host: host.to_owned(),
+        home,
+        filesystems,
+    }]
+}
+
+pub fn parse_host_capacity(output: &[u8], host: &str) -> Result<DeploymentCapacityUsage> {
     let values = parse_key_values(output);
     let total = parse_required_u64(&values, "memory.max")?;
     Ok(DeploymentCapacityUsage {
@@ -112,10 +157,11 @@ pub fn parse_host_capacity(output: &[u8]) -> Result<DeploymentCapacityUsage> {
         memory_total_bytes: total,
         logical_cores: parse_required_u64(&values, "logical.cores")?,
         disk_total_bytes: None,
+        storage: storage_samples(output, host),
     })
 }
 
-pub fn parse_aws_allocated_capacity(output: &[u8]) -> Result<DeploymentCapacityUsage> {
+pub fn parse_aws_allocated_capacity(output: &[u8], host: &str) -> Result<DeploymentCapacityUsage> {
     let values = parse_key_values(output);
     let memory_total_bytes = parse_required_u64(&values, "memory.total")?;
     Ok(DeploymentCapacityUsage {
@@ -124,6 +170,7 @@ pub fn parse_aws_allocated_capacity(output: &[u8]) -> Result<DeploymentCapacityU
         memory_total_bytes,
         logical_cores: parse_required_u64(&values, "logical.cores")?,
         disk_total_bytes: Some(parse_required_u64(&values, "disk.total")?),
+        storage: storage_samples(output, host),
     })
 }
 
@@ -189,7 +236,7 @@ mod darwin_tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let usage = parse_host_capacity(&output.stdout).unwrap();
+            let usage = parse_host_capacity(&output.stdout, "mac").unwrap();
             assert_eq!(usage.memory_used_bytes, 600 * page_size);
             assert_eq!(usage.memory_total_bytes, 17_179_869_184);
             assert_eq!(usage.logical_cores, 8);

@@ -1352,6 +1352,46 @@ fn ssh_bare_config() -> Config {
     )])
 }
 
+/// precision-3260 had 0 B free for its user while `df` showed ~23 GB "free"
+/// behind ext4's root reserve. Doctor says so plainly, with the reserve.
+#[test]
+fn storage_check_reports_a_full_disk_and_its_root_reserve() {
+    let full = output(
+        b"home=/home/dev\n\
+storage=0\t491134172\t467026656\t/\t.local/share/hel/workers\n\
+storage=41943040\t976762584\t900000000\t/home/dev/Projects\t/home/dev/Projects\n\
+cpu.percent=3\nmemory.current=1\nmemory.max=2\nlogical.cores=8\n",
+    );
+    let roomy = output(b"home=/home/dev\nstorage=41943040\t491134172\t100000000\t/\t/tmp\n");
+    let executor = FakeExecutor::new([Ok(full)]);
+    let checks = storage_checks(Ok(&ssh_bare_config()), &executor);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].id, "storage.ssh:example.test");
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    assert_eq!(
+        checks[0].detail,
+        "Disk full on /: /: 0 B free, 24.69 GB reserved for root (full); \
+/home/dev/Projects: 42.95 GB free, 35.66 GB reserved for root. \
+Mjolnir refuses writes there, and sessions that write there wait instead of restarting."
+    );
+    // The probe measures the paths Mjolnir writes to on that host.
+    let probe = executor.commands.borrow()[0].clone();
+    let remote = probe.args.last().unwrap();
+    for path in [
+        ".local/share/hel/workers",
+        ".local/share/hel/profiles",
+        ".cache/mjolnir",
+        ".cache/mbx",
+        "/tmp",
+    ] {
+        assert!(remote.contains(path), "{path} in {remote}");
+    }
+
+    let executor = FakeExecutor::new([Ok(roomy)]);
+    let checks = storage_checks(Ok(&ssh_bare_config()), &executor);
+    assert_eq!(checks[0].status, CheckStatus::Ready, "{}", checks[0].detail);
+}
+
 #[test]
 fn ssh_bare_check_is_ready_when_the_batch_mode_probe_succeeds() {
     let executor = FakeExecutor::new([Ok(output(b""))]);

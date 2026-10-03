@@ -1614,6 +1614,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         source_target: durable_target.clone(),
         target: None,
         workspace: None,
+        exit_record: None,
         liveness_probe: CommandSpec::new("printf", ["alive\n"]),
         binary_refresh: None,
         launch_refresh: None,

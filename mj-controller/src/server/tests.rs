@@ -5089,6 +5089,23 @@ if (sessionActivityLabel(session, 60000) !== 'Parked') throw Error('a parked chi
     run_viewer_script("parked-subagent", &format!("{setup}\n{source}\n{checks}"));
 }
 
+/// precision-3260: a session on a full disk showed only as unreachable. Its
+/// card now names the disk.
+#[test]
+fn embedded_viewer_says_when_a_session_s_disk_is_full() {
+    let source = viewer_source(
+        "function sessionActivityLabel(",
+        "function updateSessionActivity(",
+    );
+    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
+    let checks = r#"
+const problem = 'disk full: precision-3260 has 0 B free on /';
+const session = { lifecycle: 'live', state: 'disconnected', storage_problem: problem, activity_details: { kind: 'idle' } };
+if (sessionActivityLabel(session, 60000) !== problem) throw Error('a full disk is not named');
+"#;
+    run_viewer_script("storage-full", &format!("{setup}\n{source}\n{checks}"));
+}
+
 #[test]
 fn embedded_viewer_displays_quota_recovery_and_unknown_resets() {
     let source = viewer_source(

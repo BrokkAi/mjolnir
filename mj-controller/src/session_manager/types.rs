@@ -59,6 +59,10 @@ pub struct WorkerRecoveryPlan {
     pub target: Option<TargetRecoveryPlan>,
     pub workspace: Option<WorkerWorkspace>,
     pub liveness_probe: CommandSpec,
+    /// Prints the dead worker's own exit record, read before a restart
+    /// replaces it, so a worker that died of a full disk is not restarted
+    /// onto the same full disk.
+    pub exit_record: Option<CommandSpec>,
     /// Refresh a stale installed worker before restarting it. The digest is
     /// computed inside the recovery task so hashing a large binary never
     /// blocks a controller UI loop.
