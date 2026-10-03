@@ -17,7 +17,9 @@ The daemon is Mjolnir's background controller. Streaming a few lines must not ma
 - [x] (2026-10-02) Publish credential inputs only on relevant changes; refresh provider interpretation in background.
 - [x] (2026-10-02) Add behavior regressions and pass the complete dev suite with four test threads.
 - [x] (2026-10-02) Observe staged credential homes off the event loop, including filesystem-only transitions.
-- [ ] Complete the final profile and performance comparison, merge concurrent upstream commits, validate, and push.
+- [x] (2026-10-02) Complete the final isolated performance comparison and merge concurrent upstream commits without conflicts.
+- [x] (2026-10-02) Correct wait filtering so a durable-only turn completion is never skipped.
+- [ ] Finish combined validation and commit/push the final regression and evidence.
 
 ## Surprises & Discoveries
 
@@ -44,6 +46,10 @@ Decision: Cache the complete configuration for delegation adoption, while creden
 Decision: Publish pollable worker inputs as an Arc owned by RuntimeStateOwner, keyed by immutable record differences, configuration, moves, and the owner’s eligible worker IDs. Rationale: the initial 32-session comparison still spent work rebuilding copied input records on every unrelated update; consumers and admission now compare the same publication identity. No second lifecycle predicate or manual invalidation flag is introduced. Date/author: 2026-10-02, Codex.
 
 Decision: Observe staged-home eligibility in the existing 500 ms background refresh, alongside provider files. Rationale: replacing a legacy profile symlink with a directory changes credential eligibility without changing a durable session record. The owner still decides session eligibility, and stale prepared records cannot install after ownership changes. Date/author: 2026-10-02, Codex.
+
+Decision: Keep this implementation scoped to the four confirmed paths and report the measured CPU target miss. Rationale: 86-session measurements consistently improved CPU by 29–33%, with much larger reductions in allocations and memory, but do not support the predicted 50%. The fixture holds all workers in active turns, so their existing 150 ms relay synchronization still runs; extending this change into the worker protocol or synchronization schedule would be additional work beyond these four paths. Sampling did not reliably attribute the entire residual cost. Date/author: 2026-10-02, Codex.
+
+Decision: A changed committed wait token always forces a new decision even when detailed startup/report and viewer fields compare equal. Rationale: compact turn state can complete before a browser row changes. The existing second unchanged-input guard now includes that token, and a behavior regression completes the turn using only a durable token plus a global revision. Date/author: 2026-10-02, Codex.
 
 ## Context and Orientation
 
@@ -117,3 +123,11 @@ Upstream advanced independently to 540c9202 with three commits while this task w
 Revision: Created on 2026-10-02 from the user's accepted four-path CPU plan and the installed-daemon profile.
 
 Revision: Updated on 2026-10-02 with final behavior checks, filesystem-only staging observation, the 86-session CPU target miss, and the concurrent upstream merge requirement.
+
+The final measured implementation checkpoint is 0a878dc0. Its dev executable is target/debug/mj-cpu-optimized-final, SHA256 f42b0cbc6779d9e54cbb0307898a839caa48637118e4033777e8616ca12d3319. With identical 86-session retained histories and pending waits, CPU is 170.97% (138.20 user + 32.77 system), RSS 494735360 bytes, minor faults 195.53/s, and stream progress 19.83 ordinals/s. All 86 waits stayed pending. Evidence: target/reliability-artifacts/daemon-update-cpu-seed-10202-2445080/cpu.json. Relative to the 239.10% CPU baseline, CPU fell 28.50%, RSS 73.97%, and minor faults 93.47%; stream progress remained close to the baseline 19.93/s. The earlier shared-input run showed a 33.28% CPU reduction. Neither meets the 50% target, so this remains a stated performance limitation, not a passing acceptance claim. The measured checkpoint precedes the upstream merge and the durable-only completion regression; those later changes are validated separately and do not change this fixture's pending-turn workload.
+
+The isolated follow-up profile's 4096-byte DWARF stacks were mostly empty or truncated. It sampled allocation, serde_json, serde content deserialization, and bounded frame reading, but cannot quantify their callers. A post-measurement debugger capture detached successfully and caught waiting threads, providing no useful hot-path attribution. Artifacts: stream-perf.data under the 2293063 directory and gdb-stream-stacks.txt under 2445080. The oversized provisioning-phase capture had 44% lost samples and is discarded. Do not infer inclusive cost from these captures. No profiling tool attached to the live instance during implementation.
+
+Concurrent upstream commits merged cleanly as 8591f237. Full merged dev tests are running. Final Clippy, formatting, and diff checks pass with the wait-token correction; the focused durable-only completion regression passed (one test, 2204 filtered out). The full merged suite was compiled before that last regression, so its result is combined with the focused final-source check. Update this evidence with combined validation and push current master without force.
+
+Revision: Updated on 2026-10-02 with final CPU/memory measurements, explicit unmet performance target, clean upstream integration, and the durable-only completion regression.

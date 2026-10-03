@@ -5331,6 +5331,57 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     assert_eq!(reads(), 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(actor_without_projection()),
+        turn_states: Mutex::new(vec![Some(TurnState {
+            execution: MaterializedExecutionState::Running { started_at_ms: 10 },
+            active_turn: Some(MaterializedTurn {
+                command_id: "task".into(),
+                accepted_ordinal: Some(5),
+                turn_start_position: 6,
+                started_at_ms: 10,
+                steered_into: None,
+            }),
+            last_turn_outcome: None,
+        })]),
+        summary: Some(TurnSummary {
+            turn_number: 1,
+            turn_started_at_ms: 10,
+            last_changed_at_ms: 900,
+            final_message: Some("Completed.".into()),
+            tool_calls: 0,
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+    let waiter = spawn_wait(app, r#"{"turn_id":5,"timeout_secs":600}"#);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!waiter.is_finished());
+    *backend.turn_states.lock().unwrap() = vec![Some(TurnState {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        last_turn_outcome: Some(finished_child_turn("task")),
+    })];
+    backend
+        .wait_revision
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    snapshot_tx.send_modify(|snapshot| snapshot.revision += 1);
+    let response = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the committed turn ends the wait without a changed viewer row")
+        .unwrap()
+        .unwrap();
+    assert_eq!(json_body(response).await["outcome"], "finished");
+    assert_eq!(
+        backend
+            .turn_state_reads
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}
+
 /// A child's report lands in the durable records, which republish the
 /// snapshot without changing the child's row. The waiter must decide again
 /// then, and answer with the report.

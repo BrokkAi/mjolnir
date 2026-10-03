@@ -118,6 +118,7 @@ async fn wait_for_turn(
                 _ if unchanged => None,
                 Some(decided)
                     if wake == Wake::Published
+                        && decided.durable_revision == durable_revision
                         && decided.session == *session
                         && decided.launch_failure.as_ref() == launch_failure
                         && decided.start_status == start_status
