@@ -225,6 +225,8 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
           [--profile <id>] [--target <id>] [--workspace-id <id>] [--workspace <name>]
           [--queue start|discard] [--json]
 mj interrupt-turn --session <id> [--json]
+mj review start --session <id> [--json]
+mj review status --session <id> [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
@@ -389,6 +391,14 @@ independent clone whose work may be unpublished,
 pass `--acknowledge-unpublished-work` after reviewing the warning; suspension
 still verifies the recovery copy before releasing the clone. `mj interrupt-turn` interrupts only the current turn and
 keeps the session available for another prompt.
+
+`mj review start` reviews the turn a session just finished with the session's
+reviewer, as `/review` does in Prompt. It answers once the review has opened,
+which can take a few minutes while a reviewer is chosen and started, and fails
+with the reason when the session is still working, has queued prompts, is a
+sub-agent, or has no usable reviewer. `mj review status` prints the open
+review's tier, status, reviewing roles, and verdict, or `no review is open`.
+See [turn review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:

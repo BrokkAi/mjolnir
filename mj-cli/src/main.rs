@@ -154,6 +154,8 @@ enum Command {
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
+    /// Start a review of a session's last turn, or show the review it has open.
+    Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
     /// Print the API base URL and where its bearer token lives.
@@ -531,6 +533,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Destroy(_)) => "destroy",
         Some(Command::Resume(_)) => "resume",
         Some(Command::InterruptTurn(_)) => "interrupt-turn",
+        Some(Command::Review(_)) => "review",
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
         Some(Command::Models(_)) => "models",
@@ -748,6 +751,9 @@ async fn run_command(
                 .map(|()| DashboardExit::Normal)
         }
         Some(Command::InterruptTurn(args)) => api_commands::interrupt_turn(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Review(args)) => api_commands::review(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::StopTask(args)) => api_commands::stop_task(args)

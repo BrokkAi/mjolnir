@@ -96,6 +96,15 @@ Use the status form to see how review is configured and whether one is open:
 
 Tier and automatic behavior belong in `config.toml`; `/review quick`, `/review on`, and similar command variants are not accepted. A one-off review also must run between turns, after queued prompts have drained.
 
+From a script, the same two forms are CLI commands:
+
+```text
+mj review start --session <id>
+mj review status --session <id>
+```
+
+`mj review start` answers once the review has opened, or says why it cannot start. `mj review status` shows what the open review is doing, each reviewing role, and its verdict once it has one, or that no review is open.
+
 ## Read and resolve a verdict
 
 While review is running, the review view shows the active role and its status. In a multi-role review, `Tab` switches among the reviewer conversations so you can inspect how the verdict was reached.

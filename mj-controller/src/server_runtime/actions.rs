@@ -371,13 +371,16 @@ pub(super) async fn apply_phone_action(
         ControllerAction::StartReview { session_id } => {
             // The refusal is a sentence for the person holding the phone --
             // "prompts are queued", "set [review] profile in config.toml" --
-            // so it travels as the error text of this action.
+            // so it travels as a refusal: the phone shows that sentence and
+            // the API answers 409 with it, not a 500 behind a log reference.
             services
                 .daemon_runtime
                 .review_host()
                 .start(&session_id, true)
                 .await
-                .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                .map_err(|refusal| {
+                    anyhow::Error::new(mj_core::refusal::Refusal::precondition(refusal.to_string()))
+                })?;
             Ok(())
         }
         ControllerAction::ResolveReview {

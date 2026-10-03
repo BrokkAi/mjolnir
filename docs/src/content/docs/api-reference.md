@@ -673,6 +673,50 @@ For a session that is still starting, it withdraws the prompts held for it.
 There is no `/close` endpoint or `force` parameter. Destruction is available only
 through its dedicated authenticated endpoint, not the generic viewer actions.
 
+### Turn review
+
+```text
+POST /api/v1/sessions/{session_id}/review
+GET  /api/v1/sessions/{session_id}/review
+```
+
+`POST` starts a one-off review of the turn the session just finished, with the
+session's reviewer, as `/review` does in Prompt. It answers `202` once the
+review has opened, which can take minutes while a reviewer is chosen and
+started:
+
+```json
+{ "session_id": "0123abcd…", "started": true }
+```
+
+A review that cannot start answers `409` with the reason in `error`: the
+session is still working, prompts are queued, it is a sub-agent, a review is
+already open, or no reviewer is usable.
+
+`GET` answers `200` with the review the session has open, as the viewer shows
+it, or `"review": null` when none is open:
+
+```json
+{
+  "session_id": "0123abcd…",
+  "review": {
+    "tier": "quick",
+    "status": "sending findings to the primary agent…",
+    "roles": [{ "label": "reviewer", "state": "findings" }],
+    "verdict": {
+      "kind": "findings",
+      "text": "[P1] src/lib.rs:1 -- unbounded retry loop",
+      "allowed": ["forward", "dismiss", "cancel"]
+    }
+  }
+}
+```
+
+A role's `state` is `pending`, `running`, `done`, `findings`, or `failed`.
+`verdict` appears once the review has one; its `kind` is `clean`, `findings`,
+or `failed`, and `allowed` lists the resolutions it accepts. An unknown session
+answers `404`.
+
 ### Resume a suspended session
 
 ```text
@@ -798,6 +842,8 @@ Preconditions, all answering `409` with the reason:
 | `mj resume --session <id>` | `POST /sessions/{id}/resume` |
 | `mj destroy --session <id> [--delete-branch]` | `POST /sessions/{id}/destroy` |
 | `mj interrupt-turn --session <id>` | `POST /sessions/{id}/interrupt-turn` |
+| `mj review start --session <id>` | `POST /sessions/{id}/review` |
+| `mj review status --session <id>` | `GET /sessions/{id}/review` |
 | `mj stop-task --session <id> <task-id>` | `POST /sessions/{id}/background-tasks/stop` |
 
 These commands accept `--json`. `mj stop-task` prints its aggregate report of

@@ -31,6 +31,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long an export may take. The daemon runs git on the target, which for a
 /// large checkout over SSH is slow; its own ceiling is five minutes.
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long starting a review may take. The daemon answers once the review
+/// has opened: it waits for a recovery copy or worker upgrade holding the
+/// session, then chooses and starts a reviewer, which an Auto choice may try
+/// on several profiles.
+const REVIEW_START_TIMEOUT: Duration = Duration::from_secs(600);
 /// How much longer than the wait itself the HTTP request may take, so a wait
 /// that reaches its deadline answers `timeout` rather than failing the client.
 const WAIT_SLACK: Duration = Duration::from_secs(30);
@@ -690,6 +695,32 @@ impl ApiClient {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Start a one-off review of the turn the session just finished. The
+    /// daemon answers once the review has opened, which includes choosing and
+    /// starting a reviewer, so this may take minutes.
+    pub(crate) async fn start_review(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_controller::server::api::StartReviewResponse> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("/sessions/{session_id}/review")))
+                    .timeout(REVIEW_START_TIMEOUT),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    /// The review the session has open, if any.
+    pub(crate) async fn review_status(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_controller::server::api::ReviewStatusResponse> {
+        self.get_json(&format!("/sessions/{session_id}/review"))
+            .await
     }
 
     pub(crate) async fn stop_background_task(&self, session_id: &str, task_id: &str) -> Result<()> {

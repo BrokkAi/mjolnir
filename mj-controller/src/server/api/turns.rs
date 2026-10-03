@@ -524,6 +524,44 @@ pub(super) async fn interrupt_turn(
     send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
+/// Start a one-off review of the turn the session just finished. The
+/// controller answers once the review has opened; a review that cannot start
+/// (the session is still working, prompts are queued, a sub-agent's turn, no
+/// usable reviewer) is refused with the reason, as 409.
+pub(super) async fn start_review(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<(StatusCode, Json<StartReviewResponse>), ApiFailure> {
+    let status = send_action(
+        &state,
+        ControllerAction::StartReview {
+            session_id: session_id.clone(),
+        },
+    )
+    .await?;
+    Ok((
+        status,
+        Json(StartReviewResponse {
+            session_id,
+            started: true,
+        }),
+    ))
+}
+
+/// The review the session has open, if any, as the viewer shows it.
+pub(super) async fn review_status(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ReviewStatusResponse>, ApiFailure> {
+    let review = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?
+            .turn_review
+            .clone()
+    };
+    Ok(Json(ReviewStatusResponse { session_id, review }))
+}
+
 pub(super) async fn send_action(
     state: &ServerState,
     action: ControllerAction,

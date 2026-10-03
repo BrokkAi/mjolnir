@@ -1703,6 +1703,73 @@ pub(crate) async fn interrupt_turn(args: SessionArgs) -> Result<()> {
     }
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ReviewArgs {
+    #[command(subcommand)]
+    command: ReviewCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ReviewCommand {
+    /// Review the turn the session just finished, with the session's reviewer.
+    /// The session must be idle with no queued prompts.
+    Start(SessionArgs),
+    /// Show the review the session has open: what it is doing, each reviewing
+    /// role, and its verdict once it has one.
+    Status(SessionArgs),
+}
+
+pub(crate) async fn review(args: ReviewArgs) -> Result<()> {
+    let client = ApiClient::connect().await?;
+    match args.command {
+        ReviewCommand::Start(args) => {
+            let started = client.start_review(&args.session).await?;
+            if args.json {
+                return print_json(&started);
+            }
+            println!("review started on {}", args.session);
+            println!(
+                "follow it with `mj review status --session {}`",
+                args.session
+            );
+            Ok(())
+        }
+        ReviewCommand::Status(args) => {
+            let status = client.review_status(&args.session).await?;
+            if args.json {
+                return print_json(&status);
+            }
+            for line in review_lines(status.review.as_ref()) {
+                println!("{line}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A review as plain lines: its tier and status, one line per role, then the
+/// verdict and its text.
+fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec<String> {
+    let Some(review) = review else {
+        return vec!["no review is open".to_owned()];
+    };
+    let mut lines = vec![format!("{} review: {}", review.tier, review.status)];
+    for role in &review.roles {
+        lines.push(format!("  {}: {}", role.label, role.state));
+    }
+    if let Some(verdict) = &review.verdict {
+        lines.push(format!("verdict: {}", verdict.kind));
+        if !verdict.allowed.is_empty() {
+            lines.push(format!("resolve with: {}", verdict.allowed.join(", ")));
+        }
+        if !verdict.text.is_empty() {
+            lines.push(String::new());
+            lines.push(verdict.text.clone());
+        }
+    }
+    lines
+}
+
 /// Print where the API is and which file holds its token, which is what a
 /// caller driving it with curl needs.
 pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
@@ -1915,6 +1982,53 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[test]
+    fn review_parses_start_and_status_with_a_session() {
+        for (verb, json) in [("start", false), ("status", true)] {
+            let mut argv = vec!["mj", "review", verb, "--session", "s1"];
+            if json {
+                argv.push("--json");
+            }
+            let cli = Cli::try_parse_from(argv).expect("review parses");
+            let Some(Command::Review(args)) = cli.command else {
+                panic!("expected the review command");
+            };
+            let (ReviewCommand::Start(session) | ReviewCommand::Status(session)) = args.command;
+            assert_eq!(session.session, "s1");
+            assert_eq!(session.json, json);
+        }
+        assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
+    }
+
+    #[test]
+    fn review_lines_name_each_role_and_the_verdict() {
+        assert_eq!(review_lines(None), vec!["no review is open"]);
+        let review = mj_controller::server::ViewerTurnReview {
+            tier: "quick".into(),
+            status: "validating findings".into(),
+            roles: vec![mj_controller::server::ViewerReviewRole {
+                label: "reviewer".into(),
+                state: "findings".into(),
+            }],
+            verdict: Some(mj_controller::server::ViewerReviewVerdict {
+                kind: "findings".into(),
+                text: "[P1] src/lib.rs:1 -- no bound".into(),
+                allowed: vec!["forward".into(), "dismiss".into()],
+            }),
+        };
+        assert_eq!(
+            review_lines(Some(&review)),
+            vec![
+                "quick review: validating findings",
+                "  reviewer: findings",
+                "verdict: findings",
+                "resolve with: forward, dismiss",
+                "",
+                "[P1] src/lib.rs:1 -- no bound",
+            ]
+        );
+    }
 
     #[test]
     fn stop_task_requires_a_session_and_exactly_one_task_selection() {

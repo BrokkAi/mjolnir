@@ -5535,3 +5535,112 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
     assert_eq!(body["final_message"], "the full report");
     assert_eq!(body["report_source"], "handback");
 }
+
+#[tokio::test]
+async fn starting_a_review_sends_the_controller_action_and_names_the_session() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/review"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    assert_eq!(
+        request.action,
+        ControllerAction::StartReview {
+            session_id: "session-1".into()
+        }
+    );
+    request.reply.send(ActionOutcome::accepted()).unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["started"], true);
+}
+
+/// A review that cannot start answers 409 with the reason written for the
+/// person, not a 500 behind a log reference.
+#[tokio::test]
+async fn a_review_that_cannot_start_is_a_conflict_with_its_reason() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/review"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let request = actions.recv().await.unwrap();
+    request
+        .reply
+        .send(ActionOutcome::Refused(
+            mj_core::refusal::Refusal::precondition(
+                "prompts are queued; the review waits for them",
+            ),
+        ))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"],
+        "prompts are queued; the review waits for them"
+    );
+}
+
+#[tokio::test]
+async fn review_status_reports_the_open_review_or_none() {
+    let (app, _actions, snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let get = || {
+        bearer(Request::get("/api/v1/sessions/session-1/review"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(get()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert!(body["review"].is_null(), "{body}");
+
+    snapshot_tx.send_modify(|snapshot| {
+        let mut session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == "session-1")
+            .unwrap()
+            .clone();
+        session.turn_review = Some(crate::server::ViewerTurnReview {
+            tier: "quick".into(),
+            status: "sending findings to the primary agent…".into(),
+            roles: vec![crate::server::ViewerReviewRole {
+                label: "reviewer".into(),
+                state: "findings".into(),
+            }],
+            verdict: Some(crate::server::ViewerReviewVerdict {
+                kind: "findings".into(),
+                text: "[P1] src/lib.rs:1 -- unbounded retry loop".into(),
+                allowed: vec!["forward".into(), "dismiss".into(), "cancel".into()],
+            }),
+        });
+        snapshot.sessions.push(session);
+    });
+    let body = json_body(app.clone().oneshot(get()).await.unwrap()).await;
+    assert_eq!(body["review"]["tier"], "quick");
+    assert_eq!(body["review"]["roles"][0]["state"], "findings");
+    assert_eq!(body["review"]["verdict"]["kind"], "findings");
+
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/sessions/no-such-session/review"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

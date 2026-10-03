@@ -41,6 +41,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/interrupt-turn",
             post(interrupt_turn),
         )
+        .route(
+            "/sessions/{session_id}/review",
+            get(review_status).post(start_review),
+        )
         .route("/sessions/{session_id}/diff", get(diff))
         .route(
             "/sessions/{session_id}/files",

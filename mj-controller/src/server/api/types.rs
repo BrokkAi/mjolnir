@@ -649,6 +649,24 @@ impl From<ExportError> for ApiFailure {
     }
 }
 
+/// What `POST /sessions/{id}/review` was accepted as: the review of the turn
+/// the session just finished has started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartReviewResponse {
+    pub session_id: String,
+    pub started: bool,
+}
+
+/// The turn review a session has open, as `GET /sessions/{id}/review`
+/// reports it: the same view a phone renders, or `None` when no review is
+/// open (none was asked for, or the last one has closed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewStatusResponse {
+    pub session_id: String,
+    #[serde(default)]
+    pub review: Option<crate::server::ViewerTurnReview>,
+}
+
 // ---------------------------------------------------------------------------
 // SessionWiki
 // ---------------------------------------------------------------------------
