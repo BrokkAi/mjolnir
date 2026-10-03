@@ -103,7 +103,7 @@ While review is running, the review view shows the active role and its status. I
 Resolution depends on the verdict:
 
 - A **clean** verdict resolves automatically and advances the reviewed boundary.
-- A **findings** verdict offers **Forward findings**, **Dismiss**, and **Cancel**. Forward sends the validated findings to the primary harness as its next corrective prompt; a later review can verify those corrections. Dismiss advances the reviewed boundary without requesting changes. Cancel closes the review without advancing it, so the same delta remains reviewable.
+- A **findings** verdict is forwarded automatically, for automatic and one-off reviews alike: Mjolnir sends the validated findings to the primary harness as its next corrective prompt, and a later review can verify those corrections. If the primary rejects that prompt, the review stays open with **Forward findings** to retry, **Dismiss** to advance the reviewed boundary without requesting changes, and **Cancel** to close the review without advancing it, so the same delta remains reviewable.
 - A **failed** review offers **Dismiss** and **Cancel**. Its prompt hold has already been released, and neither choice advances the reviewed boundary; fix the profile, model, credential, or connectivity problem before trying again.
 
 Cancel is also available while review work is still running. It releases the prompt hold and leaves the unreviewed changes for a later pass.

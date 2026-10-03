@@ -99,6 +99,23 @@ impl HostState {
         for request in requests {
             self.run_one(session_id, request);
         }
+        self.forward_fresh_findings(session_id);
         self.publish(session_id);
+    }
+
+    /// A review someone asked for, automatic or manual, delivers its findings:
+    /// there is no case where the agent should not see them, so a findings
+    /// verdict is forwarded as soon as it is reached instead of waiting for a
+    /// person to press Forward. A clean verdict already closes itself, and a
+    /// failed one still waits to be dismissed. Forwarding leaves the verdict
+    /// phase, so this runs once per verdict.
+    fn forward_fresh_findings(&mut self, session_id: &str) {
+        let fresh = self.reviews.get(session_id).is_some_and(|slot| {
+            matches!(slot.driver.verdict(), Some(ReviewVerdict::Findings { .. }))
+                && slot.driver.can_forward()
+        });
+        if fresh && let Err(error) = self.resolve(session_id, Resolution::Forwarded) {
+            tracing::warn!(session_id, %error, "could not forward the review's findings");
+        }
     }
 }
