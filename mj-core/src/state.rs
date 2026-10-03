@@ -1066,6 +1066,16 @@ pub enum SessionResourceAllocation {
     },
 }
 
+/// Resource sizing supported by a target template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceAllocationKind {
+    #[default]
+    Fixed,
+    Container,
+    AwsEc2,
+}
+
 impl SessionResourceAllocation {
     pub fn validate(&self) -> Result<()> {
         match self {
@@ -1478,6 +1488,61 @@ pub struct SessionRecord {
 pub struct HostContainerSize {
     pub cpus: u64,
     pub memory_bytes: u64,
+}
+
+pub const BASELINE_CONTAINER_CPUS: u64 = 8;
+pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// Clamp a container size to a host reading, preserving the TUI's minimum of
+/// one CPU and one byte when a host reports zero totals.
+pub fn clamp_container_size(
+    size: HostContainerSize,
+    limits: Option<HostContainerSize>,
+) -> HostContainerSize {
+    let Some(limits) = limits else {
+        return HostContainerSize {
+            cpus: size.cpus.max(1),
+            memory_bytes: size.memory_bytes.max(1),
+        };
+    };
+    HostContainerSize {
+        cpus: size.cpus.min(limits.cpus.max(1)),
+        memory_bytes: size.memory_bytes.min(limits.memory_bytes.max(1)),
+    }
+}
+
+/// The default selected for a new container target: its remembered host size,
+/// or 8 CPUs / 32 GiB, clamped to the latest host totals when available.
+pub fn default_container_size(
+    remembered: Option<HostContainerSize>,
+    limits: Option<HostContainerSize>,
+) -> HostContainerSize {
+    clamp_container_size(
+        remembered.unwrap_or(HostContainerSize {
+            cpus: BASELINE_CONTAINER_CPUS,
+            memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
+        }),
+        limits,
+    )
+}
+
+/// The TUI's preferred EC2 size: retain the same instance type if offered,
+/// else choose 8 vCPUs, else the first offered option.
+pub fn preferred_aws_allocation<'a>(
+    options: &'a [SessionResourceAllocation],
+    previous: Option<&SessionResourceAllocation>,
+) -> Option<&'a SessionResourceAllocation> {
+    if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) = previous
+        && let Some(option) = options.iter().find(|option| {
+            matches!(option, SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type)
+        })
+    {
+        return Some(option);
+    }
+    options
+        .iter()
+        .find(|option| allocation_cpus(option) == BASELINE_CONTAINER_CPUS)
+        .or_else(|| options.first())
 }
 
 fn default_session_workspace_id() -> String {

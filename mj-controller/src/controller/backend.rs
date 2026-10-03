@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail, ensure};
 
 use mj_core::config::{AwsAddressSource, Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
-    PodmanWorkspaceLocator, SessionRecord, SessionResourceAllocation, TargetLocator,
-    allocation_cpus,
+    PodmanWorkspaceLocator, ResourceAllocationKind, SessionRecord, SessionResourceAllocation,
+    TargetLocator, allocation_cpus,
 };
 
 use crate::targets::{
@@ -1049,25 +1049,20 @@ fn backend_container(
     }
 }
 
-pub(super) fn validate_resource_allocation(
-    template: &TargetTemplate,
+pub(crate) fn validate_resource_allocation(
+    target_kind: impl Into<ResourceAllocationKind>,
     allocation: Option<&SessionResourceAllocation>,
 ) -> Result<()> {
     if let Some(allocation) = allocation {
         allocation.validate()?;
     }
-    match (template, allocation) {
+    match (target_kind.into(), allocation) {
         (_, None)
-        | (
-            TargetTemplate::LocalPodman { .. }
-            | TargetTemplate::LocalDocker { .. }
-            | TargetTemplate::AppleContainer { .. }
-            | TargetTemplate::SshPodman { .. }
-            | TargetTemplate::SshDocker { .. },
-            Some(SessionResourceAllocation::Container { .. }),
-        )
-        | (TargetTemplate::AwsEc2 { .. }, Some(SessionResourceAllocation::AwsEc2 { .. })) => Ok(()),
-        (TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }, Some(_)) => {
+        | (ResourceAllocationKind::Container, Some(SessionResourceAllocation::Container { .. }))
+        | (ResourceAllocationKind::AwsEc2, Some(SessionResourceAllocation::AwsEc2 { .. })) => {
+            Ok(())
+        }
+        (ResourceAllocationKind::Fixed, Some(_)) => {
             bail!(mj_core::state::BARE_TARGET_FIXED_RESOURCES)
         }
         _ => bail!("resource allocation does not match the selected target kind"),
@@ -1283,7 +1278,7 @@ pub(super) fn ec2_locator_after_launch(
 ///
 /// The mapping itself lives in `mj_core::targets`; this only pairs the stored
 /// locator with the target template the session was created against.
-pub(super) fn backend_locator(
+pub(crate) fn backend_locator(
     locator: &TargetLocator,
     session: &SessionRecord,
     config: &Config,

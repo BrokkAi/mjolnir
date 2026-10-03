@@ -1159,15 +1159,18 @@ pub(crate) async fn run_server(
                         _ => {}
                     }
                     if let ControllerAction::Cancel { session_id } = &request.action {
-                        let outcome = if request_phone_action_cancellation(
-                            session_id,
-                            &action_sessions,
-                            &action_cancellations,
-                        ) {
-                            daemon_runtime.cancel_lifecycle_if_active(session_id);
-                            ActionOutcome::accepted()
-                        } else {
-                            ActionOutcome::NotCancellable
+                        let outcome = match daemon_runtime.cancel_lifecycle_if_active(session_id).await {
+                            Ok(true) => ActionOutcome::accepted(),
+                            Ok(false)
+                                if request_phone_action_cancellation(
+                                    session_id,
+                                    &action_sessions,
+                                    &action_cancellations,
+                                ) => ActionOutcome::accepted(),
+                            Ok(false) => ActionOutcome::NotCancellable,
+                            Err(error) => ActionOutcome::Refused(Refusal::precondition(format!(
+                                "{error:#}"
+                            ))),
                         };
                         if request.reply.send(outcome).is_err() {
                             tracing::debug!(%session_id, "phone cancellation reply dropped after client disconnect");

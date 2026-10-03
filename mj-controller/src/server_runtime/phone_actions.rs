@@ -291,8 +291,11 @@ pub(super) struct PhoneActionControl {
 
 impl PhoneActionControl {
     pub(super) fn for_action(action: &ControllerAction) -> Self {
-        let create =
-            matches!(action, ControllerAction::New { .. }).then(CreateSessionControl::default);
+        let create = matches!(
+            action,
+            ControllerAction::New { .. } | ControllerAction::Restart { .. }
+        )
+        .then(CreateSessionControl::default);
         let cancelled = create.as_ref().map_or_else(
             || Arc::new(AtomicBool::new(false)),
             |control| control.cancelled.clone(),

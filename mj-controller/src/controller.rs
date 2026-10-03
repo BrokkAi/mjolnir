@@ -72,9 +72,10 @@ use crate::targets::{
     self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, SshTarget,
 };
 
+pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
-use backend::validate_resource_allocation;
+pub(crate) use backend::validate_resource_allocation;
 pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
@@ -95,6 +96,7 @@ pub use lifecycle::{
     BeforeClose, BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
+pub(crate) use resume::InPlaceRestartError;
 pub use resume::{
     ResumeRepositorySourceMismatch, ResumeRepositorySourcePreflight, ResumeRepositorySourceReceipt,
     raw_conversion_preview_for,

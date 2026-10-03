@@ -107,6 +107,47 @@ pub(super) async fn snapshot(State(state): State<ServerState>) -> Response<Body>
     response
 }
 
+/// Resolve the configured EC2 launch-template sizes off the request task.
+pub(super) async fn target_resource_options(
+    State(state): State<ServerState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ViewerTargetResourceOptions>, ApiError> {
+    {
+        let snapshot = state.snapshot_rx.borrow();
+        let target = require_target(&snapshot, &target_id)?;
+        if target.resource_allocation_kind != ResourceAllocationKind::AwsEc2 {
+            return Err(ApiError::bad_request(
+                "resource options are only available for EC2 targets",
+            ));
+        }
+    }
+    let resolving_target_id = target_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let config = Config::load()?;
+        let controller = crate::controller::config_only_controller(config);
+        controller
+            .resolve_aws_resource_options(&resolving_target_id, &crate::targets::ProcessExecutor)
+    })
+    .await
+    .map_err(|_| ApiError::controller_unavailable())?;
+    let options = result.map_err(|error| {
+        tracing::warn!(
+            target_id,
+            error = %format!("{error:#}"),
+            "web EC2 resource option resolution failed"
+        );
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not resolve EC2 resource choices",
+        )
+    })?;
+    let default_allocation = mj_core::state::preferred_aws_allocation(&options, None).cloned();
+    Ok(Json(ViewerTargetResourceOptions {
+        options,
+        default_allocation,
+    }))
+}
+
 /// Optimize and install one browser image off the async request task. The
 /// request body is deliberately raw bytes: base64 would inflate the upload,
 /// and the response contains only the small immutable reference the prompt
@@ -517,6 +558,7 @@ pub(super) async fn preflight_new(
         profile_id: request.profile_id,
         bundle_id: request.bundle_id.clone(),
         target_id: request.target_id.clone(),
+        resource_allocation: None,
         title: None,
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),

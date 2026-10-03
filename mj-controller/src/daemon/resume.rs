@@ -574,7 +574,7 @@ impl RuntimeState {
     /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
     /// under.
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let (mut result, tearing_down) = {
+        let (mut result, tearing_down, cancelled_restart) = {
             let mut lifecycle_owner = self.owner();
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let Some(active) = lifecycle.get_mut(session_id) else {
@@ -592,8 +592,19 @@ impl RuntimeState {
             if !tearing_down {
                 active.request_cancel();
             }
-            (active.result.clone(), tearing_down)
+            (
+                active.result.clone(),
+                tearing_down,
+                active.kind == LifecycleKind::Restart && !tearing_down,
+            )
         };
+        if cancelled_restart {
+            blocking({
+                let session_id = session_id.to_owned();
+                move || crate::database::cancel_session_restart(&session_id)
+            })
+            .await?;
+        }
         let mut finished = wait_for_lifecycle_result(&mut result).await;
         if finished.is_err() && tearing_down {
             {

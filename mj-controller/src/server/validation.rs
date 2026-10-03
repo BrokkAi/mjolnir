@@ -406,6 +406,7 @@ fn validate_action_against(
             profile_id,
             bundle_id,
             target_id,
+            resource_allocation,
             title,
             project_directory,
             dirty_ack,
@@ -449,6 +450,21 @@ fn validate_action_against(
             }
             require_profile(snapshot, profile_id)?;
             let target = require_launchable_target(snapshot, target_id)?;
+            crate::controller::validate_resource_allocation(
+                target.resource_allocation_kind,
+                resource_allocation.as_deref(),
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            if let (
+                Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }),
+                Some(limits),
+            ) = (resource_allocation.as_deref(), target.container_host_limits)
+                && (*cpus > limits.cpus || *memory_bytes > limits.memory_bytes)
+            {
+                return Err(ApiError::bad_request(
+                    "container resource allocation exceeds this host's reported CPU or memory limit",
+                ));
+            }
             // Bare sessions open the selected directory; the browser has no
             // bundle selection to supply for that flow.
             if !target.requires_project_directory || !bundle_id.is_empty() {

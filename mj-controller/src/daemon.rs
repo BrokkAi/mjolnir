@@ -3,6 +3,7 @@
 mod feed;
 mod owner;
 mod record_index;
+mod restart;
 mod session_move;
 use crate::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
@@ -229,6 +230,7 @@ enum LifecycleKind {
     Create,
     Suspend,
     Resume,
+    Restart,
     Move,
     ForceStop,
     DestroyStopped,
@@ -271,6 +273,7 @@ impl LifecycleKind {
             LifecycleKind::Create => "create",
             LifecycleKind::Suspend => "suspend",
             LifecycleKind::Resume => "resume",
+            LifecycleKind::Restart => "restart",
             LifecycleKind::Move => "move",
             LifecycleKind::ForceStop => "force stop",
             LifecycleKind::DestroyStopped => "destroy",
@@ -298,7 +301,7 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
     match kind {
         LifecycleKind::Suspend => state == Some(SessionState::Destroying),
         LifecycleKind::Park => false,
-        LifecycleKind::Move => !matches!(
+        LifecycleKind::Move | LifecycleKind::Restart => !matches!(
             state,
             Some(
                 SessionState::Running
@@ -323,7 +326,8 @@ fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>
 fn lifecycle_cancellable(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     !(state == Some(SessionState::StartupCleanup)
         || kind == LifecycleKind::StartupCleanup
-        || kind == LifecycleKind::Suspend && state == Some(SessionState::Destroying)
+        || matches!(kind, LifecycleKind::Suspend | LifecycleKind::Restart)
+            && state == Some(SessionState::Destroying)
         || matches!(
             kind,
             LifecycleKind::StopSubagent | LifecycleKind::Park | LifecycleKind::Unpark
@@ -546,6 +550,7 @@ impl From<LifecycleKind> for RuntimeLifecycleKind {
             LifecycleKind::Create => Self::Create,
             LifecycleKind::Suspend => Self::Suspend,
             LifecycleKind::Resume => Self::Resume,
+            LifecycleKind::Restart => Self::Resume,
             LifecycleKind::Move => Self::Move,
             LifecycleKind::ForceStop => Self::ForceStop,
             LifecycleKind::DestroyStopped | LifecycleKind::ArchiveStopped => Self::DestroyStopped,

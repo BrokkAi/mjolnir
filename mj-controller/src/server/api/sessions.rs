@@ -140,6 +140,7 @@ pub(super) async fn start_session(
         profile_id,
         bundle_id,
         target_id,
+        resource_allocation: None,
         title: request.title.clone(),
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),

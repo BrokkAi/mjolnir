@@ -92,6 +92,7 @@ impl Controller {
                 None,
                 None,
                 SourceTargetDisposition::Destroy,
+                CheckpointExportPolicy::ReuseUnchangedArchive,
                 true,
                 None,
                 None,
@@ -117,11 +118,36 @@ impl Controller {
             Some(manager),
             None,
             SourceTargetDisposition::Destroy,
+            CheckpointExportPolicy::ReuseUnchangedArchive,
             acknowledge_unpublished_work,
             before_close,
             None,
         )
         .await
+    }
+
+    /// Seal a restart checkpoint while retaining the existing target. Unlike
+    /// a Move, Restart does not change profile or destination configuration.
+    pub(crate) async fn suspend_session_for_restart(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        before_close: Option<BeforeClose>,
+    ) -> Result<()> {
+        self.suspend_session_controlled_with_manager(
+            session_id,
+            executor,
+            Some(manager),
+            None,
+            SourceTargetDisposition::RetainForInPlaceSwap,
+            CheckpointExportPolicy::Always,
+            true,
+            before_close,
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -170,6 +196,7 @@ impl Controller {
                     Some(manager),
                     Some((operation, preparation)),
                     disposition,
+                    CheckpointExportPolicy::ReuseUnchangedArchive,
                     true,
                     None,
                     source_relay.take(),
@@ -191,6 +218,7 @@ impl Controller {
             Option<&mj_core::state::MovePreparation>,
         )>,
         disposition: SourceTargetDisposition,
+        checkpoint_export_policy: CheckpointExportPolicy,
         acknowledge_unpublished_work: bool,
         before_close: Option<BeforeClose>,
         held_relay: Option<super::checkpoint::ControllerRelayLease>,
@@ -222,7 +250,7 @@ impl Controller {
                 executor,
                 manager,
                 LatchExclusivity::HoldThroughClose,
-                CheckpointExportPolicy::ReuseUnchangedArchive,
+                checkpoint_export_policy,
                 None,
                 held_relay,
             )
@@ -534,6 +562,7 @@ impl Controller {
                         Some(manager),
                         None,
                         SourceTargetDisposition::Destroy,
+                        CheckpointExportPolicy::ReuseUnchangedArchive,
                         acknowledge_unpublished_work,
                         before_close,
                         None,

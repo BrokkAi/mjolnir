@@ -3656,6 +3656,7 @@ async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             target_id: "raw".into(),
+            resource_allocation: None,
             title: Some("Raw work".into()),
             project_directory: Some(PathBuf::from("/work/project")),
             dirty_ack: Vec::new(),
@@ -3683,6 +3684,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
         profile_id: "codex-1".into(),
         bundle_id: "hel".into(),
         target_id: target_id.into(),
+        resource_allocation: None,
         title: Some("New work".into()),
         project_directory,
         dirty_ack: Vec::new(),
@@ -3714,6 +3716,75 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
         StatusCode::BAD_REQUEST
     );
     assert!(validate_action(&action("raw", Some("/work/project".into())), &snapshot).is_ok());
+}
+
+#[test]
+fn new_action_validates_allocation_kind_and_reported_container_limits() {
+    let (config, state) = sample_config_state();
+    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    snapshot
+        .targets
+        .iter_mut()
+        .find(|target| target.id == "podman")
+        .unwrap()
+        .container_host_limits = Some(mj_core::state::HostContainerSize {
+        cpus: 8,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+    });
+    let action =
+        |target_id: &str,
+         resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
+            ControllerAction::New {
+                review: None,
+                at: None,
+                branch: None,
+                base: None,
+                subagents: None,
+                create_managed_worktree: None,
+                workspace_id: String::new(),
+                profile_id: "codex-1".into(),
+                bundle_id: "hel".into(),
+                target_id: target_id.into(),
+                resource_allocation: resource_allocation.map(Box::new),
+                title: Some("Sized work".into()),
+                project_directory: None,
+                dirty_ack: Vec::new(),
+            }
+        };
+
+    let within_limits = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 16 * 1024 * 1024 * 1024,
+    };
+    assert!(validate_action(&action("podman", Some(within_limits.clone())), &snapshot).is_ok());
+    assert!(validate_action(&action("raw", Some(within_limits)), &snapshot).is_err());
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::AwsEc2 {
+                    instance_type: "c7i.2xlarge".into(),
+                    vcpus: 8,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_action(
+            &action(
+                "podman",
+                Some(mj_core::state::SessionResourceAllocation::Container {
+                    cpus: 9,
+                    memory_bytes: 16 * 1024 * 1024 * 1024,
+                }),
+            ),
+            &snapshot,
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

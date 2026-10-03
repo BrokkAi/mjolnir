@@ -4,7 +4,7 @@ pub use mj_core::storage::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -31,10 +31,12 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 72;
+const SCHEMA_VERSION: i64 = 73;
 
 mod session_move;
 pub use session_move::*;
+mod session_restart;
+pub(crate) use session_restart::*;
 
 mod legacy_schema;
 mod schema;

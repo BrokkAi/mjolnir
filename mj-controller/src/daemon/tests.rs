@@ -71,6 +71,129 @@ fn graceful_close_retires_worker_polling_only_during_target_teardown() {
 }
 
 #[test]
+fn restart_keeps_relay_ownership_through_checkpoint_and_can_recover_closing_state() {
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Restart,
+        Some(SessionState::Running)
+    ));
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Restart,
+        Some(SessionState::Checkpointing)
+    ));
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Restart,
+        Some(SessionState::Closing)
+    ));
+    assert!(lifecycle_owns_worker_target(
+        LifecycleKind::Restart,
+        Some(SessionState::Error)
+    ));
+    assert!(lifecycle_cancellable(
+        LifecycleKind::Restart,
+        Some(SessionState::Closing)
+    ));
+    assert!(!lifecycle_cancellable(
+        LifecycleKind::Restart,
+        Some(SessionState::Destroying)
+    ));
+    assert_eq!(
+        RuntimeLifecycleKind::from(LifecycleKind::Restart),
+        RuntimeLifecycleKind::Resume,
+        "surfaces continue to present Restart as a resume-style operation"
+    );
+}
+
+#[test]
+fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
+    let mut record = runtime_test_session("session-1", "workspace", SessionState::Closing);
+    record.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/tmp/session-1".into(),
+    });
+    record.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        archive_path: "/tmp/session-1.tar".into(),
+        sha256: "fresh-checkpoint".into(),
+        created_at: "2026-10-03T00:00:00Z".into(),
+        event_frontier: 7,
+    });
+    let mut intent = crate::database::SessionRestartIntent {
+        session_id: "session-1".into(),
+        operation_id: "restart-1".into(),
+        phase: crate::database::SessionRestartPhase::Stopping,
+        checkpoint_sha256: None,
+        checkpoint_started: true,
+    };
+
+    assert!(!restart::restart_checkpoint_matches(&record, &intent));
+    intent.checkpoint_sha256 = Some("older-checkpoint".into());
+    assert!(!restart::restart_checkpoint_matches(&record, &intent));
+    intent.checkpoint_sha256 = Some("fresh-checkpoint".into());
+    assert!(restart::restart_checkpoint_matches(&record, &intent));
+}
+
+#[test]
+fn restart_recovery_discards_intents_superseded_by_suspend_or_destroy() {
+    use crate::database::SessionRestartPhase;
+
+    assert!(restart::restart_intent_was_superseded(
+        Some(SessionState::Stopped),
+        SessionRestartPhase::Stopping
+    ));
+    assert!(restart::restart_intent_was_superseded(
+        Some(SessionState::Destroying),
+        SessionRestartPhase::Fallback
+    ));
+    assert!(!restart::restart_intent_was_superseded(
+        Some(SessionState::Stopped),
+        SessionRestartPhase::Fallback
+    ));
+}
+
+#[tokio::test]
+async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target() {
+    struct StatusExecutor(i32);
+    impl CommandExecutor for StatusExecutor {
+        fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                status: self.0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let state = test_runtime_state();
+    let mut controller = state.controller_projection();
+    let mut missing = runtime_test_session("session-1", "workspace", SessionState::Closing);
+    missing.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: mj_core::targets::resource_name("session-1").unwrap(),
+        workspace_storage: Default::default(),
+    });
+    controller
+        .state
+        .sessions
+        .insert(missing.id.clone(), missing);
+    let unavailable =
+        restart::restart_target_availability(&controller, "session-1", &StatusExecutor(1)).unwrap();
+    assert_eq!(unavailable, restart::RestartTargetAvailability::Missing);
+    assert!(restart::fallback_is_safe(unavailable));
+
+    let mut reachable = runtime_test_session("bare-session", "workspace", SessionState::Closing);
+    reachable.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/tmp/bare-session".into(),
+    });
+    controller
+        .state
+        .sessions
+        .insert(reachable.id.clone(), reachable);
+    let availability =
+        restart::restart_target_availability(&controller, "bare-session", &StatusExecutor(0))
+            .unwrap();
+    assert_eq!(availability, restart::RestartTargetAvailability::Reachable);
+    assert!(!restart::fallback_is_safe(availability));
+}
+
+#[test]
 fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
     assert!(lifecycle_cancellable(
         LifecycleKind::Suspend,
@@ -2118,11 +2241,54 @@ async fn committed_creation_cannot_be_cancelled_by_another_surface() {
     assert!(state.active_lifecycles()[0].cancellable);
     assert!(control.grant_commit());
     assert!(!state.active_lifecycles()[0].cancellable);
-    assert!(state.cancel_lifecycle("committed").is_err());
-    state.cancel_lifecycle_if_active("committed");
+    assert!(
+        state
+            .cancel_lifecycle_with_intent("committed")
+            .await
+            .is_err()
+    );
+    assert!(state.cancel_lifecycle_if_active("committed").await.is_err());
     assert!(!control.cancelled.load(Ordering::Acquire));
     release.notify_one();
     RuntimeState::wait_lifecycle_result(result).await.unwrap();
+}
+
+#[tokio::test]
+async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        let mut record =
+            runtime_test_session("restart-guard", "workspace", SessionState::Destroying);
+        record.target = None;
+        sessions.insert(record.id.clone(), record);
+    });
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = state
+        .start_or_join_lifecycle("restart-guard".into(), LifecycleKind::Restart, {
+            let release = release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+
+    let result = state.cancel_lifecycle_if_active("restart-guard").await;
+    assert!(result.is_err());
+    assert!(
+        !state
+            .owner()
+            .lifecycle
+            .get("restart-guard")
+            .unwrap()
+            .cancelled
+            .load(Ordering::Acquire)
+    );
+
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(operation)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2157,7 +2323,10 @@ async fn a_close_removing_the_target_stops_offering_cancellation() {
     });
 
     assert!(!state.active_lifecycles()[0].cancellable);
-    let error = state.cancel_lifecycle("destroying").unwrap_err();
+    let error = state
+        .cancel_lifecycle_with_intent("destroying")
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("cannot be cancelled"),
         "unexpected error: {error:#}"
@@ -2560,6 +2729,142 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
         return None;
     }
     Some(crate::database::install_isolated_test_writer())
+}
+
+#[tokio::test]
+async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() {
+    const NAME: &str = "restart_intent_checks_cancellation_and_records_its_sealed_checkpoint";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&session).unwrap();
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session.clone());
+    });
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let result = tokio::task::spawn_blocking({
+        let cancelled = cancelled.clone();
+        || crate::database::begin_session_restart("session-1", "restart-cancelled", cancelled)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+
+    let control = CreateSessionControl::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = state
+        .start_or_join_lifecycle_controlled(
+            "session-1".into(),
+            LifecycleKind::Restart,
+            None,
+            None,
+            Some(control.clone()),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    let cancelled = control.cancelled.clone();
+    let intent = tokio::task::spawn_blocking({
+        let cancelled = cancelled.clone();
+        || crate::database::begin_session_restart("session-1", "restart-accepted", cancelled)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!intent.checkpoint_started);
+    tokio::task::spawn_blocking(|| {
+        crate::database::mark_session_restart_checkpoint_started("session-1", "restart-accepted")?;
+        crate::database::record_session_restart_checkpoint(
+            "session-1",
+            "restart-accepted",
+            "sealed-checkpoint-sha",
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let saved = crate::database::load_session_restarts().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(saved[0].checkpoint_started);
+    assert_eq!(
+        saved[0].checkpoint_sha256.as_deref(),
+        Some("sealed-checkpoint-sha")
+    );
+    state
+        .cancel_lifecycle_with_intent("session-1")
+        .await
+        .unwrap();
+    assert!(cancelled.load(Ordering::Acquire));
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(operation)
+        .await
+        .unwrap();
+
+    let session = runtime_test_session(
+        "session-2",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&session).unwrap();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session.clone());
+    });
+    let control = CreateSessionControl::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    state
+        .start_or_join_lifecycle_controlled(
+            "session-2".into(),
+            LifecycleKind::Restart,
+            None,
+            None,
+            Some(control.clone()),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    tokio::task::spawn_blocking({
+        let cancelled = control.cancelled.clone();
+        || crate::database::begin_session_restart("session-2", "restart-preempted", cancelled)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let closing_state = state.clone();
+    let close = tokio::spawn(async move { closing_state.wait_before_close("session-2").await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !control.cancelled.load(Ordering::Acquire)
+            || crate::database::load_session_restarts()
+                .unwrap()
+                .iter()
+                .any(|intent| intent.session_id == "session-2")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Suspend removed the Restart intent before waiting for its lifecycle");
+    release.notify_one();
+    close.await.unwrap().unwrap();
 }
 
 /// The smallest archived snapshot a hand-off step can carry.

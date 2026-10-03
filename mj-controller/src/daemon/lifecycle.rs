@@ -239,7 +239,10 @@ impl RuntimeState {
                     // not get as far as rolling that record back, the stored
                     // error is applied here, because nothing else will.
                     if let Err(failure) = &result
-                        && matches!(kind, LifecycleKind::Create | LifecycleKind::Resume)
+                        && matches!(
+                            kind,
+                            LifecycleKind::Create | LifecycleKind::Resume | LifecycleKind::Restart
+                        )
                     {
                         state
                             .fail_unfinished_provisioning(&operation_session_id, &failure.detail)
@@ -250,7 +253,7 @@ impl RuntimeState {
                     // and exited. A failure puts the record back in the state
                     // it had, so without this the person is never told (#1081).
                     if let Err(failure) = &result
-                        && kind == LifecycleKind::Suspend
+                        && matches!(kind, LifecycleKind::Suspend | LifecycleKind::Restart)
                     {
                         state
                             .record_failed_close(

@@ -1256,6 +1256,28 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: adds a table for accepted session restarts. Older builds do
+    // not query or rewrite it, and session updates leave its rows intact. A
+    // restart row is removed only by the newer daemon after completion or an
+    // explicit cancellation, so the compatibility floor stays where it is.
+    if version < 73 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS session_restart_intents (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL,
+                 phase TEXT NOT NULL CHECK(phase IN ('stopping', 'restoring_in_place', 'fallback')),
+                 updated_at TEXT NOT NULL,
+                 checkpoint_sha256 TEXT,
+                 checkpoint_started INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_started IN (0, 1))
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (73, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 73;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1464,6 +1486,48 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn restart_intent_schema_matches_for_fresh_and_upgraded_stores() {
+        let directory = tempfile::tempdir().unwrap();
+        let fresh = Connection::open(directory.path().join("fresh.sqlite3")).unwrap();
+        migrate_schema(&fresh).unwrap();
+
+        let upgraded = Connection::open(directory.path().join("upgraded.sqlite3")).unwrap();
+        create_baseline_schema(&upgraded).unwrap();
+        upgraded
+            .execute_batch(
+                "CREATE TRIGGER stop_before_restart_migration BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version > 72
+                 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&upgraded).is_err());
+        if !upgraded.is_autocommit() {
+            upgraded.execute_batch("ROLLBACK").unwrap();
+        }
+        upgraded
+            .execute_batch("DROP TRIGGER stop_before_restart_migration")
+            .unwrap();
+        assert_eq!(read_schema_state(&upgraded).unwrap().revision, 72);
+        assert!(migrate_schema(&upgraded).is_ok());
+
+        let table_sql = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='session_restart_intents'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(table_sql(&fresh), table_sql(&upgraded));
+        assert_eq!(read_schema_state(&fresh).unwrap().revision, SCHEMA_VERSION);
+        assert_eq!(
+            read_schema_state(&upgraded).unwrap().revision,
+            SCHEMA_VERSION
+        );
+    }
 
     fn assert_divergent_history_upgrades(revision: i64, project_history: bool, interrupt: bool) {
         let directory = tempfile::tempdir().unwrap();

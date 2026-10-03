@@ -329,10 +329,29 @@ impl ViewerSnapshot {
             .map(|(id, target)| ViewerTarget {
                 id: id.clone(),
                 kind: target.kind_name().into(),
+                resource_allocation_kind: target.into(),
                 requires_project_directory: matches!(
                     target,
                     TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
                 ),
+                remembered_container_size: mj_core::config::container_size_host(target)
+                    .and_then(|host| state.container_sizes.get(host))
+                    .copied(),
+                container_host_limits: None,
+                default_resource_allocation: if mj_core::config::is_container_target(target) {
+                    let size = mj_core::state::default_container_size(
+                        mj_core::config::container_size_host(target)
+                            .and_then(|host| state.container_sizes.get(host))
+                            .copied(),
+                        None,
+                    );
+                    Some(SessionResourceAllocation::Container {
+                        cpus: size.cpus,
+                        memory_bytes: size.memory_bytes,
+                    })
+                } else {
+                    None
+                },
                 runtime_missing: false,
                 default_candidate: config.is_default_target(id),
                 availability: crate::server::api::LaunchAvailability::Unknown,
@@ -1017,7 +1036,19 @@ fn unknown_availability() -> crate::server::api::LaunchAvailability {
 pub struct ViewerTarget {
     pub id: String,
     pub kind: String,
+    /// Target sizing class, used for create validation and the size picker.
+    #[serde(default)]
+    pub resource_allocation_kind: ResourceAllocationKind,
     pub requires_project_directory: bool,
+    /// Size last selected for this target's physical container host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_container_size: Option<HostContainerSize>,
+    /// The latest reported host CPU and memory totals, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_host_limits: Option<HostContainerSize>,
+    /// Shared default selected for this container target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_resource_allocation: Option<SessionResourceAllocation>,
     /// Whether this target's runtime (Docker, Podman) is not installed on the
     /// host running the daemon. That is permanent for the host, so pickers
     /// leave the target out and a request that names it is refused. A host
@@ -1042,6 +1073,15 @@ pub struct ViewerTarget {
     /// configured bundle rather than a host checkout.
     #[serde(default)]
     pub recent_project_directories: Vec<String>,
+}
+
+/// EC2 size choices resolved for one target's launch template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerTargetResourceOptions {
+    pub options: Vec<SessionResourceAllocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_allocation: Option<SessionResourceAllocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

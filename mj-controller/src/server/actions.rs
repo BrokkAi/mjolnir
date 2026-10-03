@@ -40,6 +40,10 @@ pub enum ControllerAction {
         profile_id: String,
         bundle_id: String,
         target_id: String,
+        /// Explicit container or EC2 sizing selected in the create wizard.
+        /// Omitted preserves the historical target defaults for older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_allocation: Option<Box<mj_core::state::SessionResourceAllocation>>,
         /// Absent means "derive it", which is what the terminal does.
         #[serde(default)]
         title: Option<String>,
@@ -567,4 +571,62 @@ pub enum BackgroundTaskStopFailure {
     Provider,
     /// The stop task itself failed before reaching the provider.
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControllerAction;
+    use mj_core::state::SessionResourceAllocation;
+
+    #[test]
+    fn new_action_resource_allocation_round_trips_and_remains_optional() {
+        let with_allocation = serde_json::json!({
+            "action": "new",
+            "profile_id": "codex",
+            "bundle_id": "project",
+            "target_id": "podman",
+            "resource_allocation": {
+                "kind": "container",
+                "cpus": 4,
+                "memory_bytes": 8 * 1024 * 1024 * 1024_u64,
+            },
+        });
+        let action: ControllerAction = serde_json::from_value(with_allocation).unwrap();
+        assert!(matches!(
+            &action,
+            ControllerAction::New {
+                resource_allocation: Some(allocation),
+                ..
+            } if matches!(allocation.as_ref(), SessionResourceAllocation::Container {
+                cpus: 4,
+                memory_bytes: 8_589_934_592,
+            })
+        ));
+        let encoded = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ControllerAction>(encoded).unwrap(),
+            action
+        );
+
+        let older_client: ControllerAction = serde_json::from_value(serde_json::json!({
+            "action": "new",
+            "profile_id": "codex",
+            "bundle_id": "project",
+            "target_id": "podman",
+        }))
+        .unwrap();
+        assert!(matches!(
+            &older_client,
+            ControllerAction::New {
+                resource_allocation: None,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(older_client)
+                .unwrap()
+                .get("resource_allocation")
+                .is_none()
+        );
+    }
 }

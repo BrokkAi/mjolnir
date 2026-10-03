@@ -1,15 +1,12 @@
 use super::*;
 
 impl RuntimeState {
-    pub(super) fn cancel_lifecycle(&self, session_id: &str) -> Result<()> {
+    fn request_lifecycle_cancel(&self, session_id: &str) -> Result<Option<bool>> {
         let mut controller_owner = self.owner();
         let durable = durable_session_state(controller_owner.controller(), session_id);
-        let active = controller_owner
-            .lifecycle
-            .get_mut(session_id)
-            .with_context(|| {
-                format!("no lifecycle operation is running for session {session_id}")
-            })?;
+        let Some(active) = controller_owner.lifecycle.get_mut(session_id) else {
+            return Ok(None);
+        };
         ensure!(
             lifecycle_cancellable(active.kind, durable),
             "stop of {session_id} has passed its verified checkpoint and is removing the target; \
@@ -19,9 +16,40 @@ impl RuntimeState {
             active.request_cancel(),
             "lifecycle operation is no longer cancellable"
         );
+        let restart = active.kind == LifecycleKind::Restart;
         drop(controller_owner);
         self.publish_revision();
+        Ok(Some(restart))
+    }
+
+    pub async fn cancel_lifecycle_with_intent(&self, session_id: &str) -> Result<()> {
+        let restart = self
+            .request_lifecycle_cancel(session_id)?
+            .with_context(|| {
+                format!("no lifecycle operation is running for session {session_id}")
+            })?;
+        if restart {
+            blocking({
+                let session_id = session_id.to_owned();
+                move || crate::database::cancel_session_restart(&session_id)
+            })
+            .await?;
+        }
         Ok(())
+    }
+
+    pub async fn cancel_lifecycle_if_active(&self, session_id: &str) -> Result<bool> {
+        let Some(restart) = self.request_lifecycle_cancel(session_id)? else {
+            return Ok(false);
+        };
+        if restart {
+            blocking({
+                let session_id = session_id.to_owned();
+                move || crate::database::cancel_session_restart(&session_id)
+            })
+            .await?;
+        }
+        Ok(true)
     }
 
     /// Let storage cleanup drain briefly, then cancel and join every lifecycle
@@ -95,6 +123,7 @@ impl RuntimeState {
                 kind,
                 LifecycleKind::Create
                     | LifecycleKind::Resume
+                    | LifecycleKind::Restart
                     | LifecycleKind::Unpark
                     | LifecycleKind::StartupCleanup
             ) {
@@ -383,13 +412,6 @@ impl RuntimeState {
                     .collect(),
                 ..Default::default()
             },
-        }
-    }
-
-    pub fn cancel_lifecycle_if_active(&self, session_id: &str) {
-        if let Some(active) = self.owner().lifecycle.get_mut(session_id) {
-            active.request_cancel();
-            self.publish_revision();
         }
     }
 

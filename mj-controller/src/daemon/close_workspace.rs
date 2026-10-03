@@ -124,7 +124,7 @@ impl RuntimeState {
                     if cancelled.load(Ordering::Acquire) {
                         for session_id in &sessions {
                             // A close past checkpoint commit must finish its teardown.
-                            if let Err(error) = self.cancel_lifecycle(session_id) {
+                            if let Err(error) = self.cancel_lifecycle_with_intent(session_id).await {
                                 tracing::debug!(%session_id, %error, "workspace close cancellation cannot interrupt this session");
                             }
                         }

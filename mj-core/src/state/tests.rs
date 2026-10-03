@@ -460,6 +460,51 @@ fn container_size_history_rejects_invalid_keys_and_values() {
 }
 
 #[test]
+fn new_container_and_ec2_sizes_share_the_tui_defaults() {
+    assert_eq!(
+        default_container_size(None, None),
+        HostContainerSize {
+            cpus: BASELINE_CONTAINER_CPUS,
+            memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
+        }
+    );
+    assert_eq!(
+        default_container_size(
+            Some(HostContainerSize {
+                cpus: 24,
+                memory_bytes: 64 * 1024 * 1024 * 1024,
+            }),
+            Some(HostContainerSize {
+                cpus: 12,
+                memory_bytes: 48 * 1024 * 1024 * 1024,
+            }),
+        ),
+        HostContainerSize {
+            cpus: 12,
+            memory_bytes: 48 * 1024 * 1024 * 1024,
+        }
+    );
+
+    let options = vec![
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "c7i.large".into(),
+            vcpus: 2,
+            memory_bytes: 4 * 1024 * 1024 * 1024,
+        },
+        SessionResourceAllocation::AwsEc2 {
+            instance_type: "c7i.2xlarge".into(),
+            vcpus: 8,
+            memory_bytes: 16 * 1024 * 1024 * 1024,
+        },
+    ];
+    assert_eq!(preferred_aws_allocation(&options, None), Some(&options[1]));
+    assert_eq!(
+        preferred_aws_allocation(&options, Some(&options[0])),
+        Some(&options[0])
+    );
+}
+
+#[test]
 fn project_name_prefers_a_worktree_source_then_a_project_directory_then_the_bundle() {
     let mut config = sample_config();
     config

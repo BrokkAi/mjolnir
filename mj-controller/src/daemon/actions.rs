@@ -613,6 +613,10 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::RestartSession { session_id } => {
+            state.restart_session(session_id).await?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::StartCreateSession(request) => Ok(DaemonReply::RegisteredSession(Box::new(
             state.start_create_session(request).await?,
         ))),
@@ -682,7 +686,7 @@ pub(super) async fn handle_action(
                 move || crate::database::request_move_cancellation(&session_id)
             })
             .await?;
-            state.cancel_lifecycle(&session_id)?;
+            state.cancel_lifecycle_with_intent(&session_id).await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::RecoverDraft { draft_id } => {

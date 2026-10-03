@@ -39,9 +39,9 @@ use mj_core::elicitation::{ElicitationRequest, ElicitationResponse, MAX_ELICITAT
 use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 use mj_core::refusal::{Refusal, RefusalKind};
 use mj_core::state::{
-    MoveOperation, MovePhase, MovePreparation, MoveSelection, MoveSessionRequest,
-    ProjectSourceIdentity, SessionResourceAllocation, SessionState, SessionTransitionKind,
-    State as AppState,
+    HostContainerSize, MoveOperation, MovePhase, MovePreparation, MoveSelection,
+    MoveSessionRequest, ProjectSourceIdentity, ResourceAllocationKind, SessionResourceAllocation,
+    SessionState, SessionTransitionKind, State as AppState,
 };
 
 use crate::targets::AdditionalMount;

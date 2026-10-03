@@ -8,7 +8,7 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 #[cfg(unix)]
 use crate::controller::now;
@@ -3306,6 +3306,72 @@ impl CommandExecutor for SucceedingExecutor {
     }
 }
 
+#[cfg(unix)]
+#[derive(Default)]
+struct RestartCheckpointExecutor {
+    purposes: std::sync::Mutex<Vec<String>>,
+    archive_directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl RestartCheckpointExecutor {
+    fn purposes(&self) -> Vec<String> {
+        self.purposes.lock().unwrap().clone()
+    }
+}
+
+#[cfg(unix)]
+impl CommandExecutor for RestartCheckpointExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.purposes.lock().unwrap().push(command.purpose.clone());
+        targets::ProcessExecutor.execute(command)
+    }
+
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput> {
+        self.purposes.lock().unwrap().push(command.purpose.clone());
+        anyhow::ensure!(
+            command.purpose == "export target checkpoint",
+            "unexpected streamed command {:?}",
+            command.purpose
+        );
+        let spec: CheckpointExportSpec = serde_json::from_reader(input)?;
+        let canonical_session = spec.canonical_session.clone();
+        let mut archive = crate::controller::test_support::checkpoint_archive_input(
+            &spec.session.id,
+            canonical_session.event_frontier,
+            Vec::new(),
+            Vec::new(),
+        );
+        archive.session = spec.session;
+        archive.target = spec.target;
+        archive.bundle = spec.bundle;
+        archive.canonical_session = canonical_session.clone();
+        let metadata = crate::controller::test_support::write_checkpoint_archive_input(
+            &self.archive_directory,
+            &archive.session.id,
+            &archive,
+        );
+        std::fs::create_dir_all(spec.output_path.parent().context("archive output parent")?)?;
+        std::fs::copy(&metadata.archive_path, &spec.output_path)?;
+        let checkpoint = mj_checkpoint::checkpoint::TargetCheckpoint {
+            path: spec.output_path,
+            sha256: metadata.sha256,
+            event_frontier: canonical_session.event_frontier,
+            event_frontier_digest: canonical_session.event_frontier_digest,
+            timings: None,
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: serde_json::to_vec(&checkpoint)?,
+            stderr: Vec::new(),
+        })
+    }
+}
+
 /// A live session behind the scripted relay, in `state`, whose installed
 /// archive holds exactly what that relay journals at startup, so a close
 /// reuses the archive and nothing but the scripted write moves the cut.
@@ -3457,6 +3523,126 @@ async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
     }
     assert_eq!(record.state, SessionState::Stopped);
     assert_eq!(record.last_error, None);
+}
+
+/// A failed suspend can leave an `Error` record and no relay worker while its
+/// target is still present. Restart must attach to the durable relay again,
+/// export the target's current state, and seal it without cleaning the target.
+#[cfg(unix)]
+#[tokio::test]
+async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
+    if !in_close_cut_child(
+        "restart_recaptures_an_error_session_after_its_worker_is_gone",
+        LATE_HARNESS_NOTIFICATION,
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, channels, previous_worker) =
+        close_cut_controller(SessionState::Error).await;
+    let data_directory = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+    let relay_root = data_directory.join("relay");
+    let starts = data_directory.join("checkpoint-only-worker-starts");
+    let archive_directory = data_directory.join("fresh-checkpoints");
+    std::fs::create_dir_all(&archive_directory).unwrap();
+    let record = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.last_error = Some("the previous suspend lost its worker".into());
+    record.last_checkpoint_error = Some("worker process is gone".into());
+    let target = record.target.clone().expect("retained target");
+    let old_checkpoint = record.checkpoint.clone().expect("previous checkpoint");
+    let worker_root = match &target {
+        TargetLocator::LocalBare { worker_root } => worker_root.clone(),
+        other => panic!("expected the retained local target, got {other:?}"),
+    };
+    let workspace_marker = worker_root
+        .join("workspace")
+        .join("untracked-before-restart");
+    let temporary_marker = worker_root.join("tmp").join("temporary-before-restart");
+    std::fs::create_dir_all(workspace_marker.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(temporary_marker.parent().unwrap()).unwrap();
+    std::fs::write(&workspace_marker, b"workspace survives").unwrap();
+    std::fs::write(&temporary_marker, b"temporary data survives").unwrap();
+    crate::database::save_session(record).unwrap();
+
+    // The prior worker and its session actor are gone. The test publishes a
+    // checkpoint-only relay process only once Restart has durably entered its
+    // fresh-checkpoint phase, just as target recovery reconnects the journal.
+    channels.targets.send_replace(Vec::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !previous_worker.is_stopped() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the dead worker actor did not retire");
+    let restored_target =
+        latch_relay_target(&relay_root, Some(&starts), ReleaseSupport::Supported, false);
+    let targets = channels.targets.clone();
+    let restore_actor = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                let state = crate::database::load_session_record(LATCH_RELAY_SESSION)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.state);
+                if state == Some(SessionState::Closing) {
+                    targets.send_replace(vec![restored_target]);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Restart never persisted its closing checkpoint intent");
+    });
+    let executor = RestartCheckpointExecutor {
+        archive_directory,
+        ..Default::default()
+    };
+    controller
+        .suspend_session_for_restart(LATCH_RELAY_SESSION, &executor, &channels.control, None)
+        .await
+        .unwrap();
+    restore_actor.await.unwrap();
+    channels.shutdown.shutdown().await.unwrap();
+
+    let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(sealed.state, SessionState::Closing);
+    assert_eq!(sealed.target, Some(target));
+    assert_eq!(sealed.last_error, None);
+    assert!(sealed.last_checkpoint_error.is_none());
+    assert_ne!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(
+        std::fs::read(workspace_marker).unwrap(),
+        b"workspace survives"
+    );
+    assert_eq!(
+        std::fs::read(temporary_marker).unwrap(),
+        b"temporary data survives"
+    );
+    assert_eq!(std::fs::read_to_string(starts).unwrap().lines().count(), 1);
+
+    let purposes = executor.purposes();
+    assert!(
+        purposes
+            .iter()
+            .any(|purpose| purpose == "export target checkpoint"),
+        "Restart must capture a new target archive despite the installed checkpoint: {purposes:?}"
+    );
+    assert!(
+        purposes.iter().all(|purpose| {
+            let purpose = purpose.to_lowercase();
+            !purpose.contains("remove exact")
+                && !purpose.contains("remove container")
+                && !purpose.contains("temporary volume")
+                && !purpose.contains("cleanup stopped target")
+        }),
+        "Restart must seal the retained target without target cleanup: {purposes:?}"
+    );
 }
 
 /// A worker that answers a Close with a refusal did not seal its relay: the

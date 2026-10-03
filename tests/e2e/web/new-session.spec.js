@@ -3,18 +3,32 @@ const path = require('node:path');
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block' });
 
-async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } = {}) {
+const defaultContainerTarget = {
+  id: 'container', kind: 'podman', requires_project_directory: false, recent_project_directories: [],
+  resource_allocation_kind: 'container', remembered_container_size: null,
+  container_host_limits: { cpus: 24, memory_bytes: 68719476736 },
+  default_resource_allocation: { kind: 'container', cpus: 8, memory_bytes: 34359738368 },
+};
+
+async function mount(page, {
+  bundles = [{ id: 'existing', repositories: [] }],
+  containerTarget = defaultContainerTarget,
+  extraTargets = [],
+  resourceOptions = {},
+} = {}) {
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
       profiles: [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }, { id: 'gamma', harness_kind: 'grok' }],
       targets: [
-        { id: 'container', kind: 'podman', requires_project_directory: false, recent_project_directories: [] },
+        containerTarget,
         { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older'] },
         { id: 'remote', kind: 'ssh', requires_project_directory: true, recent_project_directories: ['/remote/recent'] },
+        ...extraTargets,
       ], bundles, capacity: [], launch_failures: [],
     },
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
+    resourceOptionRequests: [], resourceOptions,
     completions: [], discoveries: [], discoveryFailures: 0,
     discover: body => body.kind === 'github' ? {
       entries: [{ name: 'example/app', source: 'https://github.com/example/app', description: 'A useful project', kind: 'repository' }],
@@ -51,6 +65,12 @@ async function mount(page, { bundles = [{ id: 'existing', repositories: [] }] } 
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/api/snapshot') { state.snapshots++; return json(state.snapshot); }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
+    const resourceOptionsMatch = /^\/api\/targets\/([^/]+)\/resource-options$/.exec(pathname);
+    if (resourceOptionsMatch) {
+      const targetId = decodeURIComponent(resourceOptionsMatch[1]);
+      state.resourceOptionRequests.push(targetId);
+      return json(state.resourceOptions[targetId]);
+    }
     if (pathname === '/api/preflight/new') {
       const request = route.request().postDataJSON();
       state.preflights.push(request);
@@ -128,6 +148,57 @@ async function projectStep(page, target = 'container') {
   await page.locator('#new-target').getByRole('radio', { name: new RegExp(`^${target}`) }).check();
   await page.locator('#new-next').click();
 }
+
+test('container creation uses the shared baseline and sends the chosen size', async ({ page }) => {
+  const state = await mount(page);
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-resource-cpus')).toHaveValue('8');
+  await expect(page.locator('#new-resource-memory')).toHaveValue('32');
+  await page.locator('#new-resource-cpus').fill('6');
+  await page.locator('#new-resource-memory').fill('12.5');
+  await page.locator('#new-next').click();
+  await page.getByRole('button', { name: 'existing', exact: true }).click();
+  await page.locator('#new-next').click();
+  await expect(page).toHaveURL(/#workspace\/test$/);
+  expect(state.actions[0].resource_allocation).toEqual({
+    kind: 'container', cpus: 6, memory_bytes: 13421772800,
+  });
+});
+
+test('container remembered size is clamped to the reported host limits', async ({ page }) => {
+  const containerTarget = {
+    ...defaultContainerTarget,
+    remembered_container_size: { cpus: 14, memory_bytes: 51539607552 },
+    container_host_limits: { cpus: 10, memory_bytes: 25769803776 },
+    default_resource_allocation: { kind: 'container', cpus: 10, memory_bytes: 25769803776 },
+  };
+  await mount(page, { containerTarget });
+  await page.locator('#new-next').click();
+  await expect(page.locator('#new-resource-cpus')).toHaveValue('10');
+  await expect(page.locator('#new-resource-memory')).toHaveValue('24');
+});
+
+test('EC2 creation defaults to an 8-vCPU option and sends the chosen type', async ({ page }) => {
+  const choices = [
+    { kind: 'aws-ec2', instance_type: 'c7i.large', vcpus: 2, memory_bytes: 4294967296 },
+    { kind: 'aws-ec2', instance_type: 'm7i.2xlarge', vcpus: 8, memory_bytes: 34359738368 },
+  ];
+  const state = await mount(page, {
+    extraTargets: [{ id: 'ec2', kind: 'aws-ec2', resource_allocation_kind: 'aws-ec2', requires_project_directory: false }],
+    resourceOptions: { ec2: { options: choices, default_allocation: choices[1] } },
+  });
+  await page.locator('#new-next').click();
+  await page.locator('#new-target').getByRole('radio', { name: /^ec2/ }).check();
+  await expect.poll(() => state.resourceOptionRequests).toContain('ec2');
+  const select = page.locator('#new-resource-aws');
+  await expect(select).toHaveValue('m7i.2xlarge');
+  await select.selectOption('c7i.large');
+  await page.locator('#new-next').click();
+  await page.getByRole('button', { name: 'existing', exact: true }).click();
+  await page.locator('#new-next').click();
+  await expect(page).toHaveURL(/#workspace\/test$/);
+  expect(state.actions[0].resource_allocation).toEqual(choices[0]);
+});
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {
   const state = await mount(page);

@@ -466,23 +466,29 @@ impl DashboardState {
             | TargetTemplate::SshDocker { .. } => {
                 let limits = self.host_limits(&target_id);
                 let remembered = container_size_host(target)
-                    .and_then(|host| self.state.container_sizes.get(host));
-                let (cpus, memory_bytes) = match previous {
+                    .and_then(|host| self.state.container_sizes.get(host))
+                    .copied();
+                let previous = match previous {
                     Some(SessionResourceAllocation::Container { cpus, memory_bytes }) => {
-                        clamp_resources(*cpus, *memory_bytes, limits)
+                        Some(HostContainerSize {
+                            cpus: *cpus,
+                            memory_bytes: *memory_bytes,
+                        })
                     }
-                    _ if remembered.is_some() => {
-                        let remembered = remembered.expect("remembered size checked above");
-                        clamp_resources(remembered.cpus, remembered.memory_bytes, limits)
-                    }
-                    _ => clamp_resources(BASELINE_CPUS, BASELINE_MEMORY_BYTES, limits),
+                    _ => remembered,
                 };
-                *allocation = Some(SessionResourceAllocation::Container { cpus, memory_bytes });
+                let limits =
+                    limits.map(|(cpus, memory_bytes)| HostContainerSize { cpus, memory_bytes });
+                let size = default_container_size(previous, limits);
+                *allocation = Some(SessionResourceAllocation::Container {
+                    cpus: size.cpus,
+                    memory_bytes: size.memory_bytes,
+                });
                 DashboardAction::None
             }
             TargetTemplate::AwsEc2 { .. } => {
                 if let Some(options) = aws_options.get(&target_id) {
-                    *allocation = preferred_aws_option(options, previous).cloned();
+                    *allocation = preferred_aws_allocation(options, previous).cloned();
                     DashboardAction::None
                 } else {
                     *allocation = None;

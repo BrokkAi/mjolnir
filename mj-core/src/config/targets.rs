@@ -685,6 +685,20 @@ impl TargetTemplate {
     }
 }
 
+impl From<&TargetTemplate> for crate::state::ResourceAllocationKind {
+    fn from(template: &TargetTemplate) -> Self {
+        match template {
+            TargetTemplate::LocalPodman { .. }
+            | TargetTemplate::LocalDocker { .. }
+            | TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshPodman { .. }
+            | TargetTemplate::SshDocker { .. } => Self::Container,
+            TargetTemplate::AwsEc2 { .. } => Self::AwsEc2,
+            TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => Self::Fixed,
+        }
+    }
+}
+
 /// Whether `template` hosts a raw project checkout directly on its machine,
 /// with no managed workspace. Bare targets take a project directory instead
 /// of a bundle.

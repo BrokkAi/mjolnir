@@ -133,6 +133,7 @@ pub(super) async fn apply_phone_action(
             profile_id,
             bundle_id,
             target_id,
+            resource_allocation,
             title,
             project_directory,
             create_managed_worktree,
@@ -192,7 +193,7 @@ pub(super) async fn apply_phone_action(
                         project_directory,
                         target_template_id: target_id,
                         additional_mounts: Vec::new(),
-                        resource_allocation: None,
+                        resource_allocation: resource_allocation.map(|allocation| *allocation),
                         title,
                         session_title_override,
                     },
@@ -515,38 +516,15 @@ pub(super) async fn apply_phone_action(
             Ok(())
         }
         ControllerAction::Restart { session_id } => {
-            // The terminal's restart: stop the live session first, then resume
-            // it with the settings its record last ran with.
-            let record = controller
+            let _record = controller
                 .state
                 .sessions
                 .get(&session_id)
                 .cloned()
                 .with_context(|| format!("unknown session {session_id}"))?;
-            if record.state.is_active() {
-                services
-                    .daemon_runtime
-                    .suspend_session_with_ack(session_id.clone(), true)
-                    .await?;
-            }
-            // A cancel that landed during the stop must not run the second
-            // half and leave the session resuming after all.
-            anyhow::ensure!(
-                !control.cancelled.load(Ordering::Acquire),
-                "restart cancelled after stopping"
-            );
             services
                 .daemon_runtime
-                .resume_session(ResumeSessionRequest {
-                    session_id,
-                    workspace_id: record.workspace_id,
-                    profile_id: record.last_profile,
-                    target_template_id: record.target_template_id,
-                    additional_mounts: Some(record.additional_mounts),
-                    resource_allocation: record.resource_allocation,
-                    discard_queue: false,
-                    repository_preflight: None,
-                })
+                .restart_session_controlled(session_id, control.create.clone())
                 .await
                 .map(|_| ())
         }

@@ -136,6 +136,10 @@ pub(super) fn router(options: ServerOptions) -> Router {
             post(mark_conversation_read),
         )
         .route("/api/events", get(events))
+        .route(
+            "/api/targets/{target_id}/resource-options",
+            get(target_resource_options),
+        )
         .route("/api/bundles", post(create_bundle))
         .route("/api/preflight/new", post(preflight_new))
         .route("/api/preflight/resume", post(preflight_resume))

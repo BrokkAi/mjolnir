@@ -12,7 +12,10 @@ use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 use mj_core::project_picker::{
     ProjectDiscovery, ProjectDiscoveryRequest, ProjectEntry, ProjectEntryKind,
 };
-use mj_core::state::{HostContainerSize, STATE_VERSION, SessionResourceAllocation, State};
+use mj_core::state::{
+    BASELINE_CONTAINER_CPUS, BASELINE_CONTAINER_MEMORY_BYTES, HostContainerSize, STATE_VERSION,
+    SessionResourceAllocation, State,
+};
 
 use mj_core::targets::{AdditionalMount, MountAccess};
 
@@ -57,8 +60,8 @@ fn new_session_wizard_returns_all_three_choices() {
                 target_template_id: "podman".into(),
                 additional_mounts: vec![],
                 resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CPUS,
-                    memory_bytes: BASELINE_MEMORY_BYTES,
+                    cpus: BASELINE_CONTAINER_CPUS,
+                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
                 }),
             }),
         })
@@ -1995,8 +1998,8 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
                 target_template_id: "podman".into(),
                 additional_mounts: vec![],
                 resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CPUS,
-                    memory_bytes: BASELINE_MEMORY_BYTES,
+                    cpus: BASELINE_CONTAINER_CPUS,
+                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
                 }),
             }),
         })
@@ -2287,8 +2290,8 @@ fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
                     access: MountAccess::Ro,
                 }],
                 resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CPUS,
-                    memory_bytes: BASELINE_MEMORY_BYTES,
+                    cpus: BASELINE_CONTAINER_CPUS,
+                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
                 }),
             }),
         })
@@ -2467,8 +2470,8 @@ fn resume_can_convert_to_another_harness() {
                 target_template_id: "podman".into(),
                 additional_mounts: vec![],
                 resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CPUS,
-                    memory_bytes: BASELINE_MEMORY_BYTES,
+                    cpus: BASELINE_CONTAINER_CPUS,
+                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
                 }),
                 discard_queue: false,
             }),
@@ -2918,8 +2921,8 @@ fn resume_dialog_attaches_an_additional_resource() {
                         access: MountAccess::Ro,
                     }],
                     resource_allocation: Some(SessionResourceAllocation::Container {
-                        cpus: BASELINE_CPUS,
-                        memory_bytes: BASELINE_MEMORY_BYTES,
+                        cpus: BASELINE_CONTAINER_CPUS,
+                        memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
                     }),
                     discard_queue: false,
                 }),

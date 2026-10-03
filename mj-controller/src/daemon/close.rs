@@ -197,7 +197,10 @@ impl RuntimeState {
 
     /// [`Self::stop_subagents_for_suspend`] as the step a close runs once the
     /// parent's checkpoint is verified.
-    fn stop_subagents_before_close(self: &Arc<Self>, parent_session_id: &str) -> BeforeClose {
+    pub(super) fn stop_subagents_before_close(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+    ) -> BeforeClose {
         let state = Arc::clone(self);
         let parent_session_id = parent_session_id.to_owned();
         Box::pin(async move { state.stop_subagents_for_suspend(&parent_session_id).await })
@@ -338,10 +341,20 @@ impl RuntimeState {
                 })
                 .map(|operation| {
                     operation.request_cancel();
-                    operation.result.clone()
+                    (
+                        operation.kind == LifecycleKind::Restart,
+                        operation.result.clone(),
+                    )
                 })
         };
-        if let Some(pending) = pending {
+        if let Some((cancelled_restart, pending)) = pending {
+            if cancelled_restart {
+                blocking({
+                    let session_id = session_id.to_owned();
+                    move || crate::database::cancel_session_restart(&session_id)
+                })
+                .await?;
+            }
             if let Err(error) = Self::wait_lifecycle_result(pending.clone()).await {
                 tracing::debug!(%session_id, %error, "previous lifecycle ended before close");
             }
@@ -413,34 +426,50 @@ impl RuntimeState {
         let mut controller = tokio::task::spawn_blocking(Controller::load)
             .await
             .context("load controller for daemon close task")??;
+        let executor = DaemonStageReportingExecutor::new(
+            CancellableProcessExecutor::new(cancelled),
+            self.clone(),
+            session_id.clone(),
+        );
+        self.suspend_with_loaded_controller(
+            &session_id,
+            &mut controller,
+            &executor,
+            acknowledge_unpublished_work,
+        )
+        .await
+    }
+
+    pub(super) async fn suspend_with_loaded_controller(
+        self: &Arc<Self>,
+        session_id: &str,
+        controller: &mut Controller,
+        executor: &(impl CommandExecutor + Sync),
+        acknowledge_unpublished_work: bool,
+    ) -> Result<DaemonLifecycleResult> {
         let route = close_route(
-            controller.state.sessions.get(&session_id),
-            controller.state.subagents.contains_key(&session_id),
+            controller.state.sessions.get(session_id),
+            controller.state.subagents.contains_key(session_id),
         );
         if matches!(route, CloseRoute::Done | CloseRoute::DeferredCleanup) {
-            self.stop_subagents_for_suspend(&session_id).await?;
+            self.stop_subagents_for_suspend(session_id).await?;
             return Ok(if route == CloseRoute::DeferredCleanup {
                 DaemonLifecycleResult::DeferredCleanup
             } else {
                 DaemonLifecycleResult::Done
             });
         }
-        let executor = DaemonStageReportingExecutor::new(
-            CancellableProcessExecutor::new(cancelled),
-            self.clone(),
-            session_id.clone(),
-        );
         let deferred = match route {
             // `prepare_suspension` marks a live session `Closing`,
             // so this is also the route of every live suspend.
             CloseRoute::RecoverInterrupted => {
                 controller
                     .recover_interrupted_close_managed(
-                        &session_id,
-                        &executor,
+                        session_id,
+                        executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
-                        Some(self.stop_subagents_before_close(&session_id)),
+                        Some(self.stop_subagents_before_close(session_id)),
                     )
                     .await?
             }
@@ -451,17 +480,17 @@ impl RuntimeState {
             // genuinely provisioning is not caught here.
             CloseRoute::SettleWithoutCheckpoint => {
                 // No checkpoint can fail after the sub-agents stop.
-                self.stop_subagents_for_suspend(&session_id).await?;
-                controller.suspend_session_without_checkpoint(&session_id, &executor)?
+                self.stop_subagents_for_suspend(session_id).await?;
+                controller.suspend_session_without_checkpoint(session_id, executor)?
             }
             _ => {
                 controller
                     .suspend_session_managed_controlled(
-                        &session_id,
-                        &executor,
+                        session_id,
+                        executor,
                         &self.session_manager,
                         acknowledge_unpublished_work,
-                        Some(self.stop_subagents_before_close(&session_id)),
+                        Some(self.stop_subagents_before_close(session_id)),
                     )
                     .await?
             }
@@ -594,6 +623,14 @@ impl RuntimeState {
             .collect::<Vec<_>>();
         for session_id in session_ids {
             if crate::controller::move_session::move_owns_session(&session_id) {
+                continue;
+            }
+            if self
+                .owner()
+                .lifecycle
+                .get(&session_id)
+                .is_some_and(|active| active.kind == LifecycleKind::Restart && active.is_running())
+            {
                 continue;
             }
             if let Err(error) = self.start_deferred_cleanup(session_id.clone()) {

@@ -33,8 +33,9 @@ use mj_core::config::{
     mount_history_host, project_history_host, raw_project_context_id,
 };
 use mj_core::state::{
-    MaterializedQueuedPrompt, MoveOperation, MovePreparation, ResumeQueueDisposition,
-    SessionResourceAllocation, SessionState, allocation_cpus, allocation_memory,
+    HostContainerSize, MaterializedQueuedPrompt, MoveOperation, MovePreparation,
+    ResumeQueueDisposition, SessionResourceAllocation, SessionState, allocation_cpus,
+    allocation_memory, default_container_size, preferred_aws_allocation,
 };
 
 use mj_chat::components::PathField;
@@ -53,9 +54,6 @@ use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
 };
-
-const BASELINE_CPUS: u64 = 8;
-const BASELINE_MEMORY_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WizardStep {
@@ -594,37 +592,6 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
     })
 }
 
-pub(crate) fn clamp_resources(
-    cpus: u64,
-    memory_bytes: u64,
-    limits: Option<(u64, u64)>,
-) -> (u64, u64) {
-    let Some((max_cpus, max_memory)) = limits else {
-        return (cpus.max(1), memory_bytes.max(1));
-    };
-    (
-        cpus.min(max_cpus.max(1)),
-        memory_bytes.min(max_memory.max(1)),
-    )
-}
-
-fn preferred_aws_option<'a>(
-    options: &'a [SessionResourceAllocation],
-    previous: Option<&SessionResourceAllocation>,
-) -> Option<&'a SessionResourceAllocation> {
-    if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) = previous
-        && let Some(option) = options.iter().find(|option| {
-            matches!(option, SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type)
-        })
-    {
-        return Some(option);
-    }
-    options
-        .iter()
-        .find(|option| allocation_cpus(option) == 8)
-        .or_else(|| options.first())
-}
-
 fn apply_aws_options(
     target_id: &str,
     result: std::result::Result<Vec<SessionResourceAllocation>, String>,
@@ -641,7 +608,7 @@ fn apply_aws_options(
                     SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type
                 )).cloned()
             } else {
-                preferred_aws_option(&options, previous).cloned()
+                preferred_aws_allocation(&options, previous).cloned()
             };
             *sizing_error = allocation.is_none().then(|| {
                 "The selected instance type is unavailable; choose an available type.".into()

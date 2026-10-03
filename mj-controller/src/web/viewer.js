@@ -1358,8 +1358,231 @@ function preferredId(items, wanted) {
   return items.find(item => item.id === wanted)?.id || items[0]?.id || '';
 }
 
-function freshDraft() {
+function targetResourceKind(targetId) {
+  return snapshot?.targets.find(target => target.id === targetId)?.resource_allocation_kind || 'fixed';
+}
+
+function memoryGiBText(bytes) {
+  const gib = 1n << 30n;
+  let remainder = BigInt(bytes);
+  let text = (remainder / gib).toString();
+  remainder %= gib;
+  if (remainder !== 0n) {
+    text += '.';
+    while (remainder !== 0n) {
+      remainder *= 10n;
+      text += (remainder / gib).toString();
+      remainder %= gib;
+    }
+  }
+  return text;
+}
+
+function parseMemoryGiB(text) {
+  const value = text.trim();
+  const match = /^(\d*)(?:\.(\d*))?$/.exec(value);
+  if (!match || (!match[1] && !match[2]) || (match[2] || '').length > 30) return null;
+  const whole = BigInt(match[1] || '0');
+  const fractionText = match[2] || '';
+  const gib = 1n << 30n;
+  const denominator = 10n ** BigInt(fractionText.length);
+  const fraction = fractionText ? BigInt(fractionText) : 0n;
+  const bytes = whole * gib + (fraction * gib + denominator / 2n) / denominator;
+  if (bytes < 1n || bytes > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(bytes);
+}
+
+function containerAllocationFromDraft(draft, target) {
+  const cpuText = draft.resourceCpuText.trim();
+  if (!/^\d+$/.test(cpuText)) return { allocation: null, error: 'CPU must be a positive whole number.' };
+  const cpusBig = BigInt(cpuText);
+  if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return { allocation: null, error: 'CPU must be a positive whole number.' };
+  }
+  const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
+  if (memoryBytes === null) return { allocation: null, error: 'MEM must be a positive number of GiB (up to 30 decimal places).' };
+  const limits = target?.container_host_limits;
+  if (limits && cpusBig > BigInt(limits.cpus)) {
+    return { allocation: null, error: `CPU exceeds this host's ${limits.cpus} CPUs.` };
+  }
+  if (limits && BigInt(memoryBytes) > BigInt(limits.memory_bytes)) {
+    return { allocation: null, error: `MEM exceeds this host's ${memoryGiBText(limits.memory_bytes)} GiB.` };
+  }
   return {
+    allocation: { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes },
+    error: '',
+  };
+}
+
+function newResourceAllocationError(draft) {
+  const target = snapshot?.targets.find(item => item.id === draft?.targetId);
+  const kind = targetResourceKind(draft?.targetId);
+  if (kind === 'container') return containerAllocationFromDraft(draft, target).error;
+  if (kind === 'aws-ec2') {
+    if (draft.resourceLoading) return 'Loading EC2 size choices…';
+    if (draft.resourceError) return draft.resourceError;
+    return draft.resourceAllocation?.kind === 'aws-ec2' ? '' : 'Choose an EC2 size before continuing.';
+  }
+  return '';
+}
+
+function setNewTargetSizing(draft, targetId) {
+  draft.resourceRequestController?.abort();
+  draft.resourceRequestController = null;
+  draft.resourceRequestTargetId = null;
+  draft.resourceLoading = false;
+  draft.resourceError = '';
+  const target = snapshot?.targets.find(item => item.id === targetId);
+  if (targetResourceKind(targetId) === 'container') {
+    const allocation = target?.default_resource_allocation;
+    draft.resourceAllocation = allocation?.kind === 'container' ? { ...allocation } : null;
+    draft.resourceCpuText = allocation?.kind === 'container' ? String(allocation.cpus) : '';
+    draft.resourceMemoryText = allocation?.kind === 'container' ? memoryGiBText(allocation.memory_bytes) : '';
+  } else if (targetResourceKind(targetId) === 'aws-ec2') {
+    const choices = draft.resourceOptionsByTarget[targetId];
+    draft.resourceAllocation = choices?.default_allocation ? { ...choices.default_allocation } : null;
+    draft.resourceCpuText = '';
+    draft.resourceMemoryText = '';
+  } else {
+    draft.resourceAllocation = null;
+    draft.resourceCpuText = '';
+    draft.resourceMemoryText = '';
+  }
+}
+
+function ensureNewTargetResourceOptions(draft) {
+  const targetId = draft.targetId;
+  if (draft.resourceOptionsByTarget[targetId]
+    || (draft.resourceLoading && draft.resourceRequestTargetId === targetId)) return;
+  draft.resourceRequestController?.abort();
+  const controller = new AbortController();
+  draft.resourceRequestController = controller;
+  draft.resourceRequestTargetId = targetId;
+  draft.resourceLoading = true;
+  draft.resourceError = '';
+  request(`/api/targets/${encodeURIComponent(targetId)}/resource-options`, { signal: controller.signal })
+    .then(result => {
+      if (newDraft !== draft || draft.targetId !== targetId || controller.signal.aborted) return;
+      draft.resourceOptionsByTarget[targetId] = result;
+      draft.resourceAllocation = result.default_allocation ? { ...result.default_allocation } : null;
+      draft.resourceError = result.options?.length
+        ? ''
+        : 'This EC2 target has no available instance sizes.';
+    })
+    .catch(error => {
+      if (controller.signal.aborted || error?.name === 'AbortError' || newDraft !== draft) return;
+      draft.resourceError = error.message || 'Could not load EC2 size choices.';
+    })
+    .finally(() => {
+      if (draft.resourceRequestController === controller) {
+        draft.resourceRequestController = null;
+        draft.resourceRequestTargetId = null;
+        draft.resourceLoading = false;
+        const controls = document.querySelector('#new-resource-controls');
+        if (newDraft === draft && controls && visibleSteps()[draft.step]?.key === 'target') {
+          renderNewTargetSizingControls(draft, controls);
+          syncNewSizingState(draft);
+        }
+      }
+    });
+}
+
+function syncNewSizingState(draft) {
+  const error = newResourceAllocationError(draft);
+  if (newError) newError.textContent = error;
+  if (newNextButton && visibleSteps()[draft.step]?.key === 'target') {
+    newNextButton.disabled = Boolean(error) || draft.committing === true || draft.creatingBundle;
+  }
+}
+
+function renderNewTargetSizingControls(draft, host) {
+  host.replaceChildren();
+  const target = snapshot?.targets.find(item => item.id === draft.targetId);
+  const kind = targetResourceKind(draft.targetId);
+  if (kind === 'container') {
+    if (!target?.default_resource_allocation) {
+      host.append(el('p', 'error', 'Container size is unavailable. Refresh the target data and try again.'));
+      return;
+    }
+    const cpu = textField('CPU cores', 'new-resource-cpus', draft.resourceCpuText, value => {
+      draft.resourceCpuText = value;
+      const result = containerAllocationFromDraft(draft, target);
+      draft.resourceAllocation = result.allocation;
+      syncNewSizingState(draft);
+      const message = host.querySelector('#new-resource-error');
+      if (message) message.textContent = result.error;
+    });
+    const cpuInput = cpu.querySelector('input');
+    cpuInput.type = 'number';
+    cpuInput.min = '1';
+    cpuInput.step = '1';
+    cpuInput.inputMode = 'numeric';
+    const memory = textField('Memory (GiB)', 'new-resource-memory', draft.resourceMemoryText, value => {
+      draft.resourceMemoryText = value;
+      const result = containerAllocationFromDraft(draft, target);
+      draft.resourceAllocation = result.allocation;
+      syncNewSizingState(draft);
+      const message = host.querySelector('#new-resource-error');
+      if (message) message.textContent = result.error;
+    });
+    const memoryInput = memory.querySelector('input');
+    memoryInput.type = 'number';
+    memoryInput.min = '0.000000001';
+    memoryInput.step = 'any';
+    memoryInput.inputMode = 'decimal';
+    host.append(el('h2', '', 'Container size'), cpu, memory);
+    if (target.container_host_limits) {
+      host.append(el('p', 'dim', `This host allows up to ${target.container_host_limits.cpus} CPU cores and ${memoryGiBText(target.container_host_limits.memory_bytes)} GiB of memory.`));
+    }
+    const error = el('p', 'error', newResourceAllocationError(draft));
+    error.id = 'new-resource-error';
+    host.append(error);
+  } else if (kind === 'aws-ec2') {
+    if (draft.resourceLoading) {
+      host.append(el('p', 'dim', 'Loading EC2 size choices…'));
+      return;
+    }
+    if (draft.resourceError) {
+      host.append(el('p', 'error', draft.resourceError));
+      if (!draft.resourceOptionsByTarget[draft.targetId]) {
+        host.append(projectButton('Retry size choices', () => {
+          draft.resourceError = '';
+          ensureNewTargetResourceOptions(draft);
+          renderNewTargetSizingControls(draft, host);
+          syncNewSizingState(draft);
+        }, 'new-resource-retry'));
+      }
+      return;
+    }
+    const choices = draft.resourceOptionsByTarget[draft.targetId]?.options || [];
+    if (!choices.length) {
+      host.append(el('p', 'error', 'This EC2 target has no available instance sizes.'));
+      return;
+    }
+    const field = el('label', 'field');
+    field.append(el('span', '', 'EC2 instance size'));
+    const select = el('select');
+    select.id = 'new-resource-aws';
+    const selectedType = draft.resourceAllocation?.kind === 'aws-ec2'
+      ? draft.resourceAllocation.instance_type
+      : '';
+    if (!selectedType) select.append(new Option('Choose an instance size', ''));
+    for (const option of choices) {
+      const title = `${option.instance_type} · ${option.vcpus} vCPU · ${memoryGiBText(option.memory_bytes)} GiB`;
+      select.append(new Option(title, option.instance_type));
+    }
+    select.value = selectedType;
+    select.onchange = () => {
+      draft.resourceAllocation = choices.find(option => option.instance_type === select.value) || null;
+      syncNewSizingState(draft);
+    };
+    field.append(select);
+    host.append(el('h2', '', 'EC2 size'), field);
+  }
+}
+
+function freshDraft() {
+  const draft = {
     workspaceId: selectedWorkspaceId(),
     step: 0,
     profileId: preferredId(snapshot?.profiles || [], launchDefault?.profile_id),
@@ -1386,7 +1609,17 @@ function freshDraft() {
     catalogStep: false,
     catalogController: null,
     catalogStatus: null,
+    resourceAllocation: null,
+    resourceCpuText: '',
+    resourceMemoryText: '',
+    resourceOptionsByTarget: {},
+    resourceRequestController: null,
+    resourceRequestTargetId: null,
+    resourceLoading: false,
+    resourceError: '',
   };
+  setNewTargetSizing(draft, draft.targetId);
+  return draft;
 }
 
 
@@ -1563,6 +1796,9 @@ function renderNewForm() {
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
+  if (step.key === 'target' && targetResourceKind(newDraft.targetId) === 'aws-ec2') {
+    ensureNewTargetResourceOptions(newDraft);
+  }
   if (step.key === 'project' && !newDraft.catalogStep) {
     newDraft.catalogStep = true;
     refreshProjectCatalog(newDraft);
@@ -1572,7 +1808,12 @@ function renderNewForm() {
   const signature = JSON.stringify({
     step: step.key,
     profiles: step.key === 'profile' ? snapshot.profiles.map(p => [p.id, p.harness_kind]) : null,
-    targets: step.key === 'target' ? launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t)]) : null,
+    targets: step.key === 'target' ? [
+      launchableTargets(snapshot.targets).map(t => [t.id, t.kind, targetStatus(t), t.resource_allocation_kind,
+        t.default_resource_allocation, t.container_host_limits]),
+      newDraft.resourceCpuText, newDraft.resourceMemoryText, newDraft.resourceAllocation,
+      newDraft.resourceLoading, newDraft.resourceError,
+    ] : null,
     project: step.key === 'project' ? [
       newDraft.targetId, newDraft.catalogStatus, newDraft.projectPicker.mode, newDraft.projectPicker.revision,
       newDraft.projectMultiple, newDraft.bundleSources,
@@ -1625,22 +1866,29 @@ function renderNewForm() {
       break;
     }
     case 'target': {
-      body.append(
-        pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
+      body.append(pickerField('Where to run', 'new-target', launchableTargets(snapshot.targets), newDraft.targetId, value => {
+          const previousTargetId = newDraft.targetId;
           cancelProjectRequests();
           newDraft.projectPicker = freshProjectPicker();
           newDraft.projectPickers = {};
-          newDraft.projectDirectories[newDraft.targetId] = newDraft.projectDirectory;
+          newDraft.projectDirectories[previousTargetId] = newDraft.projectDirectory;
           newDraft.targetId = value;
           newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
+          setNewTargetSizing(newDraft, value);
+          if (targetResourceKind(value) === 'aws-ec2') ensureNewTargetResourceOptions(newDraft);
           // Changing the target changes which project question is asked, and
           // invalidates anything the previous project answer was checked for.
           newDraft.preflighted = false;
           newDraft.remoteRepositories = [];
           newDraft.localChangesExcluded = false;
           newDraft.preflightError = '';
-        }),
-      );
+          renderNewTargetSizingControls(newDraft, sizing);
+          syncNewSizingState(newDraft);
+        }));
+      const sizing = el('section', 'new-resource-controls');
+      sizing.id = 'new-resource-controls';
+      renderNewTargetSizingControls(newDraft, sizing);
+      body.append(sizing);
       break;
     }
     case 'project': {
@@ -1704,6 +1952,11 @@ function renderNewForm() {
         ['Account', newDraft.profileId],
         ...(subagentChoiceApplies(newDraft) ? [['Subagents', subagentPolicyLabel(profileSubagents(newDraft.profileId))]] : []),
         ['Where to run', newDraft.targetId],
+        ...(newDraft.resourceAllocation?.kind === 'container'
+          ? [['Container size', `${newDraft.resourceAllocation.cpus} CPU · ${memoryGiBText(newDraft.resourceAllocation.memory_bytes)} GiB memory`]]
+          : newDraft.resourceAllocation?.kind === 'aws-ec2'
+            ? [['EC2 size', newDraft.resourceAllocation.instance_type]]
+            : []),
         targetIsBare(newDraft.targetId)
           ? ['Project files', newDraft.projectDirectory]
           : ['Project', newDraft.bundleId],
@@ -1753,7 +2006,9 @@ function renderNewForm() {
   }
   const busy = newDraft.committing === true || newDraft.creatingBundle;
   newNextButton.hidden = step.key === 'project' && !targetIsBare(newDraft.targetId);
-  newNextButton.disabled = busy || checking || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
+  const sizingError = step.key === 'target' ? newResourceAllocationError(newDraft) : '';
+  newNextButton.disabled = busy || checking || Boolean(sizingError)
+    || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
   newBackButton.disabled ||= newDraft.committing === true;
   for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
   if (focused?.id && !caret && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
@@ -2461,6 +2716,13 @@ async function advanceNew() {
     newError.textContent = 'Choose where to run before continuing.';
     return;
   }
+  if (step.key === 'target') {
+    const sizingError = newResourceAllocationError(newDraft);
+    if (sizingError) {
+      newError.textContent = sizingError;
+      return;
+    }
+  }
 
   if (step.key === 'project') {
     if (!targetIsBare(newDraft.targetId) && !snapshot.bundles.some(b => b.id === newDraft.bundleId) && (!newDraft.createdBundleId || newDraft.createdBundleId !== newDraft.bundleId)) {
@@ -2503,6 +2765,12 @@ async function commitNew() {
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
     subagents: profileSubagents(draft.profileId),
   };
+  const kind = targetResourceKind(draft.targetId);
+  const target = snapshot?.targets.find(item => item.id === draft.targetId);
+  const resourceAllocation = kind === 'container'
+    ? containerAllocationFromDraft(draft, target).allocation
+    : kind === 'aws-ec2' ? draft.resourceAllocation : null;
+  if (resourceAllocation) body.resource_allocation = resourceAllocation;
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
   draft.committing = true;
   renderNewForm();

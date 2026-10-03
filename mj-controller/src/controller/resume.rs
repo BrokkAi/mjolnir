@@ -2502,6 +2502,7 @@ async fn utility_handoff_while_cancellable(
 }
 
 mod in_place;
+pub(crate) use in_place::InPlaceRestartError;
 
 #[cfg(test)]
 mod tests;

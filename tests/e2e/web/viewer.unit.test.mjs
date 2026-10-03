@@ -253,7 +253,7 @@ test('entering Review does not wait for project preflight', async () => {
 test('the create payload uses the selected profile sub-agent policy', async () => {
   const posted = [];
   const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
-    snapshot: { profiles: [
+    snapshot: { targets: [], profiles: [
       { id: 'other', harness_kind: 'claude', subagents: { mode: 'native' } },
       { id: profileId, harness_kind: harnessKind, subagents },
     ] },
@@ -271,6 +271,7 @@ test('the create payload uses the selected profile sub-agent policy', async () =
       subagents: { mode: 'none' },
     },
     pendingNewPreflight: null,
+    targetResourceKind: () => 'fixed',
     targetIsBare: () => false,
     renderNewForm: () => {},
     refresh: async () => {},
@@ -292,6 +293,7 @@ test('the create payload uses the selected profile sub-agent policy', async () =
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
     assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);
+    assert.equal(Object.hasOwn(posted.at(-1), 'resource_allocation'), false);
   }
 });
 

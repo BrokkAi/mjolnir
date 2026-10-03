@@ -12,6 +12,25 @@ use mj_core::config::{
 use mj_core::state::SessionState;
 
 #[test]
+fn web_restart_uses_the_lifecycle_cancellation_control() {
+    let action = ControllerAction::Restart {
+        session_id: "restart-web-session".into(),
+    };
+    let control = PhoneActionControl::for_action(&action);
+    let lifecycle_control = control
+        .create
+        .as_ref()
+        .expect("web Restart is admitted as a cancellable daemon lifecycle");
+    assert!(Arc::ptr_eq(
+        &control.cancelled,
+        &lifecycle_control.cancelled
+    ));
+    assert!(control.request_cancel());
+    assert!(control.cancelled.load(Ordering::Acquire));
+    assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
+}
+
+#[test]
 fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     for count in [100, 10_000, 100_000] {
         let mut controller = controller_with_profiles(&[]);
@@ -1427,6 +1446,7 @@ fn new_action() -> ControllerAction {
         profile_id: "codex".into(),
         bundle_id: "project".into(),
         target_id: "podman".into(),
+        resource_allocation: None,
         title: Some("Phone launch".into()),
         project_directory: None,
         dirty_ack: Vec::new(),

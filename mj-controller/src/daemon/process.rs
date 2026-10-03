@@ -184,11 +184,19 @@ pub(super) async fn run_daemon_runtime(
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
-        let move_owned = state.recover_moves(move_operations)?;
+        let mut lifecycle_owned = state.recover_moves(move_operations)?;
+        let restart_intents = blocking(crate::database::load_session_restarts).await?;
+        lifecycle_owned.extend(
+            restart_intents
+                .iter()
+                .map(|intent| intent.session_id.clone()),
+        );
+        lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
+        lifecycle_owned.extend(move_sessions.iter().cloned());
         state.resume_retained_cleanups();
         state.resume_startup_cleanups(true);
         state.restore_startup_deliveries(&cancellation).await?;
-        Ok::<_, anyhow::Error>((move_sessions, move_owned))
+        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
     }
     .await;
     log_startup_phase("recover moves and startup deliveries", bootstrapping);

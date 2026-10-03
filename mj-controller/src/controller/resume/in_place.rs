@@ -29,6 +29,56 @@ struct InPlaceRestorePlan {
     previous_profile_root: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InPlaceRestoreMode {
+    Move,
+    Restart,
+}
+
+pub(crate) enum InPlaceRestartError {
+    /// The target was only read or probed; fallback can still destroy it.
+    Preflight(anyhow::Error),
+    /// A requested cancellation or daemon handoff stopped the operation.
+    Cancelled(anyhow::Error),
+    /// The session record or worker root changed; keep the target for retry.
+    Restore(anyhow::Error),
+}
+
+impl std::fmt::Debug for InPlaceRestartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight(error) => formatter.debug_tuple("Preflight").field(error).finish(),
+            Self::Cancelled(error) => formatter.debug_tuple("Cancelled").field(error).finish(),
+            Self::Restore(error) => formatter.debug_tuple("Restore").field(error).finish(),
+        }
+    }
+}
+
+impl std::fmt::Display for InPlaceRestartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight(error) => {
+                write!(formatter, "in-place restart preflight failed: {error:#}")
+            }
+            Self::Cancelled(error) => write!(formatter, "in-place restart cancelled: {error:#}"),
+            Self::Restore(error) => write!(
+                formatter,
+                "in-place restart failed after restore began: {error:#}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InPlaceRestartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Preflight(error) | Self::Cancelled(error) | Self::Restore(error) => {
+                Some(error.as_ref())
+            }
+        }
+    }
+}
+
 impl Controller {
     /// Replace the harness of a sealed session without rebuilding its target.
     ///
@@ -40,12 +90,6 @@ impl Controller {
     /// `target_template_id`. Every failure stops only the worker and leaves
     /// the record `Error`, keeping the environment and checkpoint for an
     /// explicit retry.
-    // The target gate below is an ordinary lock held across the restore on
-    // purpose; see the comment where it is taken.
-    #[allow(
-        clippy::await_holding_lock,
-        reason = "the target gate deliberately spans the whole in-place restore"
-    )]
     pub(in crate::controller) async fn restore_session_in_place(
         &mut self,
         session_id: &str,
@@ -53,29 +97,91 @@ impl Controller {
         target_template_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        match self
+            .restore_session_in_place_with_mode(
+                session_id,
+                profile_id,
+                target_template_id,
+                executor,
+                InPlaceRestoreMode::Move,
+            )
+            .await?
+        {
+            Ok(session) => Ok(session),
+            Err(error) => Err(anyhow::Error::msg(error)),
+        }
+    }
+
+    pub(crate) async fn restore_session_in_place_for_restart(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_template_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<std::result::Result<MaterializedSession, InPlaceRestartError>> {
+        self.restore_session_in_place_with_mode(
+            session_id,
+            profile_id,
+            target_template_id,
+            executor,
+            InPlaceRestoreMode::Restart,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the target gate deliberately spans the whole in-place restore"
+    )]
+    async fn restore_session_in_place_with_mode(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_template_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        mode: InPlaceRestoreMode,
+    ) -> Result<std::result::Result<MaterializedSession, InPlaceRestartError>> {
         crate::worker_lifecycle::run(session_id, "restore session in place", executor, async {
-            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+            if let Err(error) = crate::worker_lifecycle::require(session_id)
+                .and_then(|owner| owner.verify_cached_target(&self.state))
+            {
+                if mode == InPlaceRestoreMode::Restart {
+                    return Ok(Err(InPlaceRestartError::Preflight(error)));
+                }
+                return Err(error);
+            }
             let previous = self
                 .state
                 .sessions
                 .get(session_id)
                 .with_context(|| format!("unknown session {session_id}"))?
                 .clone();
-            let move_operation = crate::database::load_move_operation(session_id)?;
+            let move_operation = if mode == InPlaceRestoreMode::Move {
+                crate::database::load_move_operation(session_id)?
+            } else {
+                None
+            };
             // A first attempt finds the source sealed (`Closing`); a retry finds
             // the environment its failed attempt retained (`Error`).
-            ensure!(
-                previous.state == SessionState::Closing
-                    || (previous.state == SessionState::Error
-                        && move_operation
-                            .as_ref()
-                            .is_some_and(mj_core::state::MoveOperation::holds_source_environment)),
-                "session {session_id} is not sealed for an in-place harness replacement"
-            );
-            ensure!(
-                previous.target.is_some(),
-                "an in-place harness replacement has no target to replace it in"
-            );
+            let retained_state = previous.state == SessionState::Closing
+                || (mode == InPlaceRestoreMode::Restart
+                    && matches!(
+                        previous.state,
+                        SessionState::Error | SessionState::Stopped | SessionState::Provisioning
+                    ))
+                || (previous.state == SessionState::Error
+                    && move_operation
+                        .as_ref()
+                        .is_some_and(mj_core::state::MoveOperation::holds_source_environment));
+            if !retained_state || previous.target.is_none() {
+                let error = anyhow::anyhow!(
+                    "session {session_id} is not ready for an in-place harness replacement"
+                );
+                if mode == InPlaceRestoreMode::Restart {
+                    return Ok(Err(InPlaceRestartError::Preflight(error)));
+                }
+                return Err(error);
+            }
             // From here the environment belongs to this swap. Every failure,
             // before or after the record transition below, stops only the worker
             // and leaves the record `Error` with the environment retained, so no
@@ -89,6 +195,9 @@ impl Controller {
             ) {
                 Ok(plan) => plan,
                 Err(error) => {
+                    if mode == InPlaceRestoreMode::Restart {
+                        return Ok(Err(InPlaceRestartError::Preflight(error)));
+                    }
                     return Err(self.retain_failed_in_place_move(session_id, &previous, error)?);
                 }
             };
@@ -103,10 +212,12 @@ impl Controller {
             let canonical_session = std::sync::Arc::clone(&verified_archive.canonical_session);
             let native_continuity =
                 native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
-            // A move always seals its source behind a barrier and never replays the
-            // interrupted prompt itself; queued work is admitted afterwards by
-            // `admit_move_queue`.
-            let discard_queued_prompts = true;
+            let (discard_queued_prompts, replay_queue) = match mode {
+                // A move admits its queue only after destination readiness.
+                InPlaceRestoreMode::Move => (true, false),
+                // Restart follows ordinary same-harness resume semantics.
+                InPlaceRestoreMode::Restart => (false, true),
+            };
             let context_bytes = crate::handoff::profile_handoff_bytes(Some(&profile));
             let utility_config = (!native_continuity).then(|| self.config.clone());
             let stored_frontier = crate::database::materialized_event_frontier(session_id)
@@ -132,6 +243,12 @@ impl Controller {
                     materialized_session_from_canonical(session_id, &canonical)
                 })
             });
+
+            if mode == InPlaceRestoreMode::Restart && executor.cancellation_requested() {
+                return Ok(Err(InPlaceRestartError::Cancelled(anyhow::anyhow!(
+                    "restart cancelled before the worker reset"
+                ))));
+            }
 
             // One record transition, and the crash boundary of the whole swap:
             // before it, recovery finishes the interrupted close; after it,
@@ -190,7 +307,7 @@ impl Controller {
                         restore_repositories: false,
                         native_continuity,
                         discard_queued_prompts,
-                        replay_queue: false,
+                        replay_queue,
                         utility_handoff,
                         projection_build,
                         resume_notices: Vec::new(),
@@ -208,7 +325,7 @@ impl Controller {
             }
             .await;
             match result {
-                Ok(materialized) => Ok(materialized),
+                Ok(materialized) => Ok(Ok(materialized)),
                 Err(error) => {
                     // Put back whatever this swap wrote to the durable projection,
                     // including the failed worker's own lines.
@@ -217,7 +334,13 @@ impl Controller {
                         &canonical_session,
                         discard_queued_prompts,
                     );
-                    Err(self.retain_failed_in_place_move(session_id, &previous, error)?)
+                    if mode == InPlaceRestoreMode::Restart {
+                        let error =
+                            self.retain_failed_in_place_restart(session_id, &previous, error)?;
+                        Ok(Err(InPlaceRestartError::Restore(error)))
+                    } else {
+                        Err(self.retain_failed_in_place_move(session_id, &previous, error)?)
+                    }
                 }
             }
         })
@@ -316,19 +439,38 @@ impl Controller {
         previous: &mj_core::state::SessionRecord,
         error: anyhow::Error,
     ) -> Result<anyhow::Error> {
+        self.retain_failed_in_place_restore(session_id, previous, error, "Move")
+    }
+
+    pub(crate) fn retain_failed_in_place_restart(
+        &mut self,
+        session_id: &str,
+        previous: &mj_core::state::SessionRecord,
+        error: anyhow::Error,
+    ) -> Result<anyhow::Error> {
+        self.retain_failed_in_place_restore(session_id, previous, error, "Restart")
+    }
+
+    fn retain_failed_in_place_restore(
+        &mut self,
+        session_id: &str,
+        previous: &mj_core::state::SessionRecord,
+        error: anyhow::Error,
+        owner: &'static str,
+    ) -> Result<anyhow::Error> {
         crate::worker_lifecycle::run_blocking(
             session_id,
-            "retain failed in place move",
+            "retain failed in-place restore",
             &crate::targets::ProcessExecutor,
             || {
                 let current = self
                     .state
                     .sessions
                     .get(session_id)
-                    .context("Move session missing")?;
+                    .context("session missing")?;
                 ensure!(
                     current.target.is_some() && current.target == previous.target,
-                    "retained Move target changed; refusing cleanup"
+                    "retained {owner} target changed; refusing cleanup"
                 );
                 let backend =
                     backend_locator(current.target.as_ref().unwrap(), current, &self.config)?;
@@ -352,7 +494,7 @@ impl Controller {
                 retained.state = SessionState::Error;
                 retained.updated_at = now();
                 retained.last_error =
-                    Some(format!("{error:#}; environment retained for Move retry"));
+                    Some(format!("{error:#}; environment retained for {owner} retry"));
                 if let Err(cleanup_error) = &cleanup {
                     retained.last_error = Some(format!(
                         "{error:#}; stopping retained worker failed: {cleanup_error:#}"

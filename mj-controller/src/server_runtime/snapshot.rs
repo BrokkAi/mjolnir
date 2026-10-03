@@ -520,11 +520,37 @@ pub(super) fn viewer_snapshot_selected(
     // the daemon sets it where it publishes, from the one classifier the
     // terminal wizards and the launch options also read.
     for target in &mut snapshot.targets {
-        target.runtime_missing = controller
-            .config
-            .targets
-            .get(&target.id)
-            .is_some_and(|template| engines.runtime_missing(template));
+        let Some(template) = controller.config.targets.get(&target.id) else {
+            continue;
+        };
+        target.runtime_missing = engines.runtime_missing(template);
+        target.resource_allocation_kind = template.into();
+        if mj_core::config::is_container_target(template) {
+            let limits = capacity
+                .iter()
+                .find(|host| host.target_ids.iter().any(|id| id == &target.id))
+                .and_then(|host| {
+                    Some(mj_core::state::HostContainerSize {
+                        cpus: host.logical_cores?,
+                        memory_bytes: host.memory_total_bytes?,
+                    })
+                });
+            target.remembered_container_size = mj_core::config::container_size_host(template)
+                .and_then(|host| controller.state.container_sizes.get(host))
+                .copied();
+            target.container_host_limits = limits;
+            let size =
+                mj_core::state::default_container_size(target.remembered_container_size, limits);
+            target.default_resource_allocation =
+                Some(mj_core::state::SessionResourceAllocation::Container {
+                    cpus: size.cpus,
+                    memory_bytes: size.memory_bytes,
+                });
+        } else {
+            target.remembered_container_size = None;
+            target.container_host_limits = None;
+            target.default_resource_allocation = None;
+        }
     }
     snapshot.launch_failures = launch_failures.to_vec();
     snapshot.workspaces = workspaces

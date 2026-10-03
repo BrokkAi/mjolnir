@@ -1630,8 +1630,8 @@ const IN_PLACE_MOVE_CHILD: &str = "MJ_MOVE_IN_PLACE_CHILD";
 /// exact session id.
 #[cfg(unix)]
 use crate::controller::checkpoint::tests::{
-    LATCH_CHECKPOINT_ONLY, LATCH_RELAY_ROOT, LATCH_RELAY_SESSION, ReleaseSupport,
-    latch_relay_target,
+    LATCH_CHECKPOINT_ONLY, LATCH_RELAY_ANSWER_PROMPTS, LATCH_RELAY_ROOT, LATCH_RELAY_SESSION,
+    ReleaseSupport, latch_relay_target,
 };
 
 /// A `CommandExecutor` that really runs what it is given and remembers the
@@ -2285,6 +2285,194 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     assert!(
         journal.contains("in place; the workspace and environment were kept"),
         "the move notice is missing from the destination journal: {journal}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_reuses_an_error_target_and_preserves_its_queued_command() {
+    const CHILD: &str = "MJ_RESTART_IN_PLACE_CHILD";
+    let name = test_name("restart_reuses_an_error_target_and_preserves_its_queued_command");
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env(LATCH_RELAY_ANSWER_PROMPTS, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let queued_id = "restart-queued-prompt";
+    let mut archive = crate::controller::test_support::checkpoint_archive_input(
+        LATCH_RELAY_SESSION,
+        fixture.checkpoint.event_frontier,
+        Vec::new(),
+        Vec::new(),
+    );
+    archive.session.harness_kind = HarnessKind::Claude;
+    archive.session.profile_id = IN_PLACE_SOURCE_PROFILE.into();
+    archive
+        .canonical_session
+        .queued_prompts
+        .push(CanonicalQueuedPrompt {
+            command_id: queued_id.into(),
+            kind: CanonicalQueuedCommandKind::Prompt,
+            content: vec![serde_json::json!({"type":"text","text":"queued before restart"})],
+            queued_at_ms: 42,
+        });
+    fixture.checkpoint = crate::controller::test_support::write_checkpoint_archive_input(
+        fixture.checkpoint.archive_path.parent().unwrap(),
+        LATCH_RELAY_SESSION,
+        &archive,
+    );
+
+    let temp_marker = fixture.worker_root.join("tmp").join("restart-marker");
+    fs::create_dir_all(temp_marker.parent().unwrap()).unwrap();
+    fs::write(&temp_marker, b"temporary target data").unwrap();
+    let record = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.state = SessionState::Error;
+    record.last_error = Some("suspend lost its worker".into());
+    record.last_checkpoint_error = Some("worker process is gone".into());
+    record.checkpoint = Some(fixture.checkpoint.clone());
+    crate::database::save_session(record).unwrap();
+
+    let mut controller = fixture.controller;
+    let executor = RecordingProcessExecutor::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let restored = runtime
+        .block_on(controller.restore_session_in_place_for_restart(
+            LATCH_RELAY_SESSION,
+            IN_PLACE_SOURCE_PROFILE,
+            "local-bare",
+            &executor,
+        ))
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(restored.session_id, LATCH_RELAY_SESSION);
+    assert_eq!(
+        controller.state.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert_eq!(
+        controller.state.sessions[LATCH_RELAY_SESSION].target,
+        Some(TargetLocator::LocalBare {
+            worker_root: fixture.worker_root.clone()
+        })
+    );
+    assert_eq!(fs::read(&temp_marker).unwrap(), b"temporary target data");
+    assert_eq!(
+        fs::read(fixture.checkout.join("untracked.txt")).unwrap(),
+        b"agent work"
+    );
+
+    let purposes = executor.purposes();
+    assert_eq!(
+        purposes
+            .iter()
+            .filter(|purpose| {
+                purpose.as_str() == "reset the worker root for an in-place harness replacement"
+            })
+            .count(),
+        1,
+        "Restart should reset the worker inside the retained target: {purposes:?}"
+    );
+    assert!(
+        purposes.iter().all(|purpose| {
+            let purpose = purpose.to_lowercase();
+            !purpose.contains("remove exact")
+                && !purpose.contains("remove container")
+                && !purpose.contains("container storage")
+                && !purpose.contains("temporary volume")
+                && !purpose.contains("create the session worker root")
+        }),
+        "Restart must not clean up or recreate its target: {purposes:?}"
+    );
+
+    let relay_state: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.worker_root.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
+    let queued_count = relay_state["queued_prompts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|queued| queued["command_id"] == queued_id)
+        .count();
+    let active_count = usize::from(relay_state["active_prompt"]["command_id"] == queued_id);
+    let handled_count = usize::from(relay_state["handled_commands"].get(queued_id).is_some());
+    assert!(
+        queued_count + active_count + handled_count > 0
+            && relay_state.to_string().contains("queued before restart"),
+        "the queued command is restored into the retained relay with its identity and content: {relay_state:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_classifies_a_missing_target_as_a_preflight_fallback() {
+    const CHILD: &str = "MJ_RESTART_MISSING_TARGET_CHILD";
+    let name = test_name("restart_classifies_a_missing_target_as_a_preflight_fallback");
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let record = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.state = SessionState::Closing;
+    record.checkpoint = Some(fixture.checkpoint.clone());
+    crate::database::save_session(record).unwrap();
+    fs::remove_dir_all(&fixture.worker_root).unwrap();
+
+    let mut controller = fixture.controller;
+    let executor = RecordingProcessExecutor::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let error = runtime
+        .block_on(controller.restore_session_in_place_for_restart(
+            LATCH_RELAY_SESSION,
+            IN_PLACE_SOURCE_PROFILE,
+            "local-bare",
+            &executor,
+        ))
+        .unwrap()
+        .unwrap_err();
+
+    assert!(
+        matches!(error, crate::controller::InPlaceRestartError::Preflight(_)),
+        "a missing target must be classified before restore begins: {error:?}"
+    );
+    assert!(
+        executor.purposes().iter().all(|purpose| {
+            !purpose.contains("reset the worker root")
+                && !purpose.contains("remove exact")
+                && !purpose.contains("remove container")
+        }),
+        "the failed preflight must leave cleanup to Restart's fallback"
     );
 }
 

@@ -683,6 +683,9 @@ pub enum DaemonAction {
         #[serde(default)]
         acknowledge_unpublished_work: bool,
     },
+    RestartSession {
+        session_id: String,
+    },
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
         session_id: String,
@@ -2184,6 +2187,22 @@ impl DaemonClient {
         }
     }
 
+    pub async fn restart_session(&mut self, session_id: String) -> Result<()> {
+        ensure!(
+            self.metadata.protocol_version == PROTOCOL_VERSION,
+            "cannot Restart a session: daemon protocol {} does not match client protocol {}; restart the daemon, then try again",
+            self.metadata.protocol_version,
+            PROTOCOL_VERSION
+        );
+        match self
+            .request(DaemonAction::RestartSession { session_id })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected restart-session reply {reply:?}"),
+        }
+    }
+
     pub async fn start_create_session(
         &mut self,
         request: CreateSessionRequest,
@@ -2376,7 +2395,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Settings can warm draft profile capabilities through the daemon-owned catalog.
 // Runtime deltas carry transcript item changes, and a client fetches a
 // session's tail from the daemon at its cursor instead of reading SQLite.
-pub const PROTOCOL_VERSION: u32 = 53;
+pub const PROTOCOL_VERSION: u32 = 54;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2483,6 +2502,71 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
+    }
+
+    #[tokio::test]
+    async fn restart_session_sends_one_restart_action() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "restart-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            assert!(matches!(
+                request.action,
+                DaemonAction::RestartSession { session_id } if session_id == "session-1"
+            ));
+            write_frame(
+                &mut stream,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+
+        client.restart_session("session-1".into()).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_session_rejects_an_old_daemon_before_sending_the_action() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION - 1,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "old-restart-daemon".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut byte = [0_u8; 1];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+
+        let error = client
+            .restart_session("session-1".into())
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&format!("daemon protocol {}", PROTOCOL_VERSION - 1)));
+        assert!(message.contains(&format!("client protocol {PROTOCOL_VERSION}")));
+        assert!(message.contains("restart the daemon"));
+        drop(client);
+        server.await.unwrap();
     }
 
     #[tokio::test]
