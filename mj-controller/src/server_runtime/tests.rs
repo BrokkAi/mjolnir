@@ -420,7 +420,7 @@ fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
             &std::collections::BTreeMap::new(),
             &PhoneSessionViews {
                 native_agents: &Default::default(),
-                conversations: &std::collections::BTreeMap::new(),
+                conversations: &mj_core::snapshot_map::SnapshotMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
                 pending_elicitations: &std::collections::BTreeMap::new(),
@@ -575,7 +575,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             &std::collections::BTreeMap::new(),
             &PhoneSessionViews {
                 native_agents: &Default::default(),
-                conversations: &std::collections::BTreeMap::new(),
+                conversations: &mj_core::snapshot_map::SnapshotMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
                 pending_elicitations: &std::collections::BTreeMap::new(),
@@ -871,7 +871,7 @@ fn phone_snapshot_reports_the_last_top_level_message_time() {
         }
     };
     let conversations = |entries| {
-        std::collections::BTreeMap::from([(
+        mj_core::snapshot_map::SnapshotMap::from([(
             "session-1".to_owned(),
             BrowserTranscript {
                 latest_seq: 3,
@@ -882,30 +882,31 @@ fn phone_snapshot_reports_the_last_top_level_message_time() {
             },
         )])
     };
-    let project = |conversations: &std::collections::BTreeMap<String, BrowserTranscript>| {
-        viewer_snapshot(
-            &controller,
-            &[],
-            &std::collections::BTreeMap::new(),
-            &PhoneSessionViews {
-                native_agents: &Default::default(),
-                conversations,
-                queued_prompts: &Default::default(),
-                active_user_shells: &Default::default(),
-                pending_elicitations: &Default::default(),
-                prompt_images: &Default::default(),
-                operational: &Default::default(),
-                materialized_activity: &Default::default(),
-                project_sources: &PhoneProjectSources::default(),
-                operations: &Default::default(),
-                move_recoveries: &Default::default(),
-                capacity: &[],
-                launch_failures: &[],
-                reviews: &Default::default(),
-            },
-            1,
-        )
-    };
+    let project =
+        |conversations: &mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>| {
+            viewer_snapshot(
+                &controller,
+                &[],
+                &BTreeMap::new(),
+                &PhoneSessionViews {
+                    native_agents: &Default::default(),
+                    conversations,
+                    queued_prompts: &Default::default(),
+                    active_user_shells: &Default::default(),
+                    pending_elicitations: &Default::default(),
+                    prompt_images: &Default::default(),
+                    operational: &Default::default(),
+                    materialized_activity: &Default::default(),
+                    project_sources: &PhoneProjectSources::default(),
+                    operations: &Default::default(),
+                    move_recoveries: &Default::default(),
+                    capacity: &[],
+                    launch_failures: &[],
+                    reviews: &Default::default(),
+                },
+                1,
+            )
+        };
 
     let snapshot = project(&conversations(vec![
         entry(1, "user", Some(1_000)),
@@ -922,7 +923,7 @@ fn phone_snapshot_reports_the_last_top_level_message_time() {
     ]));
     assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
 
-    let snapshot = project(&std::collections::BTreeMap::new());
+    let snapshot = project(&mj_core::snapshot_map::SnapshotMap::new());
     assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
 }
 
@@ -1755,7 +1756,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             &quotas,
             &PhoneSessionViews {
                 native_agents: &Default::default(),
-                conversations: &std::collections::BTreeMap::new(),
+                conversations: &mj_core::snapshot_map::SnapshotMap::new(),
                 queued_prompts: &std::collections::BTreeMap::new(),
                 active_user_shells: &std::collections::BTreeMap::new(),
                 pending_elicitations: &std::collections::BTreeMap::new(),
@@ -1862,7 +1863,7 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
         &std::collections::BTreeMap::new(),
         &PhoneSessionViews {
             native_agents: &Default::default(),
-            conversations: &std::collections::BTreeMap::new(),
+            conversations: &mj_core::snapshot_map::SnapshotMap::new(),
             queued_prompts: &std::collections::BTreeMap::new(),
             active_user_shells: &std::collections::BTreeMap::new(),
             pending_elicitations: &std::collections::BTreeMap::new(),
@@ -2140,7 +2141,7 @@ fn historical_sessions_do_not_restore_missing_workspace_tabs() {
         &std::collections::BTreeMap::new(),
         &PhoneSessionViews {
             native_agents: &Default::default(),
-            conversations: &std::collections::BTreeMap::new(),
+            conversations: &mj_core::snapshot_map::SnapshotMap::new(),
             queued_prompts: &std::collections::BTreeMap::new(),
             active_user_shells: &std::collections::BTreeMap::new(),
             pending_elicitations: &std::collections::BTreeMap::new(),

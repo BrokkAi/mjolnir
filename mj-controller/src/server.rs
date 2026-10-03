@@ -170,7 +170,8 @@ pub fn load_or_create_cookie_key(path: &std::path::Path) -> AnyResult<Vec<u8>> {
 pub struct ServerOptions {
     pub bind: SocketAddr,
     pub snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    pub conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+    pub conversation_rx:
+        watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     pub action_tx: mpsc::Sender<ControllerRequest>,
     pub bundle_tx: mpsc::Sender<BundleRequest>,
     pub receipt_tx: mpsc::Sender<ReadReceiptRequest>,
@@ -235,7 +236,9 @@ impl ServerOptions {
     pub fn new(
         bind: SocketAddr,
         snapshot_rx: watch::Receiver<ViewerSnapshot>,
-        conversation_rx: watch::Receiver<BTreeMap<String, BrowserTranscript>>,
+        conversation_rx: watch::Receiver<
+            mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>,
+        >,
         requests: ServerRequests,
     ) -> AnyResult<Self> {
         let cookie_key = generate_cookie_key()?.to_vec();

@@ -213,8 +213,8 @@ fn documentation_dashboard() -> DashboardState {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         quotas,
     );

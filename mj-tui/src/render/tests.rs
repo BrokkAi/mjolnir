@@ -900,8 +900,8 @@ fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_card
         sessions: [(first.id.clone(), first), (second.id.clone(), second)]
             .into_iter()
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     let first = dashboard.ordered_sessions()[0].id.clone();
@@ -1040,8 +1040,8 @@ fn project_groups_have_one_blank_row_between_them() {
         sessions: [(first.id.clone(), first), (second.id.clone(), second)]
             .into_iter()
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     let first = dashboard.ordered_sessions()[0].id.clone();
@@ -1087,8 +1087,8 @@ fn project_hotkeys_collapse_and_expand_groups_independently() {
         sessions: [(first.id.clone(), first), (second.id.clone(), second)]
             .into_iter()
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     dashboard.apply_materialized_session(&materialized_session_for(
@@ -1173,8 +1173,8 @@ fn collapsed_duplicate_targets_are_numbered_within_their_project() {
             .into_iter()
             .map(|session| (session.id.clone(), session))
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     dashboard.apply_materialized_session(&materialized_session_for(
@@ -2441,8 +2441,8 @@ fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
             sessions: [(first.id.clone(), first), (second.id.clone(), second)]
                 .into_iter()
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -2522,8 +2522,8 @@ fn minimized_sessions_dashboard(projects: usize, per_project: usize) -> Dashboar
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions,
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -3713,8 +3713,8 @@ fn dashboard_colors_named_host_permission_badges() {
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [(session.id.clone(), session)].into_iter().collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
     let capacity_target =
@@ -3898,8 +3898,8 @@ fn overflowing_session_pane_shows_a_scrollbar() {
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions,
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
     for index in 0..6 {
@@ -4299,8 +4299,8 @@ fn only_focused_pane_draws_caret_without_shifting_table_columns() {
             sessions: [(first.id.clone(), first), (second.id.clone(), second)]
                 .into_iter()
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );

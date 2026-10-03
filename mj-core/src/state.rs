@@ -1,6 +1,8 @@
 //! Durable controller-side state for Hel-managed sessions.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -1976,11 +1978,11 @@ pub struct State {
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
     pub subagents: SnapshotMap<String, SubagentRecord>,
     /// Recently used source directories, keyed by `local` or SSH host name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mount_history: BTreeMap<String, Vec<PathBuf>>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub mount_history: SnapshotMap<String, Vec<PathBuf>>,
     /// Most recently launched container size on each physical target host.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub container_sizes: BTreeMap<String, HostContainerSize>,
+    #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
+    pub container_sizes: SnapshotMap<String, HostContainerSize>,
 }
 
 impl Default for State {
@@ -1990,8 +1992,8 @@ impl Default for State {
             last_subagent_policy: Default::default(),
             sessions: SnapshotMap::new(),
             subagents: SnapshotMap::new(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: SnapshotMap::new(),
+            container_sizes: SnapshotMap::new(),
         }
     }
 }
@@ -2150,7 +2152,10 @@ impl State {
         if mounts.is_empty() {
             return;
         }
-        let sources = self.mount_history.entry(host.to_owned()).or_default();
+        let sources = self
+            .mount_history
+            .entry(host.to_owned())
+            .or_insert_with(Vec::new);
         for mount in mounts.iter().rev() {
             sources.retain(|source| source != &mount.source);
             sources.insert(0, mount.source.clone());
@@ -2171,7 +2176,7 @@ impl State {
 
     pub fn remember_project_directory(&mut self, host: &str, directory: &Path) {
         let key = project_history_key(host);
-        let directories = self.mount_history.entry(key).or_default();
+        let directories = self.mount_history.entry(key).or_insert_with(Vec::new);
         directories.retain(|existing| existing != directory);
         directories.insert(0, directory.to_path_buf());
         directories.truncate(20);

@@ -1362,6 +1362,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         &[target],
         Some(SESSION_ID),
         Some(&gate),
+        None,
     )
     .await;
     assert!(

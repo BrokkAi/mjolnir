@@ -242,8 +242,8 @@ fn sample_state() -> State {
         version: STATE_VERSION,
         sessions: [(session.id.clone(), session)].into_iter().collect(),
         subagents: Default::default(),
-        mount_history: BTreeMap::from([("local".into(), vec![PathBuf::from("/home/test/cache")])]),
-        container_sizes: BTreeMap::new(),
+        mount_history: [("local".into(), vec![PathBuf::from("/home/test/cache")])].into(),
+        container_sizes: Default::default(),
     }
 }
 
@@ -449,7 +449,7 @@ fn container_size_history_rejects_invalid_keys_and_values() {
             .contains("empty host")
     );
 
-    state.container_sizes = BTreeMap::from([(
+    state.container_sizes = SnapshotMap::from([(
         "local".into(),
         HostContainerSize {
             cpus: 0,

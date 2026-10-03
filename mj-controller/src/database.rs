@@ -51,7 +51,7 @@ use schema::{open, open_reader};
 mod writer;
 pub use writer::*;
 mod committed;
-pub use committed::CommittedState;
+pub use committed::{CommittedState, CommittedTurn};
 mod workspaces;
 pub use workspaces::*;
 mod client_state;

@@ -264,8 +264,8 @@ fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
         subagents: Default::default(),
         version: mj_core::state::STATE_VERSION,
         sessions: [(session_id.into(), record)].into_iter().collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let backend = targets::TargetLocator::AwsEc2 {
         profile: "default".into(),

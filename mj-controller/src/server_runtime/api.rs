@@ -30,7 +30,9 @@ use crate::targets::{self, CancellableProcessExecutor, CommandExecutor, CommandO
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod child_wait;
 mod subagent_input;
+use child_wait::ChildWaitFeed;
 
 use crate::daemon::RuntimeState;
 use mj_client::daemon::{WikiHitTranscript, WikiRestoreRequest, WikiSearchPage, WikiSessionInfo};
@@ -46,6 +48,9 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn revisions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
     fn queue_startup(
         self: Arc<Self>,
         _session_id: String,
@@ -194,6 +199,9 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn revisions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(RuntimeState::revisions(self))
+    }
     fn queue_startup(
         self: Arc<Self>,
         session_id: String,
@@ -741,25 +749,11 @@ impl ApiBackend {
                     .iter()
                     .map(|relation| relation.child_session_id.clone())
                     .collect::<Vec<_>>();
-                let summaries = tokio::task::spawn_blocking(move || {
-                    child_ids
-                        .into_iter()
-                        .map(|id| {
-                            let summary = crate::database::load_materialized_session_summary(&id)?;
-                            let progress = load_child_progress(&id)?;
-                            Ok((id, (summary, progress)))
-                        })
-                        .collect::<Result<std::collections::BTreeMap<_, _>>>()
-                })
-                .await??;
-                let mut starts = std::collections::BTreeMap::new();
-                for relation in &relations {
-                    if let Some(status) =
-                        self.start_status(relation.child_session_id.clone()).await?
-                    {
-                        starts.insert(relation.child_session_id.clone(), status);
-                    }
-                }
+                let (observed, starts) = self.child_snapshots(child_ids).await?;
+                let summaries = observed
+                    .into_iter()
+                    .map(|(id, summary, progress)| (id, (summary, progress)))
+                    .collect::<BTreeMap<_, _>>();
                 let agents = relations
                     .into_iter()
                     .map(|relation| {
@@ -767,6 +761,7 @@ impl ApiBackend {
                         // This listing reports state only; a child's report is
                         // collected through wait.
                         let unknown = ChildProgress {
+                            finished_span: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
                             answered_ordinal: None,
@@ -859,7 +854,9 @@ impl ApiBackend {
                     "starting a sub-agent wait"
                 );
                 let deadline = started + remaining;
+                let mut changes = ChildWaitFeed::new(self, parent_session_id).await?;
                 loop {
+                    let observed = changes.inputs(self, child_session_ids)?;
                     let inputs = self.subagent_input_progress(parent_session_id).await?;
                     let (summaries, starts) =
                         self.child_snapshots(child_session_ids.clone()).await?;
@@ -886,20 +883,21 @@ impl ApiBackend {
                     if return_when.satisfied(&finished) || tokio::time::Instant::now() >= deadline {
                         // Only read now, and only here: this is the one answer
                         // that has to be the child's own report.
-                        let ids: Vec<String> =
-                            summaries.iter().map(|(id, _, _)| id.clone()).collect();
+                        let ids = summaries
+                            .iter()
+                            .map(|(id, _, progress)| (id.clone(), progress.finished_span))
+                            .collect::<Vec<_>>();
                         let reports = tokio::task::spawn_blocking(move || {
-                            ids.into_iter()
-                                .map(|id| {
-                                    crate::database::load_materialized_finished_turn_message(&id)
-                                        .map(|message| (id, message))
-                                })
-                                .collect::<Result<std::collections::BTreeMap<_, _>>>()
+                            crate::database::load_child_answer_messages(&ids)
                         })
                         .await??;
                         let agents = summaries
                             .into_iter()
-                            .map(|(id, summary, progress)| {
+                            .map(|(id, mut summary, progress)| {
+                                if let Some(summary) = summary.as_mut() {
+                                    summary.last_agent_message =
+                                        reports.get(&id).and_then(|message| message.latest.clone());
+                                }
                                 let record = self.exports.session_record(&id);
                                 let (state, output, finished) = inputs.status(
                                     &id,
@@ -907,7 +905,9 @@ impl ApiBackend {
                                         record.as_ref(),
                                         summary.as_ref(),
                                         starts.get(&id),
-                                        reports.get(&id).and_then(Option::as_deref),
+                                        reports
+                                            .get(&id)
+                                            .and_then(|message| message.finished.as_deref()),
                                         self.exports.close_is_requested(&id),
                                         &progress,
                                     ),
@@ -956,7 +956,15 @@ impl ApiBackend {
                             ),
                         }));
                     }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    changes
+                        .wait(
+                            self,
+                            parent_session_id,
+                            child_session_ids,
+                            &observed,
+                            deadline,
+                        )
+                        .await?;
                 }
             }
             SubagentToolAction::InterruptAgent { child_session_id } => {
@@ -1169,6 +1177,43 @@ impl ApiBackend {
         )>,
         std::collections::BTreeMap<String, StartStatus>,
     )> {
+        if let Some(committed) = crate::database::committed_state()? {
+            let mut starts = BTreeMap::new();
+            let summaries = ids
+                .into_iter()
+                .map(|id| {
+                    if let Some(status) = startup_context(
+                        committed
+                            .startup_groups
+                            .get(&id)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                    )?
+                    .1
+                    {
+                        starts.insert(id.clone(), status);
+                    }
+                    let summary = committed.turns.get(&id).map(|turn| {
+                        mj_core::state::MaterializedSessionSummary {
+                            session_id: id.clone(),
+                            applied_event_ordinal: 0,
+                            last_activity_at_ms: None,
+                            execution: turn.state.0,
+                            session_title: None,
+                            last_agent_message: None,
+                            last_user_message: None,
+                            last_agent_message_follows_last_user: false,
+                            agent_message_latest_content_ordinals: Vec::new(),
+                            interruption_event_ordinals: Vec::new(),
+                        }
+                    });
+                    let progress = child_progress(&committed, &id);
+                    Ok((id, summary, progress))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok((summaries, starts));
+        }
+        // An offline backend has no writer publication to observe.
         let summaries = tokio::task::spawn_blocking(move || {
             ids.into_iter()
                 .map(|id| {
@@ -1586,6 +1631,8 @@ fn subagent_status(
 /// What the store says about a child's answer to its parent's newest prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildProgress {
+    /// The completed turn observed here owns only this transcript span.
+    pub finished_span: Option<(u64, u64)>,
     /// Where the child's report stands after its last finished turn.
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
@@ -1609,6 +1656,7 @@ impl ChildProgress {
     #[cfg(test)]
     pub(crate) fn settled(report: ReportState) -> Self {
         Self {
+            finished_span: None,
             report,
             awaited_ordinal: None,
             answered_ordinal: None,
@@ -1628,10 +1676,52 @@ impl ChildProgress {
     }
 }
 
+/// Derive one child's progress from the writer's coherent committed records.
+fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -> ChildProgress {
+    let subagent = committed.state.subagents.get(child_id);
+    let empty = mj_core::subagent::SubagentReport::default();
+    let recorded = committed.subagent_reports.get(child_id).unwrap_or(&empty);
+    let turn = committed.turns.get(child_id);
+    let active = turn.and_then(|turn| turn.state.1.as_ref());
+    let last = turn.and_then(|turn| turn.state.2.as_ref());
+    let in_flight = active
+        .into_iter()
+        .map(|turn| turn.command_id.as_str())
+        .collect::<Vec<_>>();
+    ChildProgress {
+        finished_span: last.and_then(|turn| {
+            turn.turn_start_position
+                .map(|start| (start, turn.completed_ordinal))
+        }),
+        report: mj_core::subagent::report_state(
+            subagent.is_some_and(|record| record.handback_tool),
+            recorded,
+            last,
+            &in_flight,
+            mj_core::clock::epoch_millis(),
+        ),
+        awaited_ordinal: recorded.awaited_ordinal,
+        answered_ordinal: last.and_then(mj_core::subagent::answered_ordinal),
+        failed_turn: last.and_then(|last| {
+            mj_core::subagent::failed_turn(
+                last,
+                turn.and_then(|turn| turn.failed_message.as_deref()),
+            )
+        }),
+        login_failure: last
+            .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
+            .and_then(|_| subagent.map(|record| record.profile_id.clone())),
+        report_dir: recorded.report_dir.clone(),
+    }
+}
+
 /// Read a child's progress from the store. The sub-agent `wait` and
 /// `list_agents` apply this one rule; the session wait and the reminder apply
 /// the same report rule to the turn they saw.
 pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
+    if let Some(committed) = crate::database::committed_state()? {
+        return Ok(child_progress(&committed, child_id));
+    }
     let subagent = crate::database::load_subagent(child_id)?;
     let handback_tool = subagent.as_ref().is_some_and(|record| record.handback_tool);
     let recorded = crate::database::load_subagent_report(child_id)?;
@@ -1662,6 +1752,10 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
         .and(subagent.map(|record| record.profile_id));
     Ok(ChildProgress {
+        finished_span: last.as_ref().and_then(|turn| {
+            turn.turn_start_position
+                .map(|start| (start, turn.completed_ordinal))
+        }),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),
@@ -1736,16 +1830,21 @@ async fn load_startup_context(session_id: String) -> Result<(Option<String>, Opt
     let steps = match crate::database::committed_state()? {
         Some(committed) => committed
             .startup_groups
-            .get(&session_id)
-            .cloned()
+            .get_shared(&session_id)
             .unwrap_or_default(),
-        None => {
+        None => Arc::new(
             blocking("read durable startup status", move || {
                 crate::database::load_latest_startup_group(&session_id)
             })
-            .await?
-        }
+            .await?,
+        ),
     };
+    startup_context(&steps)
+}
+
+fn startup_context(
+    steps: &[crate::database::StartupDelivery],
+) -> Result<(Option<String>, Option<StartStatus>)> {
     let group_id = steps.last().and_then(|step| step.group_id.clone());
     if let Some(step) = steps
         .iter()
@@ -2154,6 +2253,16 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn wait_revision(&self, session_id: &str) -> Result<Option<u64>> {
+        Ok(crate::database::committed_state()?.map(|committed| {
+            committed
+                .wait_revisions
+                .get(session_id)
+                .copied()
+                .unwrap_or(0)
+        }))
+    }
+
     fn subagent_report(
         &self,
         session_id: String,
@@ -2403,6 +2512,16 @@ impl SubagentBackend for ApiBackend {
 
     fn turn_state(&self, session_id: String) -> BoxFuture<'_, Result<Option<TurnState>>> {
         Box::pin(async move {
+            if let Some(committed) = crate::database::committed_state()? {
+                return Ok(committed.turns.get(&session_id).map(|turn| {
+                    let (execution, active_turn, last_turn_outcome) = turn.state.clone();
+                    TurnState {
+                        execution,
+                        active_turn,
+                        last_turn_outcome,
+                    }
+                }));
+            }
             blocking("load turn outcome", move || {
                 Ok(
                     crate::database::load_materialized_turn_outcome(&session_id)?.map(

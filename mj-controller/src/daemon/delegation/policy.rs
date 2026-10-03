@@ -30,6 +30,7 @@ pub(super) struct Policy {
     pub refresh_rx: mpsc::Receiver<()>,
     batch: QuotaRefreshBatch,
     published: BTreeMap<String, mj_core::config::HarnessProfile>,
+    catalog_config: Option<mj_core::config::Config>,
     /// Profiles the poller is asking a provider about right now.
     probing: std::collections::BTreeSet<String>,
     /// Poll cycles the poller has finished.
@@ -86,6 +87,7 @@ impl Policy {
         let credentials = CredentialSyncCoordinator::spawn_guarded(
             manager.clone(),
             state.worker_background_gate(),
+            state.clone(),
         );
         let mut policy = Self {
             services: Services {
@@ -103,6 +105,7 @@ impl Policy {
             refresh_rx,
             batch: QuotaRefreshBatch::default(),
             published: BTreeMap::new(),
+            catalog_config: None,
             probing: Default::default(),
             cycles: 0,
             credentials,
@@ -113,11 +116,18 @@ impl Policy {
         policy
     }
     pub fn sync(&mut self, force: bool) {
-        let controller = self.state.worker_controller_projection();
+        let controller = {
+            let owner = self.state.owner();
+            if !force && self.catalog_config.as_ref() == Some(&owner.controller().config) {
+                return;
+            }
+            crate::controller::Controller {
+                config: owner.controller().config.clone(),
+                state: Default::default(),
+            }
+        };
         self.catalog.sync(&controller.config);
-        self.credentials
-            .handle()
-            .set_targets(credential_sync_targets(&controller));
+        self.catalog_config = Some(controller.config.clone());
         if force || self.published != controller.config.profiles {
             if force {
                 self.batch.generation = self.batch.generation.saturating_add(1);

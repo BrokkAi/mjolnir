@@ -122,10 +122,12 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
+    pub(crate) credential_targets:
+        Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,
     committed: Option<
         tokio::sync::watch::Receiver<
-            std::result::Result<crate::database::CommittedState, Arc<str>>,
+            std::result::Result<Arc<crate::database::CommittedState>, Arc<str>>,
         >,
     >,
     workspace_closes: Mutex<BTreeMap<String, Arc<AtomicBool>>>,

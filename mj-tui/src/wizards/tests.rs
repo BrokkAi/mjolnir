@@ -334,8 +334,8 @@ fn opening_session_wizards_prefetches_all_aws_sizes() {
             sessions: [("session-1".into(), stopped_session())]
                 .into_iter()
                 .collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );
@@ -365,8 +365,8 @@ fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [(imported.id.clone(), imported)].into_iter().collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     dashboard.set_state(state);
 
@@ -1966,8 +1966,8 @@ fn new_session_bundles_are_ordered_by_latest_session_creation() {
         sessions: [(older.id.clone(), older), (recent.id.clone(), recent)]
             .into_iter()
             .collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     assert_eq!(
         bundle_ids_by_recent_creation(
@@ -2022,8 +2022,8 @@ fn new_session_defaults_to_the_most_recent_configured_choices() {
         subagents: Default::default(),
         version: STATE_VERSION,
         sessions: [(recent.id.clone(), recent)].into_iter().collect(),
-        mount_history: BTreeMap::new(),
-        container_sizes: BTreeMap::new(),
+        mount_history: Default::default(),
+        container_sizes: Default::default(),
     };
     let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
 
@@ -3923,8 +3923,8 @@ fn raw_resume_review_names_the_exact_reused_project_directory() {
             subagents: Default::default(),
             version: STATE_VERSION,
             sessions: [(session.id.clone(), session)].into_iter().collect(),
-            mount_history: BTreeMap::new(),
-            container_sizes: BTreeMap::new(),
+            mount_history: Default::default(),
+            container_sizes: Default::default(),
         },
         BTreeMap::new(),
     );

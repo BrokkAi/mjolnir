@@ -42,6 +42,8 @@ use crate::worker_client::CredentialSyncCoordinator;
 
 use crate::daemon;
 use mj_core::subagent::SubagentRecord;
+mod provider_auth;
+pub(crate) use provider_auth::ProviderAuthCache;
 
 #[cfg(test)]
 mod runtime_feed_tests;

@@ -38,6 +38,14 @@ impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> {
         self.0.get(key).map(Arc::as_ref)
     }
 
+    /// Retain one immutable record without copying its contents.
+    pub fn get_shared<Q: Ord + ?Sized>(&self, key: &Q) -> Option<Arc<V>>
+    where
+        K: Borrow<Q>,
+    {
+        self.0.get(key).cloned()
+    }
+
     pub fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -58,11 +66,24 @@ impl<K: Ord + Clone, V: Clone> SnapshotMap<K, V> {
             .map(Arc::unwrap_or_clone)
     }
 
+    /// Replace a record without copying the previous value for the caller.
+    pub fn insert_shared(&mut self, key: K, value: V) -> Option<Arc<V>> {
+        self.0.insert(key, Arc::new(value))
+    }
+
     pub fn remove<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
     {
         self.0.remove(key).map(Arc::unwrap_or_clone)
+    }
+
+    /// Remove a record while retaining its shared contents for existing readers.
+    pub fn remove_shared<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<Arc<V>>
+    where
+        K: Borrow<Q>,
+    {
+        self.0.remove(key)
     }
 
     pub fn clear(&mut self) {
@@ -240,6 +261,24 @@ mod tests {
             serde_json::from_str::<SnapshotMap<String, i32>>(&json).unwrap(),
             map
         );
+    }
+
+    #[test]
+    fn replacing_and_removing_shared_records_never_copy_retained_values() {
+        let copies = Arc::new(AtomicUsize::new(0));
+        let mut map = SnapshotMap::from([
+            (1, Counted(1, copies.clone())),
+            (2, Counted(2, copies.clone())),
+        ]);
+        let held = map.clone();
+        let one = map.get_shared(&1).unwrap();
+        let replaced = map.insert_shared(1, Counted(3, copies.clone())).unwrap();
+        assert!(Arc::ptr_eq(&one, &replaced));
+        let removed = map.remove_shared(&2).unwrap();
+        assert!(Arc::ptr_eq(&removed, &held.get_shared(&2).unwrap()));
+        assert_eq!(copies.load(Ordering::Relaxed), 0);
+        assert_eq!(held[&1].0, 1);
+        assert_eq!(map[&1].0, 3);
     }
 
     #[test]

@@ -516,7 +516,6 @@ fn listener_pids(address: SocketAddr) -> Result<Vec<u32>> {
 mod tests {
     use super::*;
     use crate::server::{ServerRequests, ViewerSnapshot};
-    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -524,7 +523,7 @@ mod tests {
         ServerOptions::new(
             address,
             watch::channel(ViewerSnapshot::default()).1,
-            watch::channel(BTreeMap::new()).1,
+            watch::channel(mj_core::snapshot_map::SnapshotMap::new()).1,
             ServerRequests {
                 action_tx: mpsc::channel(1).0,
                 bundle_tx: mpsc::channel(1).0,

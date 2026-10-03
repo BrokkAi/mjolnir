@@ -497,8 +497,8 @@ impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOut
 /// Preferences absent from the runtime feed. A background completion cannot
 /// carry config or session records back into the dashboard's authoritative view.
 pub(crate) struct DashboardMetadata {
-    mount_history: BTreeMap<String, Vec<PathBuf>>,
-    container_sizes: BTreeMap<String, mj_core::state::HostContainerSize>,
+    mount_history: mj_core::snapshot_map::SnapshotMap<String, Vec<PathBuf>>,
+    container_sizes: mj_core::snapshot_map::SnapshotMap<String, mj_core::state::HostContainerSize>,
 }
 
 impl From<Controller> for DashboardMetadata {
@@ -1108,7 +1108,7 @@ impl DashboardContext {
                     for location in view.locations {
                         let paths = history
                             .entry(format!("project:{}", location.host))
-                            .or_default();
+                            .or_insert_with(Vec::new);
                         if !paths.contains(&location.checkout_root) {
                             paths.push(location.checkout_root);
                         }
@@ -1137,7 +1137,7 @@ impl DashboardContext {
                 Ok(history) => {
                     // The controller copy is what later `set_state` calls
                     // publish, so it has to carry the fresh history too.
-                    self.controller.state.mount_history = history.clone();
+                    self.controller.state.mount_history = history.clone().into_iter().collect();
                     self.dashboard.apply_mount_history(history);
                 }
                 Err(error) => {
