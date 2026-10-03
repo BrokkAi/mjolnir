@@ -12,7 +12,7 @@ ARG RUST_IMAGE=docker.io/library/rust:1.96.0-trixie
 # compiler than Hel does (its rust-toolchain.toml names 1.97.1), so it is built
 # in its own stage and only the binary is copied out.
 # Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
-ARG BIFROST_VERSION=0.10.7
+ARG BIFROST_VERSION=0.12.0
 ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 
 FROM ${NODE_IMAGE} AS node

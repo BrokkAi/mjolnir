@@ -33,7 +33,7 @@ const DEFAULT_BIFROST_BIN: &str = "bifrost";
 /// The Bifrost release the container image installs
 /// (`containers/Containerfile.agent-dev`). A Bifrost that lacks
 /// `analyze_diff` is reported as needing this release.
-pub const REQUIRED_BIFROST_VERSION: &str = "0.10.7";
+pub const REQUIRED_BIFROST_VERSION: &str = "0.12.0";
 
 /// The Bifrost the operator chose with `MJ_BIFROST_BIN` on the daemon, if any.
 /// The daemon passes it to each worker in the launch configuration.
