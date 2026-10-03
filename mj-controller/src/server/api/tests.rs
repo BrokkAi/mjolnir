@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::state::TurnOutcomeKind;
+use mj_core::state::{SessionResourceAllocation, TurnOutcomeKind};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -1647,7 +1647,11 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             profile_id: "codex-1".into(),
             bundle_id: "hel".into(),
             target_id: "podman".into(),
-            resource_allocation: None,
+            // A container session is never created without a limit.
+            resource_allocation: Some(Box::new(SessionResourceAllocation::Container {
+                cpus: mj_core::state::BASELINE_CONTAINER_CPUS,
+                memory_bytes: mj_core::state::BASELINE_CONTAINER_MEMORY_BYTES,
+            })),
             title: None,
             project_directory: None,
             dirty_ack: Vec::new(),
@@ -1775,6 +1779,85 @@ async fn start_answers_an_unavailable_subagent_model_with_a_code() {
     let error = json_body(response).await;
     assert_eq!(error["code"], mj_core::subagent::CHOICE_UNAVAILABLE_CODE);
     assert!(error["error"].as_str().unwrap().contains("fake-model"));
+}
+
+#[tokio::test]
+async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
+    let host = mj_core::state::HostContainerSize {
+        cpus: 16,
+        memory_bytes: 64 << 30,
+    };
+    let backend = Arc::new(FakeBackend::default());
+    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
+        let target = snapshot
+            .targets
+            .iter_mut()
+            .find(|target| target.id == "podman")
+            .unwrap();
+        target.container_host_limits = Some(host);
+        target.default_resource_allocation = Some(SessionResourceAllocation::Container {
+            cpus: 12,
+            memory_bytes: 48 << 30,
+        });
+    });
+
+    // One override keeps the default for the other dimension.
+    let response = tokio::spawn(
+        app.clone()
+            .oneshot(start_request(start_body(r#","cpus":4"#))),
+    );
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        resource_allocation,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(
+        resource_allocation.as_deref(),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 48 << 30,
+        })
+    );
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    // A size the host cannot give is refused before anything is created.
+    let response = app
+        .clone()
+        .oneshot(start_request(start_body(&format!(
+            r#","memory_bytes":{}"#,
+            host.memory_bytes + 1
+        ))))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A bare target has no container size to override.
+    let response = app
+        .oneshot(start_request(
+            r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/repo","cpus":4}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await.to_string();
+    assert!(body.contains("not a container target"), "{body}");
+    assert!(
+        actions.try_recv().is_err(),
+        "no refused start reaches the controller"
+    );
 }
 
 #[tokio::test]

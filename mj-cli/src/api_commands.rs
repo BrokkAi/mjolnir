@@ -158,6 +158,15 @@ pub(crate) struct NewArgs {
     /// is on. `/review` still reviews on request.
     #[arg(long, conflicts_with_all = ["review_model", "review_effort"])]
     no_review: bool,
+    /// Container CPU limit. Omitted takes the target's default size: the
+    /// size last chosen for that host, else 8 CPUs, capped at the host's.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    cpus: Option<u64>,
+    /// Container memory limit in GiB. Omitted takes the target's default
+    /// size: the size last chosen for that host, else 32 GiB, capped at the
+    /// host's.
+    #[arg(long, value_name = "GIB", value_parser = clap::value_parser!(u64).range(1..))]
+    memory_gib: Option<u64>,
     /// The first prompt. `-` reads it from standard input.
     prompt: Option<String>,
     /// Read the first prompt from this file instead.
@@ -875,6 +884,14 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         model: args.model.clone(),
         effort: args.effort.clone(),
         prompt,
+        cpus: args.cpus,
+        memory_bytes: args
+            .memory_gib
+            .map(|gib| {
+                gib.checked_mul(1 << 30)
+                    .context("--memory-gib is too large")
+            })
+            .transpose()?,
     };
     let client = ApiClient::connect().await?;
     let response = client.start(&request).await.map_err(name_launch_flags)?;
@@ -904,7 +921,9 @@ pub(crate) fn name_launch_flags(error: anyhow::Error) -> anyhow::Error {
         .replace("project_directory", "--project-directory")
         .replace("`at`", "--at")
         .replace("`branch`", "--branch")
-        .replace("`base`", "--base");
+        .replace("`base`", "--base")
+        .replace("`cpus`", "--cpus")
+        .replace("`memory_bytes`", "--memory-gib");
     if named == message {
         return error;
     }

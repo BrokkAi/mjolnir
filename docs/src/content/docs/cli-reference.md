@@ -209,6 +209,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
        [--review-model <name>] [--review-effort <name>] [--no-review]
+       [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -263,6 +264,11 @@ cannot be combined with a session that runs directly in the selected directory.
   off. `--no-review` turns off automatic review for the session, even when
   `[review]` is on; `/review` still works. See
   [per-session settings](/turn-review/#per-session-settings).
+- On a container target, `mj new` gives the session the same CPU and memory
+  limit that the dashboard and the web viewer select: the size last chosen for
+  that host, else 8 CPUs and 32 GiB, capped at the host's totals.
+  `--cpus <count>` and `--memory-gib <GiB>` override either one. Other targets
+  refuse both options.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.

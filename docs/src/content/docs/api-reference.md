@@ -408,6 +408,18 @@ manual review still runs. A blank or overlong `model` or `effort` answers `400`.
 When `review` is omitted, the session follows `[review]`. See
 [per-session settings](/turn-review/#per-session-settings).
 
+On a container target, the session gets the same CPU and memory limit that
+the viewer's create form selects: the size last chosen for that host, else
+8 CPUs and 32 GiB, capped at the host's totals. `cpus` and `memory_bytes`
+override either one:
+
+```json
+{"cpus": 16, "memory_bytes": 68719476736}
+```
+
+A size above the host's reported totals answers `400`, and so does either
+field on a target that is not a container target.
+
 `all_models` is retired for new sessions and explicit Move overrides, which
 answer `422` with supported alternatives. Existing multi-model sessions retain
 their recorded policy on resume and on a Move with no policy override.

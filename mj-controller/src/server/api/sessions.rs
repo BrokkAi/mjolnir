@@ -69,6 +69,34 @@ pub(super) async fn get_session(
     Ok(Json(session))
 }
 
+/// The size a session created on `target_id` gets: the target's default,
+/// which is the size the viewer's create form selects, with the caller's
+/// overrides. Without it an API-created container ran with no CPU or memory
+/// limit. Targets without a container size take neither override.
+fn new_session_allocation(
+    state: &ServerState,
+    target_id: &str,
+    cpus: Option<u64>,
+    memory_bytes: Option<u64>,
+) -> Result<Option<mj_core::state::SessionResourceAllocation>, ApiFailure> {
+    use mj_core::state::SessionResourceAllocation;
+    let snapshot = state.snapshot_rx.borrow();
+    let target = crate::server::require_launchable_target(&snapshot, target_id)?;
+    match &target.default_resource_allocation {
+        Some(SessionResourceAllocation::Container {
+            cpus: default_cpus,
+            memory_bytes: default_memory_bytes,
+        }) => Ok(Some(SessionResourceAllocation::Container {
+            cpus: cpus.unwrap_or(*default_cpus),
+            memory_bytes: memory_bytes.unwrap_or(*default_memory_bytes),
+        })),
+        _ if cpus.is_none() && memory_bytes.is_none() => Ok(None),
+        _ => Err(ApiFailure::bad_request(format!(
+            "target \"{target_id}\" is not a container target; `cpus` and `memory_bytes` size container sessions only"
+        ))),
+    }
+}
+
 /// Create a session, and hand its first prompt to the backend to submit once
 /// the harness is ready.
 ///
@@ -85,6 +113,8 @@ pub(super) async fn start_session(
         validate_prompt_text(prompt, false)?;
     }
     let (profile_id, target_id) = resolve_launch(&state, &request)?;
+    let resource_allocation =
+        new_session_allocation(&state, &target_id, request.cpus, request.memory_bytes)?;
     if request.model.is_some() || request.effort.is_some() {
         let mut choices = backend
             .profile_config(profile_id.clone(), request.model.clone(), false)
@@ -140,7 +170,7 @@ pub(super) async fn start_session(
         profile_id,
         bundle_id,
         target_id,
-        resource_allocation: None,
+        resource_allocation: resource_allocation.map(Box::new),
         title: request.title.clone(),
         project_directory: request.project_directory.clone(),
         dirty_ack: Vec::new(),
@@ -531,7 +561,8 @@ pub(super) async fn wiki_restore(
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
     crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
-    crate::server::require_launchable_target(&state.snapshot_rx.borrow(), &request.target_id)?;
+    // Also requires a launchable target.
+    let resource_allocation = new_session_allocation(&state, &request.target_id, None, None)?;
     let session_id = backend
         .wiki_restore(mj_client::daemon::WikiRestoreRequest {
             wiki_id: wiki_id.clone(),
@@ -540,7 +571,7 @@ pub(super) async fn wiki_restore(
             target_template_id: request.target_id,
             project_directory: request.project_directory,
             additional_mounts: Vec::new(),
-            resource_allocation: None,
+            resource_allocation,
         })
         .await
         .map_err(|error| ApiFailure::unavailable(format!("restore failed: {error:#}")))?

@@ -211,6 +211,13 @@ pub struct StartSessionRequest {
     pub effort: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Container CPU limit. Omitted takes the target's default size, the
+    /// one the viewer's create form selects. Container targets only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u64>,
+    /// Container memory limit in bytes, defaulted like `cpus`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
 }
 
 /// Resume a stopped, lost, or failed session. Every field is optional: the
