@@ -640,6 +640,7 @@ pub async fn run_daemon_owned(
             resume_session,
             native_session_may_have_history,
             accepted_config,
+            initial_model: config.initial_model.clone(),
             harness: config.harness,
             execution_policy: config.execution_policy,
             acp_activity,

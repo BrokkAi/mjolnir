@@ -147,6 +147,12 @@ pub struct WorkerLaunchConfig {
     /// the `mj-agents` MCP server's `handback` tool. Children suppress native delegation.
     #[serde(default)]
     pub handback_tool: bool,
+    /// The model this session was created for, when its creator chose one: a
+    /// sub-agent's spawn model. The harness opens a new session on it rather
+    /// than on the profile default; once the session has accepted a model,
+    /// that one wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_model: Option<String>,
     /// Whether a turn review can ever run for this session, which is the only
     /// reason to spend anything on capturing the working tree.
     ///

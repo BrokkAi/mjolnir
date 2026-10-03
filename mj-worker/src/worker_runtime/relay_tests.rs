@@ -63,6 +63,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        initial_model: None,
         review_capture: true,
         bifrost_binary: None,
         goal_resume_request: Default::default(),
@@ -5132,6 +5133,60 @@ async fn a_codex_resume_launches_its_bridge_on_the_accepted_model() {
     assert_eq!(pinned["model"], "deepseek-flash");
     assert_eq!(pinned["default_permissions"], "project");
     assert_eq!(pinned["tui"], "never");
+}
+
+/// Issue 1217: a sub-agent's Codex thread started on the profile default and
+/// was switched to its spawn model before the first turn, and that first
+/// request was refused over the connection Codex had prewarmed for the
+/// default. A new session's bridge now starts on the model it was created
+/// for, and a model the session accepted afterwards still wins.
+#[tokio::test]
+async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
+
+    let pinned_model = async |accepted: Option<&'static str>| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("relay");
+        if let Some(accepted) = accepted {
+            let mut relay = DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
+            relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: vec![
+                        SessionConfigOption::select(
+                            "model",
+                            "Model",
+                            accepted,
+                            vec![
+                                SessionConfigSelectOption::new(accepted, "Accepted"),
+                                SessionConfigSelectOption::new("gpt-6-luna", "Luna"),
+                            ],
+                        )
+                        .category(SessionConfigOptionCategory::Model),
+                    ],
+                })
+                .unwrap();
+            relay
+                .record_observation(RelayObservation::ConfigurationUpdated {
+                    key: "model".into(),
+                    value: accepted.into(),
+                })
+                .unwrap();
+        }
+        let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+        config.cwd = temp.path().to_owned();
+        config.bridge_command = stub_runtime_bridge(temp.path());
+        config.initial_model = Some("gpt-6-luna".into());
+        expect_daemon_launch_failure(&root, config).await;
+        let spec = AcpSupervisorSpec::read(&root.join("acp-supervisor.json")).unwrap();
+        let pinned: serde_json::Value =
+            serde_json::from_str(&spec.environment["CODEX_CONFIG"]).unwrap();
+        pinned["model"].as_str().unwrap().to_owned()
+    };
+
+    assert_eq!(pinned_model(None).await, "gpt-6-luna");
+    assert_eq!(pinned_model(Some("gpt-6-astra")).await, "gpt-6-astra");
 }
 
 /// #1160: the controller leaves a ChatGPT Codex profile's API key settings out

@@ -69,6 +69,9 @@ pub struct LaunchSpec {
     /// Accepted selectors for this logical session, shared across native
     /// bridge replacements. Workers seed this from their durable relay.
     pub accepted_config: Arc<Mutex<AcceptedSessionConfig>>,
+    /// The model this session was created for, from the launch config. See
+    /// [`LaunchSpec::startup_model`].
+    pub initial_model: Option<String>,
     pub harness: HarnessKind,
     pub execution_policy: ExecutionPolicy,
     pub acp_activity: AcpActivityClock,
@@ -86,6 +89,28 @@ pub struct LaunchSpec {
     /// None resolves the optional classifier from the local environment.
     pub verdict: Option<VerdictSource>,
     pub stall_policy: Option<mj_core::activity::StallPolicy>,
+}
+
+impl LaunchSpec {
+    /// The model the harness opens its session on: the one this session
+    /// accepted, else the one it was created for.
+    ///
+    /// A harness that can only take its model before the session opens
+    /// (Codex through `CODEX_CONFIG`, Claude through `session/new`) otherwise
+    /// starts a new session on the profile default and is switched before
+    /// its first turn. Codex prewarms its Responses connection with the
+    /// default, and a sub-agent's first request for another model over that
+    /// connection was refused (issue 1217). The accepted model wins as soon
+    /// as there is one, so a model chosen later is never replaced by the one
+    /// the session was created with.
+    pub fn startup_model(&self) -> Option<String> {
+        self.accepted_config
+            .lock()
+            .expect("accepted session configuration lock poisoned")
+            .model
+            .clone()
+            .or_else(|| self.initial_model.clone())
+    }
 }
 
 pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
@@ -166,13 +191,8 @@ pub(super) fn session_request_meta(
     )]);
     // Claude builds its resume catalogue before ACP selector restoration. With
     // setup-token auth, only an explicit startup pin retains the 1M model row.
-    if let Some(model) = &spec
-        .accepted_config
-        .lock()
-        .expect("accepted session configuration lock poisoned")
-        .model
-    {
-        options.insert("model".to_owned(), serde_json::Value::String(model.clone()));
+    if let Some(model) = spec.startup_model() {
+        options.insert("model".to_owned(), serde_json::Value::String(model));
     }
     if let Some(enabled) = spec
         .harness

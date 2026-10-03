@@ -213,6 +213,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         resume_session: Some("native".into()),
         native_session_may_have_history: false,
         accepted_config: Arc::new(Mutex::new(saved)),
+        initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),

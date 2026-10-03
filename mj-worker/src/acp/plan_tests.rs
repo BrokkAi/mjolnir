@@ -361,6 +361,7 @@ impl PlanProbe {
             resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
+            initial_model: None,
             harness,
             execution_policy: policy,
             acp_activity: AcpActivityClock::default(),

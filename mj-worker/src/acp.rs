@@ -469,13 +469,12 @@ async fn run_bridge(
     // at startup cannot be corrected once it has opened the session.
     #[cfg(unix)]
     if let Some(path) = &spec.bridge_spec_path {
-        let accepted = spec
-            .accepted_config
-            .lock()
-            .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
-            .clone();
-        crate::worker_runtime::repin_bridge_selectors(path, spec.harness, &accepted)
-            .context("pin this session's accepted configuration into the ACP bridge launch")?;
+        crate::worker_runtime::repin_bridge_selectors(
+            path,
+            spec.harness,
+            spec.startup_model().as_deref(),
+        )
+        .context("pin this session's model into the ACP bridge launch")?;
     }
     let mut child = Command::new(&spec.command)
         .args(&spec.args)

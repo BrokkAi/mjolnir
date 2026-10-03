@@ -20,6 +20,7 @@ fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
+        initial_model: None,
         harness: HarnessKind::Grok,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
         acp_activity: AcpActivityClock::default(),

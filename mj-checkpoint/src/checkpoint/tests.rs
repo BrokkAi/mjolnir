@@ -1469,6 +1469,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
         native_session_id: Some(NATIVE.into()),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        initial_model: None,
         project_memory: Some(mj_core::worker_launch::ProjectMemoryLaunchConfig {
             history_socket: None,
             project_key: "project".into(),

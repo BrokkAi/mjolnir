@@ -211,16 +211,20 @@ const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 /// warn about it, and the worker restores it on the live session once the
 /// handshake completes, so pinning it here would only risk changing the
 /// effort the resumed thread starts on.
+///
+/// `model` is [`crate::acp::LaunchSpec::startup_model`]: the accepted model,
+/// or for a new session the one it was created for, so a new thread also
+/// starts on its own model rather than the profile default (issue 1217).
 #[cfg(unix)]
 pub(crate) fn pin_accepted_bridge_selectors(
     harness: HarnessKind,
     environment: &mut std::collections::BTreeMap<String, String>,
-    accepted: &mj_core::acp::AcceptedSessionConfig,
+    model: Option<&str>,
 ) -> Result<()> {
     if harness != HarnessKind::Codex {
         return Ok(());
     }
-    let Some(model) = accepted.model.as_deref() else {
+    let Some(model) = model else {
         return Ok(());
     };
     let mut config = match environment.get(CODEX_CONFIG_ENV) {
@@ -258,11 +262,11 @@ pub(crate) fn pin_accepted_bridge_selectors(
 pub(crate) fn repin_bridge_selectors(
     path: &Path,
     harness: HarnessKind,
-    accepted: &mj_core::acp::AcceptedSessionConfig,
+    model: Option<&str>,
 ) -> Result<()> {
     let mut spec = AcpSupervisorSpec::read(path)?;
     let environment = spec.environment.clone();
-    pin_accepted_bridge_selectors(harness, &mut spec.environment, accepted)?;
+    pin_accepted_bridge_selectors(harness, &mut spec.environment, model)?;
     if spec.environment == environment {
         return Ok(());
     }
@@ -431,14 +435,6 @@ pub async fn run_acp_supervisor(_spec: AcpSupervisorSpec) -> anyhow::Result<()> 
 #[cfg(all(test, unix))]
 mod model_pin_tests {
     use super::*;
-    use mj_core::acp::AcceptedSessionConfig;
-
-    fn accepted(model: &str) -> AcceptedSessionConfig {
-        AcceptedSessionConfig {
-            model: Some(model.to_owned()),
-            effort: Some("high".to_owned()),
-        }
-    }
 
     fn codex_config(environment: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
         serde_json::from_str(&environment[CODEX_CONFIG_ENV]).unwrap()
@@ -447,8 +443,7 @@ mod model_pin_tests {
     #[test]
     fn codex_launch_starts_a_resumed_bridge_on_the_accepted_model() {
         let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, &accepted("flash"))
-            .unwrap();
+        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
         assert_eq!(
             codex_config(&environment),
             serde_json::json!({ "model": "flash" })
@@ -464,8 +459,7 @@ mod model_pin_tests {
             r#"{"default_permissions":"project","model":"configured-model","tui":"never"}"#
                 .to_owned(),
         )]);
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, &accepted("flash"))
-            .unwrap();
+        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
         assert_eq!(
             codex_config(&environment),
             serde_json::json!({
@@ -483,12 +477,7 @@ mod model_pin_tests {
                 CODEX_CONFIG_ENV.to_owned(),
                 r#"{"model":"configured-model"}"#.to_owned(),
             )]);
-            pin_accepted_bridge_selectors(
-                harness,
-                &mut environment,
-                &AcceptedSessionConfig::default(),
-            )
-            .unwrap();
+            pin_accepted_bridge_selectors(harness, &mut environment, None).unwrap();
             assert_eq!(
                 environment[CODEX_CONFIG_ENV],
                 r#"{"model":"configured-model"}"#
@@ -499,10 +488,9 @@ mod model_pin_tests {
     #[test]
     fn other_harnesses_never_receive_a_codex_config() {
         let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Claude, &mut environment, &accepted("flash"))
+        pin_accepted_bridge_selectors(HarnessKind::Claude, &mut environment, Some("flash"))
             .unwrap();
-        pin_accepted_bridge_selectors(HarnessKind::Kimi, &mut environment, &accepted("flash"))
-            .unwrap();
+        pin_accepted_bridge_selectors(HarnessKind::Kimi, &mut environment, Some("flash")).unwrap();
         assert!(environment.is_empty());
     }
 
@@ -515,12 +503,9 @@ mod model_pin_tests {
                 CODEX_CONFIG_ENV.to_owned(),
                 broken.to_owned(),
             )]);
-            let error = pin_accepted_bridge_selectors(
-                HarnessKind::Codex,
-                &mut environment,
-                &accepted("flash"),
-            )
-            .expect_err("a non-object configuration cannot be merged");
+            let error =
+                pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash"))
+                    .expect_err("a non-object configuration cannot be merged");
             assert!(
                 format!("{error:#}").contains(CODEX_CONFIG_ENV),
                 "unexpected error: {error:#}"

@@ -360,6 +360,9 @@ impl Controller {
             .for_launch(profile.kind, subagent.is_some());
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
+        // The child's harness opens on its spawn model instead of switching
+        // to it from the profile default before the first turn (issue 1217).
+        launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
         // Capturing the working tree is only ever useful to a turn review, so
         // it is spent only on a session a review can run for: one whose
         // configuration has an eligible reviewer, and that is not a child. A child
@@ -736,6 +739,7 @@ pub(super) fn worker_launch_config(
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
+            initial_model: None,
             review_capture: false,
             bifrost_binary: None,
             harness: profile.kind,

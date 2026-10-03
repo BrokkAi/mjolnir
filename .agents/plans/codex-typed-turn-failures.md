@@ -16,9 +16,9 @@ The earlier part of the fix is already committed (commit e97c0266): the reminder
 
 - [x] (2026-10-03 18:30Z) Diagnose issue 1217 from the journals and Codex logs on precision-3260.
 - [x] (2026-10-03 19:20Z) Milestone 1: reminder text and transcript visibility; committed e97c0266.
-- [ ] Milestone 2: typed Codex failures become failed turns; typed records render in the transcript.
-- [ ] Milestone 3: a sub-agent's harness starts on the spawn model.
-- [ ] Full validation (clippy, nextest), commit each milestone, update issue 1217.
+- [x] (2026-10-03 20:40Z) Milestone 2: typed Codex failures become failed turns; typed records render in the transcript; credential sync reads an `access` record outside a turn. Committed 03e1b5ac.
+- [x] (2026-10-03 21:20Z) Milestone 3: a sub-agent's harness (and a turn reviewer's) starts on its chosen model through `LaunchSpec::startup_model`.
+- [x] (2026-10-03 21:50Z) Full validation: clippy clean; cargo nextest 5901 passed; live check in an isolated instance (see Artifacts). Milestone 3 committed.
 
 ## Surprises & Discoveries
 
@@ -46,7 +46,7 @@ The earlier part of the fix is already committed (commit e97c0266): the reminder
 
 ## Outcomes & Retrospective
 
-(To be written at completion.)
+Milestones 1 to 3 are implemented. A failed Codex turn is now a failed turn with the provider's reason, so a sub-agent whose first request fails is reported as failed instead of being told to hand back; a sub-agent's Codex thread and Claude session open on the spawn model, and a turn reviewer's on its configured model. Ordinary sessions created with a model (`mj new --model`, the web form) still open on the profile default and switch before the first turn, because the session record does not keep the creation model; carrying it would need a stored field and a migration, and is left for a separate change if the 400 is seen there. Whether starting on the spawn model prevents the 400 is likely but not proven: the failure is intermittent on OpenAI's side, and the evidence is the two failing children's logs.
 
 ## Context and Orientation
 
@@ -62,7 +62,7 @@ The worker's launch configuration is `mj_core::worker_launch::WorkerLaunchConfig
 
 Milestone 2. In `mj-core/src/diagnostic.rs`, add `SessionFailure` (the parsed record) with `SessionFailure::from_meta(meta)` reading `jetbrains.air.sessionFailure`, and `TurnDiagnostic::from_session_failure(&SessionFailure)` applying the code mapping from the Decision Log. When the title is a JSON provider error body (`{"error":{"message":...},"status":400}`), the diagnostic takes the inner message and the status. In `mj-worker/src/acp/session.rs`, add `sessionFailure` to the Codex AIR capabilities, and in the prompt-response branch check for a typed failure of severity `error` before the "returned without updates" check; when present, record the stop reason and warning through a function in `drive.rs` that shares the usage-limit rule with `prompt_error_outcome`. In `mj-transcript/src/projection/session_update.rs`, render a `SessionInfoUpdate` that carries a record as one system line keyed by the record's id, so later revisions replace it.
 
-Milestone 3. Add `initial_model: Option<String>` to `WorkerLaunchConfig` (serde default, skipped when absent). Set it in `session_launch_config` from the sub-agent record's model. Add `initial_model` to `LaunchSpec`, set from the launch config in `mj-worker/src/worker_runtime/unix.rs`, and add `LaunchSpec::startup_model()`. Make `repin_bridge_selectors`/`pin_accepted_bridge_selectors` and the Claude options take the startup model.
+Milestone 3. Add `initial_model: Option<String>` to `WorkerLaunchConfig` (serde default, skipped when absent). Set it in `session_launch_config` from the sub-agent record's model; the reviewer's launch spec in `mj-worker/src/worker_runtime/reviewer.rs` takes its configured model the same way. Add `initial_model` to `LaunchSpec`, set from the launch config in `mj-worker/src/worker_runtime/unix.rs`, and add `LaunchSpec::startup_model()`. Make `repin_bridge_selectors`/`pin_accepted_bridge_selectors` and the Claude options take the startup model.
 
 ## Concrete Steps
 
@@ -81,6 +81,18 @@ Unit tests: a prompt response whose `_meta` carries an error record finishes the
 All changes are additive and covered by tests; no stored data changes. Reverting a milestone's commit restores the old behaviour.
 
 ## Artifacts and Notes
+
+Live check in an isolated instance (`--instance typed-fail`, real codex-acp and Codex, a profile whose `CODEX_CONFIG` names a model that does not exist), `mj wait --json` after the first turn:
+
+    "outcome": "error", "stop_reason": "error",
+    "diagnostic": {"message": "The 'gpt-0-nonexistent' model is not supported when using Codex with a ChatGPT account.", "code": "service", "http_status": 400}
+
+and the transcript showed two lines, a Codex warning that now arrives as a typed record and the failure:
+
+    warning: Model metadata for `gpt-0-nonexistent` not found. Defaulting to fallback metadata; ...
+    warning: prompt failed: The 'gpt-0-nonexistent' model is not supported when using Codex with a ChatGPT account.
+
+An ordinary turn in the same instance ("Reply with the single word pong.") finished normally.
 
 The first child's journal, ordinals 31 to 38: Codex `threadStatus: systemError`, then `command_completed ... stop_reason: "EndTurn"`, then `command_queued handback-reminder-36`.
 

@@ -978,6 +978,9 @@ impl ReviewerRole {
             resume_session,
             native_session_may_have_history,
             accepted_config,
+            // The reviewer's chosen model, which it opens on rather than
+            // switching to after the session starts.
+            initial_model: config.model.clone(),
             harness: config.harness,
             execution_policy: config.execution_policy,
             acp_activity,

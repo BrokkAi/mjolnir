@@ -50,6 +50,7 @@ impl ClaudeProbe {
             resume_session: None,
             native_session_may_have_history: false,
             accepted_config: Default::default(),
+            initial_model: None,
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
             acp_activity: AcpActivityClock::default(),

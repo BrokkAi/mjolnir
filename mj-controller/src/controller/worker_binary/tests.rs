@@ -4615,6 +4615,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     let launch = WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        initial_model: None,
         review_capture: false,
         bifrost_binary: None,
         goal_resume_request: Default::default(),
@@ -4719,6 +4720,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     let launch = WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        initial_model: None,
         review_capture: false,
         bifrost_binary: None,
         goal_resume_request: Default::default(),
@@ -4808,6 +4810,7 @@ fn initial_bare_provision_prepares_the_harness_from_installed_files() {
     let mut launch = WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        initial_model: None,
         review_capture: false,
         bifrost_binary: None,
         goal_resume_request: Default::default(),
