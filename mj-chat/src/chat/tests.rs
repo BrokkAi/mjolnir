@@ -2537,6 +2537,71 @@ fn an_unanswered_prompt_is_marked_and_stays_restorable() {
     );
 }
 
+fn unanswered_session(
+    command_id: &str,
+    position: u64,
+    text: &str,
+    stop: &str,
+) -> MaterializedSession {
+    let mut session = MaterializedSession::empty("1234567890");
+    session.applied_event_ordinal = 9;
+    session.transcript.push(
+        TranscriptItem {
+            stable_id: format!("user:{position}"),
+            position,
+            latest_content_event_ordinal: None,
+            created_at_ms: 10,
+            last_changed_at_ms: 10,
+            body: TranscriptBody::User {
+                content: vec![serde_json::json!({"type": "text", "text": text})],
+            },
+        }
+        .into(),
+    );
+    let mut outcome = unanswered_outcome(stop);
+    outcome.command_id = command_id.into();
+    outcome.turn_start_position = Some(position);
+    session.last_turn_outcome = Some(outcome);
+    session
+}
+
+/// The notice helps once: later unanswered prompts in the same run add no
+/// row, an answered prompt starts a new run, and a reattach (which re-reads
+/// the last outcome and restores the saved draft) does not bring it back.
+#[test]
+fn unanswered_prompts_are_reported_once_until_one_is_answered() {
+    let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.apply_materialized(&unanswered_session("p1", 4, "first", unanswered), &[], &[]);
+    chat.apply_materialized(&unanswered_session("p2", 6, "second", unanswered), &[], &[]);
+    assert_eq!(chat.unsent_prompts.len(), 1);
+    assert_eq!(chat.unsent_prompts[0].payload.text, "first");
+
+    // Reattach: a new chat restores the saved draft, then sees the same outcome.
+    let mut reattached = ChatState::new(&snapshot(), &[]);
+    reattached.restore_draft(chat.encoded_draft());
+    reattached.apply_materialized(&unanswered_session("p2", 6, "second", unanswered), &[], &[]);
+    reattached.apply_materialized(&unanswered_session("p3", 8, "third", unanswered), &[], &[]);
+    assert_eq!(reattached.unsent_prompts.len(), 1);
+
+    // Once the person has dismissed the row, a reload does not restore it.
+    reattached.unsent_prompts.clear();
+    let mut later = ChatState::new(&snapshot(), &[]);
+    later.restore_draft(reattached.encoded_draft());
+    later.apply_materialized(&unanswered_session("p3", 8, "third", unanswered), &[], &[]);
+    assert!(later.unsent_prompts.is_empty());
+
+    // An answered prompt resets it, so a later failure is reported again.
+    later.apply_materialized(
+        &unanswered_session("p4", 10, "fourth", "end_turn"),
+        &[],
+        &[],
+    );
+    later.apply_materialized(&unanswered_session("p5", 12, "fifth", unanswered), &[], &[]);
+    assert_eq!(later.unsent_prompts.len(), 1);
+    assert_eq!(later.unsent_prompts[0].payload.text, "fifth");
+}
+
 /// A turn that ended normally leaves nothing to restore.
 #[test]
 fn a_finished_turn_is_not_offered_for_restore() {

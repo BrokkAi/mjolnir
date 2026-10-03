@@ -119,6 +119,7 @@ impl ChatState {
                     match serde_json::from_str::<SavedChatDraft>(body) {
                         Ok(saved) => {
                             self.unsent_prompts = saved.unsent;
+                            self.unanswered = saved.unanswered;
                             self.restore_submissions(saved.pending);
                         }
                         Err(error) => {
@@ -322,13 +323,17 @@ impl ChatState {
     }
 
     pub(crate) fn encoded_draft(&self) -> String {
-        if self.unsent_prompts.is_empty() && self.pending_submissions.is_empty() {
+        if self.unsent_prompts.is_empty()
+            && self.pending_submissions.is_empty()
+            && self.unanswered == UnansweredNotice::default()
+        {
             return self.draft_payload().encode_draft();
         }
         let saved = SavedChatDraft {
             composer: self.draft_payload(),
             unsent: self.unsent_prompts.clone(),
             pending: self.pending_submissions.clone(),
+            unanswered: self.unanswered.clone(),
         };
         format!(
             "{CHAT_DRAFT_PREFIX}{}",

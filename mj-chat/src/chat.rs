@@ -397,6 +397,25 @@ struct SavedChatDraft {
     unsent: Vec<UnsentPrompt>,
     #[serde(default)]
     pending: Vec<submissions::PendingSubmission>,
+    #[serde(default)]
+    unanswered: UnansweredNotice,
+}
+
+/// What the chat has already done about prompts the harness ended without
+/// answering. It is saved with the draft so a reattach or daemon handoff,
+/// which re-reads the same last turn outcome, neither records that turn again
+/// nor brings back a notice the person has already seen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct UnansweredNotice {
+    /// The command id of the last turn handled, so the same projection
+    /// arriving again is ignored (#970).
+    #[serde(default)]
+    turn: Option<String>,
+    /// A notice has been shown and no prompt has been answered since. The
+    /// harness (Kimi, upstream kimi-code#4109) can end many prompts this way
+    /// and the notice cannot help the person more than once.
+    #[serde(default)]
+    told: bool,
 }
 
 /// Which submit an [`UnsentPrompt`] stands for. A prompt and a shell command
@@ -573,9 +592,7 @@ pub struct ChatState {
     unsent_prompts: Vec<UnsentPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
     submission_renders: Vec<(String, std::time::Instant)>,
-    /// The command id of the last turn recorded as unanswered, so the same
-    /// projection arriving again does not record it twice (#970).
-    unanswered_turn: Option<String>,
+    unanswered: UnansweredNotice,
     /// Queue entries optimistically moved back into the composer. A relay
     /// snapshot can still contain one until its removal command is projected,
     /// so keep its identity hidden across those stale snapshots.
@@ -786,7 +803,7 @@ impl ChatState {
             unsent_prompts: Vec::new(),
             pending_submissions: Vec::new(),
             submission_renders: Vec::new(),
-            unanswered_turn: None,
+            unanswered: UnansweredNotice::default(),
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
             active_user_shells: Vec::new(),
@@ -1173,15 +1190,23 @@ impl ChatState {
         let Some(outcome) = &session.last_turn_outcome else {
             return;
         };
+        if self.unanswered.turn.as_deref() == Some(outcome.command_id.as_str()) {
+            return;
+        }
+        self.unanswered.turn = Some(outcome.command_id.clone());
         let TurnOutcomeKind::Completed { stop_reason } = &outcome.outcome else {
             return;
         };
-        if stop_reason != mj_core::acp::PROMPT_UNANSWERED_STOP_REASON
-            || self.unanswered_turn.as_deref() == Some(outcome.command_id.as_str())
-        {
+        if stop_reason != mj_core::acp::PROMPT_UNANSWERED_STOP_REASON {
+            // A prompt the harness answered ends the run, so a later failure
+            // is a new event and is reported again.
+            self.unanswered.told = false;
             return;
         }
-        self.unanswered_turn = Some(outcome.command_id.clone());
+        if self.unanswered.told {
+            return;
+        }
+        self.unanswered.told = true;
         let Some(position) = outcome.turn_start_position else {
             return;
         };
