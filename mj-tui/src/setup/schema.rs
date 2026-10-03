@@ -43,6 +43,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
         // right: the machine's arm above never sees a section that is already
         // there.
         "machines" if path.len() == 3 && key == "build_cache" => build_cache_defaults(),
+        "machines" if path.len() == 4 && key == "scheduler" => scheduler_defaults(),
         "targets" if path.len() == 2 => target_defaults(value["kind"].as_str().unwrap_or("podman")),
         "targets" if key == "workspace_storage" => {
             if value["kind"] == "host-helper" {
@@ -62,7 +63,11 @@ pub(super) fn repository_default() -> Value {
 }
 
 fn build_cache_defaults() -> Value {
-    json!({"enabled":null,"directory":null,"max_total_size":null})
+    json!({"enabled":null,"directory":null,"max_total_size":null,"scheduler":scheduler_defaults()})
+}
+
+fn scheduler_defaults() -> Value {
+    json!({"cpus":null,"memory":null})
 }
 
 /// The fields one machine kind needs. A machine owns the host settings every
@@ -169,6 +174,12 @@ pub(super) fn whole_number(path: &[String]) -> Option<WholeNumber> {
             "Enter a whole number of bytes.",
             false,
         ),
+        ["machines", _, "build_cache", "scheduler", "cpus"] => (
+            1,
+            i64::MAX as u64,
+            "Enter a positive whole number of concurrent compile permits.",
+            true,
+        ),
         _ => return None,
     };
     Some(WholeNumber {
@@ -224,6 +235,7 @@ pub(super) fn label(key: &str) -> String {
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
         "build_cache" => "Build cache (mbx)",
+        "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
         "max_total_size" => "Total cache budget (GB)",
         "max_concurrent" => "Maximum concurrent children",
@@ -277,6 +289,23 @@ pub(super) fn label(key: &str) -> String {
     .to_owned()
 }
 
+pub(super) fn field_label(path: &[String]) -> String {
+    match path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["machines", _, "build_cache", "scheduler", "cpus"] => {
+            "Concurrent compile permits".to_owned()
+        }
+        ["machines", _, "build_cache", "scheduler", "memory"] => {
+            "Compile admission budget".to_owned()
+        }
+        _ => label(path.last().map(String::as_str).unwrap_or("")),
+    }
+}
+
 /// What an empty (JSON null) value means for this setting: the effect the
 /// value actually has, never a placeholder. A value the runtime resolves from
 /// the host is filled in by the caller through `value_summary`'s `automatic`
@@ -284,6 +313,8 @@ pub(super) fn label(key: &str) -> String {
 pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        ["machines", _, "build_cache", "scheduler", "cpus"] => "Available logical CPUs".to_owned(),
+        ["machines", _, "build_cache", "scheduler", "memory"] => "85% of host memory".to_owned(),
         ["profiles", _, "subagents", "effort"] => "Model default".to_owned(),
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
@@ -640,6 +671,23 @@ pub(super) fn search_aliases(path: &[String]) -> &'static [&'static str] {
 }
 
 pub(super) fn help(path: &[String]) -> &'static str {
+    match path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["machines", _, "build_cache", "scheduler"] => {
+            return "mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's defaults.";
+        }
+        ["machines", _, "build_cache", "scheduler", "cpus"] => {
+            return "Machine-wide compile permit count shared by all mbx builds. Must be a positive integer; blank uses mbx's default.";
+        }
+        ["machines", _, "build_cache", "scheduler", "memory"] => {
+            return "Shared admission budget for compiles (e.g. 8GiB). `none` disables weighting; not a hard cap. Blank keeps mbx default.";
+        }
+        _ => {}
+    }
     if path.len() >= 3 && path[0] == "profiles" && path[2] == "subagents" {
         return "Creation defaults copied into new sessions. Existing sessions keep their own policy; edit it in Move. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort.";
     }

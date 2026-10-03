@@ -1660,6 +1660,7 @@ mod tests {
                 enabled: Some(true),
                 directory: Some(PathBuf::from("/mnt/nvme/mbx")),
                 max_total_size: Some("250GiB".into()),
+                scheduler: Default::default(),
             })),
             &executor,
         )
@@ -1809,6 +1810,7 @@ mod tests {
                     enabled: Some(true),
                     directory: None,
                     max_total_size: None,
+                    scheduler: Default::default(),
                 })),
                 &executor,
             ),

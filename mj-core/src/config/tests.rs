@@ -49,6 +49,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
             enabled: Some(true),
             directory: None,
             max_total_size: None,
+            scheduler: Default::default(),
         }),
     };
     let serialized = serde_json::to_value(&every_setting).unwrap();
@@ -1846,6 +1847,81 @@ fn shared_build_budget_round_trips_and_validates() {
 }
 
 #[test]
+fn machine_build_cache_scheduler_settings_round_trip_and_validate() {
+    let source = format!(
+        "version = {CONFIG_VERSION}\n\
+         [machines.builder]\nkind = \"ssh\"\nhost = \"builder.example.com\"\n\
+         [machines.builder.build_cache.scheduler]\ncpus = 12\nmemory = \"6GiB\"\n"
+    );
+    let config: Config = toml::from_str(&source).unwrap();
+    config.validate().unwrap();
+    let settings = config.machines["builder"].build_cache().unwrap();
+    assert_eq!(settings.scheduler.cpus, Some(12));
+    assert_eq!(settings.scheduler.memory.as_deref(), Some("6GiB"));
+
+    let saved = toml::to_string(&config).unwrap();
+    assert!(saved.contains("[machines.builder.build_cache.scheduler]"));
+    assert!(saved.contains("cpus = 12"));
+    assert!(saved.contains("memory = \"6GiB\""));
+    let loaded: Config = toml::from_str(&saved).unwrap();
+    assert_eq!(loaded.machines["builder"], config.machines["builder"]);
+
+    let default_cache: TargetBuildCache = toml::from_str("").unwrap();
+    assert!(default_cache.scheduler.is_default());
+    assert!(
+        serde_json::to_value(default_cache)
+            .unwrap()
+            .get("scheduler")
+            .is_none()
+    );
+}
+
+#[test]
+fn machine_build_cache_scheduler_rejects_values_mbx_would_reject() {
+    for cpus in ["-1", "1.5"] {
+        let parsed = toml::from_str::<TargetBuildCache>(&format!("[scheduler]\ncpus = {cpus}\n"));
+        assert!(parsed.is_err(), "cpus={cpus}");
+    }
+
+    for cpus in [0, i64::MAX as u64 + 1] {
+        let cache = TargetBuildCache {
+            scheduler: BuildCacheScheduler {
+                cpus: Some(cpus),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(cache.validate("builder").is_err(), "cpus={cpus}");
+    }
+
+    for memory in ["", "GiB", "-1", "20 gigabytes"] {
+        let cache = TargetBuildCache {
+            scheduler: BuildCacheScheduler {
+                memory: Some(memory.to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(cache.validate("builder").is_err(), "memory={memory:?}");
+    }
+
+    for memory in [
+        "none", "NONE", "100", "20GB", "20GiB", "1TiB", " 4MiB ", "8g", "8gib", "1.5GiB",
+    ] {
+        let cache = TargetBuildCache {
+            scheduler: BuildCacheScheduler {
+                memory: Some(memory.to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cache
+            .validate("builder")
+            .unwrap_or_else(|error| panic!("memory={memory:?}: {error:#}"));
+    }
+}
+
+#[test]
 fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
     for legacy in [
         serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
@@ -2526,11 +2602,13 @@ fn every_kind_config() -> Config {
         enabled: Some(true),
         directory: Some(PathBuf::from("/var/cache/mbx")),
         max_total_size: Some("50GiB".into()),
+        scheduler: Default::default(),
     };
     let builder_cache = TargetBuildCache {
         enabled: Some(false),
         directory: Some(PathBuf::from("/srv/cache/mbx")),
         max_total_size: Some("20GB".into()),
+        scheduler: Default::default(),
     };
     let ssh = SshConnection {
         host: "builder.example.com".into(),
@@ -2720,6 +2798,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
         enabled: None,
         directory: None,
         max_total_size: Some("50GiB".into()),
+        scheduler: Default::default(),
     };
     assert_eq!(
         config.machines["local"],

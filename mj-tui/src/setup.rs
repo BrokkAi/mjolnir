@@ -288,6 +288,14 @@ fn populate_subagent_profile_choices(draft: &mut Value) {
     }
 }
 
+fn only_unset_fields(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Object(fields) => fields.values().all(only_unset_fields),
+        _ => false,
+    }
+}
+
 fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
     if let Some(choices) = draft["subagents"]["eligible_profiles"].as_object_mut() {
         choices.retain(|_, eligible| eligible.as_bool().unwrap_or(false));
@@ -299,7 +307,7 @@ fn config_from_draft(mut draft: Value) -> Result<Config, serde_json::Error> {
         && machines
             .get(mj_core::config::LOCAL_MACHINE_ID)
             .and_then(|local| local["build_cache"].as_object())
-            .is_some_and(|cache| cache.values().all(Value::is_null))
+            .is_some_and(|cache| cache.values().all(only_unset_fields))
     {
         machines.remove(mj_core::config::LOCAL_MACHINE_ID);
     }
@@ -536,7 +544,9 @@ fn row_label(path: &[String], parent: &Value, key: &str, value: Option<&Value>) 
     if is_collection(path, parent) {
         return key.to_owned();
     }
-    schema::label(key)
+    let mut field_path = path.to_vec();
+    field_path.push(key.to_owned());
+    schema::field_label(&field_path)
 }
 
 /// The trail of page names above `path`, starting at the first page.
@@ -3173,7 +3183,7 @@ pub(crate) fn render_setup(
         let label = if editor.adding {
             "Name for the new entry".to_owned()
         } else {
-            schema::label(editor.path.last().unwrap())
+            schema::field_label(&editor.path)
         };
         frame.render_widget(
             Paragraph::new(label),

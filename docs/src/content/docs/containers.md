@@ -282,6 +282,13 @@ by its container runtimes:
 | Enabled | On when the cache filesystem supports reflinks. |
 | Cache directory | The host's native mbx cache if mbx is installed there, otherwise `~/.cache/mbx` on that host. |
 | Cache size limit | The host's own mbx limits if it has a configuration file, otherwise the smaller of 100 GB and a quarter of the free space. |
+| Concurrent compile permits | The mbx scheduler's logical CPU count, shared by all builds on the machine. |
+| Compile admission memory budget | The mbx scheduler's detected-memory budget. This weights concurrent compile admission; it is not a hard memory cap. |
+
+The two scheduler controls are under
+`[machines.<id>.build_cache.scheduler]` in `config.toml`. Leave either blank
+to use mbx's own default. The configuration reference documents the accepted
+memory sizes and the `none` option.
 
 Opening a machine's build cache page asks its host for these values, so each
 blank field shows what a session there would actually use, such as

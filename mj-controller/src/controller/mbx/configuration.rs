@@ -67,14 +67,32 @@ pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> 
     #[derive(serde::Serialize)]
     struct Document<'a> {
         gc: Gc<'a>,
+        #[serde(skip_serializing_if = "Scheduler::is_empty")]
+        scheduler: Scheduler<'a>,
     }
     #[derive(serde::Serialize)]
     struct Gc<'a> {
         max_total_size: &'a str,
     }
+    #[derive(serde::Serialize)]
+    struct Scheduler<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cpus: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory: Option<&'a str>,
+    }
+    impl Scheduler<'_> {
+        fn is_empty(&self) -> bool {
+            self.cpus.is_none() && self.memory.is_none()
+        }
+    }
     let document = Document {
         gc: Gc {
             max_total_size: settings.max_total_size.as_deref().unwrap_or(automatic),
+        },
+        scheduler: Scheduler {
+            cpus: settings.scheduler.cpus,
+            memory: settings.scheduler.memory.as_deref(),
         },
     };
     Ok(format!(
@@ -324,6 +342,41 @@ mod tests {
             configured_limit(Some(&restored), "target", "max_size").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn managed_scheduler_settings_reach_mbx_and_unset_values_are_omitted() {
+        let settings = TargetBuildCache {
+            scheduler: mj_core::config::BuildCacheScheduler {
+                cpus: Some(12),
+                memory: Some("6GiB".into()),
+            },
+            ..Default::default()
+        };
+        let text = managed_document(&settings, "17GB").unwrap();
+        let document: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(document["scheduler"]["cpus"].as_integer(), Some(12));
+        assert_eq!(document["scheduler"]["memory"].as_str(), Some("6GiB"));
+        assert_eq!(document["gc"]["max_total_size"].as_str(), Some("17GB"));
+
+        for (cpus, memory) in [(Some(12), None), (None, Some("none".into()))] {
+            let partial = TargetBuildCache {
+                scheduler: mj_core::config::BuildCacheScheduler { cpus, memory },
+                ..Default::default()
+            };
+            let text = managed_document(&partial, "17GB").unwrap();
+            let document: toml::Value = toml::from_str(&text).unwrap();
+            let scheduler = document["scheduler"].as_table().unwrap();
+            assert_eq!(scheduler.contains_key("cpus"), cpus.is_some());
+            assert_eq!(
+                scheduler.contains_key("memory"),
+                partial.scheduler.memory.is_some()
+            );
+        }
+
+        let defaults = managed_document(&TargetBuildCache::default(), "17GB").unwrap();
+        let document: toml::Value = toml::from_str(&defaults).unwrap();
+        assert!(document.get("scheduler").is_none());
     }
 
     #[test]

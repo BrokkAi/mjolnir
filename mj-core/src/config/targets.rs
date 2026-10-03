@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -146,6 +147,32 @@ pub struct TargetBuildCache {
     /// Shared storage budget, an mbx size string such as `100GiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_size: Option<String>,
+    /// Machine-wide compiler admission settings shared by all builds on this host.
+    #[serde(default, skip_serializing_if = "BuildCacheScheduler::is_default")]
+    pub scheduler: BuildCacheScheduler,
+}
+
+/// Optional machine-wide mbx compiler scheduling overrides.
+///
+/// When a field is unset, mbx chooses its own default for the host or
+/// container. `memory` is an admission budget used to weight concurrent
+/// compilations, not an operating-system memory limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildCacheScheduler {
+    /// Number of compiler permits shared across all mbx builds on the machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u64>,
+    /// mbx size string such as `8GiB`, or `none` to disable memory weighting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
+}
+
+impl BuildCacheScheduler {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.cpus.is_none() && self.memory.is_none()
+    }
 }
 
 /// Consume obsolete budgets without interpreting or migrating their values.
@@ -155,6 +182,7 @@ struct BuildCacheSettings {
     enabled: Option<bool>,
     directory: Option<PathBuf>,
     max_total_size: Option<String>,
+    scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
     _legacy_max_size: Option<serde::de::IgnoredAny>,
     #[serde(rename = "target_max_size")]
@@ -167,6 +195,7 @@ impl From<BuildCacheSettings> for TargetBuildCache {
             enabled: settings.enabled,
             directory: settings.directory,
             max_total_size: settings.max_total_size,
+            scheduler: settings.scheduler,
         }
     }
 }
@@ -190,8 +219,27 @@ impl TargetBuildCache {
                 "target template {template_id:?} build cache size {max_size:?} is not a size such as 100GiB"
             );
         }
+        if let Some(cpus) = self.scheduler.cpus
+            && (cpus == 0 || cpus > i64::MAX as u64)
+        {
+            bail!(
+                "machine {template_id:?} build cache scheduler cpus must be a positive integer supported by mbx"
+            );
+        }
+        if let Some(memory) = &self.scheduler.memory
+            && !is_build_cache_scheduler_memory(memory)
+        {
+            bail!(
+                "machine {template_id:?} build cache scheduler memory must be an mbx size such as 8GiB or \"none\""
+            );
+        }
         Ok(())
     }
+}
+
+fn is_build_cache_scheduler_memory(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("none") || value.parse::<ByteSize>().is_ok()
 }
 
 /// Whether a target carries no build cache overrides, so an unchanged target

@@ -753,6 +753,24 @@ for cache prerequisites.
 | `directory` | path string | no | unset (the machine's native mbx cache, else `~/.cache/mbx`) | Must be absolute. It is a path on that machine, not on the controller. |
 | `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. Caps the whole cache: build outputs, target directories, and incremental state together. |
 
+The optional `scheduler` table controls mbx's shared compiler scheduler:
+
+```toml
+[machines.morannon.build_cache.scheduler]
+cpus = 8
+memory = "24GiB"
+```
+
+| Field | TOML type | Required | Default | Validation and behavior |
+| --- | --- | --- | --- | --- |
+| `scheduler.cpus` | integer | no | unset (mbx uses the logical CPUs visible to it) | Must be a positive integer. Sets the machine-wide compiler permit pool shared by all builds. |
+| `scheduler.memory` | string | no | unset (mbx uses 85% of detected memory, constrained by a Linux cgroup limit) | An mbx size such as `24GiB`, `24GB`, or `1.5GiB`, or `none` to disable memory weighting. This is a shared admission budget for compiles, not a hard memory cap. |
+
+mbx shares this pool across independent builds on the machine. Compiler work
+uses permits according to its estimated memory demand, so a compile can use
+more than one permit. Blank scheduler fields are omitted from mbx's managed
+configuration, leaving mbx's own defaults in effect.
+
 A section with every field unset is the same as no section at all.
 
 Version 14 removes the global build-cache switch. Older configurations with

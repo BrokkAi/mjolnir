@@ -2040,7 +2040,7 @@ fn a_saved_build_cache_field_leaves_the_other_fields_on_the_page() {
     choose(&mut dashboard, "build_cache");
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     let keys = dialog.keys();
-    for expected in ["enabled", "directory", "max_total_size"] {
+    for expected in ["enabled", "directory", "max_total_size", "scheduler"] {
         assert!(
             keys.iter().any(|key| key == expected),
             "{expected:?} is missing from the reopened page: {keys:?}"
@@ -2051,6 +2051,7 @@ fn a_saved_build_cache_field_leaves_the_other_fields_on_the_page() {
         "Enabled",
         "Cache directory",
         "Total cache budget (GB)",
+        "Compile scheduling",
         "12",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in\n{text}");
@@ -2067,6 +2068,55 @@ fn a_saved_build_cache_field_leaves_the_other_fields_on_the_page() {
         "Use default must hand an optional field back: {:?}",
         dialog.notice
     );
+}
+
+#[test]
+fn machine_mbx_scheduler_controls_are_editable_and_saved() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    choose(&mut dashboard, "local");
+    choose(&mut dashboard, "build_cache");
+    choose(&mut dashboard, "scheduler");
+
+    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
+    assert_eq!(dialog.keys(), ["cpus", "memory"]);
+    let text = drawn(&mut dashboard, 140, 30).join("\n");
+    for expected in [
+        "Concurrent compile permits",
+        "Compile admission budget",
+        "Available logical CPUs",
+        "85% of host memory",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+
+    choose(&mut dashboard, "cpus");
+    for character in "12".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["machines"]["local"]["build_cache"]["scheduler"]
+            ["cpus"],
+        json!(12)
+    );
+
+    choose(&mut dashboard, "memory");
+    for character in "6GiB".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    dashboard.handle_key(key(KeyCode::Enter));
+
+    let DashboardAction::SaveSetup { updated, .. } =
+        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+    else {
+        panic!("scheduler settings must save");
+    };
+    let saved: Config = serde_json::from_str(&updated).unwrap();
+    let scheduler = &saved.machines["local"].build_cache().unwrap().scheduler;
+    assert_eq!(scheduler.cpus, Some(12));
+    assert_eq!(scheduler.memory.as_deref(), Some("6GiB"));
 }
 
 /// The border promises `Esc back`, and below the first page that is what it
@@ -3045,6 +3095,9 @@ fn every_setting_description_fits_its_two_rows() {
         &["machines", "m", "build_cache"],
         &["machines", "m", "build_cache", "directory"],
         &["machines", "m", "build_cache", "max_total_size"],
+        &["machines", "m", "build_cache", "scheduler"],
+        &["machines", "m", "build_cache", "scheduler", "cpus"],
+        &["machines", "m", "build_cache", "scheduler", "memory"],
         &["targets", "t", "memory"],
         &["targets", "t", "pull_policy"],
         &["profiles", "p", "context_window_bytes"],
@@ -3110,7 +3163,14 @@ fn a_page_lists_its_settings_in_a_fixed_order() {
             json!({"machines": {"local": {"kind": "local", "build_cache": {"max_total_size": "20GB", "enabled": false}}}}),
             &["machines", "local", "build_cache"],
         ),
-        ["enabled", "directory", "max_total_size"],
+        ["enabled", "directory", "max_total_size", "scheduler"],
+    );
+    assert_eq!(
+        order(
+            json!({"machines": {"local": {"kind": "local", "build_cache": {"scheduler": {"memory": "8GiB"}}}}}),
+            &["machines", "local", "build_cache", "scheduler"],
+        ),
+        ["cpus", "memory"],
     );
     assert_eq!(
         order(
