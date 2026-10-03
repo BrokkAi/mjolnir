@@ -323,6 +323,11 @@ fn is_turn_review_command(command_id: &str) -> bool {
     command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
 }
 
+/// The quick tier's validator, which reviews no longer run. A worker that
+/// predates its removal may still have one running when a review was
+/// interrupted, so the leftover sweep stops it like any other turn-review role.
+const LEGACY_VALIDATOR_ROLE: &str = "validator";
+
 /// Stops, in the worker, every reviewing role a turn review left running
 /// when the daemon that drove it went away.
 ///
@@ -336,8 +341,8 @@ fn is_turn_review_command(command_id: &str) -> bool {
 /// stopped only while it runs a turn review's prompt. The other roles belong
 /// to turn reviews alone; pausing one that is not running does nothing.
 pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
-    use mj_core::review::driver::{INTENT_ROLE, REVIEWER_ROLE, SUPERVISOR_ROLE, VALIDATOR_ROLE};
-    let mut roles = vec![VALIDATOR_ROLE, INTENT_ROLE, SUPERVISOR_ROLE];
+    use mj_core::review::driver::{INTENT_ROLE, REVIEWER_ROLE, SUPERVISOR_ROLE};
+    let mut roles = vec![LEGACY_VALIDATOR_ROLE, INTENT_ROLE, SUPERVISOR_ROLE];
     roles.extend(mj_review::lanes::REVIEW_LANES.iter().map(|lane| lane.id));
     let status = handle
         .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)

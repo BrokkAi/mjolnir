@@ -3,7 +3,7 @@
 use super::{SYNTHESIS_LIMIT, bound_tail};
 pub use mj_core::review::verdict::*;
 
-/// Classify a supervisor's or validator's reply.
+/// Classify a supervisor's reply.
 ///
 /// Some models explain their clean verdict before emitting the required
 /// sentinel, so a final sentinel line counts as clean unless the reply also
@@ -39,10 +39,10 @@ pub fn synthesis_verdict(text: &str) -> ReviewVerdict {
 }
 
 /// Whether a lane -- or the quick tier's sole reviewer -- reported nothing
-/// worth validating. Conservative in the same direction as
+/// worth acting on. Conservative in the same direction as
 /// [`synthesis_verdict`]: a reply carrying any priority marker, or one that
-/// does not end in the clean sentinel, still costs a validation pass rather
-/// than releasing the turn unchecked.
+/// does not end in the clean sentinel, counts as findings rather than
+/// releasing the turn unchecked.
 #[must_use]
 pub fn lane_report_is_clean(text: &str) -> bool {
     let lines = text
@@ -82,7 +82,7 @@ mod tests {
             "[P2] src/a.rs:1 -- stale comment (evidence: source-reviewed)"
         ));
         // A sentinel that trails real findings is contradictory output; keep
-        // the conservative direction and spend the validation pass.
+        // the conservative direction and treat it as findings.
         assert!(!lane_report_is_clean(
             "[P0] src/a.rs:1 -- swallowed error (evidence: source-reviewed)\nNo findings."
         ));

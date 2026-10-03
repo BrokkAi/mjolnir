@@ -881,7 +881,9 @@ pub(crate) fn render_review_settings(
         }
     }
     let description = Paragraph::new(match dialog.review.tier {
-        ReviewTier::Quick => "One general reviewer; a validator checks any findings.",
+        ReviewTier::Quick => {
+            "One general reviewer; the agent checks its findings as it fixes them."
+        }
         ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
     })
     .style(Style::default().fg(theme::palette().muted))

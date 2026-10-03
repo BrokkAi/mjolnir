@@ -434,7 +434,8 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
 #[test]
 fn conversation_title_shows_review_activity_then_restores_primary_activity() {
     use mj_client::review::RuntimeReviewView;
-    use mj_core::review::driver::{RoleState, RoleStatus, TurnReviewPhase, VALIDATOR_ROLE};
+    use mj_core::review::driver::TurnReviewPhase;
+    use mj_core::review::verdict::ReviewVerdict;
 
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_header_summary("podman", "codex3", "Review the build");
@@ -454,18 +455,15 @@ fn conversation_title_shows_review_activity_then_restores_primary_activity() {
         transcript_title(&chat, 20_000).to_string(),
         " podman  [Reviewing]  codex3  Review the build "
     );
-    view.phase = TurnReviewPhase::Running {
-        roles: vec![RoleStatus {
-            role: VALIDATOR_ROLE.to_owned(),
-            label: "Validator".to_owned(),
-            state: RoleState::Running,
-        }],
-    };
+    view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+        synthesis: "[P2] src/lib.rs:1 -- weak test".to_owned(),
+        evidence: Default::default(),
+    });
     chat.set_turn_review(Some(view));
     assert!(
         transcript_title(&chat, 20_000)
             .to_string()
-            .contains("[Validating]")
+            .contains("[Findings]")
     );
     chat.set_turn_review(None);
     assert_eq!(transcript_title(&chat, 20_000).to_string(), idle);

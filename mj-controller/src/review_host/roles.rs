@@ -168,10 +168,10 @@ impl HostState {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return;
         };
-        // A fresh role must not reuse the running harness session: the
-        // validator judges the reviewer's claims against source, so it must
-        // not inherit them. Bumping the generation is what the sidecar reads
-        // as "this is a different reviewer".
+        // A fresh role must not reuse the running harness session: each role
+        // of a new review starts without another role's context. Bumping the
+        // generation is what the sidecar reads as "this is a different
+        // reviewer".
         if let Some(generation) = fresh_generation {
             slot.generation = generation;
         }
@@ -354,10 +354,10 @@ impl HostState {
         let relay_session = role_session_id(&session_id, &role);
         let transcript = slot.roles.entry(role.clone()).or_default();
         transcript.apply(&relay_session, &events);
-        // The newest agent message is not enough on its own: after the
-        // validator starts, the reviewer's own findings are still the newest
-        // message in that role's journal. The relay's completion record for
-        // the exact command the driver submitted is what settles it.
+        // The newest agent message is not enough on its own: an earlier
+        // prompt's answer can still be the newest message in a role's journal
+        // when its next command starts. The relay's completion record for the
+        // exact command the driver submitted is what settles it.
         let awaited = slot
             .driver
             .awaited_commands()

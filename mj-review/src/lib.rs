@@ -20,8 +20,8 @@
 //!
 //! * A *lane* is one read-only specialist reviewer with a narrow brief (control
 //!   flow, duplication, error handling, dead code, tests, contracts).
-//! * The *quick tier* is one general reviewer plus, only when it reports
-//!   something, a validator that verifies each finding against source.
+//! * The *quick tier* is one general reviewer. Its findings go straight to
+//!   the primary agent, which checks them against source as it acts on them.
 //! * The *extended tier* adds a supervisor that chooses which lanes to launch
 //!   and synthesizes their reports into one verdict.
 //! * A *baseline* is the Git tree id of a repository's working tree as of the

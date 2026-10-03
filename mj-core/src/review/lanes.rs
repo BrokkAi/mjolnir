@@ -2,15 +2,15 @@
 
 use super::verdict::ReviewPassEvidence;
 
-/// Which tier a review runs at. Quick is one reviewer plus a validator only
-/// when that reviewer reports something; extended adds a supervisor that
-/// chooses specialist lanes.
+/// Which tier a review runs at. Quick is one general reviewer whose findings
+/// go straight to the primary agent; extended adds an intent analyst, Bifrost's
+/// change analysis and a supervisor that chooses specialist lanes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTier {
-    /// One general reviewer, and a validator only when it reports something.
-    /// The cheaper tier is the default: it is the one a workspace gets by
-    /// naming nothing.
+    /// One general reviewer. The primary agent checks its findings against
+    /// source when it acts on them. The cheaper tier is the default: it is the
+    /// one a workspace gets by naming nothing.
     #[default]
     Quick,
     Extended,

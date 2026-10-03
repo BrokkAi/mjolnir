@@ -31,13 +31,13 @@ fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
     assert!(view.is_working());
     view.phase = TurnReviewPhase::Running {
         roles: vec![RoleStatus {
-            role: mj_core::review::driver::VALIDATOR_ROLE.to_owned(),
-            label: "Validator".to_owned(),
+            role: mj_core::review::driver::REVIEWER_ROLE.to_owned(),
+            label: "General".to_owned(),
             state: RoleState::Running,
         }],
     };
     view.status = "checking source".to_owned();
-    assert_eq!(view.activity_label(), Some("Validating"));
+    assert_eq!(view.activity_label(), Some("Reviewing"));
     assert!(view.is_working());
     view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
         synthesis: "[P2] app.py:1 -- incorrect bounds".to_owned(),
@@ -1571,6 +1571,7 @@ async fn an_interrupted_handoff_retains_findings_until_acceptance_and_retries_th
         command_id: "durable-forward-id".to_owned(),
         trees: BTreeMap::from([(PathBuf::from("/workspace/app"), "new".to_owned())]),
         reviewed_through_ordinal: 12,
+        provenance: Default::default(),
     };
     {
         let mut state = environment.state.lock().unwrap();
@@ -2436,7 +2437,8 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
     );
     for role in [
         mj_core::review::driver::REVIEWER_ROLE,
-        mj_core::review::driver::VALIDATOR_ROLE,
+        // An older worker may still run the removed quick-tier validator.
+        "validator",
         mj_core::review::driver::SUPERVISOR_ROLE,
         mj_core::review::driver::INTENT_ROLE,
     ] {
@@ -2541,7 +2543,7 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
 /// daemon: no cancellation notice, and its verdict when the reviewer answers.
 ///
 /// Today the reviewer's prompt survives in the worker but the review does
-/// not: the driver that reads the answer, checks it with the validator and
+/// not: the driver that reads the answer, turns it into a verdict and
 /// advances the baseline (captured trees, awaited command ids, phase) lives
 /// only in the daemon's memory. Reattaching needs that state in the worker,
 /// which is issue #1185.
@@ -2735,6 +2737,10 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
     assert!(
         prompt.contains("unbounded retry loop"),
         "the corrective prompt carries the finding"
+    );
+    assert!(
+        prompt.contains("not independently verified"),
+        "a quick review's findings reach the primary as one reviewer's, unverified: {prompt}"
     );
     assert!(
         host.resolve(session, Resolution::Forwarded).await.is_err(),

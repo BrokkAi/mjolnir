@@ -1582,8 +1582,8 @@ impl ReviewerRole {
 }
 
 /// Whether `role` is one of the specialist lanes the admission cap covers.
-/// The default reviewer, the validator, the supervisor and the intent analyst
-/// are single-instance roles and are not what the cap protects against.
+/// The default reviewer, the supervisor and the intent analyst are
+/// single-instance roles and are not what the cap protects against.
 fn is_lane(role: &str) -> bool {
     mj_review::lanes::lane_by_id(role).is_some()
 }

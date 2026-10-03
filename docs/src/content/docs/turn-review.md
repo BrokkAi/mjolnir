@@ -31,7 +31,7 @@ Auto first tries profiles from a different provider, then other profiles from th
 
 Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles. Fast mode is optional; its rejection does not prevent review.
 
-The main-reviewer choice is shared by quick review, validation, supervision, intent analysis, and plan second opinion. Specialist lanes use the table's overrides even when you select the main reviewer manually.
+The main-reviewer choice is shared by quick review, supervision, intent analysis, and plan second opinion. Specialist lanes use the table's overrides even when you select the main reviewer manually.
 
 To choose manually:
 
@@ -70,7 +70,7 @@ Choose **Second opinion** before approving a proposed plan. Mj starts the review
 
 | Tier | How it works | Use it for |
 | --- | --- | --- |
-| `quick` | One general reviewer checks the turn. If it reports findings, a validator rechecks those claims against source before they reach you. | Routine turns and the lowest review cost. |
+| `quick` | One general reviewer checks the turn. Its findings go straight to the primary harness, marked as one reviewer's unverified findings; the harness checks each against source as it fixes them. No change analysis runs. | Routine turns and the lowest review cost. |
 | `extended` | A supervisor examines the change and can dispatch focused specialists for control flow, duplication, error handling, dead code, tests, and contracts. When the message history makes intent ambiguous, a separate analyst first reconciles the governing intent. | Larger or riskier changes where wider coverage is worth more time and tokens. |
 
 Both tiers apply the same qualification bar. A concern must have meaningful correctness, security, performance, or maintainability impact; it must be introduced by the reviewed turn, demonstrable from inspected evidence, and concrete enough to act on. Tests changed in the same turn are evidence to inspect, not an oracle for the intended behavior.
@@ -113,7 +113,7 @@ While review is running, the review view shows the active role and its status. I
 Resolution depends on the verdict:
 
 - A **clean** verdict resolves automatically and advances the reviewed boundary.
-- A **findings** verdict is forwarded automatically, for automatic and one-off reviews alike: Mjolnir sends the validated findings to the primary harness as its next corrective prompt, and a later review can verify those corrections. If the primary rejects that prompt, the review stays open with **Forward findings** to retry, **Dismiss** to advance the reviewed boundary without requesting changes, and **Cancel** to close the review without advancing it, so the same delta remains reviewable.
+- A **findings** verdict is forwarded automatically, for automatic and one-off reviews alike: Mjolnir sends the findings to the primary harness as its next corrective prompt, saying whether they come from one quick reviewer or from an extended review's supervisor, and a later review can verify those corrections. If the primary rejects that prompt, the review stays open with **Forward findings** to retry, **Dismiss** to advance the reviewed boundary without requesting changes, and **Cancel** to close the review without advancing it, so the same delta remains reviewable.
 - A **failed** review offers **Dismiss** and **Cancel**. Its prompt hold has already been released, and neither choice advances the reviewed boundary; fix the profile, model, credential, or connectivity problem before trying again.
 
 Cancel is also available while review work is still running. It releases the prompt hold and leaves the unreviewed changes for a later pass.

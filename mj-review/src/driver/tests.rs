@@ -77,13 +77,14 @@ fn running() -> (TurnReviewDriver, String) {
         }]
     );
     let requests = driver.delta_captured(changed_delta());
-    assert!(matches!(
-        requests.as_slice(),
-        [
-            ReviewRequest::AnalyzeDelta { .. },
-            ReviewRequest::StartRole { .. }
-        ]
-    ));
+    assert_eq!(
+        requests,
+        vec![ReviewRequest::StartRole {
+            role: REVIEWER_ROLE.to_string(),
+            fresh: true
+        }],
+        "the quick tier starts its one reviewer and runs no change analysis"
+    );
     let requests = driver.role_started(REVIEWER_ROLE);
     let command_id = prompted(&requests, REVIEWER_ROLE);
     let prompt = prompt_text(&requests, REVIEWER_ROLE);
@@ -101,6 +102,10 @@ fn supervising() -> (TurnReviewDriver, String) {
         .push(UserMessage::prompt("bound the retry"));
     let (mut driver, _) = TurnReviewDriver::start(seed);
     let requests = driver.delta_captured(changed_delta());
+    assert!(
+        matches!(requests.first(), Some(ReviewRequest::AnalyzeDelta { .. })),
+        "the extended tier runs the change analysis its supervisor reads: {requests:?}"
+    );
     assert!(
         requests.contains(&ReviewRequest::StartRole {
             role: INTENT_ROLE.to_string(),
@@ -182,7 +187,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
 }
 
 #[test]
-fn a_clean_review_spends_no_validator_and_advances_the_baseline_itself() {
+fn a_clean_review_runs_one_reviewer_and_advances_the_baseline_itself() {
     let (mut driver, command_id) = running();
     let requests = driver.role_turn_completed(&command_id, "No findings.");
     assert_eq!(
@@ -197,7 +202,7 @@ fn a_clean_review_spends_no_validator_and_advances_the_baseline_itself() {
             },
             ReviewRequest::Close,
         ],
-        "a clean reviewer releases the turn without a validator"
+        "a clean reviewer releases the turn itself"
     );
     assert!(driver.finished());
     assert_eq!(
@@ -208,150 +213,95 @@ fn a_clean_review_spends_no_validator_and_advances_the_baseline_itself() {
 }
 
 #[test]
-fn findings_reach_a_validator_only_once_the_analysis_is_ready() {
+fn quick_findings_are_the_verdict_without_a_second_pass() {
     let (mut driver, command_id) = running();
-    let requests = driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    assert!(
-        requests.is_empty(),
-        "nothing starts while the analysis is still running: {requests:?}"
-    );
-    let requests = driver.analysis_completed(Ok("- edited retry()".to_string()));
-    assert_eq!(
-        requests,
-        vec![
-            ReviewRequest::PauseRole {
-                role: REVIEWER_ROLE.to_string()
-            },
-            ReviewRequest::StartRole {
-                role: VALIDATOR_ROLE.to_string(),
-                fresh: true
-            }
-        ],
-        "the reviewer is reaped before the validator is staged over it"
-    );
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let prompt = prompt_text(&requests, VALIDATOR_ROLE);
-    assert!(prompt.contains("[P1] src/lib.rs:1 -- no bound"));
-    assert!(prompt.contains("- edited retry()"));
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
-
     let requests =
         driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
-    assert!(
-        requests
-            .iter()
-            .all(|request| matches!(request, ReviewRequest::PauseRole { .. })),
-        "a findings verdict reaps its roles and waits for the user: {requests:?}"
-    );
-    assert!(driver.can_forward());
-    assert!(!driver.finished(), "findings wait for the user");
-    assert!(matches!(
-        driver.last_verdict(),
-        Some(ReviewVerdict::Findings { .. })
-    ));
-    assert_eq!(
-        driver.roles(),
-        vec![
-            RoleStatus {
-                role: REVIEWER_ROLE.to_string(),
-                label: super::super::lanes::QUICK_LANE.label.to_string(),
-                state: RoleState::Findings,
-            },
-            RoleStatus {
-                role: VALIDATOR_ROLE.to_string(),
-                label: "Validator".to_string(),
-                state: RoleState::Clean,
-            },
-        ],
-        "a verdict keeps the completed role states available to surfaces"
-    );
-}
-
-#[test]
-fn an_analysis_that_lands_before_the_findings_starts_the_validator_at_once() {
-    let (mut driver, command_id) = running();
-    assert!(
-        driver
-            .analysis_completed(Ok("- edited retry()".to_string()))
-            .is_empty(),
-        "a clean review must never wait on the analysis"
-    );
-    let requests = driver.role_turn_completed(&command_id, "[P2] src/lib.rs:1 -- weak test");
     assert_eq!(
         requests,
-        vec![
-            ReviewRequest::PauseRole {
-                role: REVIEWER_ROLE.to_string()
-            },
-            ReviewRequest::StartRole {
-                role: VALIDATOR_ROLE.to_string(),
-                fresh: true
-            }
-        ]
+        vec![ReviewRequest::PauseRole {
+            role: REVIEWER_ROLE.to_string()
+        }],
+        "findings reap the reviewer and start nothing else"
+    );
+    assert!(driver.can_forward());
+    assert!(!driver.finished(), "findings wait to be forwarded");
+    assert_eq!(
+        driver.last_verdict(),
+        Some(&ReviewVerdict::Findings {
+            synthesis: "[P1] src/lib.rs:1 -- unbounded retry loop".to_string(),
+            evidence: ReviewPassEvidence::default(),
+        })
+    );
+    assert_eq!(
+        driver.roles(),
+        vec![RoleStatus {
+            role: REVIEWER_ROLE.to_string(),
+            label: super::super::lanes::QUICK_LANE.label.to_string(),
+            state: RoleState::Findings,
+        }],
+        "a verdict keeps the completed role state available to surfaces"
     );
 }
 
+/// The quick tier never asks for an analysis, so an answer to one (from a
+/// worker still finishing an older request) changes nothing.
 #[test]
-fn a_failed_analysis_fails_the_review_and_leaves_the_baseline_alone() {
+fn the_quick_tier_ignores_an_analysis_answer() {
     let (mut driver, command_id) = running();
     assert!(
         driver
             .analysis_completed(Err("bifrost exited with 1".to_string()))
             .is_empty()
     );
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let ReviewVerdict::Failed { reason } = driver.verdict().expect("a verdict is on screen") else {
-        panic!(
-            "a failed analysis must fail the review, got {:?}",
-            driver.phase()
-        );
-    };
-    assert!(reason.contains("bifrost exited with 1"));
-    assert!(matches!(
-        driver.last_verdict(),
-        Some(ReviewVerdict::Failed { .. })
-    ));
-    assert!(!driver.can_forward());
-    let requests = driver.dismiss();
-    assert_eq!(
-        requests,
-        vec![ReviewRequest::Close],
-        "a failed review never advances the baseline"
+    let requests = driver.role_turn_completed(&command_id, "No findings.");
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. })),
+        "a clean report is a clean review whatever the analysis did: {requests:?}"
     );
-    assert!(driver.finished());
+    assert_eq!(driver.last_verdict(), Some(&ReviewVerdict::Clean));
 }
 
-/// I1-15: a clean reviewer report after the analysis failed is not a clean
-/// review. The reviewer read the change without the analysis it was promised,
-/// so the review reports the failure instead of "no material findings".
 #[test]
-fn a_clean_report_after_a_failed_analysis_fails_the_review() {
+fn an_empty_quick_report_fails_the_review_and_leaves_the_baseline_alone() {
     let (mut driver, command_id) = running();
-    assert!(
-        driver
-            .analysis_completed(Err(
-                "bifrost exited with 1: Unknown tool: analyze_diff".into()
-            ))
-            .is_empty()
-    );
-    let requests = driver.role_turn_completed(&command_id, "No findings.");
-    let ReviewVerdict::Failed { reason } = driver.verdict().expect("a verdict is on screen") else {
-        panic!("expected a failed review, got {:?}", driver.phase());
-    };
-    assert!(reason.contains("Unknown tool: analyze_diff"), "{reason}");
+    let requests = driver.role_turn_completed(&command_id, "  \n ");
     assert!(
         !requests
             .iter()
             .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. })),
         "a failed review never advances the baseline: {requests:?}"
     );
+    let ReviewVerdict::Failed { reason } = driver.verdict().expect("a verdict is on screen") else {
+        panic!(
+            "an empty report must fail the review, got {:?}",
+            driver.phase()
+        );
+    };
+    assert!(reason.contains("empty report"), "{reason}");
+    assert!(!driver.can_forward());
+}
+
+/// The primary is told what it is getting: one reviewer's findings that
+/// nobody checked, which it verifies against source before acting.
+#[test]
+fn a_quick_forward_says_the_findings_are_unverified() {
+    let (mut driver, command_id) = running();
+    driver.role_turn_completed(&command_id, "[P2] src/lib.rs:1 -- weak test");
+    let requests = driver.forward("test-forward-command".to_owned());
+    let [ReviewRequest::PromptPrimary { prompt, .. }] = requests.as_slice() else {
+        panic!("forward submits one primary prompt, got {requests:?}");
+    };
+    assert!(prompt.starts_with("[HARNESS NOTE: an independent review"));
+    assert!(prompt.contains("nobody has checked them"), "{prompt}");
+    assert!(prompt.contains("not independently verified"), "{prompt}");
+    assert!(!prompt.contains("validated by"), "{prompt}");
+    assert!(prompt.contains("[P2] src/lib.rs:1 -- weak test"));
     assert_eq!(
-        driver
-            .roles()
-            .iter()
-            .find(|role| role.role == REVIEWER_ROLE)
-            .map(|role| role.state),
-        Some(RoleState::Clean)
+        driver.pending_forward().map(|pending| pending.provenance),
+        Some(FindingsProvenance::SingleReviewer)
     );
 }
 
@@ -384,10 +334,6 @@ fn cancelling_leaves_the_baseline_so_the_next_review_covers_both_turns() {
 #[test]
 fn forwarding_sends_the_synthesis_and_makes_the_next_review_a_verification_pass() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
 
     let requests = driver.forward("test-forward-command".to_owned());
@@ -427,10 +373,6 @@ fn forwarding_sends_the_synthesis_and_makes_the_next_review_a_verification_pass(
 #[test]
 fn a_rejected_forward_keeps_findings_and_retries_the_same_command() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
 
     let first = driver.forward("test-forward-command".to_owned());
@@ -475,10 +417,6 @@ fn a_rejected_forward_keeps_findings_and_retries_the_same_command() {
 #[test]
 fn a_late_acceptance_after_rejection_still_resolves_the_same_handoff() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
     let first = driver.forward("test-forward-command".to_owned());
     let ReviewRequest::PromptPrimary { command_id, .. } = &first[0] else {
@@ -505,15 +443,16 @@ fn a_late_acceptance_after_rejection_still_resolves_the_same_handoff() {
 #[test]
 fn an_interrupted_handoff_retries_with_its_durable_command_id() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
     driver.forward("test-forward-command".to_owned());
     let pending = driver
         .pending_forward()
         .expect("forwarding state is durable");
+    assert_eq!(
+        pending.provenance,
+        FindingsProvenance::SingleReviewer,
+        "the handoff remembers who produced the findings, so a retry sends the same note"
+    );
 
     let (mut resumed, initial) = TurnReviewDriver::resume_forward(seed(), pending.clone());
     assert!(
@@ -524,7 +463,7 @@ fn an_interrupted_handoff_retries_with_its_durable_command_id() {
         resumed.forward("unused-new-command".to_owned()),
         vec![ReviewRequest::PromptPrimary {
             command_id: pending.command_id,
-            prompt: correction_note(&pending.synthesis),
+            prompt: correction_note(&pending.synthesis, pending.provenance),
         }]
     );
 }
@@ -532,10 +471,6 @@ fn an_interrupted_handoff_retries_with_its_durable_command_id() {
 #[test]
 fn a_pending_forward_cannot_be_cancelled_before_the_relay_acknowledges_it() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- no bound");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
     driver.forward("test-forward-command".to_owned());
 
@@ -546,10 +481,6 @@ fn a_pending_forward_cannot_be_cancelled_before_the_relay_acknowledges_it() {
 #[test]
 fn dismissing_findings_advances_the_baseline_without_prompting_the_primary() {
     let (mut driver, command_id) = running();
-    driver.analysis_completed(Ok("- edited retry()".to_string()));
-    driver.role_turn_completed(&command_id, "[P3] src/lib.rs:1 -- nit");
-    let requests = driver.role_started(VALIDATOR_ROLE);
-    let command_id = prompted(&requests, VALIDATOR_ROLE);
     driver.role_turn_completed(&command_id, "[P3] src/lib.rs:1 -- nit");
 
     let requests = driver.dismiss();
@@ -823,5 +754,35 @@ fn cancelling_mid_fanout_reaps_every_role_and_keeps_the_baseline() {
         !requests
             .iter()
             .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. }))
+    );
+}
+
+/// A supervisor's synthesis keeps the wording it always had, which is also what
+/// a handoff persisted before provenance was recorded retries with.
+#[test]
+fn an_extended_forward_keeps_the_vetted_wording() {
+    let (mut driver, command_id) = supervising();
+    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
+    assert!(driver.can_forward(), "{:?}", driver.phase());
+    let requests = driver.forward("test-forward-command".to_owned());
+    let [ReviewRequest::PromptPrimary { prompt, .. }] = requests.as_slice() else {
+        panic!("forward submits one primary prompt, got {requests:?}");
+    };
+    assert_eq!(
+        prompt,
+        &correction_note(
+            "[P1] src/lib.rs:1 -- unbounded retry loop",
+            FindingsProvenance::Vetted
+        )
+    );
+    assert!(prompt.contains("validated by a reviewing agent"));
+    let pending = driver
+        .pending_forward()
+        .expect("forwarding state is durable");
+    assert_eq!(pending.provenance, FindingsProvenance::Vetted);
+    let stored = serde_json::to_value(&pending).unwrap();
+    assert!(
+        stored.get("provenance").is_none(),
+        "a vetted handoff is stored exactly as before provenance existed: {stored}"
     );
 }

@@ -13,15 +13,16 @@ pub enum ReviewRequest {
     CaptureDelta {
         baselines: BTreeMap<PathBuf, String>,
     },
-    /// Start Bifrost's semantic analysis of the captured trees. It runs
-    /// alongside the reviewing agents, because its result is not needed until
-    /// findings appear (quick tier) or the supervisor starts (extended).
+    /// Start Bifrost's semantic analysis of the captured trees. Only the
+    /// extended tier asks for it: it runs alongside the intent analyst, and
+    /// the supervisor's prompt embeds its result. The quick tier's reviewer
+    /// never reads it, so a quick review never runs it.
     AnalyzeDelta {
         repositories: Vec<AnalyzeDeltaRepository>,
     },
     /// Start the reviewer harness for `role`, with a fresh session when
-    /// `fresh` is set. The validator is a fresh session on purpose: it must
-    /// judge the findings against source, not inherit the reviewer's context.
+    /// `fresh` is set: every role of a new review starts without another
+    /// role's context.
     StartRole { role: String, fresh: bool },
     /// Send `prompt` to `role` under `command_id`.
     PromptRole {
@@ -129,8 +130,6 @@ pub enum TurnReviewPhase {
 
 /// The quick tier's sole reviewer.
 pub const REVIEWER_ROLE: &str = "reviewer";
-/// The quick tier's validator, which verifies the reviewer's findings.
-pub const VALIDATOR_ROLE: &str = "validator";
 /// The extended tier's supervisor, which owns the verdict.
 pub const SUPERVISOR_ROLE: &str = "supervisor";
 /// The extended tier's intent analyst.
@@ -173,4 +172,70 @@ pub struct PendingForward {
     pub command_id: String,
     pub trees: BTreeMap<PathBuf, String>,
     pub reviewed_through_ordinal: u64,
+    /// Who produced the findings, which decides how the corrective prompt
+    /// describes them. Durable so a retried handoff sends the same prompt the
+    /// first attempt did. Records written before it existed were all a
+    /// supervisor's or a validator's vetted synthesis.
+    #[serde(default, skip_serializing_if = "FindingsProvenance::is_vetted")]
+    pub provenance: FindingsProvenance,
+}
+
+/// Who produced a review's findings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingsProvenance {
+    /// A role that vetted other reviewers' reports before concluding: the
+    /// extended tier's supervisor.
+    #[default]
+    Vetted,
+    /// The quick tier's one reviewer. Nothing checked its findings before
+    /// they reach the primary agent.
+    SingleReviewer,
+}
+
+impl FindingsProvenance {
+    #[must_use]
+    pub const fn is_vetted(&self) -> bool {
+        matches!(self, Self::Vetted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handoff persisted before provenance was recorded came from a
+    /// supervisor or the removed validator, and retries with the vetted note.
+    #[test]
+    fn a_pending_forward_without_provenance_reads_as_vetted() {
+        let stored = r#"{"synthesis":"[P1] a.rs:1 -- broken","command_id":"forward-1","trees":{"/w":"t"},"reviewed_through_ordinal":3}"#;
+        let pending: PendingForward = serde_json::from_str(stored).unwrap();
+        assert_eq!(pending.provenance, FindingsProvenance::Vetted);
+        assert!(
+            !serde_json::to_string(&pending)
+                .unwrap()
+                .contains("provenance")
+        );
+    }
+
+    #[test]
+    fn a_single_reviewer_handoff_keeps_its_provenance() {
+        let pending = PendingForward {
+            synthesis: "[P2] a.rs:1 -- weak test".to_owned(),
+            evidence: ReviewPassEvidence::default(),
+            command_id: "forward-2".to_owned(),
+            trees: BTreeMap::new(),
+            reviewed_through_ordinal: 4,
+            provenance: FindingsProvenance::SingleReviewer,
+        };
+        let stored = serde_json::to_string(&pending).unwrap();
+        assert!(
+            stored.contains(r#""provenance":"single_reviewer""#),
+            "{stored}"
+        );
+        assert_eq!(
+            serde_json::from_str::<PendingForward>(&stored).unwrap(),
+            pending
+        );
+    }
 }

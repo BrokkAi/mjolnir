@@ -1,6 +1,6 @@
 //! Review data shared by Mjolnir's control surfaces.
 
-use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+use mj_core::review::driver::{Resolution, RoleStatus, TurnReviewPhase};
 use mj_core::review::lanes::ReviewTier;
 use mj_core::review::verdict::ReviewVerdict;
 
@@ -88,14 +88,6 @@ impl RuntimeReviewView {
                 ReviewVerdict::Failed { .. } => "Review failed",
                 ReviewVerdict::Clean => "Review complete",
             }),
-            TurnReviewPhase::Running { roles }
-                if roles.iter().any(|role| {
-                    role.role == mj_core::review::driver::VALIDATOR_ROLE
-                        && matches!(role.state, RoleState::Pending | RoleState::Running)
-                }) =>
-            {
-                Some("Validating")
-            }
             _ => Some("Reviewing"),
         }
     }

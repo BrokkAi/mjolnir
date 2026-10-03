@@ -4176,6 +4176,9 @@ fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
                 "5678efgh".to_string(),
             )]),
             reviewed_through_ordinal: 43,
+            // Stored and read back: a quick review's handoff must retry with
+            // the same "unverified" note after a restart.
+            provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
         }),
     };
     save_turn_review_state_in(&database, "session-1", &state).unwrap();
@@ -4223,6 +4226,7 @@ fn clearing_interrupted_reviews_keeps_every_baseline() {
                 command_id: "forward-1".to_string(),
                 trees: baselines.clone(),
                 reviewed_through_ordinal: 42,
+                provenance: Default::default(),
             }),
         },
     )
