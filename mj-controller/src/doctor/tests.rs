@@ -2702,8 +2702,9 @@ fn doctor_accepts_a_bifrost_at_or_above_the_reviews_minimum() {
     assert_eq!(commands[0].args, ["--version"]);
     drop(commands);
     assert_eq!(
-        bifrost_report(Ok(output("bifrost 0.11.5\n"))).status,
-        CheckStatus::Ready
+        bifrost_report(Ok(output("bifrost 0.12.3\n"))).status,
+        CheckStatus::Ready,
+        "a newer patch release than the minimum is accepted"
     );
 }
 
