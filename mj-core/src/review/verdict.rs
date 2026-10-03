@@ -43,8 +43,6 @@ impl ReviewVerdict {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReviewPassEvidence {
-    pub intent_brief: String,
-    pub intent_available: bool,
     pub lanes: Vec<ReviewLaneEvidence>,
 }
 
@@ -73,5 +71,31 @@ impl LaneOutcome {
             Self::Cancelled => "cancelled".to_string(),
             Self::Failed { reason } => format!("failed: {reason}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reviews persisted while the extended tier still ran an intent analyst
+    /// carry its brief in their evidence. Those fields are no longer read, and
+    /// the stored record still loads.
+    #[test]
+    fn evidence_stored_with_an_intent_brief_still_loads() {
+        let lanes = serde_json::to_value(vec![ReviewLaneEvidence {
+            id: "tests".to_string(),
+            outcome: LaneOutcome::Completed,
+        }])
+        .unwrap();
+        let stored = serde_json::json!({
+            "intent_brief": "Goal: add a retry",
+            "intent_available": true,
+            "lanes": lanes,
+        });
+        let evidence: ReviewPassEvidence = serde_json::from_value(stored).unwrap();
+        assert_eq!(evidence.lanes.len(), 1);
+        assert_eq!(evidence.lanes[0].id, "tests");
+        assert_eq!(evidence.lanes[0].outcome, LaneOutcome::Completed);
     }
 }

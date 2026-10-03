@@ -37,8 +37,6 @@ pub mod verdict;
 
 /// How much of a lane report the next prompt may quote.
 pub const LANE_REPORT_LIMIT: usize = 16 * 1024;
-/// How much of the intent analyst's brief the supervisor prompt embeds.
-pub const INTENT_BRIEF_LIMIT: usize = 16 * 1024;
 /// How much of the primary's user messages a review prompt embeds.
 pub const USER_MESSAGES_LIMIT: usize = 128 * 1024;
 /// How much of the per-file line-count table a prompt embeds. At roughly 60

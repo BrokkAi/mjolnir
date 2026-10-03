@@ -39,8 +39,8 @@ use mj_core::relay::{RelayCommand, RelayEvent, RelayObservation};
 use mj_core::review::lanes::{ReviewTier, UserMessage};
 use mj_core::review::verdict::ReviewVerdict;
 use mj_review::driver::{
-    INTENT_ROLE, PendingForward, Resolution, ReviewRequest, SUPERVISOR_ROLE, TurnReviewDriver,
-    TurnReviewPhase, TurnReviewSeed,
+    PendingForward, Resolution, ReviewRequest, SUPERVISOR_ROLE, TurnReviewDriver, TurnReviewPhase,
+    TurnReviewSeed,
 };
 
 pub use mj_client::review::{

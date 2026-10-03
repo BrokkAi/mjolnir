@@ -3,7 +3,7 @@ title: Turn review
 description: Configure an independent quick or extended review and resolve findings between agent turns.
 ---
 
-Turn review starts a separate reviewer conversation to inspect the work completed since the previous review boundary. It is an opt-in second opinion: the reviewer reads the governing user intent, transcript, repository state, and changed code, then reports only material, actionable findings.
+Turn review starts a separate reviewer conversation to inspect the work completed since the previous review boundary. It is an opt-in second opinion: the reviewer reads the user's messages, the repository, and the changed code, then reports only material, actionable findings.
 
 The daemon owns review execution. A review started in the terminal continues if that terminal detaches, and the same review state is visible from the web viewer.
 
@@ -31,7 +31,7 @@ Auto first tries profiles from a different provider, then other profiles from th
 
 Model families resolve to the newest advertised matching model. DeepSeek through a Codex harness counts as DeepSeek, not OpenAI. Effort values must be supported exactly. Auto skips unusable candidates and explains why if none can run. A manually selected profile fails visibly instead of changing profiles. Fast mode is optional; its rejection does not prevent review.
 
-The main-reviewer choice is shared by quick review, supervision, intent analysis, and plan second opinion. Specialist lanes use the table's overrides even when you select the main reviewer manually.
+The main-reviewer choice is shared by quick review, supervision, and plan second opinion. Specialist lanes use the table's overrides even when you select the main reviewer manually.
 
 To choose manually:
 
@@ -71,9 +71,13 @@ Choose **Second opinion** before approving a proposed plan. Mj starts the review
 | Tier | How it works | Use it for |
 | --- | --- | --- |
 | `quick` | One general reviewer checks the turn. Its findings go straight to the primary harness, marked as one reviewer's unverified findings; the harness checks each against source as it fixes them. | Routine turns and the lowest review cost. |
-| `extended` | A supervisor examines the change and can dispatch focused specialists for control flow, duplication, error handling, dead code, tests, and contracts. When the message history makes intent ambiguous, a separate analyst first reconciles the governing intent. | Larger or riskier changes where wider coverage is worth more time and tokens. |
+| `extended` | A supervisor examines the change and can dispatch focused specialists for control flow, duplication, error handling, dead code, tests, and contracts. The supervisor starts as soon as the change is captured. | Larger or riskier changes where wider coverage is worth more time and tokens. |
 
-Every reviewing agent reads the change from the capture: the diff, and Git's added and removed line counts for every changed file, which list the whole change even when a large diff is cut short in the prompt. A small change's supervisor reads the whole diff; a large one starts from the per-file counts. Reviewers navigate the code with Bifrost's tools.
+Every reviewing agent reads the change from the capture: the diff, and Git's added and removed line counts for every changed file, which list the whole change even when a large diff is cut short in the prompt. A small change's supervisor reads the whole diff; a large one starts from the per-file counts.
+
+Reviewers take the intent from the user's messages in the session's current context (since its last compaction), in order, with the most recent governing message winning a conflict. They are not given the primary agent's own messages or its report of the work, so they judge the change against what was asked rather than against the author's account of it.
+
+Reviewers navigate the code with Bifrost's tools. For the callers, references, or tests of a declaration they use `scan_usages_by_location`, which answers in well under a second once the server's index is built; they are told not to use `usage_graph`, which builds a reference graph for whole files and can take minutes on a large file.
 
 Both tiers apply the same qualification bar. A concern must have meaningful correctness, security, performance, or maintainability impact; it must be introduced by the reviewed turn, demonstrable from inspected evidence, and concrete enough to act on. Tests changed in the same turn are evidence to inspect, not an oracle for the intended behavior.
 

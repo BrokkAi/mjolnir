@@ -7,8 +7,6 @@ fn seed() -> TurnReviewSeed {
         tier: ReviewTier::Quick,
         task: "add a retry".to_string(),
         user_messages: vec![UserMessage::prompt("add a retry")],
-        initial_result: "added a retry".to_string(),
-        trajectory: "edited src/lib.rs".to_string(),
         baselines: BTreeMap::from([(PathBuf::from("/w/app"), "base-tree".to_string())]),
         through_ordinal: 12,
         prior_review: None,
@@ -103,7 +101,7 @@ fn running() -> (TurnReviewDriver, String) {
 fn supervising() -> (TurnReviewDriver, String) {
     let mut seed = seed();
     seed.tier = ReviewTier::Extended;
-    // Two governing messages, so the intent analyst is worth running.
+    // Two governing messages: the supervisor reads both itself.
     seed.user_messages
         .push(UserMessage::prompt("bound the retry"));
     let (mut driver, _) = TurnReviewDriver::start(seed);
@@ -111,25 +109,19 @@ fn supervising() -> (TurnReviewDriver, String) {
     assert_eq!(
         requests,
         vec![ReviewRequest::StartRole {
-            role: INTENT_ROLE.to_string(),
-            fresh: true
-        }],
-        "a turn with several governing messages runs the intent analyst first, \
-         and nothing else: the review runs no change analysis"
-    );
-    let requests = driver.role_started(INTENT_ROLE);
-    let intent_command = prompted(&requests, INTENT_ROLE);
-    let requests = driver.role_turn_completed(&intent_command, "Goal: bound the retry");
-    assert!(
-        requests.contains(&ReviewRequest::StartRole {
             role: SUPERVISOR_ROLE.to_string(),
             fresh: true
-        }),
-        "the supervisor starts once the intent brief exists: {requests:?}"
+        }],
+        "the supervisor starts straight after the capture: no intent analyst \
+         and no change analysis runs ahead of it"
     );
     let requests = driver.role_started(SUPERVISOR_ROLE);
     let prompt = prompt_text(&requests, SUPERVISOR_ROLE);
-    assert!(prompt.contains("Goal: bound the retry"));
+    assert!(
+        prompt.contains("bound the retry"),
+        "the supervisor reads the user's messages"
+    );
+    assert!(prompt.contains(crate::lanes::INTENT_CONTEXT));
     assert!(
         prompt.contains("<changed_files") && prompt.contains("src/lib.rs"),
         "the supervisor reads Git's per-file line counts"
@@ -531,44 +523,32 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
     );
 }
 
+/// The extended tier starts its supervisor as soon as the change is captured,
+/// whatever the user's message history looks like.
 #[test]
-fn one_governing_message_skips_the_intent_analyst() {
-    let mut seed = seed();
-    seed.tier = ReviewTier::Extended;
-    let (mut driver, _) = TurnReviewDriver::start(seed);
-    let requests = driver.delta_captured(changed_delta());
-    assert!(
-        requests.contains(&ReviewRequest::StartRole {
-            role: SUPERVISOR_ROLE.to_string(),
-            fresh: true
-        }),
-        "a self-contained prompt reaches the supervisor verbatim: {requests:?}"
-    );
-    assert!(
-        !requests.contains(&ReviewRequest::StartRole {
-            role: INTENT_ROLE.to_string(),
-            fresh: true
-        }),
-        "no analyst runs when there is nothing to reconcile"
-    );
-    let prompt = prompt_text(&driver.role_started(SUPERVISOR_ROLE), SUPERVISOR_ROLE);
-    assert!(prompt.contains(DIRECT_INTENT_CONTEXT));
-}
-
-#[test]
-fn an_empty_intent_brief_fails_the_review_rather_than_proceeding_without_one() {
-    let mut seed = seed();
-    seed.tier = ReviewTier::Extended;
-    seed.user_messages.push(UserMessage::prompt("bound it"));
-    let (mut driver, _) = TurnReviewDriver::start(seed);
-    driver.delta_captured(changed_delta());
-    let requests = driver.role_started(INTENT_ROLE);
-    let command_id = prompted(&requests, INTENT_ROLE);
-    driver.role_turn_completed(&command_id, "   ");
-    assert!(matches!(
-        driver.verdict(),
-        Some(ReviewVerdict::Failed { .. })
-    ));
+fn an_extended_review_starts_the_supervisor_straight_after_the_capture() {
+    for messages in [
+        vec![UserMessage::prompt("add a retry")],
+        vec![
+            UserMessage::prompt("add a retry"),
+            UserMessage::prompt("bound it"),
+        ],
+    ] {
+        let mut seed = seed();
+        seed.tier = ReviewTier::Extended;
+        seed.user_messages = messages;
+        let (mut driver, _) = TurnReviewDriver::start(seed);
+        assert_eq!(
+            driver.delta_captured(changed_delta()),
+            vec![ReviewRequest::StartRole {
+                role: SUPERVISOR_ROLE.to_string(),
+                fresh: true
+            }]
+        );
+        let prompt = prompt_text(&driver.role_started(SUPERVISOR_ROLE), SUPERVISOR_ROLE);
+        assert!(prompt.contains(crate::lanes::INTENT_CONTEXT));
+        assert!(!prompt.contains("intent_brief"));
+    }
 }
 
 #[test]
@@ -655,7 +635,6 @@ fn the_supervisor_launches_the_lanes_it_asks_for_and_waits_for_each() {
         panic!("a findings verdict carries its lane coverage");
     };
     assert_eq!(evidence.lanes.len(), 2);
-    assert!(evidence.intent_available);
 }
 
 #[test]
@@ -722,11 +701,7 @@ fn cancelling_mid_fanout_reaps_every_role_and_keeps_the_baseline() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         paused,
-        BTreeSet::from([
-            INTENT_ROLE.to_string(),
-            SUPERVISOR_ROLE.to_string(),
-            "duplication".to_string(),
-        ]),
+        BTreeSet::from([SUPERVISOR_ROLE.to_string(), "duplication".to_string()]),
         "every started role is reaped"
     );
     assert!(

@@ -20,12 +20,13 @@
 //!
 //! Two tiers share the machine. The *quick* tier runs one general reviewer,
 //! and its findings go straight to the primary agent, which checks them
-//! against source when it acts on them. The *extended* tier runs an intent
-//! analyst when the turn's intent needs reconciling, then a supervisor that
+//! against source when it acts on them. The *extended* tier runs a supervisor that
 //! launches the specialist lanes it thinks are worth running and synthesizes
 //! their reports; it may not conclude while a launched lane is outstanding.
 //! Every role reads the change from the capture itself: the diff and Git's
-//! per-file line counts. Reviewers navigate the code with Bifrost's MCP tools.
+//! per-file line counts. No role is given the primary agent's own messages or
+//! account of its work, only the user's messages, so a reviewer judges the
+//! change against the requirements rather than against the author's framing. Reviewers navigate the code with Bifrost's MCP tools.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -34,10 +35,9 @@ use mj_core::relay::RepoDelta;
 
 use super::delta;
 use super::lanes::{
-    DIRECT_INTENT_CONTEXT, LaneReport, PriorReviewContext, ReviewJob, ReviewSubagentRequest,
-    ReviewTier, SupplementalContext, format_report_injection, intent_prompt, lane_by_id,
-    lane_context, lane_prompt, quick_review_prompt, supervisor_prompt, user_messages_packet,
-    validate_dispatch,
+    LaneReport, PriorReviewContext, ReviewJob, ReviewSubagentRequest, ReviewTier,
+    format_report_injection, lane_by_id, lane_context, lane_prompt, quick_review_prompt,
+    supervisor_prompt, validate_dispatch,
 };
 use super::verdict::{
     LaneOutcome, ReviewLaneEvidence, ReviewPassEvidence, ReviewVerdict, lane_report_is_clean,
@@ -55,8 +55,6 @@ pub struct TurnReviewDriver {
     /// notice emitted after the resolved phase replaces it.
     last_verdict: Option<ReviewVerdict>,
     deltas: Vec<RepoDelta>,
-    /// The intent brief, once the analyst has produced one or been skipped.
-    intent: Option<SupplementalContext>,
     /// Who produces this review's findings, which decides how the corrective
     /// prompt describes them.
     provenance: FindingsProvenance,
@@ -99,7 +97,6 @@ impl TurnReviewDriver {
             phase: TurnReviewPhase::CapturingDelta,
             last_verdict: None,
             deltas: Vec::new(),
-            intent: None,
             provenance,
             queued_reports: Vec::new(),
             outstanding_lanes: BTreeSet::new(),
@@ -151,7 +148,6 @@ impl TurnReviewDriver {
             },
             last_verdict: Some(last_verdict),
             deltas,
-            intent: None,
             provenance: pending.provenance,
             queued_reports: Vec::new(),
             outstanding_lanes: BTreeSet::new(),
@@ -273,8 +269,6 @@ impl TurnReviewDriver {
             tier: self.seed.tier,
             task: self.seed.task.clone(),
             user_messages: self.seed.user_messages.clone(),
-            initial_result: self.seed.initial_result.clone(),
-            trajectory: self.seed.trajectory.clone(),
             diff: delta::workspace_diff(&self.deltas),
             diffstat: delta::combined_diffstat(&self.deltas),
             changed_files: delta::changed_files_table(&self.deltas),
@@ -342,19 +336,9 @@ impl TurnReviewDriver {
         self.status = "starting the reviewer…".to_string();
         match self.seed.tier {
             ReviewTier::Quick => vec![self.start_role(REVIEWER_ROLE, true)],
-            ReviewTier::Extended => {
-                // The supervisor's prompt embeds the intent brief, so it
-                // starts once the analyst has produced one, or at once when
-                // the turn has one self-contained governing prompt.
-                if super::lanes::should_extract_intent(&self.job()) {
-                    vec![self.start_role(INTENT_ROLE, true)]
-                } else {
-                    self.intent = Some(SupplementalContext::available(
-                        DIRECT_INTENT_CONTEXT.to_string(),
-                    ));
-                    vec![self.start_role(SUPERVISOR_ROLE, true)]
-                }
-            }
+            // The supervisor reads the user's messages itself; nothing runs
+            // ahead of it.
+            ReviewTier::Extended => vec![self.start_role(SUPERVISOR_ROLE, true)],
         }
     }
 
@@ -381,21 +365,11 @@ impl TurnReviewDriver {
                 self.status = "the reviewer is reading the change…".to_string();
                 vec![self.prompt_role(REVIEWER_ROLE, "reviewer", prompt)]
             }
-            INTENT_ROLE => {
-                let job = self.job();
-                let prompt = intent_prompt(
-                    &user_messages_packet(&job.user_messages, &job.task),
-                    &job.task,
-                );
-                self.mark_role(INTENT_ROLE, "Intent", RoleState::Running);
-                self.status = "reading what the turn was asked to do…".to_string();
-                vec![self.prompt_role(INTENT_ROLE, "intent", prompt)]
-            }
             SUPERVISOR_ROLE => {
-                let Some(intent) = self.intent.clone() else {
+                if self.awaited.contains_key(SUPERVISOR_ROLE) {
                     return Vec::new();
-                };
-                let prompt = supervisor_prompt(&self.job(), &intent);
+                }
+                let prompt = supervisor_prompt(&self.job());
                 self.mark_role(SUPERVISOR_ROLE, "Supervisor", RoleState::Running);
                 self.supervisor_idle = false;
                 self.status = "the supervisor is reviewing the change…".to_string();
@@ -413,15 +387,6 @@ impl TurnReviewDriver {
         }
     }
 
-    fn maybe_start_supervisor(&mut self) -> Vec<ReviewRequest> {
-        if self.finished() || self.started_roles.contains(SUPERVISOR_ROLE) || self.intent.is_none()
-        {
-            return Vec::new();
-        }
-        self.status = "starting the supervisor…".to_string();
-        vec![self.start_role(SUPERVISOR_ROLE, true)]
-    }
-
     /// A role finished its turn.
     pub fn role_turn_completed(&mut self, command_id: &str, answer: &str) -> Vec<ReviewRequest> {
         let Some(role) = self
@@ -435,22 +400,6 @@ impl TurnReviewDriver {
         self.awaited.remove(&role);
         match role.as_str() {
             REVIEWER_ROLE => self.reviewer_reported(answer),
-            INTENT_ROLE => {
-                self.mark_role(INTENT_ROLE, "Intent", RoleState::Clean);
-                if answer.trim().is_empty() {
-                    // mj tolerated an unavailable brief because its review was
-                    // invisible; Hel's is visible and cumulative, so failing
-                    // loudly costs one keypress to retry and loses no coverage.
-                    return self
-                        .request_failed("the intent analyst returned an empty brief".to_string());
-                }
-                self.intent = Some(SupplementalContext::available(answer.to_string()));
-                let mut requests = vec![ReviewRequest::PauseRole {
-                    role: INTENT_ROLE.to_string(),
-                }];
-                requests.extend(self.maybe_start_supervisor());
-                requests
-            }
             SUPERVISOR_ROLE => self.supervisor_reported(answer),
             lane_id => {
                 let lane_id = lane_id.to_string();
@@ -574,10 +523,6 @@ impl TurnReviewDriver {
             let mut verdict = synthesis_verdict(answer);
             if let ReviewVerdict::Findings { evidence, .. } = &mut verdict {
                 evidence.lanes = self.lane_evidence.clone();
-                if let Some(intent) = &self.intent {
-                    evidence.intent_brief = intent.body.clone();
-                    evidence.intent_available = !intent.unavailable;
-                }
             }
             return self.reach_verdict(verdict);
         }

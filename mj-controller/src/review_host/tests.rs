@@ -149,9 +149,14 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
             "support parse_range",
             "also finish the parser error path",
         ],
-        "intent receives real prompts in chronological order"
+        "reviewers receive real prompts in chronological order"
     );
-    assert!(!seed.trajectory.contains("HARNESS NOTE"));
+    assert!(
+        seed.user_messages
+            .iter()
+            .all(|message| !message.text.contains("HARNESS NOTE")),
+        "harness notes are not user messages"
+    );
 
     // A corrective-only pass still has no new user prompt, but retains the
     // latest real prompt as its current outer task.
@@ -2438,10 +2443,11 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
     );
     for role in [
         mj_core::review::driver::REVIEWER_ROLE,
-        // An older worker may still run the removed quick-tier validator.
+        // An older worker may still run the removed quick-tier validator or
+        // the removed extended-tier intent analyst.
         "validator",
+        "intent",
         mj_core::review::driver::SUPERVISOR_ROLE,
-        mj_core::review::driver::INTENT_ROLE,
     ] {
         assert!(
             paused.iter().any(|paused| paused == role),

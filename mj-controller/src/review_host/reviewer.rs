@@ -36,21 +36,16 @@ pub(super) async fn launch_role(
 ) -> Result<(), String> {
     // A specialist lane's analyzers are its identity, so it gets the `slopcop`
     // set as well as navigation; every other role navigates and reads rather
-    // than running analyzers. The intent analyst gets no tools at all: it
-    // reads the user's messages, not the code.
+    // than running analyzers.
     let lane = mj_review::lanes::lane_by_id(role).is_some();
-    let mcp_servers = if role == INTENT_ROLE {
-        Vec::new()
-    } else {
-        mj_review::bifrost::review_mcp_servers(
-            repositories,
-            if lane {
-                mj_review::lanes::LANE_BIFROST_TOOLSET
-            } else {
-                mj_review::lanes::SUPERVISOR_BIFROST_TOOLSET
-            },
-        )
-    };
+    let mcp_servers = mj_review::bifrost::review_mcp_servers(
+        repositories,
+        if lane {
+            mj_review::lanes::LANE_BIFROST_TOOLSET
+        } else {
+            mj_review::lanes::SUPERVISOR_BIFROST_TOOLSET
+        },
+    );
     // Only the supervisor may launch specialists.
     let dispatch_tool = role == SUPERVISOR_ROLE;
     let staged = {
@@ -323,10 +318,11 @@ fn is_turn_review_command(command_id: &str) -> bool {
     command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
 }
 
-/// The quick tier's validator, which reviews no longer run. A worker that
-/// predates its removal may still have one running when a review was
-/// interrupted, so the leftover sweep stops it like any other turn-review role.
-const LEGACY_VALIDATOR_ROLE: &str = "validator";
+/// The quick tier's validator and the extended tier's intent analyst, which
+/// reviews no longer run. A worker that predates their removal may still have
+/// one running when a review was interrupted, so the leftover sweep stops them
+/// like any other turn-review role.
+const LEGACY_ROLES: [&str; 2] = ["validator", "intent"];
 
 /// Stops, in the worker, every reviewing role a turn review left running
 /// when the daemon that drove it went away.
@@ -341,8 +337,9 @@ const LEGACY_VALIDATOR_ROLE: &str = "validator";
 /// stopped only while it runs a turn review's prompt. The other roles belong
 /// to turn reviews alone; pausing one that is not running does nothing.
 pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
-    use mj_core::review::driver::{INTENT_ROLE, REVIEWER_ROLE, SUPERVISOR_ROLE};
-    let mut roles = vec![LEGACY_VALIDATOR_ROLE, INTENT_ROLE, SUPERVISOR_ROLE];
+    use mj_core::review::driver::{REVIEWER_ROLE, SUPERVISOR_ROLE};
+    let mut roles = LEGACY_ROLES.to_vec();
+    roles.push(SUPERVISOR_ROLE);
     roles.extend(mj_review::lanes::REVIEW_LANES.iter().map(|lane| lane.id));
     let status = handle
         .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
@@ -489,19 +486,18 @@ pub fn resolution_notice(
 /// Builds the review's seed from the session's own projection.
 ///
 /// This is the daemon-side twin of what the chat used to read out of its view
-/// state: the latest user prompt is the task, all chronological user messages
-/// are the intent context, the agent's closing message is the result,
-/// and a compact trajectory says what it did.
+/// state: the latest user prompt is the task, and all chronological user
+/// messages are the intent context. Nothing the primary agent wrote is
+/// included, so reviewers judge the change against what the user asked rather
+/// than against the author's own account of it.
 pub(super) fn seed_from_session(
     session: &MaterializedSession,
     tier: ReviewTier,
     state: &TurnReviewState,
     _trigger: &str,
 ) -> TurnReviewSeed {
-    let reviewed_through = state.reviewed_through_ordinal;
     let mut task = String::new();
     let mut user_messages = Vec::new();
-    let mut initial_result = String::new();
 
     let context_start = session
         .transcript
@@ -515,59 +511,33 @@ pub(super) fn seed_from_session(
         .iter()
         .filter(|item| context_start == 0 || item.position > context_start)
     {
-        match &item.body {
-            mj_core::state::TranscriptBody::User { content } => {
-                let text = mj_core::transcript::materialized_content_text(content);
-                let text = text.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                if mj_core::second_opinion::is_control_origin_prompt(text)
-                    || mj_core::continuation::is_generated_prompt(
-                        item.stable_id
-                            .strip_prefix("user:")
-                            .unwrap_or(&item.stable_id),
-                    )
-                {
-                    continue;
-                }
-                task = text.to_owned();
-                // The intent analyst needs the complete chronological user
-                // history to distinguish a current steering prompt from an
-                // earlier requirement. `task` separately identifies the
-                // latest outer prompt.
-                user_messages.push(UserMessage::prompt(text));
-            }
-            mj_core::state::TranscriptBody::Agent { chunks, .. } => {
-                if !item.is_nonempty_agent_message() {
-                    continue;
-                }
-                let text = mj_core::transcript::materialized_chunks_text(chunks);
-                let text = text.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                initial_result = text.to_owned();
-            }
-            _ => {}
+        let mj_core::state::TranscriptBody::User { content } = &item.body else {
+            continue;
+        };
+        let text = mj_core::transcript::materialized_content_text(content);
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
         }
+        if mj_core::second_opinion::is_control_origin_prompt(text)
+            || mj_core::continuation::is_generated_prompt(
+                item.stable_id
+                    .strip_prefix("user:")
+                    .unwrap_or(&item.stable_id),
+            )
+        {
+            continue;
+        }
+        task = text.to_owned();
+        // Reviewers need the complete chronological user history to
+        // tell a current steering prompt from an earlier requirement.
+        // `task` separately identifies the latest outer prompt.
+        user_messages.push(UserMessage::prompt(text));
     }
-    let mut summary = mj_transcript::summary::TranscriptSummary::from_materialized(session);
-    summary.entries.retain(|entry| {
-        entry.position > reviewed_through
-            && !(entry.role == mj_transcript::summary::SummaryRole::User
-                && (mj_core::second_opinion::is_control_origin_prompt(&entry.text)
-                    || mj_core::continuation::is_generated_prompt(
-                        entry.id.strip_prefix("user:").unwrap_or(&entry.id),
-                    )))
-    });
-    let trajectory = summary.render(mj_review::lanes::LANE_TRAJECTORY_LIMIT);
     TurnReviewSeed {
         tier,
         task,
         user_messages,
-        initial_result,
-        trajectory,
         baselines: state.baselines.clone(),
         through_ordinal: session.applied_event_ordinal,
         prior_review: state.prior_review.clone(),

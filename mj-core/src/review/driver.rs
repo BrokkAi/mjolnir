@@ -124,8 +124,6 @@ pub enum TurnReviewPhase {
 pub const REVIEWER_ROLE: &str = "reviewer";
 /// The extended tier's supervisor, which owns the verdict.
 pub const SUPERVISOR_ROLE: &str = "supervisor";
-/// The extended tier's intent analyst.
-pub const INTENT_ROLE: &str = "intent";
 
 /// How every command a turn review sends a reviewing role begins, so a
 /// reviewer's running prompt says which kind of review it belongs to.
@@ -139,10 +137,6 @@ pub struct TurnReviewSeed {
     pub task: String,
     /// All real user messages in chronological order, excluding harness notes.
     pub user_messages: Vec<UserMessage>,
-    /// The primary's closing message for the reviewed work.
-    pub initial_result: String,
-    /// A compact rendering of what the primary did.
-    pub trajectory: String,
     /// Baselines the capture is taken against.
     pub baselines: BTreeMap<PathBuf, String>,
     /// The transcript ordinal a completed review advances to.
