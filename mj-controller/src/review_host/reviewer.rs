@@ -8,6 +8,16 @@ pub(super) fn prompt_command(prompt: String) -> RelayCommand {
     }
 }
 
+/// Runs one reviewer action for a running review.
+///
+/// A foreground operation can hold the session's worker for a few seconds
+/// while a review runs: an export's checkpoint, a recovery copy that started
+/// just before the review's hold, a move. The worker then refuses or cancels
+/// the reviewer action, which did nothing, so the review waits that operation
+/// out and asks again instead of failing (3444, 2026-10-04: an export's
+/// checkpoint refused the follow-up review's reviewer launch). Preparation has
+/// the same rule (`after_background_work`); this covers the running review.
+/// Any other error, or one that outlasts [`LIFECYCLE_WAIT`], is returned.
 pub(super) async fn reviewer_action(
     control: &SessionManagerControl,
     session_id: &str,
@@ -18,11 +28,38 @@ pub(super) async fn reviewer_action(
         .session(session_id.to_owned())
         .await
         .map_err(|error| format!("{error:#}"))?;
-    handle
-        .reviewer_as(role, action)
-        .await
-        .map_err(|error| format!("{error:#}"))
+    let deadline = tokio::time::Instant::now() + LIFECYCLE_WAIT;
+    let mut pause = LEASE_RETRY_PAUSE;
+    loop {
+        match handle
+            .reviewer_as(role.clone(), action.clone())
+            .await
+            .map_err(|error| format!("{error:#}"))
+        {
+            Err(reason)
+                if preempted_by_lifecycle(&reason)
+                    && tokio::time::Instant::now() + pause < deadline =>
+            {
+                tracing::info!(
+                    %session_id,
+                    operation = action.operation_name(),
+                    %reason,
+                    "a running review waits for another operation on the session"
+                );
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(LIFECYCLE_RETRY_PAUSE_MAX);
+            }
+            outcome => return outcome,
+        }
+    }
 }
+
+/// How long a running review's reviewer action waits out a foreground
+/// operation holding the session before the review reports the refusal.
+pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The longest pause between attempts while a running review waits.
+const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Stages the configured reviewer profile and starts one role under it.
 pub(super) async fn launch_role(

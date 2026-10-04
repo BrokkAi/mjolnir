@@ -2756,3 +2756,65 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
     );
     host.shutdown().await.expect("shutdown the host");
 }
+
+/// A running review waits out a foreground operation that briefly holds the
+/// worker. Here the reviewer's launch is refused once the way a checkpoint
+/// (an export, a recovery copy) refuses it; the review asks again and goes on
+/// to prompt the reviewer instead of failing (3444, 2026-10-04).
+#[tokio::test]
+async fn a_reviewer_launch_refused_by_a_checkpoint_is_retried() {
+    let session = session_id("startrefuse");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Delta {
+        repositories: vec![mj_core::relay::RepoDelta {
+            root: PathBuf::from("/workspace/app"),
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
+            ..Default::default()
+        }],
+    }));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
+        .await;
+    let _ = reply.send(Err(
+        "relay 2.28.0 could not perform reviewer_start: relay rejected request (InvalidState): \
+         worker is reserved for checkpoint or replacement; reviewer work was not admitted"
+            .to_owned(),
+    ));
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Start { .. }))
+        .await;
+    let _ = reply.send(Ok(ReviewerOutcome::Started(Box::new(
+        crate::worker_client::StartedReviewer {
+            native_session_id: None,
+            config_options: Vec::new(),
+            reused: false,
+            state: operational(),
+        },
+    ))));
+    let (_, action, _reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Submit { .. }))
+        .await;
+    assert!(matches!(action, ReviewerAction::Submit { .. }));
+    assert!(
+        host.view(session)
+            .is_none_or(|view| !matches!(view.phase, TurnReviewPhase::Verdict(_))),
+        "the refused launch did not end the review: {:?}",
+        host.view(session)
+    );
+    host.shutdown().await.unwrap();
+}
