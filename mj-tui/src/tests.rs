@@ -6020,3 +6020,20 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
     );
     assert_eq!(dashboard.working_subagent_count_for(&parent), 1);
 }
+
+/// User request 2026-10-04: the Sessions border title is padded like every
+/// other pane title, so it reads `╭ Sessions ─` rather than `╭Sessions─`.
+#[test]
+fn the_sessions_title_is_padded_like_the_other_pane_titles() {
+    let mut dashboard = dashboard_with_attention_mix();
+    dashboard.set_active_workspace(Some("default".into()));
+    let lines = drawn(&mut dashboard, 160, 24);
+    assert!(
+        lines.iter().any(|line| line.starts_with("╭ Sessions ─")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("╭Sessions")),
+        "{lines:#?}"
+    );
+}

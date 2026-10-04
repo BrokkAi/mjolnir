@@ -1186,7 +1186,13 @@ pub(crate) fn sessions_title(
     let budget = usize::from(pane_title_content_width(width, maximize_enabled));
     if workspace_name.is_empty() {
         return SessionsTitle {
-            line: Line::raw(truncate_to_cells(" Sessions ", budget, Truncate::SUMMARY)),
+            // Padded like every other pane title when it fits; a narrow
+            // minimized pane spends its few cells on letters instead.
+            line: Line::raw(if " Sessions ".len() <= budget {
+                " Sessions ".to_owned()
+            } else {
+                truncate_to_cells("Sessions", budget, Truncate::SUMMARY)
+            }),
             clear_chip: None,
         };
     }

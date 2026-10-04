@@ -1018,14 +1018,14 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
         return;
     }
     let focused = dashboard.focus() == crate::Focus::Workspaces;
-    let branded_title = Line::from(vec![
-        Span::styled(format!(" {} ", theme::glyphs().spark), theme::title(true)),
-        Span::styled("Workspaces ", theme::title(focused)),
-    ]);
-    // The product name sits beside the build number on the right; the version
-    // keeps its muted, non-bold stamp style.
+    let title = Line::from(Span::styled(WORKSPACES_TITLE, theme::title(focused)));
+    // The product mark and name sit beside the build number on the right; the
+    // version keeps its muted, non-bold stamp style.
     let stamp = Line::from(vec![
-        Span::styled(" MJOLNIR", theme::title(true)),
+        Span::styled(
+            format!(" {} MJOLNIR", theme::glyphs().spark),
+            theme::title(true),
+        ),
         Span::styled(
             format!(" {} ", dashboard.version_label),
             theme::muted().remove_modifier(Modifier::BOLD),
@@ -1033,12 +1033,6 @@ pub(crate) fn render_workspace_tabs(frame: &mut Frame, area: Rect, dashboard: &m
     ])
     .right_aligned();
     let stamp_width = stamp.width();
-    let title =
-        if branded_title.width() + stamp_width + BORDER_CORNER_CELLS <= usize::from(area.width) {
-            branded_title
-        } else {
-            Line::raw(WORKSPACES_TITLE)
-        };
     let title_width = title.width();
     let mut block = theme::panel(focused).title(title);
     // The pane sits at the top of every dashboard, so its border is where the

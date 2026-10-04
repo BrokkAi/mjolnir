@@ -355,7 +355,7 @@ fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_set
     for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
         theme::with_symbols(symbols, || {
             let unfiltered = sessions_title("", 120, true, false);
-            assert_eq!(unfiltered.line.to_string(), "Sessions", "{symbols:?}");
+            assert_eq!(unfiltered.line.to_string(), " Sessions ", "{symbols:?}");
             assert_eq!(unfiltered.clear_chip, None, "{symbols:?}");
 
             for label in ["working", "3 hidden · working"] {
@@ -4311,7 +4311,7 @@ fn focused_panes_use_quiet_rounded_borders_and_accent_titles_without_focus_label
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("╭Sessions"));
+    assert!(rendered.contains("╭ Sessions "));
     assert!(rendered.contains("Targets"));
     assert!(!rendered.contains("[focused]"));
 
