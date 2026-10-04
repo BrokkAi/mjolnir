@@ -1701,7 +1701,17 @@ impl Controller {
             .as_ref()
             .and_then(ResumeConversion::raw_to_workspace)
         {
-            crate::database::rebind_session_bundle(session_id, &conversion.bundle_id)?;
+            // The catalog may already know the converted bundle as an alias of
+            // an existing project (an imported checkout of a repository another
+            // bundle covers). The context then holds the canonical project, and
+            // the record follows it so publication sees an unchanged context.
+            let bundle_id =
+                crate::database::rebind_session_bundle(session_id, &conversion.bundle_id)?;
+            self.state
+                .sessions
+                .get_mut(session_id)
+                .expect("the resumed session is in state")
+                .bundle_id = bundle_id;
         }
         // Resume changes target resources, while titles and drafts remain
         // owned by their independent writers throughout provisioning.
@@ -2031,7 +2041,7 @@ impl Controller {
         // The record went back, so the history goes back with it.
         if record.bundle_id != current.bundle_id {
             let bundle_id = record.bundle_id.clone();
-            crate::database::rebind_session_bundle(session_id, &bundle_id)?;
+            record.bundle_id = crate::database::rebind_session_bundle(session_id, &bundle_id)?;
         }
         // Rollback restores only resources owned by this attempt, preserving
         // client edits committed while provisioning was in flight.

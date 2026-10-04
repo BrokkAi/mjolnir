@@ -5877,3 +5877,49 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         Some(fixed)
     );
 }
+
+/// A converted session's bundle may already be an alias of another project in
+/// the catalog. The context then holds the canonical project, and rebinding
+/// reports it so the resumed record can follow (resume publication rejects a
+/// record whose bundle differs from its context).
+#[test]
+fn rebinding_to_an_aliased_bundle_reports_the_canonical_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        1,
+        Some("2026-08-12T00:00:00Z"),
+        "fix parser",
+    )
+    .unwrap();
+    assert_eq!(
+        rebind_session_bundle_to(&database, "session-1", "project-2").unwrap(),
+        "project-2",
+        "a bundle the catalog does not alias is its own project"
+    );
+    open(&database)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO project_catalog(bundle_id, project_key, snapshot_json, hidden)
+             VALUES ('project-2', 'key-project-2', '{}', 0);
+             INSERT INTO project_aliases(bundle_id, canonical_id, snapshot_json, config_pending)
+             VALUES ('import-project-3', 'project-2', '{}', 0);",
+        )
+        .unwrap();
+    assert_eq!(
+        rebind_session_bundle_to(&database, "session-1", "import-project-3").unwrap(),
+        "project-2"
+    );
+    let context: String = open(&database)
+        .unwrap()
+        .query_row(
+            "SELECT bundle_id FROM session_contexts WHERE session_id = 'session-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(context, "project-2");
+}

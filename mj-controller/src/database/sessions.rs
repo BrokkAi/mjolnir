@@ -1433,7 +1433,12 @@ pub(super) fn record_recovery_failure_to(
 /// it. Resume calls this when it converts a session between its raw and bundle
 /// representations: the project is the same, so its history follows it, and
 /// only the name Hel files it under changes.
-pub fn rebind_session_bundle(session_id: &str, bundle_id: &str) -> Result<()> {
+/// Files the session under `bundle_id`'s project and returns the bundle id the
+/// session context now holds: the canonical project when the catalog knows
+/// `bundle_id` as an alias of another bundle. A caller keeping the session
+/// record must adopt the returned id, because resume publication checks the
+/// record's bundle against the context.
+pub fn rebind_session_bundle(session_id: &str, bundle_id: &str) -> Result<String> {
     let session_id = session_id.to_owned();
     let bundle_id = bundle_id.to_owned();
     submit_database_write("rebind_session_bundle", move |_| {
@@ -1445,7 +1450,7 @@ pub(super) fn rebind_session_bundle_to(
     path: &Path,
     session_id: &str,
     bundle_id: &str,
-) -> Result<()> {
+) -> Result<String> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let canonical_bundle = super::projects::canonical_project_id(&tx, bundle_id)?;
@@ -1461,7 +1466,7 @@ pub(super) fn rebind_session_bundle_to(
         )?;
     }
     tx.commit()?;
-    Ok(())
+    Ok(canonical_bundle)
 }
 
 #[cfg(test)]
