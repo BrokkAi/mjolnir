@@ -47,6 +47,49 @@ function question(id, message) {
   };
 }
 
+function claudeTwoQuestionRequest() {
+  const choice = (id, title, description) => ({
+    id,
+    title,
+    description,
+    required: false,
+    secret: false,
+    custom_answer_for: null,
+    custom_answer_option: null,
+    kind: 'single_select',
+    default: null,
+    options: [
+      { value: 'first', title: 'First choice', description: 'The first offered answer.' },
+      { value: 'second', title: 'Second choice', description: 'The second offered answer.' },
+    ],
+  });
+  const other = id => ({
+    id,
+    title: 'Other',
+    description: 'Type your own answer, or add a note to the option you chose above (optional).',
+    required: false,
+    secret: false,
+    custom_answer_for: id.replace('_custom', ''),
+    custom_answer_option: null,
+    kind: 'text',
+    default: null,
+    min_length: null,
+    max_length: null,
+    pattern: null,
+    format: null,
+  });
+  return {
+    id: 'claude-two-question',
+    message: 'Please answer the following questions.',
+    fields: [
+      choice('question_0', 'Release', 'Which deployment strategy should I use?'),
+      other('question_0_custom'),
+      choice('question_1', 'Rollback', 'What should trigger an automatic rollback?'),
+      other('question_1_custom'),
+    ],
+  };
+}
+
 function fixtureSnapshot(configOptions = []) {
   return {
     revision: 1,
@@ -372,7 +415,7 @@ test('composer renders current model and effort settings and reconciles refresh 
   await expect(settings).toHaveText('');
 });
 
-test('long question forms scroll without pushing answer controls or the composer off the phone', async ({ page }) => {
+test('long question forms scroll without pushing answer controls or the composer off the phone', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 320, height: 568 });
   const long = question('long-question', 'Answer these three questions.');
   long.fields = [0, 1, 2].map(index => ({
@@ -383,13 +426,37 @@ test('long question forms scroll without pushing answer controls or the composer
     })),
   }));
   const state = await mockViewerApi(page, [long]);
+  // The completed fixture event stream produces a reconnect banner and its
+  // unsent welcome row produces a jump button; neither is part of this layout.
+  await page.addStyleTag({ content: '#connection, #jump-to-latest { display: none !important; }' });
   const panel = page.locator('#elicitations');
   expect(await panel.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
   await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
   await expect(panel.locator('.elicitation-progress')).toContainText('Question 2/3');
   expect(state.actions).toHaveLength(0);
   await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
-  await panel.getByRole('radio', { name: /^Choice 3.5/ }).check();
+  const finalChoice = panel.getByRole('radio', { name: /^Choice 3.5/ });
+  await finalChoice.check();
+  await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
+  await finalChoice.evaluate(input => input.blur());
+  await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);
+  const restoredGeometry = await page.evaluate(() => {
+    const rect = selector => {
+      const bounds = document.querySelector(selector).getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, height: bounds.height };
+    };
+    return {
+      scrollY: window.scrollY,
+      conversation: rect('#conversation'),
+      panel: rect('#elicitations'),
+      composer: rect('#prompt-form'),
+      send: rect('#send-button'),
+    };
+  });
+  await fs.promises.writeFile(
+    testInfo.outputPath('elicitation-phone-restored.json'),
+    JSON.stringify(restoredGeometry, null, 2),
+  );
   await panel.getByRole('button', { name: 'Submit all', exact: true }).scrollIntoViewIfNeeded();
   const send = await page.locator('#send-button').boundingBox();
   expect(send.y + send.height).toBeLessThanOrEqual(569);
@@ -418,6 +485,11 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   const state = await mockViewerApi(page, [question('enum-question', 'Which deployment should be used?')]);
   const card = page.locator('#elicitations .elicitation');
   await expect(card).toContainText('Which deployment should be used?');
+  const messageBeforeForm = await card.locator('.elicitation-message').evaluate(node => {
+    const form = node.parentElement.querySelector('form');
+    return Boolean(node.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(messageBeforeForm).toBe(true);
 
   // The complete option row is the touch target, while the input remains a
   // native radio for keyboard and assistive-technology semantics.
@@ -476,6 +548,131 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   await page.reload();
   await expect(page.locator('#conversation-title')).toHaveText('Plan mode browser test');
   await expect(page.locator('#prompt-text')).toHaveText(draft);
+});
+
+test('phone elicitation prompts stay above choices and the focused answer fits beside its actions', async ({ page }, testInfo) => {
+  await mockViewerApi(page, [claudeTwoQuestionRequest()]);
+  await expect(page.locator('meta[name="viewport"]')).toHaveAttribute(
+    'content', /interactive-widget=resizes-content/,
+  );
+  const card = page.locator('#elicitations .elicitation');
+  const prompt = card.locator('.choice-control .elicitation-question').first();
+  const firstOption = card.locator('.choice-control .choice-option').first();
+  const questionOrder = await prompt.evaluate(node => {
+    const firstChoice = node.closest('.choice-control').querySelector('.choice-option');
+    return Boolean(node.compareDocumentPosition(firstChoice) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(questionOrder).toBe(true);
+  const promptBox = await prompt.boundingBox();
+  const optionBox = await firstOption.boundingBox();
+  expect(promptBox.y + promptBox.height).toBeLessThanOrEqual(optionBox.y);
+  const colors = await prompt.evaluate(node => ({
+    prompt: getComputedStyle(node).color,
+    header: getComputedStyle(node.closest('.choice-control').querySelector('legend')).color,
+  }));
+  expect(colors.prompt).not.toBe(colors.header);
+  const messageBeforeForm = await card.locator('.elicitation-message').evaluate(node => {
+    const form = node.parentElement.querySelector('form');
+    return Boolean(node.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(messageBeforeForm).toBe(true);
+
+  const otherField = card.locator('label.elicitation-field').first();
+  expect(await otherField.evaluate(node => [...node.children].map(child => child.className || child.tagName.toLowerCase())))
+    .toEqual(['elicitation-field-label', 'elicitation-question', 'input']);
+  const other = otherField.locator('input[type="text"]');
+  const subagents = page.locator('#subagents-button');
+  await subagents.evaluate(node => node.classList.remove('hidden'));
+  await page.screenshot({ path: testInfo.outputPath('elicitation-phone-before.png') });
+
+  await other.focus();
+  await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
+  await expect(page.locator('#shell-header')).toBeHidden();
+  await expect(page.locator('#prompt-form')).toBeHidden();
+  await expect(page.locator('#conversation-side')).toBeHidden();
+  await expect(subagents).toBeHidden();
+
+  // Moving focus from the text input to one of the card's buttons blurs first;
+  // the card remains expanded through that button's click/focus interaction.
+  await card.getByRole('button', { name: 'Answer and next', exact: true }).focus();
+  await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
+  await other.focus();
+  await page.setViewportSize({ width: 390, height: 464 });
+  await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
+  await expect.poll(() => page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset').trim(),
+  )).toBe('0px');
+  const measureFocusedAnswer = () => page.evaluate(() => {
+    const panel = document.querySelector('#elicitations');
+    const input = document.querySelector('#elicitations .elicitation input[type="text"]');
+    const actions = document.querySelector('#elicitations .elicitation-actions');
+    const panelRect = panel.getBoundingClientRect();
+    const inputRect = input.getBoundingClientRect();
+    const actionsRect = actions.getBoundingClientRect();
+    return {
+      viewport: { width: document.documentElement.clientWidth, height: window.innerHeight },
+      panel: { top: panelRect.top, bottom: panelRect.bottom },
+      input: { top: inputRect.top, bottom: inputRect.bottom },
+      actions: { top: actionsRect.top, bottom: actionsRect.bottom },
+      keyboardInset: getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset').trim(),
+      bodyClass: document.body.className,
+      activeElement: document.activeElement?.outerHTML.slice(0, 120),
+      panelScrollTop: panel.scrollTop,
+    };
+  });
+  await expect.poll(async () => {
+    const geometry = await measureFocusedAnswer();
+    return geometry.input.top >= geometry.panel.top && geometry.input.bottom <= geometry.actions.top &&
+      geometry.actions.bottom <= geometry.panel.bottom;
+  }).toBe(true);
+  const visible = await measureFocusedAnswer();
+  await fs.promises.writeFile(
+    testInfo.outputPath('elicitation-phone-keyboard.json'),
+    JSON.stringify(visible, null, 2),
+  );
+  expect(visible.input.top).toBeGreaterThanOrEqual(visible.panel.top);
+  expect(visible.input.bottom).toBeLessThanOrEqual(visible.actions.top);
+  expect(visible.actions.bottom).toBeLessThanOrEqual(visible.panel.bottom);
+  await page.screenshot({ path: testInfo.outputPath('elicitation-phone-keyboard.png') });
+
+  await other.evaluate(input => input.blur());
+  await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);
+  await expect(page.locator('#prompt-form')).toBeVisible();
+  await expect(subagents).toBeVisible();
+
+  // Simulate a browser that keeps the layout viewport tall while only the
+  // visual viewport shrinks, as iOS Safari can do without interactive-widget.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await other.focus();
+  await page.evaluate(() => {
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: { height: 464, offsetTop: 0, addEventListener() {}, removeEventListener() {} },
+    });
+    window.dispatchEvent(new Event('resize'));
+  });
+  await expect.poll(() => page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--keyboard-inset').trim(),
+  )).toBe('380px');
+  const fallbackBody = await page.locator('body').boundingBox();
+  expect(fallbackBody.height).toBeCloseTo(464, 0);
+  await page.evaluate(() => {
+    delete window.visualViewport;
+    window.dispatchEvent(new Event('resize'));
+  });
+  await other.evaluate(input => input.blur());
+  await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);
+
+  // The phone-only focus layout must not alter desktop geometry.
+  await page.setViewportSize({ width: 1200, height: 844 });
+  const composerBefore = await page.locator('#prompt-form').boundingBox();
+  await other.focus();
+  await expect(page.locator('#prompt-form')).toBeVisible();
+  const composerAfter = await page.locator('#prompt-form').boundingBox();
+  expect(composerAfter.x).toBe(composerBefore.x);
+  expect(composerAfter.y).toBe(composerBefore.y);
+  expect(composerAfter.width).toBe(composerBefore.width);
+  expect(composerAfter.height).toBe(composerBefore.height);
 });
 
 function multiQuestion(id, message) {

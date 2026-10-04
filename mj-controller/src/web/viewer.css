@@ -599,6 +599,27 @@ pre.entry-body {
   border-color: var(--plan);
 }
 
+.elicitation-heading,
+.elicitation .elicitation-field-label,
+.elicitation .choice-control legend {
+  color: var(--dim);
+}
+
+.elicitation .choice-control legend {
+  font-weight: 600;
+}
+
+.elicitation-question {
+  display: block;
+  color: var(--text);
+  font-weight: 400;
+  white-space: pre-wrap;
+}
+
+.elicitation .choice-control .elicitation-question {
+  margin: 4px 0 8px;
+}
+
 /* Full-row options can make a multi-question form taller than the phone.
  * Scroll that form, not the entire conversation and its pinned composer. */
 #elicitations {
@@ -1989,4 +2010,76 @@ body[data-connection='reconnecting'] .connection {
 
 .elicitation-progress {
   font-weight: 600;
+}
+
+.keyboard-viewport-probe {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 100dvh;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* With a phone keyboard open, the question is the only session content that
+ * needs the short viewport. The form keeps its own scroll and its buttons stay
+ * visible while the transcript and composer are temporarily out of the way. */
+@media (max-width: 640px) {
+  body.elicitation-focused {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - var(--keyboard-inset));
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.elicitation-focused > #shell-header,
+  body.elicitation-focused > #connection,
+  body.elicitation-focused #workspaces,
+  body.elicitation-focused #launch-failures {
+    display: none !important;
+  }
+
+  body.elicitation-focused #app {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  body.elicitation-focused #conversation {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  body.elicitation-focused .conversation-header,
+  body.elicitation-focused #conversation-transition,
+  body.elicitation-focused #conversation-scroll,
+  body.elicitation-focused #jump-to-latest,
+  body.elicitation-focused #turn-review,
+  body.elicitation-focused #conversation-side,
+  body.elicitation-focused #subagents-button,
+  body.elicitation-focused #prompt-form {
+    display: none !important;
+  }
+
+  body.elicitation-focused #elicitations {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+  }
+
+  body.elicitation-focused #elicitations > .elicitation {
+    box-sizing: border-box;
+    min-height: 100%;
+    margin: 0;
+  }
 }

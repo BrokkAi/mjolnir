@@ -5292,20 +5292,21 @@ function buildElicitationForm(form, request, register, onEdit) {
       for (const input of control.querySelectorAll('input')) register(input);
       register(control);
       validateChoices();
+      if (field.description) {
+        const description = el('span', 'elicitation-question', field.description);
+        control.insertBefore(description, control.children[1] || null);
+      }
       wrapper.append(control);
     } else {
       const label = document.createElement('span');
+      label.className = 'elicitation-field-label';
       label.textContent = `${field.title}${field.required ? ' *' : ''}`;
       control = elicitationControl(field);
       control.required = Boolean(field.required) && field.kind !== 'boolean';
       register(control);
-      wrapper.append(label, control);
-    }
-    if (field.description) {
-      const description = document.createElement('span');
-      description.className = 'dim';
-      description.textContent = field.description;
-      wrapper.append(description);
+      wrapper.append(label);
+      if (field.description) wrapper.append(el('span', 'elicitation-question', field.description));
+      wrapper.append(control);
     }
     form.append(wrapper);
     entries.push({ field, control, wrapper, validateChoices });
@@ -5384,7 +5385,7 @@ function buildElicitationForm(form, request, register, onEdit) {
 }
 function buildElicitationCard(session, request) {
   const card = el('section', 'card elicitation');
-  const heading = el('strong', '', request.title || 'Input needed');
+  const heading = el('strong', 'elicitation-heading', request.title || 'Input needed');
   const message = el('pre', 'elicitation-message', request.message);
   const form = document.createElement('form');
   // Submit goes through the current question's validator, not hidden pages.
@@ -8127,23 +8128,111 @@ shells.onclick = async e => {
 // Keyboard inset
 // ---------------------------------------------------------------------------
 //
-// How much of the window the on-screen keyboard is covering, as a custom
-// property the layout reads. The `offsetTop` term is the one naive versions
-// miss: on iOS the visual viewport scrolls within the layout viewport, and
-// without it the composer drifts by exactly that offset.
+// Measure the viewport unit used by the conversation layout so a browser that
+// resizes its content viewport does not have its keyboard inset subtracted a
+// second time. Browsers that keep the layout viewport tall still use the
+// visual viewport difference, including its offset when iOS scrolls it.
+const keyboardViewportProbe = document.createElement('div');
+keyboardViewportProbe.className = 'keyboard-viewport-probe';
+keyboardViewportProbe.setAttribute('aria-hidden', 'true');
+document.documentElement.append(keyboardViewportProbe);
+
 function syncKeyboardInset() {
   const viewport = window.visualViewport;
+  const layoutHeight = keyboardViewportProbe.getBoundingClientRect().height || window.innerHeight;
+  const visibleBottom = viewport ? viewport.height + viewport.offsetTop : layoutHeight;
   const inset = viewport
-    ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+    ? Math.max(0, layoutHeight - visibleBottom)
     : 0;
   document.documentElement.style.setProperty('--keyboard-inset', `${Math.round(inset)}px`);
 }
 
+const elicitationControlSelector =
+  'input, select, textarea, button, [contenteditable="true"]';
+let elicitationPointerActionPending = false;
+
+function focusedElicitationControl(target = document.activeElement) {
+  return target instanceof Element && target.matches(elicitationControlSelector) &&
+      target.closest('#elicitations .elicitation')
+    ? target
+    : null;
+}
+
+function revealFocusedElicitationControl(control) {
+  requestAnimationFrame(() => {
+    if (!control.isConnected || document.activeElement !== control) return;
+    if (control.closest('.elicitation-actions')) return;
+    const panel = elicitations;
+    const panelRect = panel.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const visibleTop = Math.max(panelRect.top, viewport?.offsetTop || 0) + 8;
+    const actions = control.closest('.elicitation')?.querySelector('.elicitation-actions');
+    const actionsTop = actions?.getBoundingClientRect().top ?? panelRect.bottom;
+    const visibleBottom = Math.min(
+      panelRect.bottom,
+      viewport ? viewport.offsetTop + viewport.height : window.innerHeight,
+      actionsTop,
+    ) - 8;
+    const controlRect = control.getBoundingClientRect();
+    if (controlRect.bottom > visibleBottom) {
+      panel.scrollTop += controlRect.bottom - visibleBottom;
+    } else if (controlRect.top < visibleTop) {
+      panel.scrollTop -= visibleTop - controlRect.top;
+    }
+  });
+}
+
+function syncElicitationFocus(target = document.activeElement) {
+  if (elicitationPointerActionPending) return;
+  const control = focusedElicitationControl(target);
+  document.body.classList.toggle('elicitation-focused', Boolean(control));
+  if (control) revealFocusedElicitationControl(control);
+}
+
+elicitations.addEventListener('focusin', event => syncElicitationFocus(event.target));
+elicitations.addEventListener('focusout', event => {
+  // A control-to-button blur happens before the button's click handler. Keep
+  // the focused-card layout until focus really leaves the question card.
+  const next = focusedElicitationControl(event.relatedTarget);
+  if (next) {
+    syncElicitationFocus(next);
+    return;
+  }
+  queueMicrotask(() => syncElicitationFocus());
+});
+document.addEventListener('pointerdown', event => {
+  elicitationPointerActionPending = document.body.classList.contains('elicitation-focused') ||
+    (event.target instanceof Element && Boolean(event.target.closest('#elicitations .elicitation')));
+}, true);
+document.addEventListener('click', () => {
+  if (!elicitationPointerActionPending) return;
+  elicitationPointerActionPending = false;
+  requestAnimationFrame(() => syncElicitationFocus());
+}, true);
+document.addEventListener('pointerup', () => {
+  if (!elicitationPointerActionPending) return;
+  setTimeout(() => {
+    if (!elicitationPointerActionPending) return;
+    elicitationPointerActionPending = false;
+    syncElicitationFocus();
+  }, 0);
+}, true);
+document.addEventListener('pointercancel', () => {
+  if (!elicitationPointerActionPending) return;
+  elicitationPointerActionPending = false;
+  syncElicitationFocus();
+}, true);
+
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', syncKeyboardInset);
   window.visualViewport.addEventListener('scroll', syncKeyboardInset);
+  window.visualViewport.addEventListener('resize', () => syncElicitationFocus());
+  window.visualViewport.addEventListener('scroll', () => syncElicitationFocus());
 }
-window.addEventListener('resize', syncKeyboardInset);
+window.addEventListener('resize', () => {
+  syncKeyboardInset();
+  syncElicitationFocus();
+});
 syncKeyboardInset();
 document.body.dataset.connection = navigator.onLine ? 'online' : 'offline';
 
