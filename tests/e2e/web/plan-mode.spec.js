@@ -458,8 +458,11 @@ test('long question forms scroll without pushing answer controls or the composer
     JSON.stringify(restoredGeometry, null, 2),
   );
   await panel.getByRole('button', { name: 'Submit all', exact: true }).scrollIntoViewIfNeeded();
-  const send = await page.locator('#send-button').boundingBox();
-  expect(send.y + send.height).toBeLessThanOrEqual(569);
+  // The phone composer keeps its send controls hidden until someone starts a
+  // prompt; the compact empty form must still remain below the answer panel.
+  await expect(page.locator('#send-button')).toBeHidden();
+  const composer = await page.locator('#prompt-form').boundingBox();
+  expect(composer.y + composer.height).toBeLessThanOrEqual(569);
   await panel.getByRole('button', { name: 'Submit all', exact: true }).click();
   await waitForActionCount(state, 1);
   expect(state.actions[0].response.content).toEqual({ question_0: '0', question_1: '0', question_2: '4' });

@@ -12,8 +12,11 @@ On a phone, a person should be able to read more of the conversation while writi
 - [x] (2026-10-04 13:32Z) Removed browser voice controls, capture code, assets, routes, server request wiring, tests, offline-cache entries, and web-viewer instructions. Preserved the shared dictation module and native auth/provider dependencies pending the parent's review of the now-unreferenced helper.
 - [x] (2026-10-04 13:44Z) Passed all 71 JavaScript unit tests, `cargo fmt --all -- --check`, all 263 tests selected by `cargo test -p brokk-mj-controller server::`, and `cargo clippy -p brokk-mj-controller --all-targets -- -D warnings`.
 - [x] (2026-10-04 13:44Z) Prepared the first voice-removal commit; its server test compile took 10m39s and its Clippy check took 5m46s using the normal configured Cargo build setup.
-- [ ] Implement the narrow-screen status row, focus-aware composer actions and height, compact Earlier messages control, and small header reductions while leaving desktop layout and keyboard/elicitation code unchanged.
-- [ ] Add deterministic Playwright coverage at 390 by 844, record idle and focused feed measurements, capture screenshots, run the full requested validation, and commit the layout as the second commit.
+- [x] (2026-10-04 14:15Z) Implemented the phone status row, focus-aware composer actions and height, compact Earlier messages control, and phone header spacing. Desktop keeps the Sub-agents button in its original composer location.
+- [x] (2026-10-04 14:15Z) Added four deterministic phone browser cases, saved idle/focused/expanded screenshots, and recorded feed measurements. All four new cases pass.
+- [x] (2026-10-04 14:15Z) Re-ran 71 JavaScript unit tests, `cargo fmt --all -- --check`, 263 controller server tests, and controller Clippy; all pass.
+- [x] (2026-10-04 14:15Z) Full deterministic Playwright run completed with 121 passed and two remaining phone layout failures outside this change's scope; details and logs are recorded below and in the handback.
+- [x] (2026-10-04 14:34Z) Made the compact-cards fixture return successful client-state and draft responses; all 20 compact-cards tests now pass. Final deterministic run has 121 passed, three skipped, and the same two out-of-scope phone viewport failures.
 
 ## Surprises & Discoveries
 
@@ -23,6 +26,12 @@ On a phone, a person should be able to read more of the conversation while writi
   Evidence: `cargo test -p mj-controller server::` cannot resolve a package; use `cargo test -p brokk-mj-controller server::` instead.
 - Observation: The server's `DictationRequest` queue was only consumed by the browser endpoint. Terminal dictation calls shared auth and provider code directly.
   Evidence: Repository search after removal found no production callers of `crate::dictation::execute`; `mj-chat/src/speech.rs` continues to use the shared client APIs.
+- Observation: The browser voice block also contained the send-disabled-state helper. Removing it with the voice implementation caused an undefined-function browser error; the helper was restored without the voice-active check, and the new phone send-tap case now passes.
+  Evidence: `phone composer hides actions until intent and keeps Send tappable after typing` passes in `phone-layout.spec.js`.
+- Observation: The full browser project still has two phone layout failures outside this change's scope: a project chooser row ends at y=854.95 in an 844px viewport, and a long elicitation moves the compact composer bottom to y=615 in a 568px viewport. The phone conversation changes do not edit chooser or elicitation layout code; the question test was updated only to expect the new hidden idle Send control.
+  Evidence: `tests/e2e/web/test-results/new-session-compact-source-950b1-pository-visible-on-a-phone-deterministic/error-context.md` and `tests/e2e/web/test-results/plan-mode-long-question-fo-cdb09--the-composer-off-the-phone-deterministic/error-context.md`.
+- Observation: The desktop composer geometry test raced with its unmocked draft save: after 400ms, the 404 error paragraph changed the form height. The compact-cards fixture now provides empty client state and accepts draft saves; its full 20-test file passes.
+  Evidence: `tests/e2e/web/compact-cards.spec.js` mocks both session client-state and draft routes.
 
 ## Decision Log
 
@@ -35,10 +44,15 @@ On a phone, a person should be able to read more of the conversation while writi
 - Decision: Use phone-only CSS and a JavaScript class that reflects actual focus and composer contents. Do not change the viewport metadata, visualViewport keyboard sizing, or elicitation code.
   Rationale: The task assigns those areas elsewhere and asks that desktop remain unchanged.
   Date/Author: 2026-10-04, Codex.
+- Decision: Update the existing long-question browser assertion to account for Send being intentionally hidden while the prompt is empty and idle; retain its composer-in-viewport check.
+  Rationale: This keeps the existing layout regression meaningful without changing question-card behavior or styles. Its remaining viewport failure is reported to the owner of that concurrent work.
+  Date/Author: 2026-10-04, Codex.
 
 ## Outcomes & Retrospective
 
-The browser voice surface and endpoint are removed, and the first change set passes all requested checks run so far. The phone layout, browser interaction tests, screenshots, final measurements, and two commits remain.
+The browser voice surface and endpoint are removed in commit `b32d4116`. The phone layout and four focused interaction tests are complete in the next commit. At 390 by 844, the transcript scroll box grew from 438.09px to 609px idle and 577px focused; visible transcript space grew from about 378.09px to 595px idle and 576.5px focused. The prompt box is 42px idle and 76px focused. The expanded task list spans 370px and scrolls inside a 40dvh content region.
+
+The full deterministic project reports 121 passed, three skipped, and two phone-layout failures described above. Unit tests, formatting, controller server tests, and Clippy pass. Native dictation and the shared controller dictation module remain untouched; the latter has no production executor caller after browser route removal and is retained pending parent review.
 
 ## Context and Orientation
 

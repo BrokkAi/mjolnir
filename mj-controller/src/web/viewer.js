@@ -54,6 +54,7 @@ const login = document.querySelector('#login'),
   moveNextButton = document.querySelector('#move-next'),
   moveError = document.querySelector('#move-error'),
   actionError = document.querySelector('#action-error'),
+  conversationPage = document.querySelector('#conversation'),
   feed = document.querySelector('#conversation-feed'),
   feedScroll = document.querySelector('#conversation-scroll'),
   conversationTransition = document.querySelector('#conversation-transition'),
@@ -69,8 +70,11 @@ const login = document.querySelector('#login'),
   sendButton = document.querySelector('#send-button'),
   queue = document.querySelector('#conversation-queue'),
   shells = document.querySelector('#conversation-shells'),
+  conversationStatus = document.querySelector('#conversation-status'),
   conversationSide = document.querySelector('#conversation-side'),
   conversationSummary = conversationSide?.querySelector('summary'),
+  conversationSummaryFull = conversationSummary?.querySelector('.conversation-summary-full'),
+  conversationSummaryPhone = conversationSummary?.querySelector('.conversation-summary-phone'),
   queueHeading = queue?.previousElementSibling,
   shellsHeading = shells?.previousElementSibling,
   backgroundTasks = document.querySelector('#conversation-background-tasks'),
@@ -79,7 +83,9 @@ const login = document.querySelector('#login'),
   reviewHost = document.querySelector('#turn-review'),
   promptSettings = document.querySelector('#prompt-settings'),
   subagentsButton = document.querySelector('#subagents-button'),
+  subagentsDesktopButton = document.querySelector('#subagents-button-desktop'),
   promptText = document.querySelector('#prompt-text'),
+  promptForm = document.querySelector('#prompt-form'),
   attachments = document.querySelector('#attachments'),
   attachImage = document.querySelector('#attach-image'),
   imagePicker = document.querySelector('#image-picker');
@@ -5079,11 +5085,35 @@ function renderQueue(session) {
     if (prompts.length) labels.push(`queued prompts (${prompts.length})`);
     if (running.length) labels.push(`shell commands (${running.length})`);
     if (tasks.length) labels.push(`background tasks (${tasks.length})`);
-    conversationSummary.textContent = labels.length
+    const fullLabel = labels.length
       ? labels.map(label => label[0].toUpperCase() + label.slice(1)).join(', ')
       : 'Shell commands';
+    if (typeof conversationSummaryFull !== 'undefined' && conversationSummaryFull) {
+      conversationSummaryFull.textContent = fullLabel;
+    } else {
+      conversationSummary.textContent = fullLabel;
+    }
+    if (typeof conversationSummaryPhone !== 'undefined' && conversationSummaryPhone) {
+      const compactLabels = [];
+      if (tasks.length) compactLabels.push(`Tasks ${tasks.length}`);
+      if (running.length) compactLabels.push(`Shells ${running.length}`);
+      if (prompts.length) compactLabels.push(`Queue ${prompts.length}`);
+      conversationSummaryPhone.textContent = compactLabels.join(' · ');
+    }
   }
   conversationSide.hidden = prompts.length === 0 && running.length === 0 && tasks.length === 0;
+  if (typeof syncConversationStatus === 'function') syncConversationStatus();
+}
+
+function syncConversationStatus() {
+  if (typeof conversationStatus === 'undefined' || !conversationStatus) return;
+  const subagentsVisible = typeof subagentsButton !== 'undefined'
+    && subagentsButton
+    && !subagentsButton.classList.contains('hidden');
+  const detailsVisible = typeof conversationSide !== 'undefined'
+    && conversationSide
+    && !conversationSide.hidden;
+  conversationStatus.classList.toggle('status-empty', !subagentsVisible && !detailsVisible);
 }
 
 function backgroundTaskKey(sessionId, taskId) {
@@ -5684,6 +5714,7 @@ let composerGeneration = 0;
 function setComposerText(text) {
   composerGeneration += 1;
   promptText.textContent = text;
+  syncComposerLayout();
 }
 function placeComposerCaretAtEnd() {
   const selection = window.getSelection();
@@ -5769,6 +5800,7 @@ function composerInputChanged() {
   composerRevision += 1;
   if (!composerPreserveEmptyBreak && !promptText.textContent && promptText.childNodes.length)
     promptText.replaceChildren();
+  syncComposerLayout();
 }
 
 function syncSendButtonDisabled() {
@@ -5783,6 +5815,23 @@ function syncSendButtonDisabled() {
   sendButton.disabled = !canPrompt
     || promptInFlight
     || promptImages.some(image => image.state !== 'ready');
+}
+
+let composerActionPointerDown = false;
+function syncComposerLayout() {
+  if (typeof promptForm === 'undefined' || !promptForm) return;
+  const editor = typeof promptText === 'undefined' ? null : promptText;
+  const editorFocused = Boolean(editor && document.activeElement === editor);
+  const hasText = Boolean(editor?.textContent?.trim());
+  const hasAttachments = typeof promptImages !== 'undefined' && promptImages.length > 0;
+  promptForm.classList.toggle(
+    'composer-has-intent',
+    editorFocused || hasText || hasAttachments || composerActionPointerDown,
+  );
+  promptForm.classList.toggle('composer-expanded', editorFocused || hasText);
+  if (typeof conversationPage !== 'undefined' && conversationPage) {
+    conversationPage.classList.toggle('composer-focused', editorFocused);
+  }
 }
 
 function imageDimensions(file) {
@@ -5963,6 +6012,7 @@ function renderAttachments() {
     attachments.append(chip);
   }
   syncSendButtonDisabled();
+  syncComposerLayout();
 }
 // ---------------------------------------------------------------------------
 // Drafts and history
@@ -7053,12 +7103,16 @@ function renderConversationHeader(session) {
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
-  subagentsButton.textContent = `Subagents · ${working}/${total}`;
-  subagentsButton.title = `${total} retained agents`;
-  subagentsButton.classList.toggle(
-    'hidden',
-    total === 0 || Boolean(route.subagentParentId),
-  );
+  for (const button of [subagentsButton, subagentsDesktopButton]) {
+    if (!button) continue;
+    button.textContent = `Subagents · ${working}/${total}`;
+    button.title = `${total} retained agents`;
+    button.classList.toggle(
+      'hidden',
+      total === 0 || Boolean(route.subagentParentId),
+    );
+  }
+  syncConversationStatus();
   const state = document.querySelector('#conversation-state');
   state.textContent = sessionLifecycleLabel(session);
   state.className = `pill state-${session.lifecycle}`;
@@ -7093,11 +7147,13 @@ function renderConversationHeader(session) {
   }
 }
 
-subagentsButton.onclick = () => {
+function openSubagentWorkspace() {
   const session = activeSession();
   if (!session?.subagent_session_ids?.length && !session?.native_subagents?.length) return;
   navigate({ name: 'dashboard', subagentParentId: session.id });
-};
+}
+subagentsButton.onclick = openSubagentWorkspace;
+if (subagentsDesktopButton) subagentsDesktopButton.onclick = openSubagentWorkspace;
 
 /// Drop everything the conversation view was holding.
 ///
@@ -7480,6 +7536,29 @@ document.querySelector('#prompt-form').onsubmit = e => {
   e.preventDefault();
   submitPrompt();
 };
+promptForm.addEventListener('focusin', syncComposerLayout);
+promptForm.addEventListener('focusout', event => {
+  if (event.relatedTarget && promptForm.contains(event.relatedTarget)) {
+    syncComposerLayout();
+    return;
+  }
+  queueMicrotask(syncComposerLayout);
+});
+promptForm.addEventListener('pointerdown', event => {
+  const action = event.target instanceof Element
+    ? event.target.closest('#send-button, #attach-image')
+    : null;
+  if (!action) return;
+  composerActionPointerDown = true;
+  syncComposerLayout();
+});
+// A phone blurs the editor on pointerdown; keep the toolbar through click.
+const finishComposerActionPointer = () => {
+  composerActionPointerDown = false;
+  setTimeout(syncComposerLayout, 0);
+};
+promptForm.addEventListener('pointerup', finishComposerActionPointer);
+promptForm.addEventListener('pointercancel', finishComposerActionPointer);
 promptText.addEventListener('input', () => {
   composerGeneration += 1;
   composerInputChanged();

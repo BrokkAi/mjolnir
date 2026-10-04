@@ -1531,6 +1531,18 @@ article > h3 {
   color: var(--dim);
 }
 
+.conversation-status {
+  display: contents;
+}
+
+#subagents-button {
+  display: none;
+}
+
+.conversation-summary-phone {
+  display: none;
+}
+
 .composer {
   position: relative;
   padding-top: 8px;
@@ -2036,6 +2048,7 @@ body[data-connection='reconnecting'] .connection {
   body.elicitation-focused #conversation-scroll,
   body.elicitation-focused #jump-to-latest,
   body.elicitation-focused #turn-review,
+  body.elicitation-focused #conversation-status,
   body.elicitation-focused #conversation-side,
   body.elicitation-focused #subagents-button,
   body.elicitation-focused #prompt-form {
@@ -2054,5 +2067,141 @@ body[data-connection='reconnecting'] .connection {
     box-sizing: border-box;
     min-height: 100%;
     margin: 0;
+  }
+}
+
+/* ---- compact phone conversation ---- */
+
+@media (max-width: 640px) {
+  body > #shell-header {
+    margin-block: 6px;
+    padding-block: 4px;
+  }
+
+  #shell-title {
+    margin-block: 6px;
+  }
+
+  .conversation-header {
+    gap: 6px;
+    padding-bottom: 4px;
+  }
+
+  .conversation-scroll #earlier-messages {
+    display: block;
+    min-width: 0;
+    min-height: 36px;
+    margin-bottom: 4px;
+    padding: 2px 0;
+    border: 0;
+    color: var(--dim);
+    background: transparent;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+  }
+
+  .conversation-status {
+    position: relative;
+    display: flex;
+    flex: none;
+    align-items: flex-start;
+    gap: 8px;
+    min-height: 40px;
+    margin: 4px 0;
+  }
+
+  .conversation-status.status-empty {
+    display: none;
+  }
+
+  #conversation-side {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+  }
+
+  #conversation-side > summary {
+    box-sizing: border-box;
+    min-height: 38px;
+    padding: 0 8px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 1.25;
+    white-space: nowrap;
+  }
+
+  #conversation-side > summary > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conversation-status:has(> #subagents-button:not(.hidden)) #conversation-side > summary {
+    padding-right: 138px;
+  }
+
+  .conversation-summary-full {
+    display: none;
+  }
+
+  .conversation-summary-phone {
+    display: inline;
+  }
+
+  .conversation-side-content {
+    box-sizing: border-box;
+    max-height: 40dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 4px 8px 8px;
+  }
+
+  #conversation-status > #subagents-button {
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    right: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    min-height: 40px;
+    padding: 6px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  #subagents-button-desktop,
+  .composer-lower-border {
+    display: none !important;
+  }
+
+  .conversation.composer-focused .conversation-status,
+  .conversation.composer-focused .prompt-settings {
+    display: none !important;
+  }
+
+  #prompt-text {
+    min-height: 42px;
+    padding-block: 8px;
+  }
+
+  #prompt-form.composer-expanded #prompt-text {
+    min-height: 76px;
+  }
+
+  #prompt-form .composer-actions {
+    display: none;
+  }
+
+  #prompt-form.composer-has-intent .composer-actions {
+    display: flex;
+  }
+
+  #attachments:empty {
+    display: none;
   }
 }

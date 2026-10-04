@@ -159,15 +159,30 @@
         <button id="jump-to-latest" class="jump-to-latest hidden">New messages ↓</button>
         <div id="turn-review"></div>
         <div id="elicitations"></div>
-        <details id="conversation-side" class="card">
-          <summary>Queue and shells</summary>
-          <h3>Queued prompts</h3>
-          <div id="conversation-queue"></div>
-          <h3>Shell commands</h3>
-          <div id="conversation-shells"></div>
-          <h3>Background tasks</h3>
-          <div id="conversation-background-tasks"></div>
-        </details>
+        <div id="conversation-status" class="conversation-status">
+          <details id="conversation-side" class="card">
+            <summary>
+              <span class="conversation-summary-full">Queue and shells</span>
+              <span class="conversation-summary-phone"></span>
+            </summary>
+            <div class="conversation-side-content">
+              <h3>Queued prompts</h3>
+              <div id="conversation-queue"></div>
+              <h3>Shell commands</h3>
+              <div id="conversation-shells"></div>
+              <h3>Background tasks</h3>
+              <div id="conversation-background-tasks"></div>
+            </div>
+          </details>
+          <button
+            type="button"
+            id="subagents-button"
+            class="secondary hidden"
+            aria-label="Open sub-agent workspace"
+          >
+            Sub-agents
+          </button>
+        </div>
         <form id="prompt-form" class="composer">
           <div
             id="command-palette"
@@ -196,14 +211,14 @@
           <div class="composer-lower-border">
             <button
               type="button"
-              id="subagents-button"
+              id="subagents-button-desktop"
               class="secondary hidden"
               aria-label="Open sub-agent workspace"
             >
               Sub-agents
             </button>
           </div>
-          <div class="row">
+          <div id="composer-actions" class="row composer-actions">
             <button id="send-button">Send</button>
             <button
               type="button"

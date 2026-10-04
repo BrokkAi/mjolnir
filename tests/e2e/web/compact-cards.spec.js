@@ -154,6 +154,8 @@ async function mount(page, sessions) {
       }
       return route.fulfill({ status: 202, body: '' });
     }
+    if (pathname.endsWith('/client-state')) return json({ draft: '', through_event_ordinal: 0 });
+    if (pathname.endsWith('/draft')) return route.fulfill({ status: 204, body: '' });
     if (pathname.startsWith('/api/conversations/')) {
       if (route.request().method() === 'GET') {
         state.conversationRequests += 1;
