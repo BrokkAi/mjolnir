@@ -90,7 +90,7 @@ function claudeTwoQuestionRequest() {
   };
 }
 
-function fixtureSnapshot(configOptions = []) {
+function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
   return {
     revision: 1,
     generated_at: '2026-09-05T00:00:00Z',
@@ -144,6 +144,7 @@ function fixtureSnapshot(configOptions = []) {
           set_config: false,
           set_plan_mode: true,
         },
+        ...sessionOverrides,
       },
     ],
     profiles: [{ id: 'codex', harness_kind: 'codex' }],
@@ -180,7 +181,7 @@ function conversation() {
  * the same refresh/re-render paths as a live daemon while retaining exact
  * action payloads for inspection.
  */
-async function mockViewerApi(page, initialPending = [], configOptions = []) {
+async function mockViewerApi(page, initialPending = [], configOptions = [], sessionOverrides = {}) {
   const viewerUrl = 'https://viewer.test/';
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   // Serve the shipped assets without a daemon. Any unhandled API request is
@@ -194,7 +195,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = []) {
     return route.fulfill({ path: asset });
   });
   const state = {
-    snapshot: fixtureSnapshot(configOptions),
+    snapshot: fixtureSnapshot(configOptions, sessionOverrides),
     actions: [],
     drafts: new Map(),
     snapshotRequests: 0,
@@ -554,7 +555,12 @@ test('elicitation enum and custom answers submit exact content and survive snaps
 });
 
 test('phone elicitation prompts stay above choices and the focused answer fits beside its actions', async ({ page }, testInfo) => {
-  await mockViewerApi(page, [claudeTwoQuestionRequest()]);
+  await mockViewerApi(page, [claudeTwoQuestionRequest()], [], {
+    native_subagents: [{ stable_id: 'retained-helper', state: 'completed' }],
+  });
+  // The finite fixture stream reconnects and the welcome row shows a jump
+  // control; neither belongs to the pending-question phone layout.
+  await page.addStyleTag({ content: '#connection, #jump-to-latest { display: none !important; }' });
   await expect(page.locator('meta[name="viewport"]')).toHaveAttribute(
     'content', /interactive-widget=resizes-content/,
   );
@@ -585,8 +591,11 @@ test('phone elicitation prompts stay above choices and the focused answer fits b
     .toEqual(['elicitation-field-label', 'elicitation-question', 'input']);
   const other = otherField.locator('input[type="text"]');
   const subagents = page.locator('#subagents-button');
-  await subagents.evaluate(node => node.classList.remove('hidden'));
-  await page.screenshot({ path: testInfo.outputPath('elicitation-phone-before.png') });
+  await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);
+  await expect(page.locator('#conversation-status')).toBeVisible();
+  await expect(page.locator('#prompt-form')).toBeVisible();
+  await expect(subagents).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('phone-elicitation-pending-390x844.png') });
 
   await other.focus();
   await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
@@ -636,7 +645,7 @@ test('phone elicitation prompts stay above choices and the focused answer fits b
   expect(visible.input.top).toBeGreaterThanOrEqual(visible.panel.top);
   expect(visible.input.bottom).toBeLessThanOrEqual(visible.actions.top);
   expect(visible.actions.bottom).toBeLessThanOrEqual(visible.panel.bottom);
-  await page.screenshot({ path: testInfo.outputPath('elicitation-phone-keyboard.png') });
+  await page.screenshot({ path: testInfo.outputPath('phone-elicitation-other-focused-390x464.png') });
 
   await other.evaluate(input => input.blur());
   await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);

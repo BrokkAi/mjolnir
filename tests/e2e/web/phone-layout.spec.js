@@ -271,13 +271,13 @@ test('phone status row shares one line and leaves more room for the conversation
   const idle = await phoneMetrics(page);
   expect(idle.composerTextHeight).toBeLessThanOrEqual(44);
   expect(idle.earlierControl).toBeLessThanOrEqual(40);
-  await page.screenshot({ path: testInfo.outputPath('phone-idle.png') });
+  await page.screenshot({ path: testInfo.outputPath('phone-conversation-idle-390x844.png') });
   await page.locator('#prompt-text').focus();
   await expect(page.locator('#conversation-status')).toBeHidden();
   await settleLayout(page);
   const focused = await phoneMetrics(page);
   expect(focused.composerTextHeight).toBeGreaterThanOrEqual(75);
-  await page.screenshot({ path: testInfo.outputPath('phone-focused.png') });
+  await page.screenshot({ path: testInfo.outputPath('phone-conversation-composer-focused-390x844.png') });
   expect(idle.conversationScroll).toBeGreaterThan(438.09);
   expect(focused.conversationScroll).toBeGreaterThan(438.09);
   expect(idle.visibleFeed).toBeGreaterThan(378);

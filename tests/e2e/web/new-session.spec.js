@@ -417,6 +417,7 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(worktree).toBeChecked();
   await expect(page.locator('#new-step')).toContainText('/resolved/project');
   await page.locator('#new-next').click();
+  await expect.poll(() => state.actions.length).toBe(1);
   expect(state.actions[0]).toMatchObject({ project_directory: '/resolved/project', subagents: { mode: 'native' } });
 });
 
@@ -937,6 +938,8 @@ test('a GitHub service failure reports its actionable error without suggesting a
 test('compact source navigation leaves the first folder and repository visible on a phone', async ({ page }) => {
   await mount(page, { bundles: [] });
   await projectStep(page);
+  const shellHeader = await page.locator('#shell-header').boundingBox();
+  expect(shellHeader.height).toBeLessThanOrEqual(44);
   await page.getByRole('button', { name: /^Browse folders/ }).click();
   await expect(page.getByRole('button', { name: /^code Folder/ })).toBeVisible();
   const sources = page.getByRole('group', { name: 'Find a project' });

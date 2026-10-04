@@ -2074,12 +2074,12 @@ body[data-connection='reconnecting'] .connection {
 
 @media (max-width: 640px) {
   body > #shell-header {
-    margin-block: 6px;
-    padding-block: 4px;
+    margin-block: 0;
+    padding-block: 0;
   }
 
   #shell-title {
-    margin-block: 6px;
+    margin-block: 0;
   }
 
   .conversation-header {
