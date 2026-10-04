@@ -11,10 +11,7 @@ pub(super) struct ServerState {
     pub(super) preflight_tx: mpsc::Sender<PreflightRequest>,
     pub(super) move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub(super) client_state_tx: mpsc::Sender<ClientStateRequest>,
-    pub(super) dictation_tx: mpsc::Sender<DictationRequest>,
     pub(super) background_task_stop_tx: mpsc::Sender<BackgroundTaskStopRequest>,
-    pub(super) dictation_permits: Arc<Semaphore>,
-    pub(super) dictation_probe_permits: Arc<Semaphore>,
     pub(super) shutdown: CancellationToken,
     pub(super) viewer_code: Arc<str>,
     pub(super) login_token: Arc<str>,
@@ -107,10 +104,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         preflight_tx: options.preflight_tx,
         move_preparation_tx: options.move_preparation_tx,
         client_state_tx: options.client_state_tx,
-        dictation_tx: options.dictation_tx,
         background_task_stop_tx: options.background_task_stop_tx,
-        dictation_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
-        dictation_probe_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DICTATIONS)),
         shutdown: options.shutdown,
         viewer_code: options.viewer_code.into(),
         login_token: options.login_token.into(),
@@ -149,10 +143,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/api/moves/prepare", post(prepare_move))
         .route("/api/sessions/{session_id}/client-state", get(client_state))
         .route(
-            "/api/sessions/{session_id}/dictation",
-            get(dictation_availability).post(upload_dictation),
-        )
-        .route(
             "/api/sessions/{session_id}/background-tasks/stop",
             post(stop_background_task),
         )
@@ -182,8 +172,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/login", get(viewer))
         .route("/viewer.css", get(viewer_css))
         .route("/viewer.js", get(viewer_js))
-        .route("/voice-worklet.js", get(voice_worklet_js))
-        .route("/voice-worker.js", get(voice_worker_js))
         .route("/markdown.js", get(markdown_js))
         .route("/tool-output.js", get(tool_output_js))
         .route("/manifest.webmanifest", get(manifest))

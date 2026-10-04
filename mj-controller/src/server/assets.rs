@@ -9,8 +9,6 @@ pub(super) const VIEWER_CSS: &str = include_str!("../web/viewer.css");
 pub(super) const VIEWER_JS: &str = include_str!("../web/viewer.js");
 pub(super) const MARKDOWN_JS: &str = include_str!("../web/markdown.js");
 pub(super) const TOOL_OUTPUT_JS: &str = include_str!("../web/tool-output.js");
-pub(super) const VOICE_WORKLET_JS: &str = include_str!("../web/voice-worklet.js");
-pub(super) const VOICE_WORKER_JS: &str = include_str!("../web/voice-worker.js");
 /// A fake DOM for running the shipped renderers under Node. It is deliberately
 /// not served: it exists so `cargo test` can exercise `markdown.js` without a
 /// browser.
@@ -57,14 +55,6 @@ pub(super) async fn viewer_js() -> Response<Body> {
 
 pub(super) async fn markdown_js() -> Response<Body> {
     static_response("text/javascript; charset=utf-8", MARKDOWN_JS, false)
-}
-
-pub(super) async fn voice_worklet_js() -> Response<Body> {
-    static_response("text/javascript; charset=utf-8", VOICE_WORKLET_JS, false)
-}
-
-pub(super) async fn voice_worker_js() -> Response<Body> {
-    static_response("text/javascript; charset=utf-8", VOICE_WORKER_JS, false)
 }
 
 pub(super) async fn tool_output_js() -> Response<Body> {

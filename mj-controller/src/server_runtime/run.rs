@@ -89,8 +89,6 @@ pub(crate) async fn run_server(
     let (preflight_tx, mut preflight_rx) = tokio::sync::mpsc::channel(32);
     let (move_preparation_tx, mut move_preparation_rx) = tokio::sync::mpsc::channel(32);
     let (client_state_tx, mut client_state_rx) = tokio::sync::mpsc::channel(64);
-    let (dictation_tx, mut dictation_rx) =
-        tokio::sync::mpsc::channel::<crate::dictation::DictationRequest>(8);
     let (background_task_stop_tx, mut background_task_stop_rx) =
         tokio::sync::mpsc::channel::<BackgroundTaskStopRequest>(32);
     let SessionManagerChannels {
@@ -114,7 +112,6 @@ pub(crate) async fn run_server(
             preflight_tx,
             move_preparation_tx,
             client_state_tx,
-            dictation_tx,
         },
     )?;
     options.set_background_task_stop_tx(background_task_stop_tx);
@@ -220,7 +217,6 @@ pub(crate) async fn run_server(
             tokio::sync::mpsc::unbounded_channel::<BundleCreated>();
         let (move_prepared_tx, mut move_prepared_rx) =
             tokio::sync::mpsc::unbounded_channel::<MovePrepared>();
-        let mut dictation_jobs = tokio::task::JoinSet::new();
         let mut archive_jobs = tokio::task::JoinSet::new();
         let mut bundle_jobs = tokio::task::JoinSet::new();
         let mut preflight_jobs = tokio::task::JoinSet::new();
@@ -638,26 +634,6 @@ pub(crate) async fn run_server(
                             Err(error) => tracing::warn!(%error, "phone viewer state pruning task failed"),
                         }
                     });
-                }
-                request = dictation_rx.recv() => {
-                    let Some(request) = request else {
-                        failure = feed_stopped(termination.is_cancelled(), "the phone HTTP server stopped delivering dictation requests");
-                        break;
-                    };
-                    let paths = controller.state.sessions.get(&request.session_id).map(|session| {
-                        crate::dictation::auth_paths(&controller.config, &session.last_profile)
-                    });
-                    let Ok(work) = crate::upgrade::activity("dictation") else { continue };
-                    let termination = termination.clone();
-                    dictation_jobs.spawn(async move {
-                        let _work = work;
-                        crate::dictation::execute(request, paths, termination).await
-                    });
-                }
-                job = dictation_jobs.join_next(), if !dictation_jobs.is_empty() => {
-                    if let Some(Err(error)) = job {
-                        tracing::warn!(%error, "web dictation task failed");
-                    }
                 }
                 job = archive_jobs.join_next(), if !archive_jobs.is_empty() => {
                     match job {
@@ -1512,8 +1488,6 @@ pub(crate) async fn run_server(
                 }
             }
         }
-        // Stop provider requests before the HTTP request channels disappear.
-        dictation_jobs.shutdown().await;
         // Bundle jobs are supervised so shutdown never leaves a detached
         // request task behind holding the config mutation lock.
         bundle_jobs.shutdown().await;

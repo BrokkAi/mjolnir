@@ -341,32 +341,7 @@ fn test_options(
     move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     client_state_tx: mpsc::Sender<ClientStateRequest>,
 ) -> ServerOptions {
-    test_options_with_dictation(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
-    .0
-}
-
-#[allow(clippy::too_many_arguments)]
-fn test_options_with_dictation(
-    snapshot_rx: watch::Receiver<ViewerSnapshot>,
-    conversation_rx: watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
-    action_tx: mpsc::Sender<ControllerRequest>,
-    bundle_tx: mpsc::Sender<BundleRequest>,
-    receipt_tx: mpsc::Sender<ReadReceiptRequest>,
-    preflight_tx: mpsc::Sender<PreflightRequest>,
-    move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
-    client_state_tx: mpsc::Sender<ClientStateRequest>,
-) -> (ServerOptions, mpsc::Receiver<DictationRequest>) {
-    let (dictation_tx, dictation_rx) = mpsc::channel(8);
-    let options = ServerOptions::new(
+    ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
         conversation_rx,
@@ -377,39 +352,9 @@ fn test_options_with_dictation(
             preflight_tx,
             move_preparation_tx,
             client_state_tx,
-            dictation_tx,
         },
     )
-    .unwrap();
-    (options, dictation_rx)
-}
-
-fn app_with_dictation_receiver() -> (Router, mpsc::Receiver<DictationRequest>) {
-    let (config, state) = sample_config_state();
-    let (_snapshot_tx, snapshot_rx) =
-        watch::channel(ViewerSnapshot::from_config_state(&config, &state, 1));
-    let (_conversation_tx, conversation_rx) =
-        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
-    let (action_tx, _action_rx) = mpsc::channel(8);
-    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
-    let (options, dictation_rx) = test_options_with_dictation(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    );
-    (
-        router(options.with_test_credentials("123456", b"01234567890123456789012345678901")),
-        dictation_rx,
-    )
+    .unwrap()
 }
 
 fn detached_options() -> ServerOptions {
@@ -452,25 +397,6 @@ fn cookie() -> String {
     )
 }
 
-fn valid_wav() -> Bytes {
-    let samples = vec![0_u8; 320];
-    let mut wav = Vec::with_capacity(44 + samples.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36_u32 + samples.len() as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16_u32.to_le_bytes());
-    wav.extend_from_slice(&1_u16.to_le_bytes());
-    wav.extend_from_slice(&1_u16.to_le_bytes());
-    wav.extend_from_slice(&16_000_u32.to_le_bytes());
-    wav.extend_from_slice(&32_000_u32.to_le_bytes());
-    wav.extend_from_slice(&2_u16.to_le_bytes());
-    wav.extend_from_slice(&16_u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
-    wav.extend_from_slice(&samples);
-    Bytes::from(wav)
-}
-
 async fn login_cookie(app: &Router) -> String {
     let response = app
         .clone()
@@ -496,162 +422,19 @@ async fn login_cookie(app: &Router) -> String {
 }
 
 #[tokio::test]
-async fn dictation_availability_requires_auth_and_forwards_typed_request() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let unauthorized = app
-        .clone()
-        .oneshot(
-            Request::get("/api/sessions/session-1/dictation")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-    assert!(requests.try_recv().is_err());
-
-    let cookie = login_cookie(&app).await;
-    let pending = tokio::spawn({
-        let app = app.clone();
-        async move {
-            app.oneshot(
-                Request::get("/api/sessions/session-1/dictation")
-                    .header(COOKIE, cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+async fn browser_dictation_routes_are_not_exposed() {
+    for path in [
+        "/api/sessions/session-1/dictation",
+        "/voice-worklet.js",
+        "/voice-worker.js",
+    ] {
+        let (app, _, _, _, _) = app();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
-            .unwrap()
-        }
-    });
-    let request = requests.recv().await.unwrap();
-    assert_eq!(request.session_id, "session-1");
-    assert!(matches!(
-        request.operation,
-        DictationOperation::Availability
-    ));
-    request
-        .reply
-        .send(Ok(DictationResponse::Availability {
-            available: true,
-            reason: None,
-        }))
-        .unwrap();
-    let response = pending.await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], br#"{"available":true}"#);
-}
-
-#[tokio::test]
-async fn dictation_rejects_bad_wav_before_controller_dispatch() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let cookie = login_cookie(&app).await;
-    let response = app
-        .oneshot(
-            Request::post("/api/sessions/session-1/dictation")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "audio/wav")
-                .body(Body::from("not wav"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(requests.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn dictation_rejects_a_third_upload_before_reading_its_body() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let cookie = login_cookie(&app).await;
-    let request = || {
-        Request::post("/api/sessions/session-1/dictation")
-            .header(COOKIE, cookie.clone())
-            .header(CONTENT_TYPE, "audio/wav")
-            .body(Body::from(valid_wav()))
-            .unwrap()
-    };
-    let first = tokio::spawn({
-        let app = app.clone();
-        let request = request();
-        async move { app.oneshot(request).await.unwrap() }
-    });
-    let second = tokio::spawn({
-        let app = app.clone();
-        let request = request();
-        async move { app.oneshot(request).await.unwrap() }
-    });
-    let first_request = requests.recv().await.unwrap();
-    let second_request = requests.recv().await.unwrap();
-    let third = app
-        .oneshot(
-            Request::post("/api/sessions/session-1/dictation")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "audio/wav")
-                .body(Body::from_stream(futures::stream::poll_fn(
-                    |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
-                        panic!("overloaded dictation polled its body")
-                    },
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
-    first_request
-        .reply
-        .send(Ok(DictationResponse::Transcript {
-            text: "first".into(),
-        }))
-        .unwrap();
-    second_request
-        .reply
-        .send(Ok(DictationResponse::Transcript {
-            text: "second".into(),
-        }))
-        .unwrap();
-    assert_eq!(first.await.unwrap().status(), StatusCode::OK);
-    assert_eq!(second.await.unwrap().status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn dictation_upload_rejects_unauthorized_missing_and_oversized_requests() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/api/sessions/session-1/dictation")
-                .body(Body::from(valid_wav()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let cookie = login_cookie(&app).await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/api/sessions/missing/dictation")
-                .header(COOKIE, &cookie)
-                .body(Body::from(valid_wav()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    // Exercise the streamed body limit without relying on Content-Length.
-    let response = app
-        .oneshot(
-            Request::post("/api/sessions/session-1/dictation")
-                .header(COOKIE, cookie)
-                .body(Body::from(vec![0_u8; MAX_AUDIO_BYTES + 1]))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(requests.try_recv().is_err());
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 fn app_with_background_stop_receiver(
@@ -849,60 +632,6 @@ async fn background_task_stop_reports_provider_failure_without_leaking_details()
         &body[..],
         br#"{"error":"the provider could not stop this background task"}"#
     );
-}
-
-#[tokio::test]
-async fn dictation_provider_failure_is_actionable_and_does_not_expose_details() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let cookie = login_cookie(&app).await;
-    let pending = tokio::spawn(async move {
-        app.oneshot(
-            Request::post("/api/sessions/session-1/dictation")
-                .header(COOKIE, cookie)
-                .body(Body::from(valid_wav()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-    });
-    let request = requests.recv().await.unwrap();
-    request
-        .reply
-        .send(Err(DictationError::Provider(
-            "private provider details".into(),
-        )))
-        .unwrap();
-    let response = pending.await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(body.contains("transcription"));
-    assert!(!body.contains("private provider details"));
-}
-
-#[tokio::test]
-async fn dropped_dictation_handler_cancels_controller_request() {
-    let (app, mut requests) = app_with_dictation_receiver();
-    let cookie = login_cookie(&app).await;
-    let pending = tokio::spawn({
-        let app = app.clone();
-        async move {
-            app.oneshot(
-                Request::post("/api/sessions/session-1/dictation")
-                    .header(COOKIE, cookie)
-                    .body(Body::from(valid_wav()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-        }
-    });
-    let request = requests.recv().await.unwrap();
-    let cancel = request.cancel.clone();
-    pending.abort();
-    let _ = pending.await;
-    assert!(cancel.is_cancelled());
-    drop(request);
 }
 
 #[tokio::test]
@@ -4503,8 +4232,6 @@ async fn every_response_carries_the_security_headers() {
     for path in [
         "/",
         "/viewer.js",
-        "/voice-worklet.js",
-        "/voice-worker.js",
         "/viewer.css",
         "/manifest.webmanifest",
         "/api/snapshot",

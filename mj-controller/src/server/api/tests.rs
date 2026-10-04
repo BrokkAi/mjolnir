@@ -1148,7 +1148,6 @@ fn api_app_with_worker_check(
     let (preflight_tx, _preflight_rx) = mpsc::channel(8);
     let (move_preparation_tx, _move_preparation_rx) = mpsc::channel(8);
     let (client_state_tx, _client_state_rx) = mpsc::channel(8);
-    let (dictation_tx, _dictation_rx) = mpsc::channel(8);
     let mut options = ServerOptions::new(
         "127.0.0.1:0".parse().unwrap(),
         snapshot_rx,
@@ -1160,7 +1159,6 @@ fn api_app_with_worker_check(
             preflight_tx,
             move_preparation_tx,
             client_state_tx,
-            dictation_tx,
         },
     )
     .unwrap()

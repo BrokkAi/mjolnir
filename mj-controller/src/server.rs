@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyResult};
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY as CONTENT_SECURITY_POLICY_HEADER, CONTENT_TYPE, COOKIE,
@@ -28,7 +28,6 @@ use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::sync::Semaphore;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -46,10 +45,6 @@ use mj_core::state::{
 
 use crate::targets::AdditionalMount;
 
-use crate::dictation::{
-    DictationError, DictationOperation, DictationRequest, DictationResponse, MAX_AUDIO_BYTES,
-    validate_wav,
-};
 use crate::image::optimize_image;
 
 pub mod api;
@@ -109,10 +104,6 @@ const MAX_PROMPT_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// own decoded-allocation bound; this is the HTTP envelope bound before that
 /// work starts.
 const MAX_ATTACHMENT_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
-/// Keep two browser uploads/transcriptions in flight. The permit is acquired
-/// before reading the request body, so an overloaded client is rejected
-/// without accepting megabytes that cannot be processed yet.
-const MAX_CONCURRENT_DICTATIONS: usize = 2;
 /// Keep this in sync with the prompt admission bound and the browser composer.
 pub const MAX_PROMPT_IMAGES: usize = MAX_IMAGES;
 const COOKIE_KEY_BYTES: usize = 32;
@@ -178,7 +169,6 @@ pub struct ServerOptions {
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
     pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
-    pub dictation_tx: mpsc::Sender<DictationRequest>,
     /// Dedicated bounded path for stopping one live background task. This is
     /// deliberately separate from [`ControllerAction`]: stopping a provider
     /// task does not occupy the controller's action admission slot.
@@ -229,7 +219,6 @@ pub struct ServerRequests {
     pub preflight_tx: mpsc::Sender<PreflightRequest>,
     pub move_preparation_tx: mpsc::Sender<MovePreparationRequest>,
     pub client_state_tx: mpsc::Sender<ClientStateRequest>,
-    pub dictation_tx: mpsc::Sender<DictationRequest>,
 }
 
 impl ServerOptions {
@@ -252,7 +241,6 @@ impl ServerOptions {
             preflight_tx: requests.preflight_tx,
             move_preparation_tx: requests.move_preparation_tx,
             client_state_tx: requests.client_state_tx,
-            dictation_tx: requests.dictation_tx,
             background_task_stop_tx: mpsc::channel(1).0,
             shutdown: CancellationToken::new(),
             session_ttl: DEFAULT_SESSION_TTL,

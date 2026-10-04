@@ -114,7 +114,7 @@ test('navigation captures outgoing text before clearing the composer', async () 
     cursor: 0, presentationKey: null, acknowledged: 0, clearTimeout,
     composerText: () => context.draft,
     setComposerText: text => { context.draft = text; context.composerGeneration++; },
-    cancelVoiceInput() {}, retireConversationRequest() {}, clearConversationContents() {}, clearPromptImages() {},
+    retireConversationRequest() {}, clearConversationContents() {}, clearPromptImages() {},
     request: async (url, options) => requests.push({ url, draft: JSON.parse(options.body).draft }),
   });
   vm.runInContext(extract('// A session owns its desired draft', '\n/// Put back'), context);
