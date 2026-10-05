@@ -2231,6 +2231,26 @@ fn raw_project_without_git_metadata_fails_checkpoint_export() {
     assert!(format!("{error:#}").contains("repository has no valid Git HEAD"));
 }
 
+// Hard-won: bd5c08f6: a slow export gave no phase timing in daemon logs.
+#[test]
+fn export_reports_phase_timings_to_the_controller() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let git_runner = RecordingGit::forwarding();
+
+    let exported = export_checkpoint_with_git(&spec, &git_runner).unwrap();
+
+    let timings = exported.timings.expect("export reports its phase timings");
+    assert!(
+        timings.total_ms
+            >= timings
+                .native_ms
+                .max(timings.repositories_ms)
+                .max(timings.archive_ms),
+        "{timings:?}"
+    );
+}
+
 #[test]
 fn target_checkpoint_from_a_worker_without_timings_still_decodes() {
     let target = serde_json::from_value::<TargetCheckpoint>(json!({
@@ -2328,6 +2348,32 @@ fn checkpoint_wire_requires_the_new_capture_mode_and_rejects_legacy_fields() {
         .unwrap()
         .insert("worker_root".into(), json!("/legacy"));
     assert!(serde_json::from_value::<CheckpointRestoreSpec>(retired_root).is_err());
+}
+
+#[test]
+fn checkpoint_export_wire_uses_relay_root_and_rejects_retired_worker_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let mut value = serde_json::to_value(&spec).unwrap();
+    assert_eq!(
+        value["protocol_version"],
+        CHECKPOINT_EXPORT_PROTOCOL_VERSION
+    );
+    assert!(value.get("relay_root").is_some());
+    assert!(value.get("worker_root").is_none());
+
+    let mut unversioned = value.clone();
+    unversioned
+        .as_object_mut()
+        .unwrap()
+        .remove("protocol_version");
+    assert!(serde_json::from_value::<CheckpointExportSpec>(unversioned).is_err());
+
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("worker_root".into(), json!("/legacy"));
+    assert!(serde_json::from_value::<CheckpointExportSpec>(value).is_err());
 }
 
 #[test]

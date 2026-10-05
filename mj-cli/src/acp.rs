@@ -2273,6 +2273,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeping_leaves_every_session_as_it_was() {
+        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
+        let adapter = adapter_with(client, ExitPolicy::Keep, &["session-1"]);
+        working(&adapter, "session-1");
+
+        exit(&adapter).await.expect("keeping cannot fail");
+
+        assert_eq!(
+            daemon.calls(),
+            ["interrupt session-1"],
+            "the turn stops, and nothing else happens to the session"
+        );
+    }
+
+    #[tokio::test]
     async fn leaving_stops_the_turns_the_consumer_can_no_longer_see() {
         let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
         let adapter = adapter_owning("session-1", client);

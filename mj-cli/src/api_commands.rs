@@ -2031,6 +2031,35 @@ mod tests {
     use crate::{Cli, Command};
     use clap::Parser as _;
 
+    #[test]
+    fn stop_task_requires_a_session_and_exactly_one_task_selection() {
+        for argv in [
+            vec!["mj", "stop-task", "--session", "s1"],
+            vec![
+                "mj",
+                "stop-task",
+                "--session",
+                "s1",
+                "terminal:one",
+                "--all",
+            ],
+            vec!["mj", "stop-task", "--all"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+        for selection in ["terminal:one", "--all"] {
+            let cli =
+                Cli::try_parse_from(["mj", "stop-task", "--session", "s1", selection, "--json"])
+                    .unwrap();
+            let Some(Command::StopTask(args)) = cli.command else {
+                panic!("expected stop-task")
+            };
+            assert_eq!(args.session, "s1");
+            assert_eq!(args.all, selection == "--all");
+            assert!(args.json);
+        }
+    }
+
     #[tokio::test]
     async fn stop_task_sends_opaque_ids_and_all_reports_partial_failures() {
         use axum::http::{HeaderMap, StatusCode};
@@ -2631,6 +2660,211 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("never received a prompt"))
+        );
+    }
+
+    // Hard-won: 4209cb10: branch export refusal did not name the required --branch flag.
+    #[test]
+    fn the_session_driving_subcommands_parse_their_selectors() {
+        let cli = Cli::try_parse_from([
+            "mj",
+            "prompt",
+            "--session",
+            "s1",
+            "--wait",
+            "--timeout",
+            "30",
+            "now add a test",
+        ])
+        .unwrap();
+        let Some(Command::Prompt(args)) = cli.command else {
+            panic!("expected the prompt subcommand");
+        };
+        assert_eq!(args.session, "s1");
+        assert_eq!(args.text.as_deref(), Some("now add a test"));
+        assert!(args.wait);
+        assert_eq!(args.timeout, Some(30));
+
+        let cli = Cli::try_parse_from(["mj", "wait", "--session", "s1", "--turn", "12"]).unwrap();
+        let Some(Command::Wait(args)) = cli.command else {
+            panic!("expected the wait subcommand");
+        };
+        assert_eq!(args.turn, Some(12));
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "transcript",
+            "--session",
+            "s1",
+            "--after-seq",
+            "5",
+            "--limit",
+            "10",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert_eq!(
+            (args.after_seq, args.limit, args.json),
+            (Some(5), Some(10), true)
+        );
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "export",
+            "--session",
+            "s1",
+            "--kind",
+            "bundle",
+            "--out",
+            "work.bundle",
+        ])
+        .unwrap();
+        let Some(Command::Export(args)) = cli.command else {
+            panic!("expected the export subcommand");
+        };
+        assert_eq!(args.kind, ExportKindArg::Bundle);
+        assert_eq!(args.out, Some(PathBuf::from("work.bundle")));
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "export",
+            "--session",
+            "s1",
+            "--kind",
+            "file",
+            "--path",
+            "src/main.rs",
+        ])
+        .unwrap();
+        let Some(Command::Export(args)) = cli.command else {
+            panic!("expected the export subcommand");
+        };
+        assert_eq!(args.kind, ExportKindArg::File);
+        assert_eq!(args.path.as_deref(), Some("src/main.rs"));
+
+        // Finding R3-11: without a branch name the API answered "a branch
+        // export needs a branch name", which named no flag. The command line
+        // refuses it first and names `--branch`.
+        let Err(error) =
+            Cli::try_parse_from(["mj", "export", "--session", "s1", "--kind", "branch"])
+        else {
+            panic!("a branch export without --branch is refused");
+        };
+        assert!(error.to_string().contains("--branch"), "{error}");
+
+        let cli = Cli::try_parse_from(["mj", "export", "--session", "s1"]).unwrap();
+        let Some(Command::Export(args)) = cli.command else {
+            panic!("expected the export subcommand");
+        };
+        assert_eq!(args.kind, ExportKindArg::Patch);
+
+        let cli =
+            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
+        let Some(Command::Destroy(args)) = cli.command else {
+            panic!("expected the destroy subcommand");
+        };
+        assert!(args.delete_branch);
+
+        let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
+        let Some(Command::Suspend(args)) = cli.command else {
+            panic!("expected the suspend subcommand");
+        };
+        assert_eq!(args.session.as_deref(), Some("s1"));
+        assert!(Cli::try_parse_from(["mj", "suspend", "--session", "s1", "--force"]).is_err());
+        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
+        assert!(crate::replacement_notice(cli.command.as_ref()).is_some());
+
+        let cli = Cli::try_parse_from(["mj", "resume", "--session", "s1"]).unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.session.as_deref(), Some("s1"));
+        assert_eq!(args.profile, None);
+        assert_eq!(args.target, None);
+        assert_eq!(args.queue, None);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "resume",
+            "--session",
+            "s1",
+            "--profile",
+            "deepseek",
+            "--target",
+            "localhost",
+            "--queue",
+            "discard",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected the resume subcommand");
+        };
+        assert_eq!(args.profile.as_deref(), Some("deepseek"));
+        assert_eq!(args.target.as_deref(), Some("localhost"));
+        assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
+        assert!(args.json);
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "diff",
+            "--session",
+            "s1",
+            "--base",
+            "HEAD~2",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Diff(args)) = cli.command else {
+            panic!("expected the diff subcommand");
+        };
+        assert_eq!(args.base.as_deref(), Some("HEAD~2"));
+        assert!(args.json);
+
+        for (argv, matched) in [
+            (vec!["mj", "diff", "--session", "s1"], "diff"),
+            (vec!["mj", "resume", "--session", "s1"], "resume"),
+            (vec!["mj", "sessions", "--json"], "sessions"),
+            (vec!["mj", "suspend", "--session", "s1"], "suspend"),
+            (
+                vec!["mj", "interrupt-turn", "--session", "s1"],
+                "interrupt-turn",
+            ),
+            (vec!["mj", "api-info"], "api-info"),
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap_or_else(|error| {
+                panic!("{matched} should parse: {error}");
+            });
+            assert_eq!(crate::command_name(cli.command.as_ref()), matched);
+        }
+    }
+
+    /// F-16: `mj usage` added text output while keeping partial coverage visible.
+    #[test]
+    fn usage_text_keeps_the_coverage_beside_the_totals() {
+        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
+            "session_id": "s1",
+            "turns": [],
+            "next_after_seq": 4,
+            "latest_seq": 4,
+            "totals": {"input_tokens": {"tokens": 1200, "reported_turns": 2}},
+            "coverage": {
+                "recorded_turns": 3, "full_turn_reports": 2, "last_request_reports": 1,
+                "unspecified_reports": 0, "missing_reports": 0
+            }
+        }))
+        .unwrap();
+        let lines = usage_lines(&page);
+        assert_eq!(
+            lines[..3],
+            [
+                "totals from the 2 of 3 turns that reported a whole turn:",
+                "  input_tokens  1200  (2 turns)",
+                "not in the totals: 1 reported only their last request (turns)",
+            ]
         );
     }
 }

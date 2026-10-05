@@ -242,6 +242,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resource_directory_round_trips_through_one_stream() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("many/nested")).unwrap();
+        fs::write(source.path().join("many/nested/a.txt"), b"alpha").unwrap();
+        fs::create_dir_all(source.path().join("empty")).unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        let destination = destination_root.path().join("installed");
+
+        stream_resource(source.path(), |stream| {
+            install_resource_stream(stream, &destination)
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("many/nested/a.txt")).unwrap(),
+            b"alpha"
+        );
+        assert!(destination.join("empty").is_dir());
+    }
+
+    #[test]
     fn resource_streams_reject_symbolic_links() {
         use std::os::unix::fs::symlink;
 
