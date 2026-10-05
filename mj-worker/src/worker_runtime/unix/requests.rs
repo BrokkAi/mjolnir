@@ -481,6 +481,22 @@ pub(crate) fn apply_project_memory_request(
             baseline.install_snapshot(snapshot)?;
             Ok(RelayResponsePayload::ProjectMemorySnapshotInstalled)
         }
+        RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree,
+        } => {
+            let current_replica = replica.snapshot()?;
+            if current_replica.version() != *expected_replica {
+                return Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
+                    outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+                });
+            }
+            replica.replace_tree(tree)?;
+            baseline.replace_tree(tree)?;
+            Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
+                outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
+            })
+        }
         other => bail!("{} is not a project memory request", other.method_name()),
     }
 }

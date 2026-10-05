@@ -83,6 +83,39 @@ mod tests {
     }
 
     #[test]
+    fn project_memory_replace_is_gated_and_uses_the_relay_wire_shape() {
+        let request = RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica: mj_core::project_memory::TreeVersion("tree-v1".into()),
+            tree: mj_core::project_memory::ProjectMemorySnapshot::default(),
+        };
+        assert_eq!(
+            request.minimum_protocol(),
+            mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL
+        );
+        assert!(!request.supported_at(RELAY_PROTOCOL_VERSION - 1));
+        assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
+
+        let request_json = serde_json::to_value(&request).unwrap();
+        assert_eq!(request_json["method"], "replace_project_memory_tree");
+        assert_eq!(request_json["params"]["expected_replica"], "tree-v1");
+        assert_eq!(
+            serde_json::from_value::<RelayRequest>(request_json).unwrap(),
+            request
+        );
+
+        let response = RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+        };
+        let response_json = serde_json::to_value(&response).unwrap();
+        assert_eq!(response_json["type"], "project_memory_tree_replaced");
+        assert_eq!(response_json["data"]["outcome"], "replica_changed");
+        assert_eq!(
+            serde_json::from_value::<RelayResponsePayload>(response_json).unwrap(),
+            response
+        );
+    }
+
+    #[test]
     fn hello_refuses_readers_that_cannot_preserve_provider_details() {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();

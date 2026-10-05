@@ -403,9 +403,10 @@ impl Controller {
         // Project memory is checkpoint state, not relay connection state.
         // Reconcile it once while the checkpoint barrier keeps the harness
         // idle. Ordinary attach and polling deliberately never touch it.
+        let memory_sync_cancel = tokio_util::sync::CancellationToken::new();
         relay
             .connection_mut()
-            .sync_project_memory()
+            .sync_project_memory(&self.config, memory_sync_cancel)
             .await
             .context("synchronize project memory for checkpoint")?;
         let cursor = barrier

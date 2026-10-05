@@ -1827,7 +1827,10 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 
     connection
-        .sync_project_memory()
+        .sync_project_memory(
+            &mj_core::config::Config::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("an explicit sync may detect a legacy memory endpoint");
     assert!(

@@ -52,9 +52,10 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
 ///
 /// 30 removed the reviewer's change-analysis request and added per-file line
-/// counts to a review capture. An older controller's requests are refused
-/// whole by a newer worker, rather than half-decoded.
-pub const RELAY_PROTOCOL_VERSION: u32 = 30;
+/// counts to a review capture. 31 added compare-and-replace for project memory
+/// trees. An older controller's requests are refused whole by a newer worker,
+/// rather than half-decoded.
+pub const RELAY_PROTOCOL_VERSION: u32 = 31;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -63,6 +64,9 @@ pub const RELAY_MIN_PROTOCOL_VERSION: u32 = 1;
 /// (`HELSKIL2`). A controller sends an older worker the uncompressed
 /// `HELSKIL1` format, collected with that format's raw-size limits.
 pub const RELAY_GZIP_SKILLS_PROTOCOL: u32 = 23;
+/// The first protocol whose workers support conditional whole-tree replacement
+/// of session project memory, including deletion of omitted files.
+pub const RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL: u32 = 31;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
 /// Domain separator for a v1 (chained) relay event digest. v1 records fold
