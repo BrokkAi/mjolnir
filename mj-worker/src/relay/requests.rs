@@ -162,7 +162,8 @@ impl DurableRelay {
             | RelayRequest::CompleteHistoryRequest { .. }
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::ReplaceProjectMemoryTree { .. }
-            | RelayRequest::CompleteSubagentRequest { .. } => {
+            | RelayRequest::CompleteSubagentRequest { .. }
+            | RelayRequest::SetSubagentAdmission { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,
                     "connection-only requests must be handled by the live relay transport",

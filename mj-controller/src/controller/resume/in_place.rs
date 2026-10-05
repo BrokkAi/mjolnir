@@ -210,6 +210,14 @@ impl Controller {
 
             let archive_manifest = &verified_archive.manifest;
             let canonical_session = std::sync::Arc::clone(&verified_archive.canonical_session);
+            let include_in_place_subagents = mode == InPlaceRestoreMode::Move
+                && previous
+                    .subagents
+                    .clone()
+                    .unwrap_or_default()
+                    .for_launch(profile.kind, false)
+                    .parent_role()
+                    .is_some();
             let native_continuity =
                 native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
             let (discard_queued_prompts, replay_queue) = match mode {
@@ -311,6 +319,7 @@ impl Controller {
                         utility_handoff,
                         projection_build,
                         resume_notices: Vec::new(),
+                        include_in_place_subagents,
                         // EC2-only, and in-place eligibility requires unchanged
                         // attached resources, so they are already on the instance.
                         install_attached_resources: false,

@@ -346,6 +346,10 @@ impl StandaloneSession {
         Ok(())
     }
 
+    pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {
+        self.client.set_subagent_admission(open).await
+    }
+
     /// Hands one command to the relay and returns the ordinal it accepted it
     /// at, without catching the local projection up to it.
     ///

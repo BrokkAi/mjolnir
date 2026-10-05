@@ -1167,7 +1167,9 @@ pub(super) async fn serve_client_with_memory(
             }
             if matches!(
                 &envelope.request,
-                RelayRequest::SubagentRequests | RelayRequest::CompleteSubagentRequest { .. }
+                RelayRequest::SubagentRequests
+                    | RelayRequest::CompleteSubagentRequest { .. }
+                    | RelayRequest::SetSubagentAdmission { .. }
             ) {
                 let operation = envelope.request.method_name();
                 let request_id = envelope.request_id.clone();
@@ -1190,6 +1192,17 @@ pub(super) async fn serve_client_with_memory(
                             ),
                         }
                     }
+                    (Some(endpoint), RelayRequest::SetSubagentAdmission { open }) => {
+                        match endpoint.set_mutating_admission(open) {
+                            Ok(()) => RelayResponseBody::Ok {
+                                payload: RelayResponsePayload::SubagentAdmissionChanged { open },
+                            },
+                            Err(error) => compaction_error(
+                                RelayErrorCode::Internal,
+                                &format!("change sub-agent admission: {error:#}"),
+                            ),
+                        }
+                    }
                     (None, RelayRequest::SubagentRequests) => RelayResponseBody::Ok {
                         payload: RelayResponsePayload::SubagentRequests {
                             requests: Vec::new(),
@@ -1197,6 +1210,10 @@ pub(super) async fn serve_client_with_memory(
                         },
                     },
                     (None, RelayRequest::CompleteSubagentRequest { .. }) => compaction_error(
+                        RelayErrorCode::InvalidRequest,
+                        "this session has no Mjolnir sub-agent tools",
+                    ),
+                    (None, RelayRequest::SetSubagentAdmission { .. }) => compaction_error(
                         RelayErrorCode::InvalidRequest,
                         "this session has no Mjolnir sub-agent tools",
                     ),

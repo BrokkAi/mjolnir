@@ -1315,6 +1315,26 @@ fn leased_relay_child_serves_stdio() {
                     };
                     Some(RelayResponsePayload::HistoryRequests { requests })
                 }
+                RelayRequest::SetSubagentAdmission { open } => {
+                    let admission = PathBuf::from(&root).join("subagent-admission.json");
+                    let mut state: serde_json::Value = std::fs::read(&admission)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| serde_json::json!({"open": true, "calls": 0}));
+                    state["open"] = serde_json::Value::Bool(*open);
+                    state["calls"] =
+                        serde_json::Value::from(state["calls"].as_u64().unwrap_or_default() + 1);
+                    std::fs::write(&admission, serde_json::to_vec(&state).unwrap()).unwrap();
+                    let marker = PathBuf::from(&root).join("drop-admission-open-reply-once");
+                    if *open
+                        && std::env::var_os(DROP_ADMISSION_OPEN_REPLY).is_some()
+                        && !marker.exists()
+                    {
+                        std::fs::write(marker, b"dropped").unwrap();
+                        return;
+                    }
+                    Some(RelayResponsePayload::SubagentAdmissionChanged { open: *open })
+                }
                 RelayRequest::CompleteHistoryRequest { result } => {
                     std::fs::write(
                         PathBuf::from(&root).join("history-result.json"),
@@ -2103,12 +2123,72 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
         LEASED_RELAY_ROOT.to_owned(),
         relay_root.to_string_lossy().into_owned(),
     );
+    if let Some(value) = std::env::var_os(DROP_ADMISSION_OPEN_REPLY) {
+        spec.env.insert(
+            DROP_ADMISSION_OPEN_REPLY.into(),
+            value.to_string_lossy().into_owned(),
+        );
+    }
     RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
         spec,
         worker_recovery: None,
         project_memory: None,
     }
+}
+
+#[cfg(unix)]
+const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
+    if std::env::var_os("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "reconnect_retries_subagent_admission_after_lost_open_reply",
+        ))
+        .env("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD", "1")
+        .env(DROP_ADMISSION_OPEN_REPLY, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    crate::database::save_session(&session).unwrap();
+
+    let relay_root = tempfile::tempdir().unwrap();
+    let target = leased_relay_target(relay_root.path());
+    let mut connection = None;
+    let first = sync_actor_connection(&target, &mut connection).await;
+    assert!(first.is_err(), "the first worker lost the open reply");
+    assert!(
+        connection.is_none(),
+        "the failed connection must be abandoned"
+    );
+    assert!(
+        relay_root
+            .path()
+            .join("drop-admission-open-reply-once")
+            .exists()
+    );
+
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .expect("the next relay connection repairs the gate");
+    assert!(connection.is_some());
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["open"], true, "{state}");
+    assert_eq!(state["calls"], 2, "{state}");
 }
 
 /// Register the session the projection writes to. `apply_projection_event`

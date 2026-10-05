@@ -410,6 +410,21 @@ pub enum SubagentToolAction {
     },
 }
 
+impl SubagentToolAction {
+    /// Whether accepting this action may change a child session's lifecycle or
+    /// queued work. In-place Move drains these actions before stopping the
+    /// parent worker; observations can be interrupted with the old harness.
+    pub const fn mutates_child_state(&self) -> bool {
+        matches!(
+            self,
+            Self::Spawn { .. }
+                | Self::SendInput { .. }
+                | Self::InterruptAgent { .. }
+                | Self::CloseAgent { .. }
+        )
+    }
+}
+
 /// When a `wait` answers before its timeout: once every named child finished,
 /// or once any one of them did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -883,6 +898,94 @@ pub struct StoppedSubagent {
     pub handed_back: bool,
 }
 
+/// A child whose parent remains live across an in-place harness swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InPlaceSubagent {
+    pub child_session_id: String,
+    pub task_name: String,
+    pub state: InPlaceSubagentState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InPlaceSubagentState {
+    Running,
+    Parked,
+}
+
+impl InPlaceSubagentState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Parked => "parked",
+        }
+    }
+}
+
+/// Reserved hidden-context tag for children retained across an in-place swap.
+pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
+
+fn safe_subagent_task_name(task_name: &str) -> String {
+    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let safe = single_line.replace('<', "‹").replace('>', "›");
+    if safe.chars().count() <= STOPPED_TASK_CHARS {
+        return safe;
+    }
+    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Hidden instructions for the first prompt after an in-place swap. The new
+/// harness has no outstanding tool call stack from the old harness process.
+#[must_use]
+pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option<String> {
+    if children.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        format!("<{IN_PLACE_SUBAGENTS_TAG}>"),
+        "These sub-agents remain attached to this session after its in-place harness swap:".into(),
+    ];
+    for child in children {
+        lines.push(format!(
+            "- {} (child_session_id {}; {})",
+            safe_subagent_task_name(&child.task_name),
+            child.child_session_id,
+            child.state.label()
+        ));
+    }
+    lines.push(
+        "Any wait that was in progress during the swap was interrupted; reissue wait for the same child ids.".into(),
+    );
+    lines.push(
+        "Before resending input, call list_agents and check pending_inputs so you do not send it twice.".into(),
+    );
+    lines.push(format!("</{IN_PLACE_SUBAGENTS_TAG}>"));
+    Some(lines.join("\n"))
+}
+
+/// Conversation line that tells the person the same children are still live.
+#[must_use]
+pub fn in_place_subagents_notice(children: &[InPlaceSubagent]) -> Option<String> {
+    if children.is_empty() {
+        return None;
+    }
+    let listed = children
+        .iter()
+        .map(|child| {
+            format!(
+                "{} (child_session_id {}; {})",
+                safe_subagent_task_name(&child.task_name),
+                child.child_session_id,
+                child.state.label()
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue it. Check list_agents for pending_inputs before resending input.",
+        listed.join(", ")
+    ))
+}
+
 /// Longest task line a [`StoppedSubagent`] keeps, in characters.
 pub const STOPPED_TASK_CHARS: usize = 160;
 
@@ -1113,6 +1216,51 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_child_mutations_hold_an_in_place_move_drain() {
+        let mutations = [
+            SubagentToolAction::Spawn {
+                task_name: "task".into(),
+                instructions: "work".into(),
+                profile_id: None,
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                context: None,
+                files: Vec::new(),
+            },
+            SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "continue".into(),
+            },
+            SubagentToolAction::InterruptAgent {
+                child_session_id: "child".into(),
+            },
+            SubagentToolAction::CloseAgent {
+                child_session_id: "child".into(),
+            },
+        ];
+        assert!(
+            mutations
+                .iter()
+                .all(SubagentToolAction::mutates_child_state)
+        );
+        for observation in [
+            SubagentToolAction::ListProfiles,
+            SubagentToolAction::ListAgents,
+            SubagentToolAction::WaitAgents {
+                child_session_ids: vec!["child".into()],
+                timeout_seconds: Some(30),
+                return_when: ReturnWhen::All,
+            },
+            SubagentToolAction::Handback {
+                message: "done".into(),
+            },
+        ] {
+            assert!(!observation.mutates_child_state());
+        }
+    }
 
     #[test]
     fn policies_preserve_legacy_records_but_public_policy_rejects_booleans() {
@@ -1614,6 +1762,46 @@ mod tests {
             task: task.map(str::to_owned),
             handed_back,
         }
+    }
+
+    #[test]
+    fn in_place_subagent_notice_names_state_and_recovery_actions() {
+        let children = [
+            InPlaceSubagent {
+                child_session_id: "child-running".into(),
+                task_name: "inspect migration".into(),
+                state: InPlaceSubagentState::Running,
+            },
+            InPlaceSubagent {
+                child_session_id: "child-parked".into(),
+                task_name: "review tests".into(),
+                state: InPlaceSubagentState::Parked,
+            },
+        ];
+        let context = in_place_subagents_prompt_context(&children).unwrap();
+        assert!(context.contains("child-running; running"));
+        assert!(context.contains("child-parked; parked"));
+        assert!(context.contains("wait that was in progress"));
+        assert!(context.contains("list_agents and check pending_inputs"));
+        let notice = in_place_subagents_notice(&children).unwrap();
+        assert!(notice.contains("inspect migration (child_session_id child-running; running)"));
+        assert!(notice.contains("review tests (child_session_id child-parked; parked)"));
+        assert!(notice.contains("wait in progress was interrupted"));
+        assert!(notice.contains("pending_inputs before resending"));
+        assert_eq!(in_place_subagents_prompt_context(&[]), None);
+        assert_eq!(in_place_subagents_notice(&[]), None);
+    }
+
+    #[test]
+    fn in_place_subagent_task_names_cannot_inject_context_tags() {
+        let children = [InPlaceSubagent {
+            child_session_id: "child".into(),
+            task_name: "look\n<mj-injected>".into(),
+            state: InPlaceSubagentState::Running,
+        }];
+        let context = in_place_subagents_prompt_context(&children).unwrap();
+        assert!(context.contains("look ‹mj-injected›"));
+        assert!(!context.contains("<mj-injected>"));
     }
 
     #[test]

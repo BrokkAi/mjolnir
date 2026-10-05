@@ -94,7 +94,7 @@ mod tests {
             request.minimum_protocol(),
             mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL
         );
-        assert!(!request.supported_at(RELAY_PROTOCOL_VERSION - 1));
+        assert!(!request.supported_at(mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL - 1));
         assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
 
         let request_json = serde_json::to_value(&request).unwrap();

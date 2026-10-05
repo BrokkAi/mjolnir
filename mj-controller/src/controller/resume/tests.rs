@@ -25,6 +25,60 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecuto
 use super::*;
 
 #[test]
+fn in_place_subagent_prompt_roster_uses_latest_child_state() {
+    const CHILD: &str = "MJ_IN_PLACE_ROSTER_FRESHNESS_TEST_CHILD";
+    let test_name = crate::controller::test_support::test_name(
+        module_path!(),
+        "in_place_subagent_prompt_roster_uses_latest_child_state",
+    );
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name)
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = checkpoint_test_session(parent_id);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    crate::database::save_session(&parent).unwrap();
+    let child_directory = tempfile::tempdir().unwrap();
+    let mut child = parent.clone();
+    child.id = "fresh-child".into();
+    child.state = SessionState::Running;
+    child.target = Some(TargetLocator::LocalBare {
+        worker_root: child_directory.path().join(&child.id),
+    });
+    let relation = mj_core::subagent::SubagentRecord {
+        child_session_id: child.id.clone(),
+        parent_session_id: parent_id.into(),
+        task_name: "inspect current child state".into(),
+        profile_id: "claude".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "inspect current child state".into(),
+        request_key: "fresh-child-request".into(),
+        created_at: "2026-10-05T00:00:00Z".into(),
+        noticed_turn: None,
+        handback_tool: false,
+    };
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+
+    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    assert!(context.unwrap().contains("fresh-child; running"));
+    assert!(notice.unwrap().contains("fresh-child; running"));
+
+    child.state = SessionState::Parked;
+    crate::database::save_session(&child).unwrap();
+    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    assert!(context.unwrap().contains("fresh-child; parked"));
+    assert!(notice.unwrap().contains("fresh-child; parked"));
+}
+
+#[test]
 fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload() {
     const CHILD: &str = "MJ_ACCEPTED_SOURCE_REPAIR_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -1853,6 +1907,7 @@ exit 0
             utility_handoff: None,
             projection_build: None,
             resume_notices: Vec::new(),
+            include_in_place_subagents: false,
             install_attached_resources: true,
             worker_root_reset: WorkerRootReset::FreshTarget,
             retire_after_ready: None,

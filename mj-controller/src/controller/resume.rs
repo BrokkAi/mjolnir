@@ -541,6 +541,9 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub projection_build: Option<tokio::task::JoinHandle<Result<MaterializedSession>>>,
     /// Conversation lines to record once the destination answers.
     pub resume_notices: Vec<String>,
+    /// Refresh the retained-child roster immediately before prompt context and
+    /// the conversation notice are installed.
+    pub include_in_place_subagents: bool,
     pub install_attached_resources: bool,
     pub worker_root_reset: WorkerRootReset,
     /// A managed checkout to retire once, and only once, the restore succeeded.
@@ -570,6 +573,7 @@ impl Controller {
                 utility_handoff,
                 projection_build,
                 mut resume_notices,
+                include_in_place_subagents,
                 install_attached_resources: should_install_attached_resources,
                 worker_root_reset,
                 retire_after_ready,
@@ -591,9 +595,20 @@ impl Controller {
                 });
             let stopped_subagents_context =
                 mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
+            let reopen_move_subagents =
+                matches!(&worker_root_reset, WorkerRootReset::InPlace { .. })
+                    && self.state.sessions[session_id]
+                        .subagents
+                        .clone()
+                        .unwrap_or_default()
+                        .for_launch(profile.kind, false)
+                        .parent_role()
+                        .is_some();
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
                 &stopped_subagents,
             ));
+            let mut prompt_contexts = Vec::new();
+            prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
             let workspace_root = if let Some(project_directory) = &resumed_project_directory {
@@ -819,14 +834,29 @@ impl Controller {
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
                         .await?
                 };
+                if reopen_move_subagents {
+                    relay
+                        .set_subagent_admission(true)
+                        .await
+                        .context("reopen sub-agent requests on the replacement worker")?;
+                }
+                if include_in_place_subagents {
+                    let session_id = session_id.to_owned();
+                    let (context, _) = tokio::task::spawn_blocking(move || {
+                        load_in_place_subagent_prompt_data(&session_id)
+                    })
+                    .await
+                    .context("join the retained sub-agent roster read")??;
+                    prompt_contexts.extend(context);
+                }
                 // Installed before the harness is ready, so a queued prompt the
                 // restored relay starts on its own cannot claim the hidden
                 // context first. The relay hands it to one prompt only.
-                if let Some(context) = &stopped_subagents_context {
+                if !prompt_contexts.is_empty() {
                     relay
-                        .install_prompt_context(context.clone())
+                        .install_prompt_context(prompt_contexts.join("\n\n"))
                         .await
-                        .context("tell the resumed session which sub-agents its suspend stopped")?;
+                        .context("tell the resumed session about its sub-agents")?;
                 }
                 let native_session_id =
                     wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
@@ -898,6 +928,15 @@ impl Controller {
                 );
                 resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
             }
+            if include_in_place_subagents {
+                let session_id = session_id.to_owned();
+                let (_, notice) = tokio::task::spawn_blocking(move || {
+                    load_in_place_subagent_prompt_data(&session_id)
+                })
+                .await
+                .context("join the retained sub-agent notice roster read")??;
+                resume_notices.extend(notice);
+            }
             for notice in &resume_notices {
                 let submitted = async {
                     let command_id = new_command_id("resume-notice")?;
@@ -958,6 +997,18 @@ pub(super) struct VerifiedResumeArchive {
     pub archive_path: PathBuf,
     pub manifest: mj_checkpoint::archive::ArchiveManifest,
     pub canonical_session: Arc<CanonicalSessionSnapshot>,
+}
+
+fn load_in_place_subagent_prompt_data(
+    session_id: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let state = crate::database::load_state()
+        .context("load current retained sub-agents for the in-place resume")?;
+    let children = super::move_session::move_children(&state, session_id);
+    Ok((
+        mj_core::subagent::in_place_subagents_prompt_context(&children),
+        mj_core::subagent::in_place_subagents_notice(&children),
+    ))
 }
 
 /// Read and verify the archive a stopped session will be restored from.
@@ -1898,6 +1949,7 @@ impl Controller {
                     utility_handoff,
                     projection_build,
                     resume_notices,
+                    include_in_place_subagents: false,
                     install_attached_resources: true,
                     worker_root_reset: WorkerRootReset::FreshTarget,
                     retire_after_ready: conversion

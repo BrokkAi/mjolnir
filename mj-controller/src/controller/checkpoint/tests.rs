@@ -850,6 +850,10 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
     ));
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
+pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
+pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
+    "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
 const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
 const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
 #[cfg(unix)]
@@ -1091,11 +1095,58 @@ fn latch_relay_child_serves_stdio() {
                 None => {}
             }
         }
-        let response = if reject_release && requests_checkpoint_release(&request) {
-            unparseable_request_response(&request)
-        } else {
-            relay.handle(request)
-        };
+        if std::env::var_os(LATCH_RECORD_SUBAGENT_ADMISSION).is_some()
+            && let mj_core::relay::RelayRequest::SetSubagentAdmission { open } = &request.request
+        {
+            record_test_subagent_admission(Path::new(&root), *open);
+            let marker = Path::new(&root).join("drop-admission-close-reply-once");
+            if !open
+                && std::env::var_os(LATCH_DROP_ADMISSION_CLOSE_REPLY).is_some()
+                && !marker.exists()
+            {
+                std::fs::write(marker, b"dropped").expect("record the dropped close reply");
+                break;
+            }
+        }
+        let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let response =
+            if let (Some(max_protocol), mj_core::relay::RelayRequest::Hello { supported, .. }) =
+                (max_protocol, &request.request)
+                && max_protocol < mj_core::relay::RELAY_PROTOCOL_VERSION
+            {
+                let negotiated = max_protocol.min(supported.max);
+                mj_core::relay::RelayResponseEnvelope {
+                    request_id: request.request_id.clone(),
+                    protocol_version: negotiated,
+                    body: mj_core::relay::RelayResponseBody::Ok {
+                        payload: mj_core::relay::RelayResponsePayload::Hello {
+                            negotiated,
+                            relay_version: "older-protocol-test".into(),
+                            session_id: LATCH_RELAY_SESSION.into(),
+                            worker_build: None,
+                        },
+                    },
+                }
+            } else if reject_release && requests_checkpoint_release(&request) {
+                unparseable_request_response(&request)
+            } else if let Some(response) = subagent_connection_response(&request) {
+                response
+            } else {
+                let mut request = request;
+                if max_protocol.is_some() {
+                    // Run the current durable relay's behavior while speaking
+                    // the older version negotiated by this test worker.
+                    request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
+                }
+                let mut response = relay.handle(request);
+                if let Some(max_protocol) = max_protocol {
+                    response.protocol_version =
+                        max_protocol.min(mj_core::relay::RELAY_PROTOCOL_VERSION);
+                }
+                response
+            };
         mj_core::relay::write_relay_frame(&mut writer, &response).expect("answer a relay request");
         if checkpoint_only {
             relay.dispatch_checkpoint_only().unwrap();
@@ -1168,6 +1219,44 @@ fn latch_relay_child_serves_stdio() {
         }
     }
 }
+
+#[cfg(unix)]
+fn record_test_subagent_admission(relay_root: &Path, open: bool) {
+    let queue_path = relay_root
+        .parent()
+        .expect("relay root parent")
+        .join(LATCH_RELAY_SESSION)
+        .join("subagents.json");
+    let mut queue: serde_json::Value = std::fs::read(&queue_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    queue["mutating_admission_open"] = serde_json::Value::Bool(open);
+    std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
+        .expect("persist fake worker sub-agent admission");
+}
+fn subagent_connection_response(
+    request: &mj_core::relay::RelayRequestEnvelope,
+) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    let payload = match &request.request {
+        mj_core::relay::RelayRequest::SubagentRequests => {
+            mj_core::relay::RelayResponsePayload::SubagentRequests {
+                requests: Vec::new(),
+                results: Vec::new(),
+            }
+        }
+        mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
+            mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
+        }
+        _ => return None,
+    };
+    Some(mj_core::relay::RelayResponseEnvelope {
+        request_id: request.request_id.clone(),
+        protocol_version: request.protocol_version,
+        body: mj_core::relay::RelayResponseBody::Ok { payload },
+    })
+}
+
 fn requests_checkpoint_release(request: &mj_core::relay::RelayRequestEnvelope) -> bool {
     matches!(
         &request.request,
@@ -1238,6 +1327,16 @@ pub(crate) fn latch_relay_target(
     }
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
         spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
+    }
+    for key in [
+        LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_RECORD_SUBAGENT_ADMISSION,
+        LATCH_DROP_ADMISSION_CLOSE_REPLY,
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            spec.env
+                .insert(key.into(), value.to_string_lossy().into_owned());
+        }
     }
     if release == ReleaseSupport::Rejected {
         spec.env
