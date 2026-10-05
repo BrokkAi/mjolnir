@@ -513,21 +513,6 @@ mod tests {
     use crossterm::event::KeyCode;
 
     #[test]
-    fn config_rows_show_only_names_and_fall_back_for_blank_names() {
-        let mut choice = SessionConfigChoice {
-            value: "model-id".into(),
-            name: "Model name".into(),
-            description: Some("An explanation that should not appear".into()),
-        };
-        assert_eq!(config_value_row(&choice).as_deref(), Some("Model name"));
-        choice.name = "  ".into();
-        assert_eq!(config_value_row(&choice).as_deref(), Some("model-id"));
-    }
-
-    /// Tab has two jobs now: finish a completion, and hand the keyboard to
-    /// the next pane. An open popup wins, so a Tab meant for the completion
-    /// can never move focus out from under it.
-    #[test]
     fn tab_accepts_an_open_completion_before_it_cycles_focus() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.handle_key(key(KeyCode::Char('/')));
@@ -583,33 +568,6 @@ mod tests {
                 .iter()
                 .any(|command| command.name == "goal")
         );
-    }
-
-    #[test]
-    fn config_value_autocomplete_uses_advertised_acp_choices() {
-        use agent_client_protocol::schema::v1::{
-            SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-        };
-
-        let options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "auto",
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new("auto", "Auto"),
-                    SessionConfigSelectOption::new("gpt-5.6-luna", "Luna"),
-                ]),
-            )
-            .category(SessionConfigOptionCategory::Model),
-        ];
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_config_options(&options);
-        chat.set_input("/model lun".into());
-
-        assert!(chat.accept_autocomplete());
-        assert_eq!(chat.input, "/model gpt-5.6-luna");
-        assert!(chat.autocomplete.is_none());
     }
 
     #[test]

@@ -29,15 +29,7 @@ pub(crate) fn key(code: KeyCode) -> KeyEvent {
 }
 
 /// The drawn buffer as one string per row.
-pub(crate) fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
-    (buffer.area.y..buffer.area.bottom())
-        .map(|y| {
-            (buffer.area.x..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect()
-}
+pub(crate) use mj_chat::golden::buffer_lines;
 
 pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str) {
     let cells: Vec<Vec<char>> = lines.iter().map(|line| line.chars().collect()).collect();

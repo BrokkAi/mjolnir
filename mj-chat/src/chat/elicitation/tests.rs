@@ -111,10 +111,7 @@ fn buffer_row(buffer: &Buffer, row: u16, start: u16, end: u16) -> String {
 }
 
 fn buffer_text(buffer: &Buffer) -> String {
-    (buffer.area.y..buffer.area.bottom())
-        .map(|row| buffer_row(buffer, row, buffer.area.x, buffer.area.right()))
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::golden::buffer_lines(buffer).join("\n")
 }
 
 #[test]
