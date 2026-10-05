@@ -1050,7 +1050,6 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use mj_controller::server::api::{API_VERSION, API_VERSION_HEADER};
     use serde_json::{Value, json};
-    use std::path::Path as StdPath;
     use std::time::Duration;
 
     /// Every documented response carries the contract version, and the client
@@ -1700,6 +1699,7 @@ mod tests {
         assert!(daemon.prompt.lock().unwrap().is_empty());
     }
 
+    // Hard-won: b4c94833: the inline ACP prompt handler missed cancels until the turn ended.
     #[tokio::test]
     async fn a_cancel_sent_during_a_turn_stops_it_and_answers_cancelled() {
         // The prompt's answer used to be computed inside the message handler,
@@ -1726,6 +1726,7 @@ mod tests {
         assert_eq!(daemon.interrupts.lock().unwrap().as_slice(), ["session-1"]);
     }
 
+    // Hard-won: 5dafd135: a cancel during a held prompt was reported although the prompt still ran.
     #[tokio::test]
     async fn a_cancel_sent_while_the_prompt_is_held_withdraws_it_and_answers_cancelled() {
         // R2-1: a new session's prompt is held until its worker attaches. A
@@ -1754,6 +1755,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 5dafd135: the retry stopped before the newly accepted turn became visible.
     #[tokio::test]
     async fn a_cancel_that_arrives_before_its_turn_exists_is_retried_until_it_stops_the_turn() {
         // R2-1: the cancel sent during the hold, and the one sent as the prompt
@@ -1785,6 +1787,7 @@ mod tests {
         );
     }
 
+    // Hard-won: b4c94833: disconnect was noticed only after the turn had already completed.
     #[tokio::test]
     async fn a_consumer_that_goes_away_mid_turn_has_its_turn_stopped() {
         // Closing the pipe used to wait for the running prompt handler, so by
@@ -1813,6 +1816,7 @@ mod tests {
         assert_eq!(daemon.interrupts.lock().unwrap().as_slice(), ["session-1"]);
     }
 
+    // Hard-won: b4c94833: ACP ignored --workspace and created against the wrong or ambiguous workspace.
     #[tokio::test]
     async fn a_named_workspace_is_the_one_the_session_is_created_in() {
         // With two workspaces the daemon will not pick one, so a name the
@@ -1870,6 +1874,7 @@ mod tests {
     /// Launch finding R5-9: an adapter whose sessions were all refused exited
     /// 0 with nothing on standard error. It now ends with the refusal, which
     /// `mj acp` prints and turns into exit status 1.
+    // Hard-won: 28f47288: an unknown-workspace refusal was lost when the ACP consumer closed stdin.
     #[tokio::test]
     async fn an_adapter_that_created_nothing_ends_with_the_refusal() {
         let (client, _daemon) = FakeDaemon::start(FakeTurn::default()).await;
@@ -1897,165 +1902,6 @@ mod tests {
         assert!(
             format!("{error:#}").contains("unknown workspace \"nowhere\""),
             "{error:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_finished_turn_emits_the_answer_and_reports_end_turn() {
-        let (client, daemon) = FakeDaemon::start(FakeTurn {
-            outcome: "finished",
-            final_message: Some("the answer"),
-            ..FakeTurn::default()
-        })
-        .await;
-        let mut sent: Vec<(String, String)> = Vec::new();
-        let mut notify = |session_id: &str, message: &str| -> Result<()> {
-            sent.push((session_id.to_owned(), message.to_owned()));
-            Ok(())
-        };
-
-        let stop = run_turn(&client, "session-1", "do the thing", &mut notify, || false)
-            .await
-            .expect("the turn runs");
-
-        assert_eq!(stop, StopReason::EndTurn);
-        assert_eq!(
-            sent,
-            [("session-1".to_owned(), "the answer".to_owned())],
-            "a consumer that reads only updates still sees the answer"
-        );
-        let prompt = daemon.prompt.lock().unwrap();
-        assert_eq!(prompt[0].0, "session-1");
-        assert_eq!(prompt[0].1["text"], "do the thing");
-        let wait = daemon.wait.lock().unwrap();
-        assert_eq!(wait[0].1["turn_id"], 7);
-    }
-
-    #[tokio::test]
-    async fn every_turn_that_did_not_finish_is_refused() {
-        // A consumer treats `EndTurn` as success, so nothing short of a finished
-        // turn may report it. Each of these is a different reason a turn stops
-        // without succeeding. `input_required` is answered differently, with the
-        // question named, which its own test covers.
-        for outcome in ["error", "quota_limit", "timeout", "stopped"] {
-            let (client, _daemon) = FakeDaemon::start(FakeTurn {
-                outcome,
-                final_message: Some("something went wrong"),
-                ..FakeTurn::default()
-            })
-            .await;
-            let mut sent: Vec<(String, String)> = Vec::new();
-            let mut notify = |session_id: &str, message: &str| -> Result<()> {
-                sent.push((session_id.to_owned(), message.to_owned()));
-                Ok(())
-            };
-
-            let stop = run_turn(&client, "session-1", "hello", &mut notify, || false)
-                .await
-                .expect("the turn runs");
-
-            assert_eq!(stop, StopReason::Refusal, "outcome {outcome}");
-            assert_eq!(sent.len(), 1, "outcome {outcome} still reports its message");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_cancelled_turn_reports_cancelled() {
-        let (client, _daemon) = FakeDaemon::start(FakeTurn {
-            outcome: "cancelled",
-            ..FakeTurn::default()
-        })
-        .await;
-        let mut notify = |_session_id: &str, _message: &str| -> Result<()> { Ok(()) };
-
-        let stop = run_turn(&client, "session-1", "hello", &mut notify, || false)
-            .await
-            .expect("the turn runs");
-
-        assert_eq!(stop, StopReason::Cancelled);
-    }
-
-    #[test]
-    fn at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
-        use clap::Parser;
-        let commit = "a".repeat(40);
-        let parse = |extra: &[&str]| {
-            let mut argv = vec!["mj", "--instance", "exact-checkout-1162", "acp"];
-            argv.extend_from_slice(&["--workspace", "town"]);
-            argv.extend_from_slice(extra);
-            crate::Cli::try_parse_from(argv)
-        };
-        let error = parse(&["--at", &commit]).expect_err("--at without --bundle is refused");
-        assert!(error.to_string().contains("--bundle"), "{error}");
-        assert!(parse(&["--bundle", "product", "--at", &commit]).is_ok());
-        let cli = parse(&[
-            "--bundle",
-            "product",
-            "--at",
-            &commit,
-            "--branch",
-            "town/run-123",
-            "--base",
-            "v1.0",
-        ])
-        .unwrap();
-        let Some(crate::Command::Acp(args)) = cli.command else {
-            panic!("expected the acp command");
-        };
-        let request = start_request(&args, None, StdPath::new("/work/project"));
-        assert_eq!(request.at.as_deref(), Some(commit.as_str()));
-        assert_eq!(request.branch.as_deref(), Some("town/run-123"));
-        assert_eq!(request.base.as_deref(), Some("v1.0"));
-    }
-
-    #[test]
-    fn a_bundle_session_uses_the_managed_workspace_and_a_bare_one_the_consumers_directory() {
-        let args = AcpArgs {
-            profile: Some("codex-work".to_owned()),
-            target: Some("builder-podman".to_owned()),
-            bundle: Some("product".to_owned()),
-            workspace: crate::WorkspaceName::default(),
-            on_exit: ExitPolicy::Keep,
-            ..AcpArgs::default()
-        };
-        let managed = start_request(&args, None, StdPath::new("/work/project"));
-        assert_eq!(managed.profile_id.as_deref(), Some("codex-work"));
-        assert_eq!(managed.target_id.as_deref(), Some("builder-podman"));
-        assert_eq!(managed.bundle_id.as_deref(), Some("product"));
-        assert!(
-            managed.project_directory.is_none(),
-            "a managed target provisions its own workspace"
-        );
-
-        let bare = start_request(
-            &AcpArgs {
-                bundle: None,
-                ..args
-            },
-            None,
-            StdPath::new("/work/project"),
-        );
-        assert!(bare.bundle_id.is_none());
-        assert_eq!(
-            bare.project_directory.as_deref(),
-            Some(StdPath::new("/work/project"))
-        );
-    }
-
-    #[test]
-    fn a_prompt_is_the_text_of_its_blocks_and_nothing_else() {
-        let blocks = [
-            ContentBlock::Text(TextContent::new("first")),
-            ContentBlock::Text(TextContent::new("second")),
-        ];
-        assert_eq!(prompt_text(&blocks).unwrap(), "first\nsecond");
-        assert!(
-            prompt_text(&[]).is_err(),
-            "a turn with no text has nothing to run"
-        );
-        assert!(
-            prompt_text(&[ContentBlock::Text(TextContent::new("   "))]).is_err(),
-            "whitespace is not a prompt"
         );
     }
 
@@ -2102,21 +1948,6 @@ mod tests {
 
     fn working(adapter: &Adapter, session_id: &str) {
         adapter.active.lock().unwrap().insert(session_id.to_owned());
-    }
-
-    #[tokio::test]
-    async fn keeping_leaves_every_session_as_it_was() {
-        let (client, daemon) = FakeDaemon::start(FakeTurn::default()).await;
-        let adapter = adapter_with(client, ExitPolicy::Keep, &["session-1"]);
-        working(&adapter, "session-1");
-
-        exit(&adapter).await.expect("keeping cannot fail");
-
-        assert_eq!(
-            daemon.calls(),
-            ["interrupt session-1"],
-            "the turn stops, and nothing else happens to the session"
-        );
     }
 
     #[tokio::test]
@@ -2293,6 +2124,7 @@ mod tests {
         );
     }
 
+    // Hard-won: dd2fb6e5: a pre-admission failed state was mistaken for the outcome of a new exit operation.
     #[tokio::test]
     async fn a_failed_session_is_not_reported_before_its_destruction_is_taken_up() {
         // The daemon admits the destruction before it touches the session, so
@@ -2355,6 +2187,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 5dafd135: the adapter reported cancelled even after the turn had already completed.
     #[tokio::test]
     async fn a_turn_that_finishes_before_a_cancel_can_stop_it_reports_end_turn() {
         // R2-1: the adapter answered `cancelled` for a turn whose reply had

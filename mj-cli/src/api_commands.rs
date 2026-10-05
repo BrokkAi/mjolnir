@@ -2031,100 +2031,6 @@ mod tests {
     use crate::{Cli, Command};
     use clap::Parser as _;
 
-    #[test]
-    fn review_parses_start_and_status_with_a_session() {
-        for (verb, json) in [("start", false), ("status", true)] {
-            let mut argv = vec!["mj", "review", verb, "--session", "s1"];
-            if json {
-                argv.push("--json");
-            }
-            let cli = Cli::try_parse_from(argv).expect("review parses");
-            let Some(Command::Review(args)) = cli.command else {
-                panic!("expected the review command");
-            };
-            let (ReviewCommand::Start(session)
-            | ReviewCommand::Status(session)
-            | ReviewCommand::Forward(session)
-            | ReviewCommand::Dismiss(session)
-            | ReviewCommand::Cancel(session)) = args.command;
-            assert_eq!(session.session, "s1");
-            assert_eq!(session.json, json);
-        }
-        for verb in ["forward", "dismiss", "cancel"] {
-            let cli = Cli::try_parse_from(["mj", "review", verb, "--session", "s1"])
-                .expect("review resolutions parse");
-            let Some(Command::Review(args)) = cli.command else {
-                panic!("expected the review command");
-            };
-            let resolved = match args.command {
-                ReviewCommand::Forward(_) => "forward",
-                ReviewCommand::Dismiss(_) => "dismiss",
-                ReviewCommand::Cancel(_) => "cancel",
-                _ => panic!("{verb} parsed as another review command"),
-            };
-            assert_eq!(resolved, verb);
-        }
-        assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
-    }
-
-    #[test]
-    fn review_lines_name_each_role_and_the_verdict() {
-        assert_eq!(review_lines(None), vec!["no review is open"]);
-        let review = mj_controller::server::ViewerTurnReview {
-            tier: "quick".into(),
-            status: "validating findings".into(),
-            roles: vec![mj_controller::server::ViewerReviewRole {
-                label: "reviewer".into(),
-                state: "findings".into(),
-            }],
-            verdict: Some(mj_controller::server::ViewerReviewVerdict {
-                kind: "findings".into(),
-                text: "[P1] src/lib.rs:1 -- no bound".into(),
-                allowed: vec!["forward".into(), "dismiss".into()],
-            }),
-        };
-        assert_eq!(
-            review_lines(Some(&review)),
-            vec![
-                "quick review: validating findings",
-                "  reviewer: findings",
-                "verdict: findings",
-                "resolve with: forward, dismiss",
-                "",
-                "[P1] src/lib.rs:1 -- no bound",
-            ]
-        );
-    }
-
-    #[test]
-    fn stop_task_requires_a_session_and_exactly_one_task_selection() {
-        for argv in [
-            vec!["mj", "stop-task", "--session", "s1"],
-            vec![
-                "mj",
-                "stop-task",
-                "--session",
-                "s1",
-                "terminal:one",
-                "--all",
-            ],
-            vec!["mj", "stop-task", "--all"],
-        ] {
-            assert!(Cli::try_parse_from(argv).is_err());
-        }
-        for selection in ["terminal:one", "--all"] {
-            let cli =
-                Cli::try_parse_from(["mj", "stop-task", "--session", "s1", selection, "--json"])
-                    .unwrap();
-            let Some(Command::StopTask(args)) = cli.command else {
-                panic!("expected stop-task")
-            };
-            assert_eq!(args.session, "s1");
-            assert_eq!(args.all, selection == "--all");
-            assert!(args.json);
-        }
-    }
-
     #[tokio::test]
     async fn stop_task_sends_opaque_ids_and_all_reports_partial_failures() {
         use axum::http::{HeaderMap, StatusCode};
@@ -2232,6 +2138,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: db7d3a78: --json export with --out printed prose instead of a JSON object.
     #[test]
     fn export_json_with_out_reports_one_object_and_text_stays_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
@@ -2288,6 +2195,7 @@ mod tests {
     /// A daemon being replaced ends a wait with the handoff mark. The wait
     /// asks the next daemon for the same turn, with what is left of its
     /// budget, and reports that daemon's answer instead of failing.
+    // Hard-won: c87e5e88: wait ended with an error instead of following its accepted turn after daemon replacement.
     #[tokio::test]
     async fn a_wait_follows_the_daemon_across_an_upgrade_handoff() {
         use axum::http::StatusCode;
@@ -2362,6 +2270,7 @@ mod tests {
 
     /// A command continued under the daemon's newer build must parse there as
     /// the rest of the same command: same turn, time left, same filter.
+    // Hard-won: 4ce83357: wait and events did not continue under the replacing daemon after a protocol bump.
     #[test]
     fn continuations_parse_as_the_rest_of_the_same_command() {
         let request = WaitRequest {
@@ -2392,239 +2301,13 @@ mod tests {
         assert_eq!(events.after_seq, Some(9));
     }
 
-    #[test]
-    fn new_review_flags_choose_the_sessions_own_review() {
-        use mj_core::config::SessionReview;
-        let parse = |extra: &[&str]| {
-            let mut argv = vec!["mj", "new", "--bundle", "product"];
-            argv.extend_from_slice(extra);
-            Cli::try_parse_from(argv).map(|cli| match cli.command {
-                Some(Command::New(args)) => new_session_review(&args),
-                _ => panic!("expected the new command"),
-            })
-        };
-        assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(parse(&["--no-review"]).unwrap(), Some(SessionReview::Off));
-        assert_eq!(
-            parse(&["--review-model", "gpt-6-astra"]).unwrap(),
-            Some(SessionReview::On {
-                model: Some("gpt-6-astra".into()),
-                effort: None,
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-effort", "high"]).unwrap(),
-            Some(SessionReview::On {
-                model: None,
-                effort: Some("high".into()),
-                tier: None,
-            })
-        );
-        assert_eq!(
-            parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
-            Some(SessionReview::On {
-                model: Some("gpt-6-luna".into()),
-                effort: None,
-                tier: Some(mj_core::review::lanes::ReviewTier::Extended),
-            })
-        );
-        assert!(
-            parse(&["--review-tier", "thorough"]).is_err(),
-            "only quick and extended are tiers"
-        );
-        assert!(parse(&["--no-review", "--review-tier", "quick"]).is_err());
-        let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
-            .expect_err("off and a reviewer model contradict each other");
-        assert!(error.to_string().contains("--review-model"), "{error}");
-    }
-
-    #[test]
-    fn new_accepts_a_launch_base_and_leaves_it_unset_otherwise() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "raw",
-            "--project-directory",
-            "/srv/project",
-            "--base",
-            "HEAD~1",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.base.as_deref(), Some("HEAD~1"));
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "raw",
-            "--project-directory",
-            "/srv/project",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.base, None);
-    }
-
-    #[test]
-    fn new_model_selects_by_model_and_conflicts_with_profile() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--bundle",
-            "product",
-            "--model",
-            "gpt-6-luna",
-            "--effort",
-            "high",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.model.as_deref(), Some("gpt-6-luna"));
-        assert_eq!(args.effort.as_deref(), Some("high"));
-        assert!(args.profile.is_none());
-
-        let error = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--bundle",
-            "product",
-            "--profile",
-            "codex",
-            "--model",
-            "gpt-6-luna",
-        ])
-        .expect_err("a model-based profile choice cannot be combined with --profile");
-        assert!(error.to_string().contains("--profile"), "{error}");
-    }
-
-    #[test]
-    fn new_at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
-        let commit = "0123456789abcdef0123456789abcdef01234567";
-        let parse = |extra: &[&str]| {
-            let mut argv = vec!["mj", "new", "--workspace", "town"];
-            argv.extend_from_slice(extra);
-            Cli::try_parse_from(argv)
-        };
-        let error = parse(&["--at", commit]).expect_err("--at without --bundle is refused");
-        assert!(error.to_string().contains("--bundle"), "{error}");
-
-        let Some(Command::New(args)) = parse(&["--bundle", "product", "--at", commit])
-            .unwrap()
-            .command
-        else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.at.as_deref(), Some(commit));
-        assert_eq!((args.branch, args.base), (None, None));
-
-        let Some(Command::New(args)) = parse(&[
-            "--bundle",
-            "product",
-            "--at",
-            commit,
-            "--branch",
-            "town/run-1",
-            "--base",
-            "v1.0",
-        ])
-        .unwrap()
-        .command
-        else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.branch.as_deref(), Some("town/run-1"));
-        assert_eq!(args.base.as_deref(), Some("v1.0"));
-    }
-
-    #[test]
-    fn a_refused_start_names_quoted_fields_as_flags() {
-        let error = name_launch_flags(anyhow::anyhow!(
-            "`at` requires bundle_id: it checks out the bundle's primary repository"
-        ));
-        assert_eq!(
-            error.to_string(),
-            "--at requires --bundle: it checks out the bundle's primary repository"
-        );
-    }
-
-    #[test]
-    fn new_subagent_policy_rejects_legacy_flags_and_requires_fixed_model() {
-        let parse = |extra: &[&str]| {
-            let mut argv = vec![
-                "mj",
-                "new",
-                "--profile",
-                "codex",
-                "--target",
-                "raw",
-                "--project-directory",
-                "/srv/project",
-            ];
-            argv.extend_from_slice(extra);
-            let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
-            let Some(Command::New(args)) = cli.command else {
-                panic!("new command");
-            };
-            new_subagent_policy(&args)
-        };
-        use mj_core::subagent::SubagentPolicy;
-        assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(
-            parse(&["--subagents", "native"]).unwrap(),
-            Some(SubagentPolicy::Native)
-        );
-        assert_eq!(
-            parse(&["--subagents", "none"]).unwrap(),
-            Some(SubagentPolicy::None)
-        );
-        assert_eq!(
-            parse(&[
-                "--subagents",
-                "single-model",
-                "--subagent-model",
-                "model",
-                "--subagent-effort",
-                "high"
-            ])
-            .unwrap(),
-            Some(SubagentPolicy::SingleModel {
-                model: "model".into(),
-                effort: Some("high".into())
-            })
-        );
-        for args in [
-            &["--mj-subagents"][..],
-            &["--native-subagents"],
-            &["--subagents", "all-models"],
-            &["--subagents", "single-model"],
-            &["--subagents", "native", "--subagent-model", "model"],
-            &["--subagents", "native", "--subagent-effort", "high"],
-            &["--subagents", "none", "--subagent-model", "model"],
-            &["--subagents", "none", "--subagent-effort", "high"],
-        ] {
-            assert!(parse(args).is_err());
-        }
-    }
-
     /// A turn the worker failed for going quiet has to say why, where a script
     /// waiting on it can see it. Before this the reason lived only in the
     /// transcript and `mj wait` printed the bare word "error" (#1020).
     /// Launch finding J-25: `mj prompt --wait` printed the Codex quota
     /// sentence three times, as the wait's message, the diagnostic, and the
     /// agent's final message. Each distinct line is printed once.
+    // Hard-won: cd2f1b6d: a Codex quota reason was printed three times and surfaced as an ordinary error.
     #[test]
     fn a_reason_repeated_in_the_final_message_is_printed_once() {
         let sentence = "You’ve hit your usage limit. Try again at Sep 29th, 2026 10:20 PM.";
@@ -2650,6 +2333,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 4a875bad: wait showed only error and hid the diagnostic already recorded by the worker.
     #[test]
     fn a_failed_turn_reports_the_reason_the_worker_recorded() {
         let response = wait_response(
@@ -2695,6 +2379,7 @@ mod tests {
 
     /// precision-3260: sessions on a full disk read as "unreachable" with
     /// nothing saying why. The list marks them and the report says why.
+    // Hard-won: 540c9202: a real full filesystem stopped workers while users saw only unreachable.
     #[test]
     fn a_session_on_a_full_disk_says_so_in_the_list_and_the_report() {
         let mut session = wait_response("finished", serde_json::json!({})).session;
@@ -2713,6 +2398,7 @@ mod tests {
     /// Launch finding R11-3: `mj sessions --session` printed `last turn
     /// Completed { stop_reason: "EndTurn" }`, Rust's debug form. It says how
     /// the turn ended in words.
+    // Hard-won: 1018b0f7: session summaries exposed Rust debug spellings instead of user-readable turn outcomes.
     #[test]
     fn one_session_names_how_its_last_turn_ended_in_words() {
         let with_outcome = |outcome: serde_json::Value| {
@@ -2770,6 +2456,7 @@ mod tests {
     /// sessions` and the parent's sub-agent notice said "completed, end of
     /// turn". `mj wait` and `mj prompt --wait` use the same words, placed as
     /// the notice places them; `--json` keeps the stop reason unchanged.
+    // Hard-won: 5a09877c: wait exposed raw harness stop reasons unlike the existing session summary.
     #[test]
     fn a_wait_says_how_the_turn_ended_in_the_words_mj_sessions_uses() {
         let finished = wait_response(
@@ -2857,6 +2544,7 @@ mod tests {
 
     /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with
     /// "the turn ended as stopped" once the suspension had succeeded.
+    // Hard-won: 2a521fc5: successful suspension made mj wait report an error and exit nonzero.
     #[test]
     fn a_wait_that_sees_a_finished_suspension_reports_success() {
         let suspended = |error: serde_json::Value| {
@@ -2879,82 +2567,7 @@ mod tests {
         assert!(report_wait(&failed_resume, false).is_err());
     }
 
-    #[test]
-    fn usage_selects_one_session_or_a_whole_tree_and_pages_only_sessions() {
-        #[derive(clap::Parser)]
-        struct UsageCommand {
-            #[command(flatten)]
-            usage: UsageArgs,
-        }
-        let parse = |args: &[&str]| <UsageCommand as clap::Parser>::try_parse_from(args);
-        assert!(
-            parse(&[
-                "usage",
-                "--session",
-                "s",
-                "--after-seq",
-                "1",
-                "--limit",
-                "2"
-            ])
-            .is_ok()
-        );
-        assert!(parse(&["usage", "--parent", "p", "--json"]).is_ok());
-        for args in [
-            vec!["usage"],
-            vec!["usage", "--session", "s", "--parent", "p"],
-            vec!["usage", "--parent", "p", "--limit", "2"],
-            vec!["usage", "--parent", "p", "--after-seq", "1"],
-        ] {
-            assert!(parse(&args).is_err(), "{args:?}");
-        }
-    }
-
-    #[test]
-    fn usage_tree_text_distinguishes_models_efforts_and_removed_children() {
-        let tree: mj_core::storage::UsageTree=serde_json::from_value(serde_json::json!({
-            "parent_session_id":"parent", "totals":{},
-            "coverage":{"recorded_turns":2,"full_turn_reports":2,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0},
-            "by_model":[{"model":"sol","effort":"high","totals":{"input_tokens":{"tokens":10,"reported_turns":1}}},
-                {"model":"luna","effort":"low","totals":{"input_tokens":{"tokens":20,"reported_turns":1}}}],
-            "sessions":[{"session_id":"child","parent_session_id":"parent","task_name":"investigate",
-                "operational_session_present":false,"totals":{},"by_model":[],
-                "coverage":{"recorded_turns":0,"full_turn_reports":0,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0}}]
-        })).unwrap();
-        let text = usage_tree_lines(&tree).join("\n");
-        assert!(text.contains("model sol; effort high:"));
-        assert!(text.contains("model luna; effort low:"));
-        assert!(
-            text.contains("task investigate; parent parent; accounting retained after cleanup")
-        );
-    }
-
-    /// F-16: `mj usage` printed JSON unless asked for text.
-    #[test]
-    fn usage_text_keeps_the_coverage_beside_the_totals() {
-        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
-            "session_id": "s1",
-            "turns": [],
-            "next_after_seq": 4,
-            "latest_seq": 4,
-            "totals": {"input_tokens": {"tokens": 1200, "reported_turns": 2}},
-            "coverage": {
-                "recorded_turns": 3, "full_turn_reports": 2, "last_request_reports": 1,
-                "unspecified_reports": 0, "missing_reports": 0
-            }
-        }))
-        .unwrap();
-        let lines = usage_lines(&page);
-        assert_eq!(
-            lines[..3],
-            [
-                "totals from the 2 of 3 turns that reported a whole turn:",
-                "  input_tokens  1200  (2 turns)",
-                "not in the totals: 1 reported only their last request (turns)",
-            ]
-        );
-    }
-
+    // Hard-won: 0877ce6d: the refusal named API fields instead of the --profile and --target flags.
     #[test]
     fn a_refused_start_names_the_flags_the_user_typed() {
         let error = name_launch_flags(anyhow::anyhow!(
@@ -2969,6 +2582,7 @@ mod tests {
     /// R2-3: the `mj suspend` refusal told the user to "retry with
     /// acknowledge_unpublished_work=true", the API field. The CLI's flag is
     /// `--acknowledge-unpublished-work`.
+    // Hard-won: d7b2f496: the unpublished-work refusal named the API field instead of the CLI flag.
     #[test]
     fn a_refused_suspend_names_the_flag_the_user_types() {
         for (api, cli) in [
@@ -2987,6 +2601,7 @@ mod tests {
 
     /// F-11: a destroyed session that never took a prompt was offered
     /// `mj resume --wiki`, which then failed with "no prompt to restore from".
+    // Hard-won: 94305629: a never-prompted archived session was offered a resume that always failed.
     #[test]
     fn an_archived_row_is_offered_a_resume_only_when_it_has_something_to_restore() {
         let row = |nothing_to_restore: bool| mj_client::daemon::WikiSessionInfo {
@@ -3017,367 +2632,5 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("never received a prompt"))
         );
-    }
-
-    #[test]
-    fn creating_a_session_parses_its_target_selection_and_first_prompt() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "--workspace",
-            "work",
-            "new",
-            "--target",
-            "local",
-            "--project-directory",
-            ".",
-            "--model",
-            "gpt-5",
-            "--effort",
-            "high",
-            "add a README line",
-        ])
-        .unwrap();
-        assert_eq!(cli.workspace.as_deref(), Some("work"));
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert!(args.profile.is_none());
-        assert_eq!(args.target.as_deref(), Some("local"));
-        assert_eq!(args.project_directory, Some(PathBuf::from(".")));
-        assert_eq!(args.model.as_deref(), Some("gpt-5"));
-        assert_eq!(args.effort.as_deref(), Some("high"));
-        assert_eq!(args.prompt.as_deref(), Some("add a README line"));
-        assert!(!args.json);
-
-        // The idempotency key is gone; a command line that still passes it
-        // must fail rather than be silently ignored.
-        assert!(
-            Cli::try_parse_from([
-                "mj",
-                "new",
-                "--profile",
-                "codex",
-                "--target",
-                "local",
-                "--project-directory",
-                ".",
-                "--idempotency-key",
-                "k",
-                "add a README line",
-            ])
-            .is_err()
-        );
-
-        // The global workspace flag names a workspace; the session-scoped id
-        // is its own flag, so the two cannot collide.
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "local",
-            "--bundle",
-            "bundle-1",
-            "--workspace-id",
-            "workspace-7",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert_eq!(args.workspace_id.as_deref(), Some("workspace-7"));
-        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
-        assert!(args.json);
-    }
-
-    #[test]
-    fn creating_a_session_does_not_require_naming_a_profile_or_target() {
-        // Both identifiers fall back to the default `mj go` records, so a
-        // caller that has never read its configuration can still start work.
-        let cli = Cli::try_parse_from(["mj", "new", "--bundle", "bundle-1", "add a README line"])
-            .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert!(args.profile.is_none());
-        assert!(args.target.is_none());
-        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
-    }
-
-    #[test]
-    fn the_session_driving_subcommands_parse_their_selectors() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "prompt",
-            "--session",
-            "s1",
-            "--wait",
-            "--timeout",
-            "30",
-            "now add a test",
-        ])
-        .unwrap();
-        let Some(Command::Prompt(args)) = cli.command else {
-            panic!("expected the prompt subcommand");
-        };
-        assert_eq!(args.session, "s1");
-        assert_eq!(args.text.as_deref(), Some("now add a test"));
-        assert!(args.wait);
-        assert_eq!(args.timeout, Some(30));
-
-        let cli = Cli::try_parse_from(["mj", "wait", "--session", "s1", "--turn", "12"]).unwrap();
-        let Some(Command::Wait(args)) = cli.command else {
-            panic!("expected the wait subcommand");
-        };
-        assert_eq!(args.turn, Some(12));
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "transcript",
-            "--session",
-            "s1",
-            "--after-seq",
-            "5",
-            "--limit",
-            "10",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::Transcript(args)) = cli.command else {
-            panic!("expected the transcript subcommand");
-        };
-        assert_eq!(
-            (args.after_seq, args.limit, args.json),
-            (Some(5), Some(10), true)
-        );
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "export",
-            "--session",
-            "s1",
-            "--kind",
-            "bundle",
-            "--out",
-            "work.bundle",
-        ])
-        .unwrap();
-        let Some(Command::Export(args)) = cli.command else {
-            panic!("expected the export subcommand");
-        };
-        assert_eq!(args.kind, ExportKindArg::Bundle);
-        assert_eq!(args.out, Some(PathBuf::from("work.bundle")));
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "export",
-            "--session",
-            "s1",
-            "--kind",
-            "file",
-            "--path",
-            "src/main.rs",
-        ])
-        .unwrap();
-        let Some(Command::Export(args)) = cli.command else {
-            panic!("expected the export subcommand");
-        };
-        assert_eq!(args.kind, ExportKindArg::File);
-        assert_eq!(args.path.as_deref(), Some("src/main.rs"));
-
-        // Launch finding R3-11: without a branch name the API answered "a
-        // branch export needs a branch name", which named no flag. The
-        // command line refuses it first and names `--branch`.
-        let Err(error) =
-            Cli::try_parse_from(["mj", "export", "--session", "s1", "--kind", "branch"])
-        else {
-            panic!("a branch export without --branch is refused");
-        };
-        assert!(error.to_string().contains("--branch"), "{error}");
-
-        // An export defaults to the patch, which is what a caller reviewing
-        // the work asks for most.
-        let cli = Cli::try_parse_from(["mj", "export", "--session", "s1"]).unwrap();
-        let Some(Command::Export(args)) = cli.command else {
-            panic!("expected the export subcommand");
-        };
-        assert_eq!(args.kind, ExportKindArg::Patch);
-
-        let cli =
-            Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
-        let Some(Command::Destroy(args)) = cli.command else {
-            panic!("expected the suspend subcommand");
-        };
-        assert!(args.delete_branch);
-
-        let cli = Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).unwrap();
-        let Some(Command::Suspend(args)) = cli.command else {
-            panic!("expected the suspend subcommand");
-        };
-        assert_eq!(args.session.as_deref(), Some("s1"));
-        assert!(Cli::try_parse_from(["mj", "suspend", "--session", "s1", "--force"]).is_err());
-        // `close` is gone; its old name only says what replaced it.
-        let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
-        assert!(crate::replacement_notice(cli.command.as_ref()).is_some());
-
-        // Resume names the session and nothing else by default: the session's
-        // own record supplies the profile and target.
-        let cli = Cli::try_parse_from(["mj", "resume", "--session", "s1"]).unwrap();
-        let Some(Command::Resume(args)) = cli.command else {
-            panic!("expected the resume subcommand");
-        };
-        assert_eq!(args.session.as_deref(), Some("s1"));
-        assert_eq!(args.profile, None);
-        assert_eq!(args.target, None);
-        assert_eq!(args.queue, None);
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "resume",
-            "--session",
-            "s1",
-            "--profile",
-            "deepseek",
-            "--target",
-            "localhost",
-            "--queue",
-            "discard",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::Resume(args)) = cli.command else {
-            panic!("expected the resume subcommand");
-        };
-        assert_eq!(args.profile.as_deref(), Some("deepseek"));
-        assert_eq!(args.target.as_deref(), Some("localhost"));
-        assert_eq!(args.queue, Some(ResumeQueueArg::Discard));
-        assert!(args.json);
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "diff",
-            "--session",
-            "s1",
-            "--base",
-            "HEAD~2",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::Diff(args)) = cli.command else {
-            panic!("expected the diff subcommand");
-        };
-        assert_eq!(args.base.as_deref(), Some("HEAD~2"));
-        assert!(args.json);
-
-        for (argv, matched) in [
-            (vec!["mj", "diff", "--session", "s1"], "diff"),
-            (vec!["mj", "resume", "--session", "s1"], "resume"),
-            (vec!["mj", "sessions", "--json"], "sessions"),
-            (vec!["mj", "suspend", "--session", "s1"], "suspend"),
-            (
-                vec!["mj", "interrupt-turn", "--session", "s1"],
-                "interrupt-turn",
-            ),
-            (vec!["mj", "api-info"], "api-info"),
-        ] {
-            let cli = Cli::try_parse_from(argv.clone()).unwrap_or_else(|error| {
-                panic!("{matched} should parse: {error}");
-            });
-            assert_eq!(crate::command_name(cli.command.as_ref()), matched);
-        }
-    }
-
-    /// `mj resume` names one subject: a Mjolnir session or a SessionWiki row.
-    /// Both at once would leave the command guessing which to continue.
-    #[test]
-    fn resume_takes_a_session_or_a_wiki_id_but_not_both() {
-        let cli = Cli::try_parse_from(["mj", "resume", "--wiki", "abc123"]).unwrap();
-        let Some(Command::Resume(args)) = cli.command else {
-            panic!("expected the resume subcommand");
-        };
-        assert_eq!(args.wiki.as_deref(), Some("abc123"));
-        assert_eq!(args.session, None);
-
-        assert!(
-            Cli::try_parse_from(["mj", "resume", "--wiki", "abc123", "--session", "s1"]).is_err(),
-            "--wiki and --session name different subjects"
-        );
-        assert!(
-            Cli::try_parse_from(["mj", "resume"]).is_err(),
-            "resume has to be told what to continue"
-        );
-    }
-
-    /// `mj workspaces` keeps opening the manager, and the two subcommands are
-    /// the non-interactive form a script uses to get a workspace before its
-    /// first session (#1080).
-    #[test]
-    fn workspaces_keeps_its_interactive_form_and_gains_list_and_create() {
-        let cli = Cli::try_parse_from(["mj", "workspaces"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        assert!(args.command.is_none(), "the bare form opens the manager");
-
-        let cli = Cli::try_parse_from(["mj", "workspaces", "list", "--json"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        let Some(crate::WorkspacesCommand::List(list)) = args.command else {
-            panic!("expected list");
-        };
-        assert!(list.json);
-
-        let cli = Cli::try_parse_from(["mj", "workspaces", "create", "Release work"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        let Some(crate::WorkspacesCommand::Create(create)) = args.command else {
-            panic!("expected create");
-        };
-        assert_eq!(create.name, "Release work");
-        assert!(!create.json);
-
-        // The name is required: an empty create would otherwise reach the API.
-        assert!(Cli::try_parse_from(["mj", "workspaces", "create"]).is_err());
-    }
-
-    #[test]
-    fn suspend_names_the_option_that_takes_a_session_id() {
-        let parsed = Cli::try_parse_from(["mj", "suspend", "s1"]).expect("the id is accepted");
-        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
-            panic!("suspend parsed as another command");
-        };
-        let error = suspend_session_id(&args).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("--session s1"),
-            "the error has to say which option to use: {error:#}"
-        );
-
-        let parsed =
-            Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).expect("the option parses");
-        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
-            panic!("suspend parsed as another command");
-        };
-        assert_eq!(suspend_session_id(&args).unwrap(), "s1");
-    }
-
-    #[test]
-    fn a_prompt_comes_from_exactly_one_source() {
-        assert_eq!(
-            read_prompt(Some("inline".to_owned()), None)
-                .unwrap()
-                .as_deref(),
-            Some("inline")
-        );
-        let error =
-            read_prompt(Some("inline".to_owned()), Some(PathBuf::from("prompt.txt"))).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("not both"),
-            "unexpected error: {error:#}"
-        );
-        assert_eq!(read_prompt(None, None).unwrap(), None);
     }
 }

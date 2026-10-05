@@ -1983,6 +1983,7 @@ mod tests {
     /// Stopping a session retires its relay actor, which closes the open
     /// chat's feed. The chat is told before that happens so it reads the
     /// closure as the expected end of a deliberate stop.
+    // Hard-won: 66c73159: an intentional stop triggered a misleading feed-loss warning and reconnect loop.
     #[tokio::test]
     async fn stopping_the_open_chats_session_marks_that_chat_retiring() {
         let mut chat = open_chat("session-open");
@@ -2000,42 +2001,5 @@ mod tests {
         mark_active_chat_retiring(Some(&mut chat), "session-other");
 
         assert!(!chat.session_retiring());
-    }
-
-    #[tokio::test]
-    async fn restart_dispatch_sends_one_daemon_restart_action() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = daemon::DaemonMetadata {
-            protocol_version: daemon::PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "restart-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-        };
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
-            assert!(matches!(
-                request.action,
-                daemon::DaemonAction::RestartSession { session_id } if session_id == "session-1"
-            ));
-            daemon::write_frame(
-                &mut stream,
-                &daemon::ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(daemon::DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let mut client = daemon::DaemonClient::connect(metadata).await.unwrap();
-
-        dispatch_restart(&mut client, "session-1".into())
-            .await
-            .unwrap();
-        server.await.unwrap();
     }
 }

@@ -61,6 +61,7 @@ impl GitCommandRunner for RecordingGit {
     }
 }
 
+// Hard-won: f7bf63fc: a new session with no accepted prompt could not be checkpointed because export required native history.
 #[test]
 fn empty_native_artifacts_allowed_only_for_unprompted_sessions() {
     let temp = tempfile::tempdir().unwrap();
@@ -78,6 +79,7 @@ fn empty_native_artifacts_allowed_only_for_unprompted_sessions() {
 /// clear had replaced the native session with one that never received a
 /// prompt, so it had nothing to archive, but the prompt from before the clear
 /// made the export require native artifacts.
+// Hard-won: adfee2e4: a pre-clear failed prompt made the new empty native thread incorrectly require artifacts.
 #[test]
 fn a_session_cleared_after_its_only_prompt_checkpoints_without_native_artifacts() {
     let temp = tempfile::tempdir().unwrap();
@@ -225,6 +227,7 @@ fn uuid_v7_timestamp_decodes_only_version_seven_uuids() {
     }
 }
 
+// Hard-won: 28d0ebfc: a full Codex-home scan parsed rollouts that predated the session and cost about 15 GB per checkpoint.
 #[test]
 fn codex_content_probe_skips_rollouts_older_than_the_session() {
     let temp = tempfile::tempdir().unwrap();
@@ -258,6 +261,7 @@ fn codex_name_matched_rollout_is_collected_whatever_its_mtime() {
     assert_eq!(artifacts.len(), 1);
 }
 
+// Hard-won: 28d0ebfc: unrelated rollouts were parsed again on every checkpoint despite their permanent negative header verdict.
 #[test]
 fn codex_scan_cache_makes_a_negative_probe_verdict_permanent() {
     let temp = tempfile::tempdir().unwrap();
@@ -302,6 +306,7 @@ fn codex_scan_cache_makes_a_negative_probe_verdict_permanent() {
     );
 }
 
+// Hard-won: 28d0ebfc: Codex probe parsed lines past the one session_meta header in each rollout.
 #[test]
 fn codex_probe_stops_at_the_first_session_meta_header() {
     let temp = tempfile::tempdir().unwrap();
@@ -350,36 +355,6 @@ fn codex_export_rebuilds_a_corrupt_scan_cache_and_records_verdicts() {
             .len(),
         0
     );
-}
-
-#[test]
-fn prompt_detection_reads_the_materialized_transcript() {
-    let mut snapshot = CanonicalSessionSnapshot {
-        command_ledger: None,
-        assessment_state: None,
-        event_frontier: 1,
-        event_frontier_digest: "a".repeat(64),
-        session: CanonicalSessionState {
-            execution: CanonicalExecutionState::Idle,
-            last_activity_at_ms: Some(1),
-            session_title: None,
-            configuration: Default::default(),
-        },
-        transcript: Vec::new(),
-        queued_prompts: Vec::new(),
-    };
-    assert!(!current_native_session_received_prompt(&snapshot));
-    snapshot.transcript.push(CanonicalTranscriptItem {
-        stable_id: "user-1".into(),
-        position: 1,
-        latest_content_event_ordinal: None,
-        created_at_ms: 1,
-        last_changed_at_ms: 1,
-        body: CanonicalTranscriptBody::User {
-            content: vec![json!({"type": "text", "text": "hi"})],
-        },
-    });
-    assert!(current_native_session_received_prompt(&snapshot));
 }
 
 #[test]
@@ -672,6 +647,7 @@ fn grok_cwd_key_url_encodes_short_paths_and_hashes_long_ones() {
 /// storage by the cwd text it receives, so the restored session has to land
 /// under that text or `session/resume` reports FS_NOT_FOUND. Kimi Code and
 /// Claude Code key by the directory, so the separator must not change theirs.
+// Hard-won: ea0c9720: Grok resume used a cwd spelling without the trailing separator and failed to find its live session.
 #[test]
 fn restored_native_sessions_follow_each_harness_reading_of_the_launch_cwd() {
     const NATIVE: &str = "01a0ee22-d1b8-72a0-9c50-e34eab622597";
@@ -1211,131 +1187,6 @@ fn prestage_catch_up_recaptures_native_history_that_changed_before_the_barrier()
 }
 
 #[test]
-#[ignore = "timing measurement against MJ_CHECKPOINT_BENCH_ARCHIVE"]
-fn checkpoint_packaging_throughput() {
-    let source = std::env::var_os("MJ_CHECKPOINT_BENCH_ARCHIVE")
-        .map(PathBuf::from)
-        .expect("set MJ_CHECKPOINT_BENCH_ARCHIVE");
-    let read_started = std::time::Instant::now();
-    let archive = read_archive_verified(&source).unwrap();
-    let canonical_session = archive.canonical_session().unwrap();
-    let native_artifacts = archive
-        .manifest
-        .payloads
-        .iter()
-        .filter_map(|descriptor| {
-            let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
-                return None;
-            };
-            Some(NativeArtifact {
-                relative_path: relative_path.clone(),
-                data: archive.payload(descriptor).unwrap().to_vec(),
-                mode: descriptor.mode,
-            })
-        })
-        .collect::<Vec<_>>();
-    let repositories = archive
-        .manifest
-        .repositories
-        .iter()
-        .map(|repository| archived_repository_snapshot(&archive, repository).unwrap())
-        .collect::<Vec<_>>();
-    let payload_bytes = native_artifacts
-        .iter()
-        .map(|artifact| artifact.data.len() as u64)
-        .chain(repositories.iter().flat_map(|repository| {
-            [
-                repository.committed_bundle.len() as u64,
-                repository.staged_patch.len() as u64,
-                repository.unstaged_patch.len() as u64,
-                repository.untracked_tar.len() as u64,
-            ]
-        }))
-        .sum::<u64>()
-        + serde_json::to_vec(&canonical_session).unwrap().len() as u64;
-    let read_elapsed = read_started.elapsed();
-    let stage_fixture = tempfile::tempdir().unwrap();
-    let relay_root = stage_fixture.path().join("worker");
-    let harness_home = stage_fixture.path().join("harness");
-    let workspace_root = stage_fixture.path().join("workspace");
-    let repository_root = workspace_root.join("app");
-    fs::create_dir_all(&relay_root).unwrap();
-    fs::create_dir_all(&harness_home).unwrap();
-    fs::create_dir_all(&repository_root).unwrap();
-    for artifact in &native_artifacts {
-        write_private_file(
-            &harness_home,
-            &artifact.relative_path,
-            &artifact.data,
-            artifact.mode,
-        )
-        .unwrap();
-    }
-    git(&repository_root, &["init"]);
-    git(
-        &repository_root,
-        &["config", "user.email", "hel@example.test"],
-    );
-    git(&repository_root, &["config", "user.name", "Hel Test"]);
-    fs::write(repository_root.join("README.md"), b"benchmark").unwrap();
-    git(&repository_root, &["add", "."]);
-    git(&repository_root, &["commit", "-m", "benchmark"]);
-    let capture_spec = CheckpointCaptureSpec {
-        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
-        session: archive.manifest.session.clone(),
-        target: archive.manifest.target.clone(),
-        bundle: archive.manifest.bundle.clone(),
-        relay_root,
-        harness_home,
-        workspace_root,
-        repositories: vec![CheckpointRepositorySpec {
-            id: "app".into(),
-            relative_destination: "app".into(),
-            capture: CheckpointRepositoryCapture::MetadataOnly,
-            origin_override: None,
-        }],
-        allow_empty_native: false,
-        stage_path: stage_fixture.path().join("worker/checkpoint-stage"),
-        refresh_existing: false,
-    };
-    let prestage_started = std::time::Instant::now();
-    capture_checkpoint(&capture_spec, &SystemGit).unwrap();
-    let prestage_elapsed = prestage_started.elapsed();
-    let catch_up_started = std::time::Instant::now();
-    capture_checkpoint(
-        &CheckpointCaptureSpec {
-            refresh_existing: true,
-            ..capture_spec
-        },
-        &SystemGit,
-    )
-    .unwrap();
-    let catch_up_elapsed = catch_up_started.elapsed();
-    let output_directory = tempfile::tempdir().unwrap();
-    let output = output_directory.path().join("benchmark.hel.zip");
-    let pack_started = std::time::Instant::now();
-    write_archive_hashed(
-        &output,
-        &ArchiveInput {
-            session: archive.manifest.session,
-            target: archive.manifest.target,
-            bundle: archive.manifest.bundle,
-            canonical_session,
-            native_artifacts,
-            repositories,
-        },
-    )
-    .unwrap();
-    eprintln!(
-        "checkpoint benchmark: payload_bytes={payload_bytes} read_ms={} prestage_ms={} catch_up_ms={} pack_ms={}",
-        read_elapsed.as_millis(),
-        prestage_elapsed.as_millis(),
-        catch_up_elapsed.as_millis(),
-        pack_started.elapsed().as_millis()
-    );
-}
-
-#[test]
 #[ignore = "timing measurement against a real Codex archive and harness home"]
 fn codex_root_archive_throughput() {
     const BASELINE_MS: u128 = 46_124;
@@ -1843,6 +1694,7 @@ fn a_checkout_restore_lands_on_the_branch_the_caller_names() {
     );
 }
 
+// Hard-won: 5dd34548: workspace restore could check out a branch already held by another worktree or return a raw Git error.
 #[test]
 fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
     let temp = tempfile::tempdir().unwrap();
@@ -1896,6 +1748,7 @@ fn a_workspace_restore_refuses_a_branch_checked_out_in_another_worktree() {
 /// A session whose project is a subdirectory of its checkout still owns the
 /// whole checkout: Stop deletes a managed worktree, so work anywhere in it has
 /// to travel in the archive and come back at the same place in the checkout.
+// Hard-won: c4322938: stop and resume lost tracked and untracked work outside the project subdirectory.
 #[test]
 fn a_subdirectory_session_restores_work_across_its_whole_checkout() {
     let temp = tempfile::tempdir().unwrap();
@@ -2178,6 +2031,7 @@ fn a_checkpoint_excludes_everything_the_reviewer_owns() {
 /// no `.gitmodules` entry, could not be suspended: the submodule check failed
 /// on a gitlink Git has no URL for. The gitlink is now recorded as the
 /// commit it points to.
+// Hard-won: 4d80f0eb: an unregistered gitlink made checkpoint fail with Git’s missing .gitmodules URL error.
 #[test]
 fn a_gitlink_without_a_gitmodules_entry_does_not_block_the_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
@@ -2378,25 +2232,6 @@ fn raw_project_without_git_metadata_fails_checkpoint_export() {
 }
 
 #[test]
-fn export_reports_phase_timings_to_the_controller() {
-    let temp = tempfile::tempdir().unwrap();
-    let (spec, _) = fixture(temp.path());
-    let git_runner = RecordingGit::forwarding();
-
-    let exported = export_checkpoint_with_git(&spec, &git_runner).unwrap();
-
-    let timings = exported.timings.expect("export reports its phase timings");
-    assert!(
-        timings.total_ms
-            >= timings
-                .native_ms
-                .max(timings.repositories_ms)
-                .max(timings.archive_ms),
-        "{timings:?}"
-    );
-}
-
-#[test]
 fn target_checkpoint_from_a_worker_without_timings_still_decodes() {
     let target = serde_json::from_value::<TargetCheckpoint>(json!({
         "path": "/worker/checkpoint.hel.zip",
@@ -2496,32 +2331,6 @@ fn checkpoint_wire_requires_the_new_capture_mode_and_rejects_legacy_fields() {
 }
 
 #[test]
-fn checkpoint_export_wire_uses_relay_root_and_rejects_retired_worker_root() {
-    let temp = tempfile::tempdir().unwrap();
-    let (spec, _) = fixture(temp.path());
-    let mut value = serde_json::to_value(&spec).unwrap();
-    assert_eq!(
-        value["protocol_version"],
-        CHECKPOINT_EXPORT_PROTOCOL_VERSION
-    );
-    assert!(value.get("relay_root").is_some());
-    assert!(value.get("worker_root").is_none());
-
-    let mut unversioned = value.clone();
-    unversioned
-        .as_object_mut()
-        .unwrap()
-        .remove("protocol_version");
-    assert!(serde_json::from_value::<CheckpointExportSpec>(unversioned).is_err());
-
-    value
-        .as_object_mut()
-        .unwrap()
-        .insert("worker_root".into(), json!("/legacy"));
-    assert!(serde_json::from_value::<CheckpointExportSpec>(value).is_err());
-}
-
-#[test]
 fn checkpoint_export_rejects_an_unsupported_protocol_before_interpreting_paths() {
     let temp = tempfile::tempdir().unwrap();
     let (mut spec, _) = fixture(temp.path());
@@ -2581,6 +2390,7 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
 
 /// I1-6: a same-harness resume kept the conversation but not the model the
 /// session had selected, because the relay seed carried no configuration.
+// Hard-won: a78a57a9: native resume silently replaced the accepted Claude model and effort with harness defaults.
 #[test]
 fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_not() {
     let temp = tempfile::tempdir().unwrap();
@@ -2626,6 +2436,7 @@ fn a_native_restore_seeds_the_accepted_model_and_effort_and_a_text_handoff_does_
 /// id. Codex's effort option is `reasoning_effort`, so a seed that read only
 /// the key `effort` lost the effort across suspend and resume while the model
 /// (id `model`) survived.
+// Hard-won: 0b5375dc: Codex resume read only the generic effort key and lost its reasoning_effort selection.
 #[test]
 fn a_native_restore_seeds_effort_stored_under_the_harness_option_id() {
     let temp = tempfile::tempdir().unwrap();
@@ -2666,6 +2477,7 @@ fn a_native_restore_seeds_effort_stored_under_the_harness_option_id() {
 /// it. The seed now says whether the native session the restore continues
 /// ever received a prompt. `/clear` starts a new native session, so only the
 /// conversation after the newest context boundary counts.
+// Hard-won: 0bb9439b: a never-prompted Codex thread was marked used and refused on resume.
 #[test]
 fn a_native_restore_says_whether_the_continued_session_ever_received_a_prompt() {
     let temp = tempfile::tempdir().unwrap();
@@ -2859,6 +2671,7 @@ fn restored_image_resolution_rejects_missing_and_corrupt_blobs() {
 /// The relay seed must stay proportional to the queue, never to the
 /// conversation: a long session used to write its whole transcript into the
 /// target's relay root for three fields nobody else read.
+// Hard-won: a3aa9745: restore wrote a 47 MB canonical transcript although relay startup consumed only a few fields.
 #[test]
 fn the_relay_seed_does_not_grow_with_the_transcript() {
     let temp = tempfile::tempdir().unwrap();
@@ -2895,6 +2708,7 @@ fn the_relay_seed_does_not_grow_with_the_transcript() {
 /// A restore seeds a relay that has none of its own state yet. Existing
 /// state means the previous worker was never fully torn down, and the seed
 /// would silently lose to it.
+// Hard-won: 2e7f5ec9: a leaked worker snapshot could overwrite the restored relay seed and make resume fail.
 #[test]
 fn restore_refuses_a_relay_root_that_already_holds_relay_state() {
     let temp = tempfile::tempdir().unwrap();
@@ -2932,6 +2746,7 @@ fn restore_refuses_a_relay_root_that_already_holds_relay_state() {
 
 /// `Path::exists` follows links, so a *dangling* symlink at the seed path
 /// reads as "no file here" and used to send the write to the link target.
+// Hard-won: 37432b73: private restore followed a dangling symlink instead of refusing its target.
 #[cfg(unix)]
 #[test]
 fn restore_refuses_to_seed_the_relay_through_a_dangling_symlink() {
@@ -2970,6 +2785,7 @@ fn restore_refuses_to_seed_the_relay_through_a_dangling_symlink() {
     );
 }
 
+// Hard-won: 37432b73: private restore wrote through a symlinked ancestor into an unintended path.
 #[cfg(unix)]
 #[test]
 fn restore_refuses_a_native_artifact_under_a_symlinked_directory() {

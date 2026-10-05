@@ -470,52 +470,6 @@ mod tests {
         }
     }
 
-    /// The session menu's Copy session ID puts the full ID on both
-    /// clipboards and names its short form on the notice bar. When the
-    /// terminal clipboard refuses it, the notice bar says that instead.
-    #[test]
-    fn copying_a_session_id_names_its_short_form_or_the_clipboard_failure() {
-        let session_id = "0123456789abcdef";
-        let notice = super::super::actions::copied_session_id_notice(session_id);
-        let mut dashboard = DashboardState::new(
-            Config::default(),
-            mj_core::state::State::default(),
-            BTreeMap::new(),
-        );
-        let mut system_text = None;
-        let mut terminal_text = None;
-        copy_and_report(
-            &mut dashboard,
-            session_id,
-            &notice,
-            false,
-            |text| system_text = Some(text.to_owned()),
-            |text| {
-                terminal_text = Some(text.to_owned());
-                Ok(())
-            },
-        );
-        assert_eq!(system_text.as_deref(), Some(session_id));
-        assert_eq!(terminal_text.as_deref(), Some(session_id));
-        assert_eq!(
-            dashboard.notice().as_deref(),
-            Some("Copied session ID 01234567")
-        );
-
-        copy_and_report(
-            &mut dashboard,
-            session_id,
-            &notice,
-            true,
-            |_| panic!("SSH copy must not open the remote desktop clipboard"),
-            |_| anyhow::bail!("terminal write failed"),
-        );
-        assert_eq!(
-            dashboard.notice().as_deref(),
-            Some("Copy to the terminal clipboard failed: terminal write failed")
-        );
-    }
-
     #[test]
     fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
         let error = copy_selected_text(

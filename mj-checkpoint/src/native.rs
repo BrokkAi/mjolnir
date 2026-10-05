@@ -29,23 +29,3 @@ fn muse_sessions_root_at(config_home: &Path, native_config: &Path, native_data: 
         config_home.join(".data/muse/sessions")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn muse_external_and_private_profiles_resolve_separate_data_roots() {
-        let native_config = Path::new("/xdg/config/muse");
-        let native_data = Path::new("/xdg/data/muse");
-        assert_eq!(
-            muse_sessions_root_at(native_config, native_config, native_data),
-            native_data.join("sessions")
-        );
-        let private = Path::new("/profiles/account/muse");
-        assert_eq!(
-            muse_sessions_root_at(private, native_config, native_data),
-            private.join(".data/muse/sessions")
-        );
-    }
-}

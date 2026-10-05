@@ -1503,6 +1503,7 @@ mod tests {
     /// `connect_or_start`, which is how a daemon stopped by a restart came
     /// back on the attached client's older build before the restart could
     /// start its own.
+    // Hard-won: cbbc2e0d: the unattended keep-alive restarted a daemon from a stale client executable.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one() {
@@ -1544,6 +1545,7 @@ mod tests {
             "the keep-alive must never start a daemon"
         );
     }
+    // Hard-won: 2be31d67: restart stopped the old daemon before discovering the replacement config was invalid.
     #[test]
     fn a_configuration_the_new_daemon_cannot_read_refuses_the_replacement() {
         let directory = tempfile::tempdir().unwrap();
@@ -1564,6 +1566,7 @@ mod tests {
         assert!(error.contains("was not restarted"), "{error}");
     }
 
+    // Hard-won: 871a4d9b: an unusable profile credential prevented a replacement that should leave other profiles available.
     #[test]
     fn a_profile_that_cannot_start_does_not_refuse_the_replacement() {
         // The reported failure: a Codex home that authenticates with an API key
@@ -1639,6 +1642,7 @@ mod tests {
             }
         );
     }
+    // Hard-won: ef16209e: restart reported success after another client relaunched the old executable.
     #[test]
     fn a_restart_onto_another_build_fails_and_names_both_executables() {
         let error = restart_verdict(
@@ -1657,6 +1661,7 @@ mod tests {
         assert!(error.contains("(/checkout/target/debug/mj)"), "{error}");
         assert!(error.contains("mj daemon restart"), "{error}");
     }
+    // Hard-won: b7ced524: startup was reported failed after eight seconds while the live daemon was still initializing.
     #[tokio::test(start_paused = true)]
     async fn slow_startup_is_awaited_rather_than_reported_as_a_failure() {
         use std::cell::Cell;
