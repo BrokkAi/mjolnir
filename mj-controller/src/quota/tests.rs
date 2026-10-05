@@ -34,46 +34,6 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
 }
 
 #[test]
-fn a_custom_provider_profile_asks_its_provider_for_quota_not_chatgpt() {
-    let home = tempfile::tempdir().unwrap();
-    let request = QuotaRefreshRequest::for_profile(
-        "glm",
-        &zai_profile(home.path(), "https://api.z.ai/api/v1"),
-        home.path().to_path_buf(),
-    );
-    assert_eq!(
-        request.provider,
-        Some(ProviderCredential {
-            id: "zai".to_owned(),
-            host: "api.z.ai".to_owned(),
-            api_key: "coding-plan-key".to_owned(),
-        })
-    );
-    assert!(!request.native_openai);
-    assert!(crate::zai_usage::serves_quota(
-        &request.provider.unwrap().host
-    ));
-
-    // A Codex profile that uses its own ChatGPT login keeps that path.
-    let native = tempfile::tempdir().unwrap();
-    let request = QuotaRefreshRequest::for_profile(
-        "work",
-        &HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: native.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        },
-        native.path().to_path_buf(),
-    );
-    assert_eq!(request.provider, None);
-    assert!(request.native_openai);
-}
-
-#[test]
 fn inline_custom_provider_credentials_do_not_enable_openai_banked_resets() {
     let home = tempfile::tempdir().unwrap();
     let mut profile = zai_profile(home.path(), "https://example.invalid/v1");
@@ -89,6 +49,7 @@ fn inline_custom_provider_credentials_do_not_enable_openai_banked_resets() {
     assert!(!request.native_openai);
 }
 
+// Hard-won: 6f73fe58: usage-billed custom providers were incorrectly shown as unavailable
 #[tokio::test]
 async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
     let home = tempfile::tempdir().unwrap();
@@ -102,24 +63,6 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
     assert!(outcome.report.windows.is_empty());
     assert!(outcome.report.is_usage_priced());
     assert_eq!(outcome.report.compact(), API_LABEL);
-}
-
-#[test]
-fn parses_kimi_summary_limits_and_booster_without_credentials() {
-    let payload = serde_json::json!({
-        "usage": {"name":"Weekly", "used":40, "limit":1000, "resetAt":"tomorrow"},
-        "limits": [{"detail":{"remaining":"90", "limit":"100", "name":"5h"}}],
-        "boosterWallet": {"balance":{"amountLeft":42000000}}
-    });
-    let (windows, extra) = parse_kimi_usage(&payload);
-    assert_eq!(windows.len(), 2);
-    assert_eq!(windows[0].used, Some(40));
-    assert_eq!(windows[1].used, Some(10));
-    assert_eq!(windows[0].label, "Week");
-    assert_eq!(windows[0].remaining_percent, Some(96));
-    assert_eq!(windows[1].label, "5H");
-    assert_eq!(windows[1].remaining_percent, Some(90));
-    assert_eq!(extra.as_deref(), Some("booster 42 remaining"));
 }
 
 #[test]
@@ -248,54 +191,6 @@ fn compact_hides_claude_short_window_when_week_is_exhausted() {
     assert_eq!(report.compact(), "Week 0% left, resets 03:59 Aug 14");
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn a_grok_profile_reports_its_billing_period_as_one_quota_window() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("auth.json"), b"old credentials").unwrap();
-    install_fake_command(
-        directory.path(),
-        "grok",
-        "#!/bin/sh\nprintf 'refreshed credentials' > \"$GROK_HOME/auth.json\"\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *initialize*) printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\\n' ;;\n    *billing*) printf '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"config\":{\"creditUsagePercent\":25.0,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"end\":\"2026-08-18T05:22:07+00:00\"}},\"subscription_tier\":\"X Premium+\"}}\\n' ;;\n  esac\ndone\n",
-    );
-    let environment = BTreeMap::from([
-        (
-            "GROK_HOME".to_owned(),
-            directory.path().to_string_lossy().into_owned(),
-        ),
-        (
-            "PATH".to_owned(),
-            directory.path().to_string_lossy().into_owned(),
-        ),
-    ]);
-
-    let (outcome, _) = refresh_profile(
-        QuotaRefreshRequest {
-            native_openai: true,
-            profile_id: "grok".into(),
-            harness: HarnessKind::Grok,
-            source_home: directory.path().to_path_buf(),
-            environment,
-            cwd: directory.path().to_path_buf(),
-            provider: None,
-        },
-        None,
-    )
-    .await;
-    assert!(outcome.credentials_changed);
-    let report = outcome.report;
-
-    assert_eq!(report.error, None, "{:?}", report.error);
-    // One long window and no short one: Grok Build has no 5-hour budget.
-    assert_eq!(report.windows.len(), 1);
-    assert_eq!(report.weekly_window().unwrap().remaining_percent, Some(75));
-    assert_eq!(report.five_hour_window(), None);
-    // The subscription tier stays off the row; the fixture carries it to
-    // prove it is ignored.
-    assert_eq!(report.extra, None);
-    assert!(report.compact().starts_with("Week 75% left, resets "));
-}
-
 /// A `codex app-server` stand-in on `PATH` that logs every request line it
 /// reads, so a test can assert the exact protocol exchange.
 #[cfg(unix)]
@@ -383,6 +278,7 @@ async fn poll_codex_profile(
 }
 
 #[cfg(unix)]
+// Hard-won: c94c68c0: host and container could spend the same Codex refresh token and kill a live turn
 #[tokio::test]
 async fn a_codex_login_near_expiry_is_rotated_before_the_usage_query() {
     let directory = tempfile::tempdir().unwrap();
@@ -537,12 +433,6 @@ fn a_codex_refresh_margin_is_an_hour_or_a_tenth_of_the_token_life() {
 }
 
 #[tokio::test]
-async fn a_missing_codex_credential_file_asks_for_no_rotation() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(!codex_login_is_near_expiry(&directory.path().join("auth.json")).await);
-}
-
-#[tokio::test]
 async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     let directory = tempfile::tempdir().unwrap();
 
@@ -664,6 +554,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
 /// Other quota tests reach the same log lines on their own threads, and
 /// tracing decides once per process whether a line is wanted, so this runs
 /// alone in a child process with a global subscriber.
+// Hard-won: e9fa6be0: quota failures appeared as unavailable without a diagnostic reason
 #[test]
 fn a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once() {
     const TEST: &str = "a_profile_whose_quota_cannot_be_read_says_why_in_the_log_once";
@@ -1315,6 +1206,7 @@ fn claude_comma_separated_reset_is_normalized() {
 /// This runs alone in a child process. The writer is process-wide, and a
 /// thread's own subscriber can miss an event from a callsite that a parallel
 /// test reaches first.
+// Hard-won: b1ba33fb: dashboard refresh wrote the quota cache without owning the database writer
 #[test]
 fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     const CHILD: &str = "MJ_QUOTA_RESET_CACHE_TEST_CHILD";

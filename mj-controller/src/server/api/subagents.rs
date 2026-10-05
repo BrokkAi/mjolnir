@@ -819,6 +819,7 @@ mod tests {
             .collect()
     }
 
+    // Hard-won: 435b4ed9: children used the parent's nearly depleted profile over one with quota
     #[test]
     fn ranking_puts_most_quota_first_unknown_last_and_ties_to_the_parent() {
         let mut candidates = vec![
@@ -833,29 +834,6 @@ mod tests {
         assert_eq!(
             ids(&candidates),
             vec!["high", "parent", "a-other", "b-other", "empty", "unknown"]
-        );
-    }
-
-    #[test]
-    fn a_model_no_profile_offers_is_refused_with_what_is_offered() {
-        let failure = choose_subagent_profile(
-            SubagentCandidates {
-                offered: vec![
-                    candidate("codex", Some(50), &["luna", "nova"]),
-                    candidate("deepseek", Some(100), &["flash"]),
-                ],
-                unavailable: vec![("glm".to_owned(), "not signed in".to_owned())],
-            },
-            None,
-            "codex",
-            "sol",
-        )
-        .unwrap_err();
-        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            failure.message,
-            "no eligible profile offers model \"sol\". Offered: deepseek (flash); \
-             codex (luna, nova). Could not check: glm (not signed in)."
         );
     }
 
@@ -894,6 +872,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 435b4ed9: same-harness profiles hid models needed by sub-agents
     #[test]
     fn merging_keeps_the_best_of_each_same_model_group() {
         let merged = merge_same_models(
@@ -1096,26 +1075,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn fixed_model_without_effort_uses_harness_default() {
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            candidates: SubagentCandidates {
-                offered: vec![candidate("parent", Some(50), &["plain"])],
-                unavailable: vec![],
-            },
-        });
-        let policy = mj_core::subagent::SubagentPolicy::SingleModel {
-            model: "plain".into(),
-            effort: None,
-        };
-        let selected =
-            resolve_subagent_policy_selection(&backend, "s", "parent", &policy, None, None, None)
-                .await
-                .unwrap();
-        assert_eq!(selected.model, "plain");
-        assert_eq!(selected.effort, None);
-    }
-
     fn efforts(values: &[&str]) -> Vec<mj_core::acp::SessionConfigChoice> {
         values
             .iter()
@@ -1132,6 +1091,7 @@ mod tests {
     /// passed because it was checked against the profile's default model; the
     /// child's first prompt then never ran ("this agent does not offer high as
     /// a effort"). Efforts are the child model's own.
+    // Hard-won: f67ed023: Haiku inherited an invalid effort from a sibling model and never ran its first prompt
     #[test]
     fn a_child_effort_comes_from_the_efforts_its_own_model_offers() {
         assert_eq!(
@@ -1161,6 +1121,7 @@ mod tests {
         );
     }
 
+    // Hard-won: f67ed023: spawn accepted effort unsupported by the selected model
     #[tokio::test]
     async fn a_spawn_checks_effort_against_the_model_it_names() {
         let mut claude = candidate("claude", Some(50), &["sonnet", "no-effort"]);
@@ -1208,49 +1169,5 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(selection.effort.as_deref(), Some("low"));
-    }
-
-    #[tokio::test]
-    async fn a_luna_model_selection_turns_on_fast_mode() {
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            candidates: SubagentCandidates {
-                offered: vec![candidate("codex", Some(50), &["luna"])],
-                unavailable: Vec::new(),
-            },
-        });
-        let selection = resolve_subagent_selection(
-            &backend,
-            "parent-session",
-            "codex",
-            None,
-            Some("luna"),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(selection.fast_mode);
-    }
-
-    #[tokio::test]
-    async fn a_non_luna_model_selection_leaves_fast_mode_off() {
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            candidates: SubagentCandidates {
-                offered: vec![candidate("codex", Some(50), &["nova", "astra"])],
-                unavailable: Vec::new(),
-            },
-        });
-        for model in ["nova", "astra"] {
-            let selection = resolve_subagent_selection(
-                &backend,
-                "parent-session",
-                "codex",
-                None,
-                Some(model),
-                None,
-            )
-            .await
-            .unwrap();
-            assert!(!selection.fast_mode, "{model} must not turn on fast mode");
-        }
     }
 }

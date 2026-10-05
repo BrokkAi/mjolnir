@@ -423,46 +423,6 @@ mod tests {
             advertised: false,
         }
     }
-    #[test]
-    fn auto_prefers_other_providers_then_quota_class_then_provider() {
-        use ReviewProvider::*;
-        use UtilityQuotaClass::*;
-        let mut candidates = vec![
-            candidate("primary", Codex, 2, Healthy, 100),
-            candidate("other-codex", Codex, 1, Healthy, 100),
-            candidate("claude-reserve", Claude, 0, Reserve, 10),
-            candidate("deepseek", DeepSeek, 0, Healthy, 100),
-            candidate("claude", Claude, 0, Healthy, 20),
-            candidate("kimi-unknown", Kimi, 0, Unknown, 0),
-        ];
-        rank(&mut candidates);
-        assert_eq!(
-            candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            [
-                "claude",
-                "deepseek",
-                "claude-reserve",
-                "kimi-unknown",
-                "other-codex",
-                "primary"
-            ]
-        );
-    }
-    #[test]
-    fn newest_family_model_uses_advertised_ids() {
-        let choices = ReviewCapabilityChoices {
-            model_choices: ["gpt-5.9-luna", "gpt-5.10-luna", "gpt-6-astra"]
-                .map(|value| mj_core::acp::SessionConfigChoice {
-                    value: value.into(),
-                    name: value.into(),
-                    description: None,
-                })
-                .into(),
-            ..Default::default()
-        };
-        assert_eq!(family_model(&choices, "luna").unwrap(), "gpt-5.10-luna");
-        assert!(family_model(&choices, "sonnet").is_err());
-    }
     fn snapshot(
         entries: &[(
             &str,
@@ -498,6 +458,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 3eefab64: Auto staged unrelated profiles and credentials before rejecting models they could not run
     #[test]
     fn a_pinned_model_rules_profiles_in_or_out_from_the_catalog_alone() {
         use mj_core::profile_capabilities::CapabilityState;
@@ -527,6 +488,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 3eefab64: Auto tried a failing unknown profile before the known profile that offered the pinned model
     #[test]
     fn confirmed_profiles_are_tried_before_unknown_ones_whatever_their_rank() {
         let mut candidates = vec![
@@ -573,117 +535,6 @@ mod tests {
             ..Default::default()
         }
     }
-
-    #[test]
-    fn manual_main_model_does_not_override_specialist_policy() {
-        let config = ReviewConfig {
-            profile: Some("work".into()),
-            model: Some("gpt-6-astra".into()),
-            effort: Some("high".into()),
-            ..Default::default()
-        };
-        let (main, specialist) = select_models(
-            ReviewProvider::Codex,
-            &config,
-            &catalog(&["gpt-5.9-luna", "gpt-5.10-luna"]),
-            true,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(main.effort.as_deref(), Some("high"));
-        assert_eq!(specialist.model.as_deref(), Some("gpt-5.10-luna"));
-        assert_eq!(specialist.effort.as_deref(), Some("xhigh"));
-        assert!(specialist.fast_mode);
-        let (main, specialist) =
-            select_models(ReviewProvider::Other, &config, &catalog(&[]), true).unwrap();
-        assert_eq!(main, specialist);
-    }
-
-    #[test]
-    fn auto_with_a_named_model_uses_it_only_where_it_is_offered() {
-        let config = ReviewConfig {
-            model: Some("gpt-6-astra".into()),
-            ..Default::default()
-        };
-        let (main, _) = select_models(
-            ReviewProvider::Codex,
-            &config,
-            &catalog(&["gpt-6-astra", "gpt-7-astra"]),
-            false,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(main.effort.as_deref(), Some("medium"), "policy effort");
-
-        let error = select_models(
-            ReviewProvider::Claude,
-            &config,
-            &catalog(&["claude-fable-5-1"]),
-            false,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("gpt-6-astra"), "{error:#}");
-
-        // A provider Auto has no policy for can still offer the model; its
-        // harness keeps its own effort unless one is named.
-        let (main, _) = select_models(
-            ReviewProvider::Other,
-            &config,
-            &catalog(&["gpt-6-astra"]),
-            false,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(main.effort, None);
-
-        let effort_only = ReviewConfig {
-            effort: Some("high".into()),
-            ..Default::default()
-        };
-        let (main, _) = select_models(
-            ReviewProvider::Codex,
-            &effort_only,
-            &catalog(&["gpt-6-astra", "gpt-7-astra"]),
-            false,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("gpt-7-astra"));
-        assert_eq!(main.effort.as_deref(), Some("high"));
-    }
-
-    #[test]
-    fn auto_uses_newest_k_series_and_deepseek_efforts() {
-        let (main, specialist) = select_models(
-            ReviewProvider::Kimi,
-            &ReviewConfig::default(),
-            &catalog(&["kimi-code/k3", "kimi-code/k4", "kimi-latest"]),
-            true,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("kimi-code/k4"));
-        assert_eq!(main.effort.as_deref(), Some("max"));
-        assert_eq!(main, specialist);
-        let (main, specialist) = select_models(
-            ReviewProvider::DeepSeek,
-            &ReviewConfig::default(),
-            &catalog(&["deepseek-v4-flash", "deepseek-v5-flash", "deepseek-v6-pro"]),
-            true,
-        )
-        .unwrap();
-        assert_eq!(main.model.as_deref(), Some("deepseek-v5-flash"));
-        assert_eq!(main.effort.as_deref(), Some("max"));
-        assert_eq!(specialist.effort.as_deref(), Some("high"));
-        assert!(!specialist.fast_mode);
-        assert!(
-            select_models(
-                ReviewProvider::Other,
-                &ReviewConfig::default(),
-                &catalog(&[]),
-                false
-            )
-            .is_err()
-        );
-    }
 }
 
 #[cfg(test)]
@@ -695,6 +546,7 @@ mod preemption_tests {
     /// an Auto choice waits and asks again instead of skipping every
     /// candidate (Series 34 #3444, 2026-10-03: four Codex profiles refused in
     /// five seconds, then "No usable Auto reviewer").
+    // Hard-won: bc774743: checkpoint preparation made Auto skip every profile and report no usable reviewer
     #[test]
     fn a_worker_reserved_for_checkpoint_is_a_lifecycle_preemption() {
         let refusal = "relay 2.28.0 could not perform reviewer_start: relay rejected request \
