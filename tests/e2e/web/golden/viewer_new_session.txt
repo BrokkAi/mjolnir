@@ -1,0 +1,1128 @@
+=== shared container defaults (390x844) ===
+New session
+
+Step 2 of 4 · Where to run
+
+Where to run
+container
+podman
+local
+local
+remote
+ssh
+Container size
+CPU cores
+Memory (GiB)
+
+This host allows up to 24 CPU cores and 64 GiB of memory.
+
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"local","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"remote","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"32","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== container resource allocation and launch (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+6 CPU · 12.5 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":6,"memory_bytes":13421772800}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== EC2 default resource option (390x844) ===
+New session
+
+Step 2 of 4 · Where to run
+
+Where to run
+container
+podman
+local
+local
+remote
+ssh
+ec2
+aws-ec2
+EC2 size
+EC2 instance size
+c7i.large · 2 vCPU · 4 GiB
+m7i.2xlarge · 8 vCPU · 32 GiB
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"local","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"remote","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"ec2","checked":true,"disabled":false,"pressed":null},{"tag":"select","id":"new-resource-aws","label":"c7i.large · 2 vCPU · 4 GiB\nm7i.2xlarge · 8 vCPU · 32 GiB","value":"m7i.2xlarge","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: GET /api/targets/*/resource-options ["ec2"]
+project creation requests: 0
+=== EC2 resource choice and launch (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+ec2
+EC2 size
+c7i.large
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"aws-ec2","instance_type":"c7i.large","vcpus":2,"memory_bytes":4294967296}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"remote_repairs":[]}]
+request: GET /api/targets/*/resource-options ["ec2"]
+project creation requests: 0
+=== local path suggestions stay with the local host (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/recent
+/work/older
+Project files
+/work/recent/
+/work/repos/
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/recent","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/re","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/re","kind":"directories"}]
+project creation requests: 0
+=== selected path suggestion and child completion (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/recent
+/work/older
+Project files
+/work/recent/
+/work/repos/
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/recent","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/repos/","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/re","kind":"directories"},{"target_id":"local","prefix":"/work/repos/","kind":"directories"}]
+project creation requests: 0
+=== host-specific path suggestions and URL source (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+GitHub URL or owner/repository
+
+You can also enter a repository path on the computer running Mjolnir.
+
+Use repositorySelect multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-source","label":null,"value":"owner/repo","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-use","label":"Use repository","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/re","kind":"directories"},{"target_id":"local","prefix":"/work/repos/","kind":"directories"}]
+project creation requests: 0
+=== managed worktree selected on Review (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+local
+Project files
+/work/linked
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
+request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/linked","kind":"directories"}]
+project creation requests: 0
+=== explicit managed worktree choice and launch (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+local
+Project files
+/work/linked
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","create_managed_worktree":true,"subagents":{"mode":"native"}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
+request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/linked","kind":"directories"}]
+project creation requests: 0
+=== review subagent policy Native (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== profile subagent policy Native (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review subagent policy None (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+None
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== profile subagent policy None (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+None
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review subagent policy Single model: model-a · high (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: model-a · high
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== profile subagent policy Single model: model-a · high (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: model-a · high
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"model-a","effort":"high"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review subagent policy Single model: haiku · low (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: haiku · low
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== profile subagent policy Single model: haiku · low (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: haiku · low
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"haiku","effort":"low"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review subagent policy Single model: haiku (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: haiku
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== profile subagent policy Single model: haiku (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: haiku
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"haiku","effort":null},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review for harness without subagent support (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+gamma
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== harness without subagent support (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+gamma
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== managed worktree unavailable on container (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== managed worktree unavailable on local (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+local
+Project files
+/work/recent
+Title (optional)
+Create isolated checkout
+
+Use the selected directory directly.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/recent","remote_repairs":[]}]
+project creation requests: 0
+=== managed worktree unavailable on remote (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+remote
+Project files
+/remote/recent
+Title (optional)
+Create isolated checkout
+
+Use the selected directory directly.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"remote","project_directory":"/remote/recent","remote_repairs":[]}]
+project creation requests: 0
+=== recent and saved project choices (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+
+Pick a saved project or find a repository to start from.
+
+GitHub
+Your repositories and search
+Browse folders
+On your Mjolnir computer
+Paste URL
+GitHub URL or owner/repository
+Recent projects
+existing
+example/frontend · example/api
+Saved projects
+saved
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGitHub URL or owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-saved-project-existing","label":"existing\nexample/frontend · example/api","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-saved-project-saved","label":"saved","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== recent and saved multi-repository project selection (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== empty and truncated GitHub results (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+Search GitHub repositories
+
+Uses the GitHub account on the computer running Mjolnir.
+
+No repositories found.
+
+Try another search, browse folders, or paste a GitHub URL.
+
+More repositories are available. Narrow your search.
+
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-search","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"github","query":""}]
+project creation requests: 0
+=== empty and truncated GitHub results can continue by URL (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+GitHub URL or owner/repository
+
+You can also enter a repository path on the computer running Mjolnir.
+
+Use repositorySelect multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-source","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-use","label":"Use repository","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"github","query":""}]
+project creation requests: 0
+=== filtered folder result (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+
+Folders on the computer running Mjolnir.
+
+/home/controller
+
+Up
+Home
+Go to folder…
+Filter folder names
+
+1 result
+
+omitted
+/home/controller/omitted
+Use repository →
+Open folder
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-up","label":"Up","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-home","label":"Home","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-location","label":null,"value":"/home/controller","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-go","label":null,"value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-folder-filter","label":null,"value":"omitted","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"omitted\n/home/controller/omitted\nUse repository →","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Open folder omitted","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller","filter":"omitted"}]
+project creation requests: 0
+=== folder filtering and opening a result without selecting it (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+
+Folders on the computer running Mjolnir.
+
+/home/controller/omitted
+
+Up
+Home
+Go to folder…
+Filter folder names
+
+1 result
+
+first
+Open folder
+Browse →
+
+More folders are available. Filter by folder name to find them.
+
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-up","label":"Up","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-home","label":"Home","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-location","label":null,"value":"/home/controller/omitted","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-go","label":null,"value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-folder-filter","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"first\nOpen folder\nBrowse →","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller","filter":"omitted"},{"kind":"directory","path":"/home/controller/omitted"}]
+project creation requests: 0
+=== actionable GitHub service failure (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+Search GitHub repositories
+
+Uses the GitHub account on the computer running Mjolnir.
+
+GitHub is temporarily unavailable. Retry later.
+
+Retry
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-search","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-retry","label":"Retry","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"github","query":""}]
+project creation requests: 0
+=== compact phone project chooser (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+
+Folders on the computer running Mjolnir.
+
+/home/controller
+
+Up
+Home
+Go to folder…
+Filter folder names
+
+1 result
+
+code
+Folder
+Browse →
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-up","label":"Up","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-home","label":"Home","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-location","label":null,"value":"/home/controller","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-go","label":null,"value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-folder-filter","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"code\nFolder\nBrowse →","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""}]
+project creation requests: 0
+layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":221,"width":118,"height":44},{"text":"Folders","x":136,"y":221,"width":118,"height":44},{"text":"URL","x":262,"y":221,"width":118,"height":44}],"result":null,"documentWidth":390}
+=== opened folder remains visible on phone (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+
+Folders on the computer running Mjolnir.
+
+/home/controller/code
+
+Up
+Home
+Go to folder…
+Filter folder names
+
+1 result
+
+Use code
+Repository in this folder
+Use repository →
+Open folder
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-up","label":"Up","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-home","label":"Home","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-location","label":null,"value":"/home/controller/code","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-go","label":null,"value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-folder-filter","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Use code\nRepository in this folder\nUse repository →","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Open folder Use code","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
+project creation requests: 0
+layout: {"header":{"x":10,"y":8,"width":370,"height":44},"sourceButtons":[{"text":"GitHub","x":10,"y":221,"width":118,"height":44},{"text":"Folders","x":136,"y":221,"width":118,"height":44},{"text":"URL","x":262,"y":221,"width":118,"height":44}],"result":{"text":"Use code\nRepository in this folder\nUse repository →","x":23,"y":721,"width":206.03,"height":113.95},"documentWidth":390}
+=== phone URL source choice (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+GitHub
+Folders
+URL
+Recent & saved projects
+GitHub URL or owner/repository
+
+You can also enter a repository path on the computer running Mjolnir.
+
+Use repositorySelect multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Folders","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"URL","value":"","checked":null,"disabled":false,"pressed":"true"},{"tag":"button","id":"new-project-saved","label":"Recent & saved projects","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-source","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-use","label":"Use repository","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
+project creation requests: 0
+=== phone recent projects source choice (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+
+Pick a saved project or find a repository to start from.
+
+GitHub
+Your repositories and search
+Browse folders
+On your Mjolnir computer
+Paste URL
+GitHub URL or owner/repository
+
+Your projects will appear here after you choose a repository.
+
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGitHub URL or owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
+project creation requests: 0
+=== compact phone source navigation (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+
+Pick a saved project or find a repository to start from.
+
+GitHub
+Your repositories and search
+Browse folders
+On your Mjolnir computer
+Paste URL
+GitHub URL or owner/repository
+
+Your projects will appear here after you choose a repository.
+
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGitHub URL or owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/projects/discover [{"kind":"directory","path":""},{"kind":"directory","path":"/home/controller/code"}]
+project creation requests: 0
+layout: {"x":199,"y":289,"width":181,"height":89.96875}
+=== review shows unavailable subagent policy (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: removed · high
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== unavailable subagent model and Settings guidance (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Single model: removed · high
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+
+Selected subagent model "removed" is unavailable. Change the default in Settings → Agent Profiles → alpha → Sub-agents, or choose another account.
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"removed","effort":"high"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== generic launch error (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+
+boom
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0

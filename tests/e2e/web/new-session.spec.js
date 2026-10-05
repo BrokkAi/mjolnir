@@ -12,6 +12,8 @@ const defaultContainerTarget = {
 
 async function mount(page, {
   bundles = [{ id: 'existing', repositories: [] }],
+  profiles = [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }, { id: 'gamma', harness_kind: 'grok' }],
+  targets = null,
   containerTarget = defaultContainerTarget,
   extraTargets = [],
   resourceOptions = {},
@@ -19,8 +21,8 @@ async function mount(page, {
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
-      profiles: [{ id: 'alpha', harness_kind: 'codex' }, { id: 'beta', harness_kind: 'claude' }, { id: 'gamma', harness_kind: 'grok' }],
-      targets: [
+      profiles,
+      targets: targets || [
         containerTarget,
         { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older'] },
         { id: 'remote', kind: 'ssh', requires_project_directory: true, recent_project_directories: ['/remote/recent'] },
@@ -41,7 +43,7 @@ async function mount(page, {
       ], directory: body.path || '/home/controller', parent: body.path ? '/home/controller' : '/', truncated: false,
     },
     complete: () => ({ candidates: ['/work/recent/', '/work/repos/'], insert: '/work/re', truncated: false }),
-    holdCreate: null, holdLaunch: null,
+    holdCreate: null, holdLaunch: null, launchResponses: 0,
     holdPreflight: null, preflightError: null, remoteRepairs: [], resolvedDirectory: null,
     worktreeOptions: { available: true, default_create: true },
   };
@@ -119,7 +121,9 @@ async function mount(page, {
       state.actions.push(route.request().postDataJSON());
       if (state.holdLaunch) await state.holdLaunch;
       if (state.actionError) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(state.actionError) });
-      return route.fulfill({ status: 202, body: '' });
+      await route.fulfill({ status: 202, body: '' });
+      if (state.holdLaunch) state.launchResponses += 1;
+      return;
     }
     const file = pathname === '/' ? 'viewer.html' : pathname.slice(1);
     if (['viewer.html', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest', 'icon.svg'].includes(file))
@@ -149,20 +153,331 @@ async function projectStep(page, target = 'container') {
   await page.locator('#new-next').click();
 }
 
-test('container creation uses the shared baseline and sends the chosen size', async ({ page }) => {
-  const state = await mount(page);
+async function captureNewSessionState(output, page, label, state, extra = null) {
+  const viewport = page.viewportSize();
+  output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
+  output.push((await page.locator('#new-page').isVisible())
+    ? (await page.locator('#new-page').innerText()).trim()
+    : (await page.locator('#app').innerText()).trim());
+  const controls = await page.locator('#new-page button, #new-page input, #new-page select, #new-page textarea').evaluateAll(nodes => nodes.map(node => ({
+    tag: node.tagName.toLowerCase(),
+    id: node.id || null,
+    label: node.getAttribute('aria-label') || node.innerText?.trim() || node.getAttribute('name') || null,
+    value: 'value' in node ? node.value : null,
+    checked: 'checked' in node ? node.checked : null,
+    disabled: 'disabled' in node ? node.disabled : null,
+    pressed: node.getAttribute('aria-pressed'),
+  })));
+  output.push(`controls: ${JSON.stringify(controls)}`);
+  output.push(`subagent selector count: ${await page.locator('#new-subagents').count()}`);
+  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
+  if (state.preflights.length) output.push(`request: POST /api/preflight/new ${JSON.stringify(state.preflights)}`);
+  if (state.resourceOptionRequests.length) output.push(`request: GET /api/targets/*/resource-options ${JSON.stringify(state.resourceOptionRequests)}`);
+  if (state.completions.length) output.push(`request: POST /api/paths/complete ${JSON.stringify(state.completions)}`);
+  if (state.discoveries.length) output.push(`request: POST /api/projects/discover ${JSON.stringify(state.discoveries)}`);
+  if (state.creates.length) output.push(`request: POST /api/bundles ${JSON.stringify(state.creates)}`);
+  output.push(`project creation requests: ${state.creates.length}`);
+  if (extra !== null) output.push(`layout: ${JSON.stringify(extra)}`);
+}
+
+async function startHeldLaunch(page, state) {
+  let release;
+  state.holdLaunch = new Promise(resolve => { release = resolve; });
   await page.locator('#new-next').click();
-  await expect(page.locator('#new-resource-cpus')).toHaveValue('8');
-  await expect(page.locator('#new-resource-memory')).toHaveValue('32');
-  await page.locator('#new-resource-cpus').fill('6');
-  await page.locator('#new-resource-memory').fill('12.5');
-  await page.locator('#new-next').click();
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await page.locator('#new-next').click();
-  await expect(page).toHaveURL(/#workspace\/test$/);
-  expect(state.actions[0].resource_allocation).toEqual({
-    kind: 'container', cpus: 6, memory_bytes: 13421772800,
+  await expect.poll(() => state.actions.length).toBe(1);
+  await expect(page.locator('#new-next')).toBeDisabled();
+  return async () => {
+    release();
+    await expect.poll(() => state.launchResponses).toBe(1);
+    await expect(page.locator('#new-page')).toBeHidden();
+  };
+}
+
+async function withNewSessionPage(context, options, output, label, scenario) {
+  const page = await context.newPage();
+  const state = await mount(page, options);
+  try {
+    const result = await scenario(page, state);
+    const afterCapture = typeof result === 'function' ? result : null;
+    await captureNewSessionState(output, page, label, state, afterCapture ? null : result ?? null);
+    if (afterCapture) await afterCapture();
+  } finally {
+    await page.close();
+  }
+}
+
+async function captureWizardPath(output, page, state, label) {
+  for (let index = 0; index < 5; index += 1) {
+    const progress = await page.locator('#new-progress').innerText();
+    if (progress.includes('Review')) {
+      await expect(page.locator('#new-step')).not.toContainText('Checking project');
+      await captureNewSessionState(output, page, `${label}: ${progress}`, state);
+      return;
+    }
+    await captureNewSessionState(output, page, `${label}: ${progress}`, state);
+
+    const current = await page.locator('#new-step').innerText();
+    const projectChoice = page.getByRole('button', { name: 'existing', exact: true });
+    if (current.includes('Choose a project') && await projectChoice.count()) {
+      await projectChoice.click();
+      if ((await page.locator('#new-progress').innerText()) === progress) await page.locator('#new-next').click();
+    } else {
+      await page.locator('#new-next').click();
+    }
+    await expect.poll(() => page.locator('#new-progress').innerText()).not.toBe(progress);
+  }
+  throw new Error(`New-session wizard did not reach Review for ${label}`);
+}
+
+test('golden_viewer_new_session', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+
+  await withNewSessionPage(context, {}, output, 'container resource allocation and launch', async (page, state) => {
+    await page.locator('#new-next').click();
+    await captureNewSessionState(output, page, 'shared container defaults', state);
+    await page.locator('#new-resource-cpus').fill('6');
+    await page.locator('#new-resource-memory').fill('12.5');
+    await page.locator('#new-next').click();
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    return startHeldLaunch(page, state);
   });
+
+  const ec2Choices = [
+    { kind: 'aws-ec2', instance_type: 'c7i.large', vcpus: 2, memory_bytes: 4294967296 },
+    { kind: 'aws-ec2', instance_type: 'm7i.2xlarge', vcpus: 8, memory_bytes: 34359738368 },
+  ];
+  await withNewSessionPage(context, {
+    extraTargets: [{ id: 'ec2', kind: 'aws-ec2', resource_allocation_kind: 'aws-ec2', requires_project_directory: false }],
+    resourceOptions: { ec2: { options: ec2Choices, default_allocation: ec2Choices[1] } },
+  }, output, 'EC2 resource choice and launch', async (page, state) => {
+    await page.locator('#new-next').click();
+    await page.locator('#new-target').getByRole('radio', { name: /^ec2/ }).check();
+    await expect.poll(() => page.locator('#new-resource-aws').inputValue()).toBe('m7i.2xlarge');
+    await captureNewSessionState(output, page, 'EC2 default resource option', state);
+    await page.locator('#new-resource-aws').selectOption('c7i.large');
+    await page.locator('#new-next').click();
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    return startHeldLaunch(page, state);
+  });
+
+  await withNewSessionPage(context, {}, output, 'host-specific path suggestions and URL source', async (page, state) => {
+    await projectStep(page, 'local');
+    const directory = page.locator('#new-project-directory');
+    await directory.fill('/work/re');
+    await expect.poll(() => state.completions.length).toBe(1);
+    await captureNewSessionState(output, page, 'local path suggestions stay with the local host', state);
+    await directory.press('ArrowDown');
+    await directory.press('Enter');
+    await expect.poll(() => state.completions.length).toBe(2);
+    await captureNewSessionState(output, page, 'selected path suggestion and child completion', state);
+    await page.locator('#new-back').click();
+    await page.locator('#new-target').getByRole('radio', { name: /^container/ }).check();
+    await page.locator('#new-next').click();
+    await page.getByRole('button', { name: /^(Paste URL|URL)/ }).click();
+    await page.locator('#new-project-source').fill('owner/repo');
+    await expect(page.locator('#new-project-source')).toHaveValue('owner/repo');
+  });
+
+  await withNewSessionPage(context, {}, output, 'explicit managed worktree choice and launch', async (page, state) => {
+    state.worktreeOptions = { available: true, default_create: false };
+    await projectStep(page, 'local');
+    await page.locator('#new-project-directory').fill('/work/linked');
+    await expect.poll(() => state.completions.length).toBe(1);
+    await page.locator('#new-next').click();
+    await page.getByRole('checkbox', { name: 'Create isolated checkout' }).check();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await captureNewSessionState(output, page, 'managed worktree selected on Review', state);
+    return startHeldLaunch(page, state);
+  });
+
+  for (const [policy, label] of [
+    [undefined, 'Native'],
+    [{ mode: 'none' }, 'None'],
+    [{ mode: 'single_model', model: 'model-a', effort: 'high' }, 'Single model: model-a · high'],
+    [{ mode: 'single_model', model: 'haiku', effort: 'low' }, 'Single model: haiku · low'],
+    [{ mode: 'single_model', model: 'haiku', effort: null }, 'Single model: haiku'],
+  ]) {
+    await withNewSessionPage(context, {}, output, `profile subagent policy ${label}`, async (page, state) => {
+      if (policy) {
+        state.snapshot.profiles[0].subagents = policy;
+        await refresh(page, state);
+      }
+      await projectStep(page, 'container');
+      await page.getByRole('button', { name: 'existing', exact: true }).click();
+      await expect(page.locator('#new-step')).not.toContainText('Checking project');
+      await captureNewSessionState(output, page, `review subagent policy ${label}`, state);
+      return startHeldLaunch(page, state);
+    });
+  }
+
+  await withNewSessionPage(context, {}, output, 'harness without subagent support', async (page, state) => {
+    await page.locator('#new-profile').selectOption('gamma');
+    await projectStep(page, 'container');
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await captureNewSessionState(output, page, 'review for harness without subagent support', state);
+    return startHeldLaunch(page, state);
+  });
+
+  for (const target of ['container', 'local', 'remote']) {
+    await withNewSessionPage(context, {}, output, `managed worktree unavailable on ${target}`, async (page, state) => {
+      state.worktreeOptions = { available: false, default_create: false };
+      await projectStep(page, target);
+      if (target === 'container') await page.getByRole('button', { name: 'existing', exact: true }).click();
+      else await page.locator('#new-next').click();
+      await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    });
+  }
+
+  await withNewSessionPage(context, { bundles: [
+    { id: 'existing', repositories: [{ id: 'frontend', github: 'example/frontend' }, { id: 'api', github: 'example/api' }] },
+    { id: 'saved', repositories: [] },
+  ] }, output, 'recent and saved multi-repository project selection', async (page, state) => {
+    state.snapshot.sessions.push({ id: 'recent', workspace_id: 'test', bundle_id: 'existing', capabilities: {} });
+    await refresh(page, state);
+    await projectStep(page);
+    await expect(page.locator('#new-step')).not.toContainText('Refreshing recent projects…');
+    await captureNewSessionState(output, page, 'recent and saved project choices', state);
+    await page.getByRole('button', { name: 'existing example/frontend · example/api', exact: true }).click();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+  });
+
+  await withNewSessionPage(context, { bundles: [] }, output, 'empty and truncated GitHub results can continue by URL', async (page, state) => {
+    state.discover = () => ({ entries: [], directory: null, parent: null, truncated: true });
+    await projectStep(page);
+    await page.getByRole('button', { name: /^GitHub/ }).click();
+    await expect(page.locator('.project-browser')).toContainText('No repositories found');
+    await captureNewSessionState(output, page, 'empty and truncated GitHub results', state);
+    await page.getByRole('button', { name: /^(Paste URL|URL)/ }).click();
+    await expect(page.locator('#new-project-source')).toBeFocused();
+  });
+
+  await withNewSessionPage(context, { bundles: [] }, output, 'folder filtering and opening a result without selecting it', async (page, state) => {
+    state.discover = body => ({
+      entries: body.filter === 'omitted'
+        ? [{ name: 'omitted', source: '/home/controller/omitted', kind: 'repository' }]
+        : [{ name: 'first', source: '/home/controller/first', kind: 'directory' }],
+      directory: body.path || '/home/controller', parent: '/', truncated: !body.filter,
+    });
+    await projectStep(page);
+    await page.getByRole('button', { name: /^(Browse folders|Folders)/ }).click();
+    await page.getByRole('textbox', { name: 'Filter folder names' }).fill('omitted');
+    await expect(page.getByRole('button', { name: /^omitted / })).toBeVisible();
+    await captureNewSessionState(output, page, 'filtered folder result', state);
+    await page.getByRole('button', { name: 'Open folder omitted', exact: true }).click();
+    await expect(page.getByRole('button', { name: /^first / })).toBeVisible();
+  });
+
+  await withNewSessionPage(context, { bundles: [] }, output, 'actionable GitHub service failure', async (page, state) => {
+    state.discover = () => ({ error: 'GitHub is temporarily unavailable. Retry later.' });
+    await projectStep(page);
+    await page.getByRole('button', { name: /^GitHub/ }).click();
+    await expect(page.locator('.project-browser').getByRole('alert')).toHaveText('GitHub is temporarily unavailable. Retry later.');
+  });
+
+  await withNewSessionPage(context, { bundles: [] }, output, 'compact phone source navigation', async (page, state) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await projectStep(page);
+    await page.getByRole('button', { name: /^Browse folders/ }).click();
+    await expect(page.getByRole('button', { name: /^code Folder/ })).toBeVisible();
+    const projectLayout = () => page.evaluate(() => {
+      const rect = node => {
+        const box = node.getBoundingClientRect();
+        return { x: +box.x.toFixed(2), y: +box.y.toFixed(2), width: +box.width.toFixed(2), height: +box.height.toFixed(2) };
+      };
+      const sources = document.querySelector('[aria-label="Find a project"]');
+      const buttons = [...(sources?.querySelectorAll('button') || [])];
+      const result = [...document.querySelectorAll('button')].find(button => /^(code Folder|Use code)/.test(button.innerText.trim()));
+      return {
+        header: rect(document.querySelector('#shell-header')),
+        sourceButtons: buttons.map(button => ({ text: button.innerText, ...rect(button) })),
+        result: result ? { text: result.innerText, ...rect(result) } : null,
+        documentWidth: document.documentElement.scrollWidth,
+      };
+    });
+    await captureNewSessionState(output, page, 'compact phone project chooser', state, await projectLayout());
+    await page.getByRole('button', { name: /^code Folder/ }).click();
+    await expect(page.getByRole('button', { name: /^Use code/ })).toBeVisible();
+    await captureNewSessionState(output, page, 'opened folder remains visible on phone', state, await projectLayout());
+    await page.getByRole('group', { name: 'Find a project' }).getByRole('button', { name: 'URL', exact: true }).click();
+    await expect(page.locator('#new-project-source')).toBeVisible();
+    await captureNewSessionState(output, page, 'phone URL source choice', state);
+    await page.getByRole('button', { name: 'Recent & saved projects', exact: true }).click();
+    await captureNewSessionState(output, page, 'phone recent projects source choice', state);
+    const foldersButton = page.getByRole('button', { name: /^Browse folders/ });
+    await expect(foldersButton).toContainText('On your Mjolnir computer');
+    return foldersButton.boundingBox();
+  });
+
+  const unavailable = {
+    error: 'Selected subagent model "removed" is unavailable.',
+    code: 'subagent_choice_unavailable',
+  };
+  await withNewSessionPage(context, {}, output, 'unavailable subagent model and Settings guidance', async (page, state) => {
+    state.snapshot.profiles[0].subagents = { mode: 'single_model', model: 'removed', effort: 'high' };
+    state.actionError = unavailable;
+    await refresh(page, state);
+    await projectStep(page, 'container');
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await captureNewSessionState(output, page, 'review shows unavailable subagent policy', state);
+    await page.locator('#new-next').click();
+    await expect(page.locator('#new-error')).toContainText('Settings → Agent Profiles → alpha → Sub-agents');
+  });
+
+  await withNewSessionPage(context, {}, output, 'generic launch error', async (page, state) => {
+    state.actionError = { error: 'boom' };
+    await projectStep(page, 'container');
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await page.locator('#new-next').click();
+    await expect(page.locator('#new-error')).toHaveText('boom');
+  });
+
+  assertGolden('viewer_new_session', output.join('\n'));
+});
+
+test('golden_web_new_session_wizard_steps', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+  const bare = { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/a'] };
+  const sized = { ...defaultContainerTarget, id: 'container', kind: 'local-podman', requires_project_directory: false };
+  const cases = [
+    ['one profile omits Account but keeps Where to run', [{ id: 'only', harness_kind: 'codex' }], [bare, sized]],
+    ['several profiles keep Account', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, sized]],
+    ['only usable raw target omits Where to run', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, runtime_missing: true }, { id: 'mac', kind: 'ssh', requires_project_directory: true, availability: 'unavailable' }]],
+    ['unknown target remains offered', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [bare, { ...sized, availability: 'unknown' }]],
+    ['single sized target keeps Where to run', [{ id: 'a', harness_kind: 'codex' }, { id: 'b', harness_kind: 'claude' }], [sized]],
+  ];
+  for (const [label, profiles, targets] of cases) {
+    const page = await context.newPage();
+    const state = await mount(page, { profiles, targets, bundles: [{ id: 'existing', repositories: [] }] });
+    try {
+      await captureWizardPath(output, page, state, label);
+    } finally {
+      await page.close();
+    }
+  }
+
+  const skippedPage = await context.newPage();
+  const skippedState = await mount(skippedPage, {
+    profiles: [{ id: 'fake', harness_kind: 'codex' }],
+    targets: [bare],
+    bundles: [{ id: 'existing', repositories: [] }],
+  });
+  try {
+    await skippedPage.locator('#new-next').click();
+    await expect(skippedPage.locator('#new-step')).not.toContainText('Checking project');
+    await captureNewSessionState(output, skippedPage, 'review after skipped steps supplies all required values', skippedState);
+    const finishLaunch = await startHeldLaunch(skippedPage, skippedState);
+    await captureNewSessionState(output, skippedPage, 'launch payload after skipped steps', skippedState);
+    await finishLaunch();
+  } finally {
+    await skippedPage.close();
+  }
+  assertGolden('web_new_session_wizard_steps', output.join('\n'));
 });
 
 test('container remembered size is clamped to the reported host limits', async ({ page }) => {
@@ -176,28 +491,6 @@ test('container remembered size is clamped to the reported host limits', async (
   await page.locator('#new-next').click();
   await expect(page.locator('#new-resource-cpus')).toHaveValue('10');
   await expect(page.locator('#new-resource-memory')).toHaveValue('24');
-});
-
-test('EC2 creation defaults to an 8-vCPU option and sends the chosen type', async ({ page }) => {
-  const choices = [
-    { kind: 'aws-ec2', instance_type: 'c7i.large', vcpus: 2, memory_bytes: 4294967296 },
-    { kind: 'aws-ec2', instance_type: 'm7i.2xlarge', vcpus: 8, memory_bytes: 34359738368 },
-  ];
-  const state = await mount(page, {
-    extraTargets: [{ id: 'ec2', kind: 'aws-ec2', resource_allocation_kind: 'aws-ec2', requires_project_directory: false }],
-    resourceOptions: { ec2: { options: choices, default_allocation: choices[1] } },
-  });
-  await page.locator('#new-next').click();
-  await page.locator('#new-target').getByRole('radio', { name: /^ec2/ }).check();
-  await expect.poll(() => state.resourceOptionRequests).toContain('ec2');
-  const select = page.locator('#new-resource-aws');
-  await expect(select).toHaveValue('m7i.2xlarge');
-  await select.selectOption('c7i.large');
-  await page.locator('#new-next').click();
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await page.locator('#new-next').click();
-  await expect(page).toHaveURL(/#workspace\/test$/);
-  expect(state.actions[0].resource_allocation).toEqual(choices[0]);
 });
 
 test('whole-row taps and in-progress gestures survive unrelated live updates', async ({ page }) => {
@@ -269,33 +562,6 @@ test('raw projects use host-specific recents and preserve edited paths across Ba
 
 // Suggestions answer the machine that owns the path and never rewrite what
 // is being typed; pasting a URL never searches a filesystem.
-test('a project directory suggests paths on its own host and a URL never searches folders', async ({ page }) => {
-  const state = await mount(page);
-  await projectStep(page, 'local');
-  const directory = page.locator('#new-project-directory');
-  await directory.fill('/work/re');
-  await expect.poll(() => state.completions.length).toBe(1);
-  expect(state.completions[0]).toEqual({ target_id: 'local', prefix: '/work/re', kind: 'directories' });
-  const rows = page.locator('.field-suggestions .palette-row[role="option"]');
-  await expect(rows).toHaveCount(2);
-  await expect(rows.first()).toBeVisible();
-  await expect(directory).toHaveValue('/work/re');
-
-  await directory.press('ArrowDown');
-  await directory.press('Enter');
-  await expect(directory).toHaveValue('/work/repos/');
-  // Accepting a directory asks for its children, on the same host.
-  await expect.poll(() => state.completions.length).toBe(2);
-  expect(state.completions[1]).toEqual({ target_id: 'local', prefix: '/work/repos/', kind: 'directories' });
-
-  await page.locator('#new-back').click();
-  await page.locator('#new-target').getByRole('radio', { name: /^container/ }).check();
-  await page.locator('#new-next').click();
-  await page.getByRole('button', { name: /^(Paste URL|URL)/ }).click();
-  await page.locator('#new-project-source').fill('owner/repo');
-  await page.waitForTimeout(400);
-  expect(state.completions).toHaveLength(2);
-});
 
 // The project list finishing re-renders the step and replaces the field. A
 // slow machine makes that land after the person has typed.
@@ -532,7 +798,6 @@ test('resume choices stay selected through revisions and are used by Resume', as
   expect(state.actions[0]).toEqual({ action: 'resume', session_id: 'suspended', workspace_id: 'test', profile_id: 'beta', target_id: 'remote', queue: 'discard' });
 });
 
-
 test('managed worktree defaults can be overridden and survive Back and live refresh', async ({ page }) => {
   const state = await mount(page);
   await projectStep(page, 'local');
@@ -551,57 +816,6 @@ test('managed worktree defaults can be overridden and survive Back and live refr
   expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: false, project_directory: '/work/recent' });
 });
 
-test('an existing linked checkout can explicitly create a managed worktree', async ({ page }) => {
-  const state = await mount(page);
-  state.worktreeOptions = { available: true, default_create: false };
-  await projectStep(page, 'local');
-  await page.locator('#new-project-directory').fill('/work/linked');
-  await page.locator('#new-next').click();
-  const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
-  await expect(checkbox).not.toBeChecked();
-  await expect(checkbox).toBeEnabled();
-  await checkbox.focus();
-  await page.keyboard.press('Space');
-  await expect(checkbox).toBeChecked();
-  await expect(checkbox).toBeFocused();
-  await page.locator('#new-next').click();
-  expect(state.actions.at(-1)).toMatchObject({ create_managed_worktree: true, project_directory: '/work/linked' });
-});
-
-// Policy comes from the profile's setting; the form has no session-level selector.
-for (const [policy, label] of [
-  [undefined, 'SubagentsNative'],
-  [{ mode: 'none' }, 'SubagentsNone'],
-    [{ mode: 'single_model', model: 'model-a', effort: 'high' }, 'SubagentsSingle model: model-a · high'],
-]) {
-  test(`Review states the profile subagent policy ${label}, offers no input, and sends it`, async ({ page }) => {
-    const state = await mount(page);
-    if (policy) {
-      state.snapshot.profiles[0].subagents = policy;
-      await refresh(page, state);
-    }
-    await projectStep(page, 'container');
-    await page.getByRole('button', { name: 'existing', exact: true }).click();
-    await expect(page.locator('#new-step')).toContainText(label);
-    await expect(page.locator('#new-subagents')).toHaveCount(0);
-    await refresh(page, state);
-    await expect(page.locator('#new-step')).toContainText(label);
-    await page.locator('#new-next').click();
-    expect(state.actions.at(-1).subagents).toEqual(policy || { mode: 'native' });
-  });
-}
-
-test('a harness that cannot receive Mjolnir sub-agents shows no Subagents row', async ({ page }) => {
-  const state = await mount(page);
-  await page.locator('#new-profile').selectOption('gamma');
-  await projectStep(page, 'container');
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.locator('#new-step')).toContainText('Accountgamma');
-  await expect(page.locator('#new-step')).not.toContainText('Subagents');
-  await page.locator('#new-next').click();
-  expect(state.actions.at(-1).subagents).toEqual({ mode: 'native' });
-});
-
 test('changing the directory resets the worktree choice to its inspected default', async ({ page }) => {
   const state = await mount(page);
   await projectStep(page, 'local');
@@ -612,39 +826,6 @@ test('changing the directory resets the worktree choice to its inspected default
   await page.locator('#new-project-directory').fill('/work/another');
   await page.locator('#new-next').click();
   await expect(checkbox).toBeChecked();
-});
-
-for (const target of ['container', 'local', 'remote']) {
-  test(`unsupported worktree creation stays disabled for ${target}`, async ({ page }) => {
-    const state = await mount(page);
-    state.worktreeOptions = { available: false, default_create: false };
-    await projectStep(page, target);
-    if (target === 'container') await page.getByRole('button', { name: 'existing', exact: true }).click();
-    else await page.locator('#new-next').click();
-    const checkbox = page.getByRole('checkbox', { name: 'Create isolated checkout' });
-    await expect(checkbox).not.toBeChecked();
-    await expect(checkbox).toBeDisabled();
-    await refresh(page, state);
-    await expect(checkbox).toBeDisabled();
-  });
-}
-
-test('saved multi-repository projects and recent projects open without creating a new configuration', async ({ page }) => {
-  const state = await mount(page, { bundles: [
-    { id: 'existing', repositories: [{ id: 'frontend', github: 'example/frontend' }, { id: 'api', github: 'example/api' }] },
-    { id: 'saved', repositories: [] },
-  ] });
-  state.snapshot.sessions.push({ id: 'recent', workspace_id: 'test', bundle_id: 'existing', capabilities: {} });
-  await refresh(page, state);
-  await expect(page.locator('#new-progress')).toContainText('Account');
-  await projectStep(page);
-  await expect(page.getByRole('heading', { name: 'Recent projects' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Saved projects' })).toBeVisible();
-  await page.getByRole('button', { name: 'existing example/frontend · example/api', exact: true }).tap();
-  await expect(page.locator('#new-progress')).toContainText('Review');
-  await expect(page.locator('#new-step')).toContainText('Where to run');
-  expect(state.creates).toHaveLength(0);
-  expect(state.preflights[0].bundle_id).toBe('existing');
 });
 
 test('GitHub lists accessible repositories, preserves focus across snapshots and searches with the keyboard', async ({ page }) => {
@@ -699,18 +880,6 @@ test('GitHub authentication errors keep their sign-in instructions and folders r
   await expect(page.locator('#new-progress')).toContainText('Review');
   expect(state.creates).toEqual([{ sources: ['/home/controller/code'] }]);
   expect(state.completions).toHaveLength(0);
-});
-
-test('empty and truncated GitHub results explain next steps without preventing URL entry', async ({ page }) => {
-  const state = await mount(page, { bundles: [] });
-  state.discover = () => ({ entries: [], directory: null, parent: null, truncated: true });
-  await projectStep(page);
-  await page.getByRole('button', { name: /^GitHub/ }).click();
-  await expect(page.locator('.project-browser')).toContainText('No repositories found');
-  await expect(page.locator('.project-browser')).not.toContainText(/Sign in|gh auth login/);
-  await expect(page.locator('.project-browser')).toContainText('Narrow your search');
-  await page.getByRole('button', { name: /^(Paste URL|URL)/ }).click();
-  await expect(page.getByRole('textbox', { name: 'GitHub URL or owner/repository' })).toBeFocused();
 });
 
 test('superseded discovery and cancelled wizard requests cannot insert old results', async ({ page }) => {
@@ -804,28 +973,6 @@ test('search, folder location, and pasted text survive switching source choices'
   await expect(page.locator('#new-project-current-folder')).toHaveText('/home/controller/code');
   expect(state.discoveries).toHaveLength(4);
   expect(state.creates).toHaveLength(0);
-});
-
-test('folder filtering finds omitted repositories and Open folder browses without selecting', async ({ page }) => {
-  const state = await mount(page, { bundles: [] });
-  state.discover = body => ({
-    entries: body.filter === 'omitted' ? [
-      { name: 'omitted', source: '/home/controller/omitted', kind: 'repository' },
-    ] : [{ name: 'first', source: '/home/controller/first', kind: 'directory' }],
-    directory: body.path || '/home/controller', parent: '/', truncated: !body.filter,
-  });
-  await projectStep(page);
-  await page.getByRole('button', { name: /^(Browse folders|Folders)/ }).click();
-  await expect(page.locator('.project-browser')).toContainText('Filter by folder name');
-  await page.getByRole('textbox', { name: 'Filter folder names' }).fill('omitted');
-  await expect(page.getByRole('button', { name: /^omitted / })).toBeVisible();
-  expect(state.discoveries.at(-1)).toEqual({ kind: 'directory', path: '/home/controller', filter: 'omitted' });
-  await page.getByRole('button', { name: 'Open folder omitted', exact: true }).click();
-  await expect(page.locator('#new-project-current-folder')).toHaveText('/home/controller/omitted');
-  await expect(page.getByRole('textbox', { name: 'Filter folder names' })).toHaveValue('');
-  expect(state.discoveries.at(-1)).toEqual({ kind: 'directory', path: '/home/controller/omitted' });
-  expect(state.creates).toHaveLength(0);
-  await expect(page.locator('#new-progress')).toContainText('Project');
 });
 
 test('cancelled folder loading offers a retry without leaving the chooser', async ({ page }) => {
@@ -924,51 +1071,6 @@ test('folder path disclosure is optional, keyboard accessible, and survives upda
   expect(state.creates).toHaveLength(0);
 });
 
-test('a GitHub service failure reports its actionable error without suggesting another sign-in', async ({ page }) => {
-  const state = await mount(page, { bundles: [] });
-  state.discover = () => ({ error: 'GitHub is temporarily unavailable. Retry later.' });
-  await projectStep(page);
-  await page.getByRole('button', { name: /^GitHub/ }).click();
-  await expect(page.locator('.project-browser').getByRole('alert')).toHaveText('GitHub is temporarily unavailable. Retry later.');
-  await expect(page.locator('.project-browser')).not.toContainText(/Sign in|gh auth login/);
-  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: /^(Paste URL|URL)/ }).click();
-  await expect(page.locator('#new-project-source')).toBeVisible();
-});
-
-test('compact source navigation leaves the first folder and repository visible on a phone', async ({ page }) => {
-  await mount(page, { bundles: [] });
-  await projectStep(page);
-  const shellHeader = await page.locator('#shell-header').boundingBox();
-  expect(shellHeader.height).toBeLessThanOrEqual(44);
-  await page.getByRole('button', { name: /^Browse folders/ }).click();
-  await expect(page.getByRole('button', { name: /^code Folder/ })).toBeVisible();
-  const sources = page.getByRole('group', { name: 'Find a project' });
-  await expect(sources.getByRole('button', { name: 'Folders', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#new-step')).not.toContainText('Pick a saved project');
-  for (const label of ['GitHub', 'Folders', 'URL']) {
-    const box = await sources.getByRole('button', { name: label, exact: true }).boundingBox();
-    expect(box.height).toBeGreaterThanOrEqual(44);
-    expect(box.height).toBeLessThanOrEqual(46);
-  }
-  const assertVisibleWithoutScrolling = async row => {
-    await expect(row).toBeVisible();
-    await page.evaluate(() => scrollTo(0, 0));
-    const box = await row.boundingBox();
-    expect(box.y).toBeGreaterThanOrEqual(0);
-    expect(box.y + box.height).toBeLessThanOrEqual(844);
-  };
-  const folder = page.getByRole('button', { name: /^code Folder/ });
-  await assertVisibleWithoutScrolling(folder);
-  await folder.click();
-  await assertVisibleWithoutScrolling(page.getByRole('button', { name: /^Use code/ }));
-  await expect(page.getByRole('button', { name: 'Recent & saved projects', exact: true })).toBeVisible();
-  await sources.getByRole('button', { name: 'URL', exact: true }).click();
-  await expect(page.locator('#new-project-source')).toBeVisible();
-  await page.getByRole('button', { name: 'Recent & saved projects', exact: true }).click();
-  await expect(page.getByRole('button', { name: /^Browse folders/ })).toContainText('On your Mjolnir computer');
-});
-
 test('opening and immediately editing a folder path preserves disclosure through redraw', async ({ page }) => {
   await mount(page, { bundles: [] });
   await projectStep(page);
@@ -1060,19 +1162,4 @@ test('group creation is single flight and leaving it preserves the draft while i
     { sources: ['example/app', 'example/shared'] },
     { sources: ['example/app', 'example/shared'] },
   ]);
-});
-
-test('an unavailable subagent model is reported with the Settings path for the chosen account', async ({ page }) => {
-  const state = await mount(page);
-  state.snapshot.profiles[0].subagents = { mode: 'single_model', model: 'removed', effort: 'high' };
-  state.actionError = { error: 'Selected subagent model "removed" is unavailable.', code: 'subagent_choice_unavailable' };
-  await refresh(page, state);
-  await projectStep(page, 'container');
-  await page.getByRole('button', { name: 'existing', exact: true }).click();
-  await expect(page.locator('#new-step')).toContainText('Single model: removed · high');
-  await page.locator('#new-next').click();
-  await expect(page.locator('#new-error')).toContainText('"removed" is unavailable');
-  await expect(page.locator('#new-error')).toContainText('Settings → Agent Profiles → alpha → Sub-agents');
-  await expect(page.locator('#new-error')).not.toContainText('--subagent');
-  await expect(page.locator('#new-next')).toBeEnabled();
 });

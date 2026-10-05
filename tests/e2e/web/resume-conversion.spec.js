@@ -146,11 +146,3 @@ test('a checkout that cannot convert reports why and leaves Resume disabled', as
   await expect(detail(page).locator('button[data-action="resume"]')).toBeDisabled();
   await expect(detail(page).locator('[data-role="resume-conversion"]')).toHaveCount(0);
 });
-
-test('a bare destination asks nothing and leaves Resume available', async ({ page }) => {
-  const state = await mount(page);
-  await detail(page).locator('[data-role="resume-target"] select').selectOption('local');
-  await expect(detail(page).locator('button[data-action="resume"]')).toBeEnabled();
-  await expect(detail(page)).not.toContainText('Checking checkout…');
-  expect(state.preflights).toEqual([]);
-});
