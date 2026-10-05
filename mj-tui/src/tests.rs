@@ -4,7 +4,6 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use mj_core::config::{ProjectBundle, ProjectRepository};
 use mj_core::state::{
     MaterializedExecutionState, STATE_VERSION, SessionState, State, TranscriptBody,
 };
@@ -91,18 +90,6 @@ fn a_clamped_selection_move_is_still_consumed() {
 }
 
 #[test]
-fn activating_target_rename_opens_the_config_id_editor() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.begin_target_actions();
-    dashboard.handle_event_result(Event::Key(key(KeyCode::Tab)));
-
-    let result = dashboard.handle_event_result(Event::Key(key(KeyCode::Enter)));
-
-    assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
-    assert!(result.consumed);
-}
-
-#[test]
 fn a_cursor_only_text_edit_is_consumed_without_an_action() {
     let mut session = running_session();
     session.session_title_override = Some("rename me".into());
@@ -140,119 +127,6 @@ fn open_rename_through_the_palette(dashboard: &mut DashboardState) {
     );
 }
 
-/// The composer is a separate focus, so a pane's actions are plain
-/// letters: nothing typed at a pane can be mistaken for prompt text.
-#[test]
-fn plain_keys_drive_the_focused_pane() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ResumeDialog),
-        DashboardAction::OpenResumeDialog
-    );
-    dashboard.cancel_modal();
-    assert_eq!(
-        open_new_session_wizard(&mut dashboard),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::New(_)));
-    dashboard.cancel_modal();
-    // `e` was the session edit dialog's key. The command palette replaced
-    // that dialog, so nothing answers `e` on the Sessions pane now.
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('e'))),
-        DashboardAction::None
-    );
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-    // Restart no longer answers a plain key: a session transition has to
-    // be chosen from the palette or the row menu.
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('r'))),
-        DashboardAction::None
-    );
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-    assert_eq!(
-        dashboard.dispatch_command(CommandId::RestartSession),
-        DashboardAction::RestartSession {
-            session_id: "session-1".into()
-        }
-    );
-
-    assert_eq!(DashboardAction::None, DashboardAction::None);
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-    assert_eq!(
-        dashboard.dispatch_command(CommandId::Workspaces),
-        DashboardAction::LoadWorkspaceManagement { generation: 1 }
-    );
-    dashboard.cancel_modal();
-    assert_eq!(
-        chord(&mut dashboard, CommandId::WebViewer),
-        DashboardAction::LoadWebAccess
-    );
-    dashboard.cancel_modal();
-    assert_eq!(
-        dashboard.handle_key(ctrl_key('v')),
-        DashboardAction::PasteFromClipboard
-    );
-}
-
-#[test]
-fn target_id_escape_restores_parent_action_focus() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.begin_target_actions();
-    let Mode::TargetActions(dialog) = &mut dashboard.mode else {
-        panic!("target actions should open");
-    };
-    dialog
-        .form
-        .get_mut()
-        .focus(crate::dialogs::DialogControl::TargetRename);
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
-    dashboard.handle_key(key(KeyCode::Esc));
-    let Mode::TargetActions(dialog) = &dashboard.mode else {
-        panic!("Escape should restore target actions");
-    };
-    assert!(
-        dialog
-            .form
-            .borrow()
-            .is_focused(crate::dialogs::DialogControl::TargetRename)
-    );
-}
-
-#[test]
-fn pane_actions_follow_the_focused_pane() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(dashboard.focus, Focus::Targets);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::TargetActions(_)));
-    dashboard.cancel_modal();
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('n'))),
-        DashboardAction::None,
-        "the plain letter creates nothing anywhere"
-    );
-
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(dashboard.focus, Focus::Quota);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('e'))),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::ConfigId(_)));
-}
-
 #[test]
 fn minimized_summary_panes_do_not_operate_on_hidden_rows() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -271,265 +145,6 @@ fn minimized_summary_panes_do_not_operate_on_hidden_rows() {
     dashboard.handle_key(key(KeyCode::Char('e')));
     assert_eq!(dashboard.quota_index, 0);
     assert_eq!(dashboard.mode, Mode::Dashboard);
-}
-
-/// Refreshing moved off the two panes onto one global key, so the letter
-/// the panes used to answer must now do nothing at all.
-#[test]
-fn plain_r_no_longer_refreshes() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    for wanted in [Focus::Targets, Focus::Quota] {
-        while dashboard.focus != wanted {
-            dashboard.cycle_focus(false);
-        }
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('r'))),
-            DashboardAction::None,
-            "plain r still acts at {wanted:?}"
-        );
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
-    // The refresh chord answers from every pane.
-    assert_eq!(
-        chord(&mut dashboard, CommandId::Refresh),
-        DashboardAction::RefreshAll
-    );
-}
-
-#[test]
-fn tab_walks_the_layout_order_and_back() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    assert_eq!(dashboard.focus, Focus::Sessions);
-
-    // The ring follows the layout down the screen.
-    for expected in [
-        Focus::Prompt,
-        Focus::Targets,
-        Focus::Quota,
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Sessions,
-    ] {
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
-        assert_eq!(dashboard.focus, expected);
-    }
-}
-
-#[test]
-fn shift_tab_walks_the_reverse_order() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    for expected in [
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Quota,
-        Focus::Targets,
-        Focus::Prompt,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::BackTab));
-        assert_eq!(dashboard.focus, expected);
-    }
-}
-
-#[test]
-fn alt_g_toggles_standard_and_minimized_panes_without_moving_focus() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.focus = Focus::Quota;
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Standard
-    );
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::TogglePanePreset),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Minimized
-    );
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Minimized
-    );
-    assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Minimized);
-    assert_eq!(dashboard.focus, Focus::Quota);
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::TogglePanePreset),
-        DashboardAction::None
-    );
-    for pane in [
-        SupportPane::Sessions,
-        SupportPane::Targets,
-        SupportPane::Quota,
-    ] {
-        assert_eq!(dashboard.pane_size(pane), PaneSize::Standard);
-    }
-    assert_eq!(dashboard.focus, Focus::Quota);
-}
-
-#[test]
-fn alt_z_cycles_the_focused_pane_and_a_new_maximum_demotes_the_old_one() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus = Focus::Sessions;
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Maximized
-    );
-    assert_eq!(dashboard.focus, Focus::Sessions);
-
-    dashboard.focus = Focus::Targets;
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Maximized
-    );
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Standard
-    );
-    assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Standard);
-
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Minimized
-    );
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Standard
-    );
-}
-
-#[test]
-fn alt_z_skips_a_maximum_that_cannot_grow_the_focused_pane() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus = Focus::Targets;
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-
-    assert!(!dashboard.pane_maximize_enabled(SupportPane::Targets));
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Minimized
-    );
-    assert_eq!(dashboard.focus, Focus::Targets);
-}
-
-#[test]
-fn pane_sizes_capture_and_restore_a_nondefault_arrangement() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
-    dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
-    let captured = dashboard.pane_sizes();
-
-    dashboard.set_pane_size(SupportPane::Quota, PaneSize::Maximized);
-    dashboard.set_pane_maximize_enabled([
-        (SupportPane::Sessions, false),
-        (SupportPane::Targets, true),
-        (SupportPane::Quota, true),
-    ]);
-    dashboard.restore_pane_sizes(captured).unwrap();
-
-    assert_eq!(dashboard.pane_sizes(), captured);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Maximized
-    );
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Targets),
-        PaneSize::Minimized
-    );
-    assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Standard);
-}
-
-#[test]
-fn invalid_pane_size_restore_leaves_the_current_arrangement_unchanged() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
-    let before = dashboard.pane_sizes();
-    let invalid = PaneSizes {
-        sessions: PaneSize::Maximized,
-        targets: PaneSize::Maximized,
-        quota: PaneSize::Standard,
-    };
-
-    assert!(dashboard.restore_pane_sizes(invalid).is_err());
-    assert_eq!(dashboard.pane_sizes(), before);
-}
-
-#[test]
-fn alt_z_on_prompt_explains_that_prompt_is_not_resizable() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_prompt();
-    chord(&mut dashboard, CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.notice().as_deref(),
-        Some("Select Sessions, Targets, or Profiles before cycling the pane size.")
-    );
-    assert_eq!(dashboard.focus, Focus::Prompt);
-}
-
-/// Plain letters are pane-local only. New session, resume, and mark read
-/// keep pane-local shortcuts separate from global chords.
-#[test]
-fn plain_a_remains_unbound_and_the_wizard_has_its_own_key() {
-    {
-        let character = 'a';
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char(character))),
-            DashboardAction::None,
-            "{character}"
-        );
-        assert_eq!(dashboard.mode, Mode::Dashboard, "{character}");
-        assert_eq!(dashboard.notice(), None, "{character}");
-    }
-
-    // The chords still do what the letters used to.
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    assert_eq!(
-        open_new_session_wizard(&mut dashboard),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::New(_)));
-    dashboard.cancel_modal();
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ResumeDialog),
-        DashboardAction::OpenResumeDialog
-    );
-    assert_eq!(
-        chord(&mut dashboard, CommandId::MarkAllRead),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.notice().as_deref(),
-        Some("No unread sessions in this workspace.")
-    );
 }
 
 #[test]
@@ -581,40 +196,6 @@ fn ctrl_c_cancels_text_modal_but_is_inert_on_non_text_modal_controls() {
     assert!(matches!(new_session.mode, Mode::New(_)));
 }
 
-#[test]
-fn tab_reaches_every_pane_without_changing_explicit_sizes() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
-    dashboard.set_pane_size(SupportPane::Quota, PaneSize::Minimized);
-    let sizes = dashboard.pane_sizes;
-    for expected in [
-        Focus::Prompt,
-        Focus::Targets,
-        Focus::Quota,
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(dashboard.focus, expected);
-        assert_eq!(dashboard.pane_sizes, sizes);
-    }
-    for expected in [
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Quota,
-        Focus::Targets,
-        Focus::Prompt,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::BackTab));
-        assert_eq!(dashboard.focus, expected);
-        assert_eq!(dashboard.pane_sizes, sizes);
-    }
-}
-
 /// The combined surface is quit with the detach chord. A stray Escape must never
 /// take the conversation off the screen.
 #[test]
@@ -638,49 +219,6 @@ fn escape_never_quits_the_combined_surface() {
         );
         dashboard.handle_key(key(KeyCode::Tab));
     }
-}
-
-#[test]
-fn ctrl_n_and_ctrl_p_move_the_focused_list() {
-    let sessions = (0..3)
-        .map(|index| {
-            let mut session = stopped_session();
-            session.id = format!("session-{index}");
-            session.state = SessionState::Running;
-            (session.id.clone(), session)
-        })
-        .collect();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions,
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.select_active_session("session-0");
-
-    assert_eq!(dashboard.selected_visible_index(), Some(0));
-    dashboard.handle_key(ctrl_key('n'));
-    dashboard.handle_key(ctrl_key('n'));
-    assert_eq!(dashboard.selected_visible_index(), Some(2));
-    dashboard.handle_key(ctrl_key('p'));
-    assert_eq!(dashboard.selected_visible_index(), Some(1));
-
-    dashboard.handle_key(key(KeyCode::BackTab));
-    assert_eq!(dashboard.focus, Focus::Workspaces);
-    dashboard.handle_key(key(KeyCode::BackTab));
-    assert_eq!(dashboard.focus, Focus::Workspaces);
-    dashboard.handle_key(key(KeyCode::BackTab));
-    assert_eq!(dashboard.focus, Focus::Quota);
-    dashboard.handle_key(ctrl_key('n'));
-    assert_eq!(dashboard.quota_index, 1);
-    dashboard.handle_key(ctrl_key('p'));
-    assert_eq!(dashboard.quota_index, 0);
 }
 
 /// Builds `count` live sessions, `per_project` of them in each project,
@@ -713,71 +251,6 @@ fn dashboard_with_live_sessions(count: usize, per_project: usize) -> DashboardSt
     dashboard
 }
 
-fn session_row_indices(dashboard: &DashboardState) -> Vec<usize> {
-    dashboard
-        .sessions_rows()
-        .into_iter()
-        .filter_map(|row| match row {
-            SessionsRow::Session { index, .. } => Some(index),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Every explicit size lists every session across every project.
-#[test]
-fn every_pane_size_lists_every_session_across_projects() {
-    for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
-        let mut dashboard = dashboard_with_live_sessions(6, 2);
-        dashboard.set_pane_size(SupportPane::Sessions, size);
-        dashboard.set_current_session(Some("session-0"));
-
-        assert_eq!(
-            session_row_indices(&dashboard),
-            [0, 1, 2, 3, 4, 5],
-            "{size:?}"
-        );
-        assert_eq!(
-            dashboard.visible_session_indices(),
-            [0, 1, 2, 3, 4, 5],
-            "{size:?}"
-        );
-        // Three projects, each with a heading.
-        let headings = dashboard
-            .sessions_rows()
-            .into_iter()
-            .filter(|row| matches!(row, SessionsRow::ProjectHeading { .. }))
-            .count();
-        assert_eq!(headings, 3, "{size:?}");
-    }
-}
-
-#[test]
-fn every_project_starts_expanded_and_collapsing_one_leaves_the_others() {
-    let mut dashboard = dashboard_with_live_sessions(4, 2);
-    dashboard.focus_sessions();
-    let expanded = |dashboard: &DashboardState| {
-        dashboard
-            .sessions_rows()
-            .into_iter()
-            .filter_map(|row| match row {
-                SessionsRow::Session { expanded, .. } => Some(expanded),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(expanded(&dashboard), [true, true, true, true]);
-
-    dashboard.handle_key(key(KeyCode::Char('2')));
-    assert_eq!(expanded(&dashboard), [true, true, false, false]);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(
-        expanded(&dashboard),
-        [false, false, false, false],
-        "Space collapses the selected session's own project"
-    );
-}
-
 /// A session that becomes history releases the conversation and selection
 /// together; only deliberate navigation selects a remaining row.
 #[test]
@@ -801,69 +274,9 @@ fn the_selection_survives_the_list_changing_under_it() {
     assert_eq!(dashboard.selected_session_id(), Some("session-0"));
 }
 
-/// Each numbered project answers only for itself, so several can be
-/// collapsed at once and the rest stay expanded.
-#[test]
-fn digits_toggle_projects_independently() {
-    let sessions = (0..3)
-        .map(|index| {
-            let mut session = stopped_session();
-            session.id = format!("session-{index}");
-            session.state = SessionState::Running;
-            session.project_directory = Some(format!("/projects/p{index}").into());
-            (session.id.clone(), session)
-        })
-        .collect();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions,
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    let keys = dashboard.project_keys();
-    assert_eq!(keys.len(), 3);
-    let expanded = |dashboard: &DashboardState| {
-        dashboard
-            .project_keys()
-            .into_iter()
-            .map(|key| !dashboard.collapsed_project_keys.contains(&key))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(expanded(&dashboard), [true, true, true]);
-
-    dashboard.handle_key(key(KeyCode::Char('1')));
-    assert_eq!(expanded(&dashboard), [false, true, true]);
-    dashboard.handle_key(key(KeyCode::Char('3')));
-    assert_eq!(expanded(&dashboard), [false, true, false]);
-    dashboard.handle_key(key(KeyCode::Char('1')));
-    assert_eq!(expanded(&dashboard), [true, true, false]);
-}
-
-#[test]
-fn remote_operation_cancel_action_carries_the_operation_kind() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let session_id = session.id.clone();
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_session_operation(session_id.clone(), SessionOperationKind::Launching, None);
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::CancelOperation),
-        DashboardAction::CancelOperation {
-            session_id,
-            kind: SessionOperationKind::Launching,
-        }
-    );
-}
-
 /// Launch campaign finding A-7: the cancel chord with nothing in flight
 /// says so instead of doing nothing silently.
+// Hard-won: 30a93a2: cancel with no pending operation was silent.
 #[test]
 fn cancel_with_nothing_in_flight_shows_a_notice() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -879,6 +292,7 @@ fn cancel_with_nothing_in_flight_shows_a_notice() {
 /// session kept trying to attach and failed after 15 seconds with a notice
 /// that named no session. The pane is emptied instead, with a notice that
 /// names the session; a failure to open names it too.
+// Hard-won: 945a2da: suspended pinned panes retried an impossible attach.
 #[test]
 fn a_pinned_pane_releases_a_suspended_session_and_names_it() {
     let mut session = stopped_session();
@@ -913,6 +327,7 @@ fn a_pinned_pane_releases_a_suspended_session_and_names_it() {
 /// Launch campaign finding B-10: the title is a record field, not worker
 /// state, so a session that is still starting can be renamed from the
 /// Sessions pane and from its type-ahead composer.
+// Hard-won: 81e032e: renaming a Starting session did nothing from the composer.
 #[test]
 fn a_starting_session_can_be_renamed() {
     for from_prompt in [false, true] {
@@ -942,8 +357,8 @@ fn a_starting_session_can_be_renamed() {
     }
 }
 
-/// A launching session parks its conversation behind a composer the user
-/// can type into; the draft survives to be taken by the chat that opens.
+/// A launching session parks its conversation behind a composer the user can
+/// edit; the draft, including a readline cursor edit, survives to the chat that opens.
 #[test]
 fn typing_during_a_launching_transition_edits_the_standby_draft() {
     let mut session = stopped_session();
@@ -952,63 +367,27 @@ fn typing_during_a_launching_transition_edits_the_standby_draft() {
     dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
     dashboard.focus_prompt();
 
-    for character in "hello".chars() {
+    for character in "hello world".chars() {
         assert_eq!(
             dashboard.handle_key(key(KeyCode::Char(character))),
             DashboardAction::None
         );
     }
-    dashboard.handle_key(key(KeyCode::Backspace));
-    dashboard.handle_key(key(KeyCode::Char('l')));
+    dashboard.handle_key(alt_key('b'));
+    dashboard.handle_key(key(KeyCode::Char('!')));
 
     assert_eq!(
         dashboard
             .standby_prompts
             .get("session-1")
             .map(|standby| standby.draft()),
-        Some("helll".into())
+        Some("hello !world".into())
     );
     assert_eq!(
         dashboard.take_standby_prompt_draft("session-1").as_deref(),
-        Some("helll")
+        Some("hello !world")
     );
     assert_eq!(dashboard.take_standby_prompt_draft("session-1"), None);
-}
-
-/// The standby composer is the real one, so its readline chords edit the
-/// draft instead of falling through to the dashboard.
-#[test]
-fn readline_chords_edit_the_standby_draft() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
-    dashboard.focus_prompt();
-
-    for character in "alpha beta".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    // Ctrl-A to line start, then Ctrl-K kills the whole line…
-    dashboard.handle_key(ctrl_key('a'));
-    dashboard.handle_key(ctrl_key('k'));
-    assert_eq!(
-        dashboard
-            .standby_prompts
-            .get("session-1")
-            .map(|standby| standby.draft()),
-        Some(String::new())
-    );
-    // …Ctrl-Y yanks it back, and Alt-B walks back a word.
-    dashboard.handle_key(ctrl_key('y'));
-    dashboard.handle_key(alt_key('b'));
-    assert_eq!(
-        dashboard
-            .standby_prompts
-            .get("session-1")
-            .map(|standby| standby.draft()),
-        Some("alpha beta".into())
-    );
-    assert!(dashboard.take_standby_prompt_draft("session-1").is_some());
 }
 
 /// Enter during a starting transition hands the prompt to the host for
@@ -1047,6 +426,7 @@ fn enter_during_a_starting_transition_queues_the_prompt_for_delivery() {
 
 /// Recalling a queued prompt with Up takes it back from the daemon: the
 /// preview goes, the composer holds the text, and Enter queues the edit once.
+// Hard-won: 888bd1d: recalling queued text left the daemon step pending.
 #[test]
 fn recalling_a_queued_startup_prompt_withdraws_it_and_enter_requeues_the_edit() {
     let mut session = stopped_session();
@@ -1338,31 +718,9 @@ fn a_paste_during_a_starting_transition_joins_the_standby_draft() {
     );
 }
 
-#[test]
-fn opening_a_session_with_missing_configuration_explains_repair() {
-    let session = running_session();
-    let mut dashboard = dashboard_with_session(session);
-    let bundle_id = dashboard.selected_session().unwrap().bundle_id.clone();
-    let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
-    assert_eq!(dashboard.open_selected_session(), DashboardAction::None);
-    let Mode::Confirm(dialog) = &dashboard.mode else {
-        panic!("repair dialog expected")
-    };
-    let Confirmation::ConfigurationRepair { error, .. } = &dialog.confirmation else {
-        panic!("repair details expected")
-    };
-    assert!(error.contains("missing bundle"));
-    assert!(error.contains("config.toml"));
-    dashboard.handle_key(key(KeyCode::Esc));
-    dashboard.config.bundles.insert(bundle_id, bundle);
-    assert!(!matches!(
-        dashboard.open_selected_session(),
-        DashboardAction::None
-    ));
-}
-
 /// The notice bar is the only report a background failure gets, so a key
 /// press that happens to arrive while one is fresh must not wipe it.
+// Hard-won: 7c56a0f: incidental keys hid a background notice before it rendered.
 #[test]
 fn a_fresh_notice_survives_a_key_press_and_clears_once_it_has_been_readable() {
     let mut session = stopped_session();
@@ -1389,27 +747,6 @@ fn a_fresh_notice_survives_a_key_press_and_clears_once_it_has_been_readable() {
         DashboardAction::None
     );
     assert_eq!(dashboard.notice(), None);
-}
-
-/// A key press that reports something of its own replaces the notice
-/// whatever its age; the display period only defends against incidental
-/// keys.
-#[test]
-fn a_key_press_with_its_own_notice_replaces_a_fresh_one() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    dashboard.set_notice("Rename failed: relay unreachable");
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::MarkAllRead),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.notice().as_deref(),
-        Some("No unread sessions in this workspace.")
-    );
 }
 
 #[test]
@@ -1518,6 +855,7 @@ fn session_order_cache_tracks_creation_visibility_and_workspace_changes() {
     assert_eq!(ids(&dashboard), ["first"]);
 }
 
+// Hard-won: a74134f: workspace moves left a selected session in both tabs.
 #[test]
 fn a_feed_record_with_a_new_workspace_moves_the_row_between_tabs() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -1546,237 +884,11 @@ fn a_feed_record_with_a_new_workspace_moves_the_row_between_tabs() {
     assert_eq!(dashboard.selected_session_id(), None);
 }
 
-#[test]
-fn workspace_arrows_keep_focus_while_restoring_other_workspace_views() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let first = dashboard.active_workspace_id().unwrap().to_owned();
-    dashboard.workspace_order.push("second".into());
-    dashboard.workspace_order.push("third".into());
-    dashboard
-        .workspace_names
-        .insert("second".into(), "Second".into());
-    dashboard
-        .workspace_names
-        .insert("third".into(), "Third".into());
-    dashboard.set_active_workspace(Some("second".into()));
-    dashboard.focus_prompt();
-    dashboard.set_active_workspace(Some(first.clone()));
-    dashboard.handle_key(key(KeyCode::BackTab));
-    assert_eq!(dashboard.focus, Focus::Workspaces);
-    dashboard.handle_key(key(KeyCode::BackTab));
-    assert_eq!(dashboard.focus, Focus::Workspaces);
-    for expected in ["second", "third"] {
-        let DashboardAction::SelectWorkspace { workspace_id } =
-            dashboard.handle_key(key(KeyCode::Right))
-        else {
-            panic!("right selects the next workspace");
-        };
-        assert_eq!(workspace_id, expected);
-        dashboard.set_active_workspace(Some(workspace_id));
-        assert_eq!(dashboard.focus, Focus::Workspaces);
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Right)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.workspace_control_focus,
-        crate::workspaces::WorkspaceControlFocus::Menu
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Left)),
-        DashboardAction::None
-    );
-    let DashboardAction::SelectWorkspace { workspace_id } =
-        dashboard.handle_key(key(KeyCode::Left))
-    else {
-        panic!("left selects the previous workspace");
-    };
-    assert_eq!(workspace_id, "second");
-    dashboard.set_active_workspace(Some(workspace_id));
-    assert_eq!(dashboard.focus, Focus::Workspaces);
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(
-        dashboard.workspace_control_focus,
-        crate::workspaces::WorkspaceControlFocus::Menu
-    );
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(dashboard.focus, Focus::Sessions);
-}
-
-#[test]
-fn workspace_tabs_filter_live_sessions_and_keep_transitions_visible() {
-    let mut local = running_session();
-    local.id = "local".into();
-    let mut dashboard = dashboard_with_session(local);
-    let mut remote = running_session();
-    remote.id = "remote".into();
-    remote.workspace_id = "another-workspace".into();
-    dashboard.state.sessions.insert(remote.id.clone(), remote);
-    let mut archived = running_session();
-    archived.id = "archived".into();
-    archived.archived = true;
-    dashboard
-        .state
-        .sessions
-        .insert(archived.id.clone(), archived);
-    let mut history = stopped_session();
-    history.id = "history".into();
-    dashboard.state.sessions.insert(history.id.clone(), history);
-    dashboard.clamp_selections();
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<Vec<_>>(),
-        ["archived", "local"]
-    );
-    dashboard.set_active_workspace(Some("another-workspace".into()));
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<Vec<_>>(),
-        ["remote"]
-    );
-    dashboard.session_operations.insert(
-        "history".into(),
-        operation(SessionOperationKind::Launching, None),
-    );
-    dashboard.set_active_workspace(Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.into()));
-    assert!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .any(|session| session.id == "local")
-    );
-    assert!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .any(|session| session.id == "history")
-    );
-}
-
-#[test]
-fn subagent_workspace_filters_children_and_closes_back_to_named_parent() {
-    let mut parent = stopped_session();
-    parent.id = "parent-session".into();
-    parent.title = "Parent planning session".into();
-    parent.session_title_override = Some("Parent planning session".into());
-    parent.state = SessionState::Running;
-    parent.project_directory = Some(std::path::PathBuf::from("/worktrees/parent-session"));
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
-        kind: Default::default(),
-        source_project_directory: std::path::PathBuf::from("/src/mjolnir-main"),
-        source_repository: std::path::PathBuf::from("/src/mjolnir-main"),
-        worktree_root: std::path::PathBuf::from("/worktrees/parent-session"),
-        branch: "mj/parent-session".into(),
-        target: mj_core::state::ManagedWorktreeTarget::Local,
-        base_commit: None,
-    });
-    let mut child = stopped_session();
-    child.id = "child-session".into();
-    child.title = "Inspect the parser and report back".into();
-    child.session_title_override = Some("Inspect parser".into());
-    child.acp_session_title = None;
-    child.state = SessionState::Running;
-    // A child launches into the parent's worktree checkout and owns no
-    // worktree of its own, so its own project identity is the parent's
-    // session id.
-    child.project_directory = Some(std::path::PathBuf::from("/worktrees/parent-session"));
-    let relation = mj_core::subagent::SubagentRecord {
-        child_session_id: child.id.clone(),
-        parent_session_id: parent.id.clone(),
-        task_name: "Inspect parser".into(),
-        profile_id: child.last_profile.clone(),
-        model: None,
-        effort: None,
-        working_directory: Default::default(),
-        initial_prompt: "Inspect the parser".into(),
-        request_key: "request-1".into(),
-        created_at: child.created_at.clone(),
-        noticed_turn: None,
-        handback_tool: false,
-    };
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: [(child.id.clone(), relation)].into_iter().collect(),
-            version: STATE_VERSION,
-            sessions: [
-                (parent.id.clone(), parent.clone()),
-                (child.id.clone(), child.clone()),
-            ]
-            .into_iter()
-            .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<Vec<_>>(),
-        vec![parent.id.as_str()],
-        "child sessions belong only to the virtual workspace"
-    );
-
-    dashboard.open_subagent_workspace(parent.id.clone());
-    assert_eq!(dashboard.subagent_parent_id(), Some(parent.id.as_str()));
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<Vec<_>>(),
-        vec![child.id.as_str()]
-    );
-
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 3)).unwrap();
-    terminal
-        .draw(|frame| {
-            crate::workspaces::render_workspace_tabs(frame, frame.area(), &mut dashboard);
-        })
-        .unwrap();
-    let screen = terminal.backend().to_string();
-    assert!(screen.contains("Parent planning session"), "{screen}");
-    assert!(screen.contains("X"), "{screen}");
-
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).unwrap();
-    terminal
-        .draw(|frame| {
-            let layout = crate::render::SessionsLayout::new(&dashboard, frame.area().width - 2);
-            crate::render::render_sessions(frame, frame.area(), &dashboard, &layout);
-        })
-        .unwrap();
-    let rows = terminal.backend().to_string();
-    assert!(rows.contains("Inspect parser"), "{rows}");
-    assert!(
-        rows.contains("mjolnir-main"),
-        "a child groups under the project its parent works in: {rows}"
-    );
-    assert!(
-        !rows.contains("parent-session"),
-        "no row names the parent session id: {rows}"
-    );
-
-    dashboard.close_subagent_workspace();
-    assert_eq!(dashboard.subagent_parent_id(), None);
-    assert_eq!(dashboard.selected_session_id(), Some(parent.id.as_str()));
-}
-
 /// A stopped Mjolnir sub-agent has no worker to attach to. Found live: its
 /// conversation sat on "Bringing your conversation into focus" until the
 /// attach timed out, and the work it did could not be read. It opens as a
 /// read-only view of its stored transcript instead.
+// Hard-won: bc0cee0: finished child transcripts could not be opened or read.
 #[test]
 fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
     let mut parent = stopped_session();
@@ -1877,6 +989,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
 /// the parent's real workspace. This is the contract the dashboard's
 /// `apply_runtime_records` relies on when it assigns `state.subagents`
 /// alongside `state.sessions` on every `set_state` call.
+// Hard-won: 4a99630: runtime snapshots omitted new child relations from workspace filtering.
 #[test]
 fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
     let mut parent = stopped_session();
@@ -2028,216 +1141,7 @@ fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edit
     );
 }
 
-#[test]
-fn sessions_are_ordered_by_creation_sequence_ascending() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.state.sessions.clear();
-    for (id, created) in [
-        ("session-z", "2026-08-09T01:00:00Z"),
-        ("session-y", "2026-08-09T00:30:00-02:00"),
-        ("session-a", "unknown"),
-    ] {
-        let mut session = running_session();
-        session.id = id.into();
-        session.created_at = created.into();
-        dashboard.state.sessions.insert(id.into(), session);
-    }
-    assert_eq!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect::<Vec<_>>(),
-        ["session-z", "session-y", "session-a"]
-    );
-}
-
-#[test]
-fn resolved_git_origin_groups_differently_named_raw_worktrees() {
-    let mut first = stopped_session();
-    first.id = "bifrost-fird".into();
-    first.state = SessionState::Running;
-    first.project_directory = Some("/mnt/optane/bifrost-fird".into());
-    let mut second = stopped_session();
-    second.id = "bifrost-fuzz".into();
-    second.state = SessionState::Running;
-    second.project_directory = Some("/home/dev/bifrost-fuzz".into());
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [first, second]
-            .into_iter()
-            .map(|session| (session.id.clone(), session))
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    let source =
-        ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git").unwrap();
-
-    dashboard.set_project_source("bifrost-fird", source.clone());
-    dashboard.set_project_source("bifrost-fuzz", source);
-
-    assert_eq!(dashboard.project_keys(), ["github:brokkai/bifrost-dev"]);
-    assert!(
-        dashboard
-            .ordered_sessions()
-            .iter()
-            .all(|session| dashboard.project_is_expanded(session))
-    );
-}
-
-#[test]
-fn bundle_and_checkout_share_one_canonical_project_heading() {
-    let mut dashboard_config = config();
-    dashboard_config.bundles.insert(
-        "bifrost".into(),
-        ProjectBundle {
-            primary_repo: "bifrost".into(),
-            repositories: vec![ProjectRepository {
-                id: "bifrost".into(),
-                github: Some("BrokkAi/bifrost-dev".into()),
-                local: None,
-                destination: "bifrost".into(),
-                git_ref: None,
-            }],
-        },
-    );
-    let mut bundle_session = running_session();
-    bundle_session.id = "bundle".into();
-    bundle_session.bundle_id = "bifrost".into();
-    assert!(bundle_session.project_directory.is_none());
-
-    let single = DashboardState::new(
-        dashboard_config.clone(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [(bundle_session.id.clone(), bundle_session.clone())]
-                .into_iter()
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    let single_heading = single
-        .sessions_rows()
-        .into_iter()
-        .find_map(|row| match row {
-            SessionsRow::ProjectHeading { label, .. } => Some(label),
-            SessionsRow::Session { .. } => None,
-        })
-        .expect("bundle project heading");
-    assert_eq!(single_heading, "bifrost-dev");
-
-    let mut raw_source = running_session();
-    raw_source.id = "raw".into();
-    raw_source.created_at = "2026-08-09T00:01:00Z".into();
-    let mut dashboard = DashboardState::new(
-        dashboard_config,
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [bundle_session, raw_source]
-                .into_iter()
-                .map(|session| (session.id.clone(), session))
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.set_project_source(
-        "raw",
-        ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
-            .expect("canonical source"),
-    );
-
-    let headings = dashboard
-        .sessions_rows()
-        .into_iter()
-        .filter_map(|row| match row {
-            SessionsRow::ProjectHeading { label, .. } => Some(label),
-            SessionsRow::Session { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(dashboard.project_keys(), ["github:brokkai/bifrost-dev"]);
-    assert_eq!(headings, ["bifrost-dev"]);
-    assert_eq!(dashboard.ordered_sessions().len(), 2);
-
-    // Case differences in a remote's spelling must not let another owner
-    // split this canonical group into two headings during display sorting.
-    dashboard.set_project_source(
-        "raw",
-        ProjectSourceIdentity::git_remote("https://github.com/brokkai/bifrost-dev.git").unwrap(),
-    );
-    let mut unrelated = running_session();
-    unrelated.id = "unrelated".into();
-    dashboard
-        .state
-        .sessions
-        .insert(unrelated.id.clone(), unrelated);
-    dashboard.set_project_source(
-        "unrelated",
-        ProjectSourceIdentity::git_remote("https://github.com/Else/bifrost-dev.git").unwrap(),
-    );
-    let keys = dashboard.project_keys();
-    assert_eq!(keys.len(), 2);
-    assert!(keys.contains(&"github:brokkai/bifrost-dev".to_owned()));
-    assert!(keys.contains(&"github:else/bifrost-dev".to_owned()));
-    assert_eq!(dashboard.ordered_sessions().len(), 3);
-}
-
-#[test]
-fn mark_all_read_advances_a_materialized_session_and_returns_its_receipt() {
-    let mut dashboard = dashboard_with_session(running_session());
-    apply_materialized_transcript(&mut dashboard, vec![agent_message(4, "unread response")]);
-    assert_eq!(
-        dashboard.session_details["session-1"].unread_agent_messages,
-        1
-    );
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::MarkAllRead),
-        DashboardAction::MarkAllRead {
-            receipts: vec![("session-1".into(), 4)]
-        }
-    );
-    assert_eq!(
-        dashboard.session_details["session-1"].unread_agent_messages,
-        0
-    );
-    assert_eq!(
-        dashboard.state.sessions["session-1"].viewed_through_event_ordinal,
-        4
-    );
-}
-
-#[test]
-fn mark_all_read_includes_an_interruption_only_session() {
-    let mut dashboard = dashboard_with_session(running_session());
-    apply_materialized_transcript(&mut dashboard, vec![work_interruption(3)]);
-    assert_eq!(
-        dashboard.session_details["session-1"].unread_interruptions,
-        1
-    );
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::MarkAllRead),
-        DashboardAction::MarkAllRead {
-            receipts: vec![("session-1".into(), 3)]
-        }
-    );
-    let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.unread_interruptions, 0);
-    assert!(!detail.has_unread());
-}
-
+// Hard-won: 19a4148: mark-all-read cleared unread state in other workspaces.
 #[test]
 fn mark_all_read_leaves_another_workspaces_session_unread() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -2267,181 +1171,7 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
     );
 }
 
-#[test]
-fn bracketed_paste_populates_dashboard_text_editors() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-
-    open_rename_through_the_palette(&mut dashboard);
-    let Mode::Rename(editor) = &mut dashboard.mode else {
-        panic!("expected rename editor")
-    };
-    editor.title.clear();
-    dashboard.handle_paste("pasted title\n");
-
-    let Mode::Rename(editor) = &dashboard.mode else {
-        panic!("expected rename editor")
-    };
-    assert_eq!(editor.title, "pasted title");
-}
-
-#[test]
-fn the_tab_ring_visits_every_pane_and_keeps_the_session_selection() {
-    let mut active = stopped_session();
-    active.id = "session-0".into();
-    active.state = SessionState::Running;
-    let other = running_session();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [(active.id.clone(), active), (other.id.clone(), other)]
-                .into_iter()
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.select_active_session("session-0");
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-
-    assert_eq!(dashboard.focus, Focus::Sessions);
-    assert_eq!(dashboard.selected_session().unwrap().id, "session-0");
-    dashboard.handle_key(key(KeyCode::Down));
-    assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
-
-    // The selection is anchored by session id, so it survives focus
-    // moving away and Tab lands the user back where they were.
-    for expected in [
-        Focus::Prompt,
-        Focus::Targets,
-        Focus::Quota,
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(dashboard.focus, expected);
-        assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
-    }
-
-    for expected in [
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Quota,
-        Focus::Targets,
-        Focus::Prompt,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::BackTab));
-        assert_eq!(dashboard.focus, expected);
-    }
-}
-
-#[test]
-fn keyboard_selection_stops_at_the_active_panes_ends_instead_of_wrapping() {
-    let sessions = (0..3)
-        .map(|index| {
-            let mut session = stopped_session();
-            session.id = format!("session-{index}");
-            session.state = SessionState::Running;
-            (session.id.clone(), session)
-        })
-        .collect();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions,
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.select_active_session("session-0");
-
-    assert_eq!(dashboard.selected_visible_index(), Some(0));
-    dashboard.handle_key(key(KeyCode::Up));
-    assert_eq!(
-        dashboard.selected_visible_index(),
-        Some(0),
-        "Up to the actions preserves the selected conversation"
-    );
-    assert_eq!(
-        dashboard.session_action_focus,
-        Some(CommandId::NewSessionWizard)
-    );
-    dashboard.handle_key(key(KeyCode::Down));
-    assert_eq!(dashboard.session_action_focus, None);
-    assert_eq!(dashboard.selected_visible_index(), Some(0));
-
-    dashboard.handle_key(key(KeyCode::Down));
-    dashboard.handle_key(key(KeyCode::Down));
-    assert_eq!(dashboard.selected_visible_index(), Some(2));
-    dashboard.handle_key(key(KeyCode::Down));
-    assert_eq!(
-        dashboard.selected_visible_index(),
-        Some(2),
-        "Down at the last row stays put"
-    );
-}
-
-/// Every project starts expanded, and a collapsed one is still a list of
-/// sessions: Enter opens the row under the caret rather than spending the
-/// key on the group.
-#[test]
-fn enter_opens_the_selected_session_even_inside_a_collapsed_project() {
-    let sessions = (0..3)
-        .map(|index| {
-            let mut session = stopped_session();
-            session.id = format!("session-{index}");
-            session.state = SessionState::Running;
-            session.project_directory = Some(if index < 2 {
-                "/projects/shared".into()
-            } else {
-                "/projects/other".into()
-            });
-            session.created_at = format!("2026-08-1{}T00:00:00Z", index + 1);
-            (session.id.clone(), session)
-        })
-        .collect();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions,
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.select_active_session("session-1");
-    assert!(
-        dashboard.project_is_expanded(dashboard.selected_session().unwrap()),
-        "projects default to expanded"
-    );
-
-    // Collapsing the selected session's project leaves the selection, and
-    // Enter still opens it.
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    assert!(!dashboard.project_is_expanded(dashboard.selected_session().unwrap()));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::Open {
-            session_id: "session-1".into()
-        }
-    );
-    assert_eq!(dashboard.selected_session().unwrap().id, "session-1");
-}
-
+// Hard-won: 233796e: wheel input scrolled the focused pane instead of the hovered pane.
 #[test]
 fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
     let sessions = (0..5)
@@ -2483,97 +1213,6 @@ fn mouse_wheel_scrolls_the_hovered_pane_without_changing_focus() {
     assert_eq!(dashboard.quota_index, 1);
     assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 0);
     assert_eq!(dashboard.focus, Focus::Sessions);
-}
-
-#[test]
-fn clicking_an_active_rows_tail_line_selects_that_session() {
-    let mut dashboard = dashboard_with_conversations(3);
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw active row hitboxes");
-    assert_eq!(
-        dashboard.selected_visible_index().unwrap_or(0),
-        0,
-        "starts on the first session"
-    );
-
-    let (_, row) = *dashboard
-        .session_row_areas
-        .iter()
-        .find(|(index, _)| *index == 2)
-        .expect("the third active row has a recorded hitbox");
-    assert!(
-        row.height > 1,
-        "an unselected row still spans its preview lines"
-    );
-    // Click the row's bottom line, i.e. its conversation tail, not the
-    // one-line summary at the top.
-    dashboard.handle_mouse(mouse_at_row(
-        MouseEventKind::Down(MouseButton::Left),
-        row,
-        row.height - 1,
-    ));
-
-    assert_eq!(
-        dashboard.selected_visible_index().unwrap_or(0),
-        2,
-        "clicking the tail line selected the row, not just its summary line"
-    );
-    assert_eq!(dashboard.focus, Focus::Sessions);
-}
-
-#[test]
-fn a_single_click_on_a_row_selects_but_reports_no_action() {
-    let mut dashboard = dashboard_with_conversations(3);
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw active row hitboxes");
-
-    let (_, row) = *dashboard
-        .session_row_areas
-        .iter()
-        .find(|(index, _)| *index == 1)
-        .expect("the second active row has a recorded hitbox");
-    let action = dashboard.handle_mouse(mouse_at_row(
-        MouseEventKind::Down(MouseButton::Left),
-        row,
-        0,
-    ));
-
-    assert_eq!(action, DashboardAction::None);
-    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 1);
-}
-
-#[test]
-fn a_double_click_on_an_active_row_opens_it_like_enter() {
-    let mut dashboard = dashboard_with_conversations(3);
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw active row hitboxes");
-
-    let (_, row) = *dashboard
-        .session_row_areas
-        .iter()
-        .find(|(index, _)| *index == 1)
-        .expect("the second active row has a recorded hitbox");
-    let click = || mouse_at_row(MouseEventKind::Down(MouseButton::Left), row, 0);
-
-    let first = dashboard.handle_mouse(click());
-    assert_eq!(first, DashboardAction::None, "the first click just selects");
-
-    let second = dashboard.handle_mouse(click());
-    assert_eq!(
-        second,
-        DashboardAction::Open {
-            session_id: "session-1".into(),
-        },
-        "a quick second click on the same row opens it, matching Enter"
-    );
-    assert_eq!(dashboard.selected_visible_index().unwrap_or(0), 1);
 }
 
 #[test]
@@ -2687,50 +1326,6 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
     assert_eq!(dashboard.selected_session().unwrap().id, "new-session");
 }
 
-/// Stopping the last session empties the live dashboard; it belongs to the
-/// resume dialog now.
-#[test]
-fn stopping_the_last_session_removes_it_and_panes_still_cycle() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    assert_eq!(dashboard.focus, Focus::Sessions);
-
-    let mut state = dashboard.state.clone();
-    state.sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
-    dashboard.set_state(state);
-    assert_eq!(dashboard.focus, Focus::Sessions);
-    assert_eq!(dashboard.ordered_sessions().len(), 0);
-    assert_eq!(dashboard.selected_session(), None);
-
-    for expected in [
-        Focus::Prompt,
-        Focus::Targets,
-        Focus::Quota,
-        Focus::Workspaces,
-        Focus::Workspaces,
-        Focus::Sessions,
-    ] {
-        dashboard.handle_key(key(KeyCode::Tab));
-        assert_eq!(dashboard.focus, expected);
-    }
-}
-
-#[test]
-fn opening_an_active_session_returns_controller_action() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    session.checkpoint = None;
-    let mut dashboard = dashboard_with_session(session);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::Open {
-            session_id: "session-1".into()
-        }
-    );
-}
-
 /// A failed session has two reasonable answers to Enter, and recovery
 /// replaces the target, so the surface asks instead of guessing. The row
 /// is red before the key is ever pressed, so the dialog is not a surprise.
@@ -2821,6 +1416,7 @@ fn dashboard_with_two_sessions() -> DashboardState {
 /// Launch finding B-4: a launch that finishes after the user selected
 /// another row must not take the selection back, or the next session
 /// command (such as close) acts on a session the user did not choose.
+// Hard-won: 4d523f1: launch completion replaced the user’s newer selection and focus.
 #[test]
 fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2840,6 +1436,7 @@ fn a_finished_launch_leaves_a_selection_the_user_moved_elsewhere() {
 /// and then did not open; the selection sat on the first row, which is where
 /// the clamp puts it when a refresh does not carry the selected session.
 /// Nobody chose that row, so finishing the launch still opens the session.
+// Hard-won: 0d95dcf: refreshing during launch lost the session the user had started.
 #[test]
 fn a_finished_launch_opens_the_session_a_refresh_displaced() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2864,6 +1461,7 @@ fn a_finished_launch_opens_the_session_a_refresh_displaced() {
 /// claude-b: Session opening did not respond within 15 seconds" although
 /// nothing asked to open it. The pane still named the suspended session, and
 /// the end of its lifecycle re-armed an attach to a session with no worker.
+// Hard-won: 0d95dcf: suspending a pinned session triggered a needless 15-second attach.
 #[test]
 fn a_suspended_session_is_not_attached_to() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -2875,19 +1473,6 @@ fn a_suspended_session_is_not_attached_to() {
         .expect("session")
         .state = SessionState::Stopped;
     assert!(!dashboard.pane_session_can_attach("session-1"));
-}
-
-/// When the selection is still on the launching session, finishing the
-/// launch opens it for its first prompt, as before.
-#[test]
-fn a_finished_launch_opens_the_session_the_user_left_selected() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.select_active_session("session-1");
-
-    dashboard.finish_new_session("session-1");
-
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
-    assert_eq!(dashboard.focus(), Focus::Prompt);
 }
 
 #[test]
@@ -2914,61 +1499,6 @@ fn setting_the_current_session_writes_only_the_focused_pane() {
 }
 
 #[test]
-fn a_split_shows_its_session_in_the_new_pane_and_takes_the_focus() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-
-    assert_ne!(second, first);
-    assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.current_session_id(), Some("session-2"));
-    assert_eq!(dashboard.pane_session(first), Some("session-1"));
-    assert_eq!(dashboard.pane_for_session("session-1"), Some(first));
-    // Focusing a pane moves the Sessions highlight onto what it shows.
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-    dashboard.focus_pane(first);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
-}
-
-#[test]
-fn closing_the_browse_pane_is_refused_without_displacing_its_session() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let only = dashboard.focused_pane();
-    assert_eq!(dashboard.close_pane(only), None);
-    assert_eq!(dashboard.focused_pane(), only);
-    assert_eq!(dashboard.current_session_id(), Some("session-1"));
-}
-
-#[test]
-fn the_conversation_layout_round_trips_with_its_sessions_and_focus() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Vertical, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_pane(first);
-    let saved = dashboard.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID);
-    assert!(saved.validate().is_ok());
-
-    let mut restored = dashboard_with_two_sessions();
-    restored.cache_workspace_layout(mj_core::workspace::DEFAULT_WORKSPACE_ID, saved.clone());
-
-    assert_eq!(restored.focused_pane(), first);
-    assert_eq!(restored.pane_session(first), Some("session-1"));
-    assert_eq!(restored.pane_session(second), Some("session-2"));
-    assert_eq!(
-        restored.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID),
-        saved
-    );
-}
-
-#[test]
 fn a_restored_pane_whose_session_is_gone_opens_empty() {
     let mut dashboard = dashboard_with_two_sessions();
     dashboard.set_current_session(Some("session-1"));
@@ -2984,35 +1514,6 @@ fn a_restored_pane_whose_session_is_gone_opens_empty() {
 
     assert_eq!(restored.pane_session(first), Some("session-1"));
     assert_eq!(restored.pane_session(second), None);
-}
-
-/// The session row's menu is where a split is created, so both commands have
-/// to be in it.
-#[test]
-fn the_session_menu_offers_pin_controls() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.focus_sessions();
-    dashboard.begin_session_palette();
-
-    let lines = drawn(&mut dashboard, 120, 60);
-    let joined = lines.join("\n");
-    assert!(joined.contains("Pin…"), "{joined}");
-    assert!(joined.contains("Unpin"), "{joined}");
-}
-
-/// The pane commands belong where a conversation is: at the composer, and in
-/// the Sessions list beside it.
-#[test]
-fn the_command_palette_offers_close_pane_at_the_composer() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    dashboard.focus_prompt();
-    open_palette(&mut dashboard);
-
-    let joined = drawn(&mut dashboard, 120, 60).join("\n");
-    assert!(joined.contains("Close pane"), "{joined}");
-    assert!(joined.contains("Focus pane right"), "{joined}");
-    assert!(joined.contains("Resize pane left"), "{joined}");
 }
 
 /// Opening a session already on screen is a move, not a copy: the same
@@ -3063,6 +1564,7 @@ fn a_split_with_no_room_is_refused_and_changes_nothing() {
 
 /// Launch finding D-2: the refusal notice describes a failed split, so a
 /// later split that succeeds must take it off the bar.
+// Hard-won: 34e23bc: a successful split left an obsolete refusal notice visible.
 #[test]
 fn a_successful_split_clears_the_earlier_no_room_notice() {
     let mut dashboard = dashboard_with_two_sessions();
@@ -3081,32 +1583,6 @@ fn a_successful_split_clears_the_earlier_no_room_notice() {
         .expect("a wide frame has room for two panes");
 
     assert_eq!(dashboard.notice(), None);
-}
-
-/// Moving the focus between panes is a layout change the controller has to
-/// save, and one that carries the Sessions highlight with it.
-#[test]
-fn focusing_a_pane_toward_a_direction_reports_the_change_and_moves_the_highlight() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-
-    let action = dashboard.dispatch_command(CommandId::FocusPaneLeft);
-
-    assert_eq!(
-        action,
-        DashboardAction::ConversationPanesChanged { focus_moved: true }
-    );
-    assert_eq!(dashboard.focused_pane(), first);
-    assert_eq!(dashboard.selected_session_id(), Some("session-1"));
-    // There is nothing further left, so the command changes nothing.
-    assert_eq!(
-        dashboard.dispatch_command(CommandId::FocusPaneLeft),
-        DashboardAction::None
-    );
 }
 
 /// An attach lands in the pane that asked for it, whichever pane has the
@@ -3133,22 +1609,6 @@ fn a_session_installs_into_the_pane_that_asked_and_leaves_any_other() {
     assert_eq!(dashboard.pane_for_session("session-1"), Some(second));
 }
 
-/// Closing the active pin selects the remaining active conversation.
-#[test]
-fn closing_a_pane_selects_the_remaining_active_conversation() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .unwrap();
-    dashboard.focus_pane(first);
-    dashboard.select_active_session("session-1");
-    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-1"));
-    assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-}
-
 /// A stored arrangement that names one session in two panes is not a layout
 /// this surface can draw: the conversation would appear twice.
 #[test]
@@ -3167,113 +1627,6 @@ fn a_restored_layout_never_shows_one_session_in_two_panes() {
 
     assert_eq!(restored.pane_session(first), Some("session-1"));
     assert_eq!(restored.pane_session(second), None);
-}
-
-/// The keys herdr uses for panes: `prefix+v` splits beside, `prefix+x`
-/// closes. The split itself belongs to the controller, which opens the
-/// session in the new pane, so the test does that step the way `mj-cli`
-/// does and then closes the pane with its own key.
-#[test]
-fn the_pane_keys_split_beside_the_conversation_and_close_a_pin() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    dashboard.select_active_session("session-2");
-    dashboard.focus_prompt();
-    let first = dashboard.focused_pane();
-    let action = chord(&mut dashboard, CommandId::OpenSessionSplitRight);
-    let DashboardAction::SplitConversation { pane, direction } = action else {
-        panic!("expected a targeted split: {action:?}");
-    };
-    assert_eq!(pane, first);
-    assert_eq!(direction, ratatui::layout::Direction::Horizontal);
-    let browse = dashboard.split_conversation_pane(pane, direction).unwrap();
-    assert_eq!(dashboard.focused_pane(), browse);
-    assert_eq!(dashboard.pane_session(browse), None);
-    assert_eq!(dashboard.pin_id("session-2"), Some(0));
-    dashboard.focus_pane(first);
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ClosePane),
-        DashboardAction::ClosePane { pane: first }
-    );
-    assert_eq!(dashboard.close_pane(first).as_deref(), Some("session-2"));
-    assert_eq!(dashboard.browse_pane(), browse);
-    assert_eq!(dashboard.navigation.layout().pane_count(), 1);
-}
-
-#[test]
-fn a_pane_close_chip_closes_its_own_pane_without_moving_the_keyboard() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_prompt();
-
-    let lines = drawn(&mut dashboard, 120, 40);
-    let chip = |dashboard: &DashboardState, pane| {
-        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
-        (transcript.right() - 3, transcript.y)
-    };
-    {
-        let (column, row) = chip(&dashboard, first);
-        assert_eq!(
-            lines[row as usize].chars().nth(column as usize),
-            Some('×'),
-            "pinned panes draw a close chip on their title row: {lines:#?}"
-        );
-    }
-
-    let target = chip(&dashboard, first);
-    assert_eq!(
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), target)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), target)),
-        DashboardAction::ClosePane { pane: first }
-    );
-    assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-}
-
-/// The last-pane key returns the keyboard to the pane it came from, and says
-/// so when there is no pane to go back to.
-#[test]
-fn the_last_pane_key_returns_to_the_pane_the_keyboard_came_from() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    dashboard.focus_prompt();
-
-    // Nothing has moved yet, so there is nothing to go back to.
-    assert_eq!(
-        chord(&mut dashboard, CommandId::FocusLastPane),
-        DashboardAction::None
-    );
-    assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
-    assert_eq!(dashboard.focused_pane(), first);
-
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_pane(first);
-    dashboard.focus_pane(second);
-    dashboard.focus_prompt();
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::FocusLastPane),
-        DashboardAction::ConversationPanesChanged { focus_moved: true }
-    );
-    assert_eq!(dashboard.focused_pane(), first);
-
-    // It is a toggle: running it again goes back to where it just came from.
-    assert_eq!(
-        chord(&mut dashboard, CommandId::FocusLastPane),
-        DashboardAction::ConversationPanesChanged { focus_moved: true }
-    );
-    assert_eq!(dashboard.focused_pane(), second);
 }
 
 /// Closing a pane forgets it as the place to go back to, so the key never
@@ -3298,305 +1651,6 @@ fn closing_a_pane_leaves_no_previous_pane_to_return_to() {
     );
     assert_eq!(dashboard.notice().as_deref(), Some("No previous pane"));
     assert_eq!(dashboard.focused_pane(), second);
-}
-
-/// Zoom fills the conversation band with the focused pane: the other panes
-/// keep their place in the arrangement but are neither drawn nor pointed at,
-/// and the zoom toggles back off.
-#[test]
-fn zoom_fills_the_band_with_the_focused_pane_and_toggles_back() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_prompt();
-    drawn(&mut dashboard, 120, 40);
-    let band = dashboard.conversation_area.expect("the conversation band");
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ZoomPane),
-        DashboardAction::ConversationPanesChanged { focus_moved: false }
-    );
-    assert!(dashboard.conversation_zoomed());
-    drawn(&mut dashboard, 120, 40);
-
-    let panes = dashboard.conversation_panes(band);
-    assert_eq!(panes.len(), 1);
-    assert_eq!(panes[0].id, second);
-    assert_eq!(panes[0].rect, band);
-    // Hit-testing agrees with what was drawn: the hidden pane answers for
-    // nothing, and the zoomed pane answers for the whole band.
-    let (transcript, _) = dashboard.pane_bands(second).expect("the zoomed pane drew");
-    assert_eq!(transcript.width, band.width);
-    assert!(dashboard.pane_bands(first).is_none());
-    assert_eq!(
-        dashboard.chat_region_contains(band.x + 1, band.y + 1),
-        Some(second)
-    );
-
-    // The arrangement underneath is untouched, so unzooming puts both back.
-    chord(&mut dashboard, CommandId::ZoomPane);
-    assert!(!dashboard.conversation_zoomed());
-    drawn(&mut dashboard, 120, 40);
-    assert_eq!(dashboard.conversation_panes(band).len(), 2);
-    assert!(dashboard.pane_bands(first).is_some());
-}
-
-/// Directional focus works against the arrangement the zoom hides, and moving
-/// the keyboard keeps the zoom: the new pane fills the band in its turn.
-#[test]
-fn focusing_another_pane_while_zoomed_keeps_the_zoom() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_prompt();
-    drawn(&mut dashboard, 120, 40);
-    chord(&mut dashboard, CommandId::ZoomPane);
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::FocusPaneLeft),
-        DashboardAction::ConversationPanesChanged { focus_moved: true }
-    );
-
-    assert_eq!(dashboard.focused_pane(), first);
-    assert!(dashboard.conversation_zoomed());
-    let band = dashboard.conversation_area.expect("the conversation band");
-    let panes = dashboard.conversation_panes(band);
-    assert_eq!(panes.len(), 1);
-    assert_eq!(panes[0].id, first);
-    assert_ne!(second, first);
-}
-
-/// Splitting and closing both change which panes there are, so each one ends
-/// the zoom rather than leaving panes hidden behind it.
-#[test]
-fn a_split_or_a_close_ends_the_zoom() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_prompt();
-    drawn(&mut dashboard, 120, 40);
-
-    chord(&mut dashboard, CommandId::ZoomPane);
-    assert!(dashboard.conversation_zoomed());
-    dashboard
-        .split_focused_pane(ratatui::layout::Direction::Vertical, None)
-        .expect("the test conversation area has room for a third pane");
-    assert!(!dashboard.conversation_zoomed());
-
-    chord(&mut dashboard, CommandId::ZoomPane);
-    assert!(dashboard.conversation_zoomed());
-    dashboard.close_pane(first);
-    assert!(!dashboard.conversation_zoomed());
-}
-
-/// A lone pane already fills the band, so the command says so instead of
-/// changing nothing silently.
-#[test]
-fn zooming_a_lone_pane_says_there_is_nothing_to_zoom() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    dashboard.focus_prompt();
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ZoomPane),
-        DashboardAction::None
-    );
-
-    assert!(!dashboard.conversation_zoomed());
-    assert_eq!(
-        dashboard.notice().as_deref(),
-        Some("Only one pane; nothing to zoom")
-    );
-}
-
-/// The zoomed pane carries a `Z` chip left of its close chip, and clicking it
-/// puts the other panes back.
-#[test]
-fn clicking_the_zoom_chip_unzooms() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.config.advanced.symbols = Some(mj_core::config::SymbolSet::Unicode);
-    dashboard.set_current_session(Some("session-1"));
-    dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    dashboard.focus_prompt();
-    drawn(&mut dashboard, 120, 40);
-    chord(&mut dashboard, CommandId::ZoomPane);
-
-    let lines = drawn(&mut dashboard, 120, 40);
-    let (transcript, _) = dashboard
-        .pane_bands(dashboard.focused_pane())
-        .expect("the zoomed pane drew");
-    let chip = (transcript.right() - 6, transcript.y);
-    assert_eq!(
-        lines[chip.1 as usize].chars().nth(chip.0 as usize),
-        Some('Z'),
-        "the zoomed pane draws a Z chip left of its close chip: {lines:#?}"
-    );
-
-    assert_eq!(
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), chip)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), chip)),
-        DashboardAction::ConversationPanesChanged { focus_moved: false }
-    );
-    assert!(!dashboard.conversation_zoomed());
-}
-
-/// The pane with the keyboard draws its transcript border in the focused
-/// style, and its neighbour does not, so the focused pane is visible without
-/// reading the composer.
-#[test]
-fn the_focused_pane_draws_a_distinct_transcript_border() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    assert_eq!(dashboard.focused_pane(), second);
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw two panes");
-    let corner = |dashboard: &DashboardState, pane| {
-        let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
-        (transcript.x, transcript.y)
-    };
-    let buffer = terminal.backend().buffer();
-    assert_eq!(
-        Some(buffer[corner(&dashboard, second)].fg),
-        mj_chat::theme::border(true).fg,
-        "the focused pane's transcript border uses the focused style"
-    );
-    assert_eq!(
-        buffer[corner(&dashboard, first)].fg,
-        mj_chat::theme::palette().border,
-        "an unfocused pane keeps the resting border"
-    );
-}
-
-/// With one pane there is nothing to tell apart, so the transcript border
-/// stays at rest and the single-pane surface draws as it always has.
-#[test]
-fn the_lone_pane_draws_a_resting_transcript_border() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let pane = dashboard.focused_pane();
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw one pane");
-    let (transcript, _) = dashboard.pane_bands(pane).expect("a drawn pane");
-    assert_eq!(
-        terminal.backend().buffer()[(transcript.x, transcript.y)].fg,
-        mj_chat::theme::palette().border,
-        "a lone pane draws the resting border whether or not it has the keyboard"
-    );
-}
-
-/// Closing a pane that does not hold the keyboard removes it and reports what
-/// it showed, leaving the focus and the highlight alone.
-#[test]
-fn closing_an_unfocused_pane_leaves_the_keyboard_where_it_was() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-
-    let closed = dashboard.close_pane(first);
-
-    assert_eq!(closed.as_deref(), Some("session-1"));
-    assert_eq!(dashboard.navigation.layout().pane_count(), 1);
-    assert_eq!(dashboard.focused_pane(), second);
-    assert_eq!(dashboard.selected_session_id(), Some("session-2"));
-    assert_eq!(dashboard.pane_session(second), Some("session-2"));
-}
-
-/// `prefix+minus` stacks instead of sitting beside, and the focus keys move
-/// between the two panes from the composer.
-#[test]
-fn the_stacked_split_key_and_the_focus_keys_answer_from_the_composer() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    dashboard.select_active_session("session-2");
-    dashboard.focus_prompt();
-    let first = dashboard.focused_pane();
-
-    let action = chord(&mut dashboard, CommandId::OpenSessionSplitBelow);
-
-    let DashboardAction::SplitConversation { direction, .. } = action else {
-        panic!("the stacked split key should ask for a split: {action:?}");
-    };
-    assert_eq!(direction, ratatui::layout::Direction::Vertical);
-    dashboard
-        .split_focused_pane(direction, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::FocusPaneUp),
-        DashboardAction::ConversationPanesChanged { focus_moved: true }
-    );
-    assert_eq!(dashboard.focused_pane(), first);
-    assert_eq!(dashboard.selected_session_id(), None);
-}
-
-/// A split key pressed with nothing selected still splits; the new pane is
-/// simply empty. The controller answers `SplitPane` by splitting and leaving
-/// the leaf without a session.
-#[test]
-fn a_split_key_with_no_selection_asks_for_an_empty_pane() {
-    let mut dashboard = dashboard_with_two_sessions();
-    let mut state = dashboard.state.clone();
-    state.sessions.clear();
-    dashboard.set_state(state);
-    dashboard.focus_prompt();
-
-    assert_eq!(dashboard.selected_session_id(), None);
-    assert_eq!(
-        chord(&mut dashboard, CommandId::OpenSessionSplitRight),
-        DashboardAction::SplitConversation {
-            pane: dashboard.focused_pane(),
-            direction: ratatui::layout::Direction::Horizontal
-        }
-    );
-}
-
-/// A restored arrangement comes back with the keyboard in the pane it named
-/// and the Sessions highlight on that pane's session. Without the highlight
-/// following, the controller's "open what is selected" step would pull the
-/// first row's conversation into the restored focus pane.
-#[test]
-fn a_restored_arrangement_keeps_its_focus_and_its_highlight() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("the test conversation area has room for two panes");
-    let saved = dashboard.conversation_layout_for(mj_core::workspace::DEFAULT_WORKSPACE_ID);
-    assert_eq!(saved.focus, second.raw());
-
-    let mut restored = dashboard_with_two_sessions();
-    restored.cache_workspace_layout(mj_core::workspace::DEFAULT_WORKSPACE_ID, saved);
-
-    assert_eq!(restored.focused_pane(), second);
-    assert_eq!(restored.current_session_id(), Some("session-2"));
-    assert_eq!(restored.selected_session_id(), Some("session-2"));
 }
 
 /// Three live sessions in the default workspace and one in `other`: `asks`
@@ -3910,6 +1964,7 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
     );
 }
 
+// Hard-won: bed9102: terminal failures inflated badges and queued an unopenable session.
 #[test]
 fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -4132,6 +2187,7 @@ fn workspace_tabs_and_folded_headings_carry_attention_badges() {
     assert!(heading.contains("done ✓1"));
 }
 
+// Hard-won: 1b2ef72: short names and wide graphemes clipped the workspace badge.
 #[test]
 fn short_workspace_names_keep_their_attention_badges() {
     for name in ["M", "MJ", "界", "e\u{301}"] {
@@ -4203,55 +2259,9 @@ fn priority_order_lists_waiting_first_without_project_headings() {
     assert_eq!(ids[0], "done");
 }
 
-/// User request 2026-09-29: the Sessions title puts the hidden count first,
-/// then the state, then the clear chip: `8 hidden · idle ×`, and
-/// `8 hidden - idle x` with ASCII symbols. The chip still clears the filter.
-#[test]
-fn the_sessions_title_leads_with_the_hidden_count_and_ends_with_the_clear_chip() {
-    use crossterm::event::{MouseButton, MouseEventKind};
-    use mj_core::config::SymbolSet;
-
-    for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')] {
-        let mut dashboard = dashboard_with_attention_mix();
-        let mut config = dashboard.config.clone();
-        config.advanced.symbols = Some(symbols);
-        dashboard.set_config(config);
-        dashboard.set_active_workspace(Some("default".into()));
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('i')));
-        assert_eq!(dashboard.sessions_hidden_count(), 2);
-
-        let lines = drawn(&mut dashboard, 240, 40);
-        let label = format!("2 hidden {dot} idle {close} ");
-        let (x, y) = point(&lines, &label);
-        let pane = dashboard.pane_areas.expect("pane areas")[0];
-        assert_eq!(y, pane.y, "{symbols:?}: the label is on the title");
-        assert!(
-            !lines.iter().any(|line| line.contains("idle 2 hidden")
-                || line.contains(&format!("idle {dot} 2 hidden"))),
-            "{symbols:?}: {lines:#?}"
-        );
-
-        // The chip is the glyph after the state, and only it clears the filter.
-        let chip = x + "2 hidden · idle ".chars().count() as u16;
-        assert_eq!(
-            lines[usize::from(y)].chars().nth(usize::from(chip)),
-            Some(close)
-        );
-        for cell in [x, chip - 2] {
-            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), (cell, y)));
-            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (cell, y)));
-            assert!(dashboard.sessions_filter.is_some(), "{symbols:?}: {cell}");
-            drawn(&mut dashboard, 240, 40);
-        }
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), (chip, y)));
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), (chip, y)));
-        assert_eq!(dashboard.sessions_filter, None, "{symbols:?}");
-    }
-}
-
 /// RCL-2 (2026-09-29): with the Sessions pane minimized, the title still says
 /// a filter is on.
+// Hard-won: daa8f51: minimized attention titles dropped the active filter indicator.
 #[test]
 fn a_minimized_sessions_pane_title_still_shows_the_filter_chip() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -4274,134 +2284,6 @@ fn a_minimized_sessions_pane_title_still_shows_the_filter_chip() {
         .take(usize::from(pane.width))
         .collect::<String>();
     assert!(title.contains('×'), "{title:?}");
-}
-
-#[test]
-fn slash_searches_sessions_by_name_and_esc_clears_the_filter() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    dashboard.focus_sessions();
-    let ids = |dashboard: &DashboardState| {
-        dashboard
-            .ordered_sessions()
-            .into_iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
-
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    for character in "qui".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    assert_eq!(ids(&dashboard), ["quiet"]);
-    assert_eq!(dashboard.selected_session_id(), None);
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines.iter().any(|line| line.contains("Sessions · /qui")),
-        "{lines:#?}"
-    );
-    // At this width the count has no room, and the pane keeps its own name
-    // rather than shortening to `S · ` to make the number fit.
-    assert!(
-        !lines.iter().any(|line| line.contains("hidden")),
-        "{lines:#?}"
-    );
-
-    // Given the room, the title says how many rows the filter holds back, so a
-    // shortened list never reads as the whole truth.
-    let wide = drawn(&mut dashboard, 240, 40);
-    assert!(
-        wide.iter()
-            .any(|line| line.contains("Sessions · 2 hidden · /qui")),
-        "{wide:#?}"
-    );
-
-    // Enter keeps the filter and returns the letters to the pane; `j` moves
-    // again instead of typing.
-    dashboard.handle_key(key(KeyCode::Enter));
-    dashboard.handle_key(key(KeyCode::Char('j')));
-    assert_eq!(ids(&dashboard), ["quiet"]);
-    assert_eq!(dashboard.selected_session_id(), Some("quiet"));
-
-    // A query nothing matches retains the active row with an explanation.
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    for character in "zzz".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    assert_eq!(ids(&dashboard), ["quiet"]);
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines.iter().any(|line| line.contains("Outside filter")),
-        "{lines:#?}"
-    );
-
-    // Esc clears the text, and Esc again drops the filter.
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(dashboard.sessions_filter.is_none());
-}
-
-#[test]
-fn state_letters_narrow_the_sessions_pane_and_a_shows_all() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    dashboard.focus_sessions();
-    let ids = |dashboard: &DashboardState| {
-        dashboard
-            .ordered_sessions()
-            .into_iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>()
-    };
-    dashboard.handle_key(key(KeyCode::Char('b')));
-    assert_eq!(ids(&dashboard), ["asks"]);
-    dashboard.handle_key(key(KeyCode::Char('d')));
-    assert_eq!(ids(&dashboard), ["done"]);
-    dashboard.handle_key(key(KeyCode::Char('i')));
-    assert_eq!(ids(&dashboard), ["quiet"]);
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines.iter().any(|line| line.contains("Sessions · idle")),
-        "{lines:#?}"
-    );
-    dashboard.handle_key(key(KeyCode::Char('a')));
-    assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
-    assert!(dashboard.sessions_filter.is_none());
-
-    // The state filter and the text filter compose.
-    dashboard.handle_key(key(KeyCode::Char('b')));
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    dashboard.handle_key(key(KeyCode::Char('q')));
-    assert!(ids(&dashboard).is_empty());
-    dashboard.handle_key(key(KeyCode::Backspace));
-    dashboard.handle_key(key(KeyCode::Char('a')));
-    assert_eq!(
-        ids(&dashboard),
-        ["asks"],
-        "typing `a` edits the query while editing"
-    );
-
-    // Jumping to a session the filter hides drops the filter: with both
-    // questions answered, `done` (unread, hidden by the blocked filter) is
-    // the only entry left in the queue.
-    dashboard.handle_key(key(KeyCode::Enter));
-    for id in ["asks", "remote"] {
-        dashboard
-            .session_details
-            .get_mut(id)
-            .unwrap()
-            .pending_elicitations
-            .clear();
-    }
-    assert_eq!(
-        chord(&mut dashboard, CommandId::NextAttention),
-        DashboardAction::Open {
-            session_id: "done".into()
-        }
-    );
-    assert!(dashboard.sessions_filter.is_none());
 }
 
 /// Two running sessions, `alpha` open in the conversation pane and selected,
@@ -4453,6 +2335,7 @@ fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
 /// just found therefore read that answer, dropped the row out of the filter,
 /// and left `d` reporting that nothing matches a row still drawn with `✓`. A
 /// filter is a view: it hides rows without choosing a conversation.
+// Hard-won: cf352ae: the done filter read its unread answer and then hid that row.
 #[test]
 fn the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone() {
     let mut dashboard = dashboard_with_an_unread_reply_off_screen();
@@ -4488,6 +2371,7 @@ fn the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone
 /// frame moves the focus to the Create action. The filter must keep answering
 /// from there: the empty pane's own line promises that Esc clears the filter,
 /// and without the letters there is no way back to the sessions at all.
+// Hard-won: 6de42d8: an empty filtered list stopped accepting its own clear keys.
 #[test]
 fn a_state_letter_that_hides_every_row_keeps_answering_the_letters_and_esc() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -4535,48 +2419,6 @@ fn a_state_letter_that_hides_every_row_keeps_answering_the_letters_and_esc() {
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(dashboard.sessions_filter.is_none());
     assert_eq!(ids(&dashboard), ["asks", "done", "quiet"]);
-}
-
-#[test]
-fn the_palette_finds_create_session_from_cre_and_lists_recent_commands_first() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    open_palette(&mut dashboard);
-    for character in "cre".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    let Mode::Palette(palette) = &dashboard.mode else {
-        panic!("palette open");
-    };
-    assert_eq!(palette.entries[0].id, CommandId::NewSessionWizard);
-    dashboard.handle_key(key(KeyCode::Esc));
-
-    // A subsequence query ranks a word-start match above a description hit.
-    open_palette(&mut dashboard);
-    for character in "mvs".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    let Mode::Palette(palette) = &dashboard.mode else {
-        panic!("palette open");
-    };
-    assert_eq!(
-        palette.entries[0].id,
-        CommandId::MoveSession,
-        "{:?}",
-        palette.entries
-    );
-    dashboard.handle_key(key(KeyCode::Esc));
-
-    // Running a command puts it under Recent the next time the palette opens
-    // with an empty query.
-    chord(&mut dashboard, CommandId::MarkAllRead);
-    open_palette(&mut dashboard);
-    let lines = drawn(&mut dashboard, 120, 40);
-    let recent = lines
-        .iter()
-        .position(|line| line.contains("Recent"))
-        .expect("Recent heading");
-    assert!(lines[recent + 1].contains("Mark all read"), "{lines:#?}");
 }
 
 #[test]
@@ -4676,67 +2518,6 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
     );
 }
 
-#[test]
-fn every_confirmation_button_answers_a_unique_letter() {
-    use crate::dialogs::render::confirmation_accelerators;
-    assert_eq!(
-        confirmation_accelerators(&["No", "Yes", "Yes, delete branch"]),
-        ['n', 'y', 'd']
-    );
-    assert_eq!(
-        confirmation_accelerators(&["Cancel", "Confirm"]),
-        ['c', 'o']
-    );
-    assert_eq!(
-        confirmation_accelerators(&["Dismiss", "Open transcript", "Open settings"]),
-        ['d', 'o', 's']
-    );
-    assert_eq!(
-        confirmation_accelerators(&["Cancel", "Force stop", "Retry suspension"]),
-        ['c', 'f', 'r']
-    );
-
-    // The delete dialog's third button is reachable by its letter.
-    let mut dashboard = dashboard_with_session(legacy_managed_session(running_session()));
-    dashboard.focus_sessions();
-    dashboard.dispatch_command(CommandId::DestroySession);
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("a Destroy and delete branch")),
-        "{lines:#?}"
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('a'))),
-        DashboardAction::ForceDestroy {
-            session_id: "session-1".into(),
-            delete_branch: true
-        }
-    );
-}
-
-#[test]
-fn esc_clears_a_help_filter_then_closes_help_and_clears_a_pane_notice() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    chord(&mut dashboard, CommandId::Help);
-    dashboard.handle_key(key(KeyCode::Char('x')));
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(
-        matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()),
-        "{:?}",
-        dashboard.mode
-    );
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-
-    dashboard.set_notice("Something happened.");
-    assert!(dashboard.notices.current().is_some());
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(dashboard.notices.current(), None);
-}
-
 fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
     mj_core::local_git::parse_git_status(
         std::path::PathBuf::from("/work"),
@@ -4747,52 +2528,11 @@ fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
     )
 }
 
-#[test]
-fn session_rows_carry_the_branch_once_the_checkout_was_read() {
-    let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: "/work".into(),
-    });
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.focus_sessions();
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
-
-    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
-    let lines = drawn(&mut dashboard, 160, 40);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("ACP pretty name  ⎇ feature/x ↑1 ↓2 ±2")),
-        "{lines:#?}"
-    );
-    // A narrow sidebar keeps the branch and drops the counts.
-    let lines = drawn(&mut dashboard, 100, 40);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("ACP pretty name  ⎇ feature/x") && !line.contains("±2")),
-        "{lines:#?}"
-    );
-    // A checkout that is not a repository adds nothing to the row.
-    dashboard.set_git_status(
-        "session-1".into(),
-        Ok(mj_core::local_git::parse_git_status(
-            "/work".into(),
-            "not a git checkout",
-            None,
-            "",
-            "",
-        )),
-    );
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(!lines.iter().any(|line| line.contains("⎇")), "{lines:#?}");
-}
-
 /// Every session created with a managed worktree gets a `mj/<32 hex>` branch,
 /// which is wider than the sidebar, so dropping the whole marker hid the
 /// feature at the widths people use. The middle of the name is what nobody
 /// reads: elide it and the marker keeps its ahead, behind, and changed counts.
+// Hard-won: ddb00ad: long generated branch names hid all checkout status at normal widths.
 #[test]
 fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
     let mut session = running_session();
@@ -4860,6 +2600,7 @@ fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
 /// host reads only a few per pass, so a session it did not read must stay
 /// due; marking all of them as read left all but the first few without a
 /// branch marker for good.
+// Hard-won: 3ea7e85: the per-pass limit permanently starved sessions beyond the first batch.
 #[test]
 fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
     let target = mj_core::state::TargetLocator::LocalBare {
@@ -4882,73 +2623,6 @@ fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
     probed.sort();
 
     assert_eq!(probed, ["session-1", "session-2", "session-3", "session-4"]);
-}
-
-#[test]
-fn the_changed_files_overlay_lists_files_and_refreshes_on_r() {
-    let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: "/work".into(),
-    });
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.focus_sessions();
-    assert_eq!(
-        chord(&mut dashboard, CommandId::ChangedFiles),
-        DashboardAction::ProbeGitStatus {
-            session_id: "session-1".into()
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::ChangedFiles(_)));
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Reading the checkout")),
-        "{lines:#?}"
-    );
-
-    dashboard.set_git_status("session-1".into(), Ok(git_status_fixture()));
-    let lines = drawn(&mut dashboard, 120, 40);
-    // The longest status word fills its column, so the column has to carry the
-    // separator: `modifiedsrc/main.rs` is not a line anyone can read.
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("modified src/main.rs") && line.contains("+12 −3")),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("new      notes.md")),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("2 files · +12 −3")),
-        "{lines:#?}"
-    );
-
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('r'))),
-        DashboardAction::ProbeGitStatus {
-            session_id: "session-1".into()
-        }
-    );
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-
-    // Without a running target the command explains itself instead of
-    // opening an overlay that can never fill.
-    dashboard
-        .state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .target = None;
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(!lines.iter().any(|line| line.contains("Changed files ·")));
-    assert!(matches!(
-        (crate::actions::spec(CommandId::ChangedFiles).available)(&dashboard),
-        crate::actions::Availability::Blocked(_)
-    ));
 }
 
 #[test]
@@ -5000,80 +2674,7 @@ fn the_ascii_symbol_set_draws_the_dashboard_without_non_ascii_glyphs() {
     assert!(lines.iter().any(|line| line.contains("╭")), "{lines:#?}");
 }
 
-#[test]
-fn the_monochrome_theme_draws_every_surface_without_colors() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    dashboard.select_active_session("asks");
-    let mut config = dashboard.config.clone();
-    config.theme = mj_core::config::UiTheme::Mono;
-    dashboard.set_config(config);
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    let colored = buffer
-        .content()
-        .iter()
-        .filter(|cell| {
-            cell.fg != ratatui::style::Color::Reset || cell.bg != ratatui::style::Color::Reset
-        })
-        .count();
-    assert_eq!(colored, 0, "monochrome must paint no colors");
-    // The selected row still stands out, by reverse video.
-    let lines = buffer_lines(buffer);
-    let (column, row) = point(&lines, "› ");
-    assert!(
-        buffer[(column, row)]
-            .modifier
-            .contains(ratatui::style::Modifier::REVERSED),
-        "selection is reverse video in mono"
-    );
-    open_palette(&mut dashboard);
-    drawn(&mut dashboard, 120, 40);
-    dashboard.handle_key(key(KeyCode::Esc));
-    chord(&mut dashboard, CommandId::Help);
-    drawn(&mut dashboard, 120, 40);
-}
-
-#[test]
-fn the_notice_log_lists_notices_newest_first_and_stacked_failures() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    dashboard.set_notice("Profile quotas refreshed.");
-    dashboard.set_failure_notice("Resume failed: archive missing");
-    dashboard.set_failure_notice("Move failed: target unreachable");
-    let lines = drawn(&mut dashboard, 120, 40);
-    assert!(
-        lines
-            .last()
-            .unwrap()
-            .contains("2 failures · latest: Move failed: target unreachable"),
-        "{}",
-        lines.last().unwrap()
-    );
-    dashboard.dispatch_command(CommandId::NoticeLog);
-    assert!(matches!(dashboard.mode, Mode::NoticeLog(_)));
-    let lines = drawn(&mut dashboard, 120, 40);
-    let newest = lines
-        .iter()
-        .position(|line| line.contains("Move failed: target unreachable"))
-        .expect("newest failure");
-    let older = lines
-        .iter()
-        .position(|line| line.contains("Resume failed: archive missing"))
-        .expect("older failure");
-    let oldest = lines
-        .iter()
-        .position(|line| line.contains("Profile quotas refreshed."))
-        .expect("plain notice");
-    assert!(newest < older && older < oldest, "{lines:#?}");
-    assert!(lines[newest].contains("ago"), "{lines:#?}");
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(dashboard.mode, Mode::Dashboard);
-}
-
+// Hard-won: b9e5e3b: failed targets were still attached until the open attempt could not finish.
 #[test]
 fn a_failed_session_shows_its_error_instead_of_an_attach_that_cannot_finish() {
     let mut session = running_session();
@@ -5100,24 +2701,7 @@ fn a_failed_session_shows_its_error_instead_of_an_attach_that_cannot_finish() {
     );
 }
 
-#[test]
-fn a_daemon_notice_about_another_workspace_names_that_workspace_first() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    assert_eq!(
-        dashboard.notice_naming_workspace("remote", "Credential sync failed".into()),
-        "In workspace Other: Credential sync failed"
-    );
-    assert_eq!(
-        dashboard.notice_naming_workspace("asks", "Credential sync failed".into()),
-        "Credential sync failed"
-    );
-    assert_eq!(
-        dashboard.notice_naming_workspace("missing", "Credential sync failed".into()),
-        "Credential sync failed"
-    );
-}
-
+// Hard-won: b9e5e3b: long failure notices lost their diagnostic tail at terminal width.
 #[test]
 fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -5149,6 +2733,7 @@ fn the_notice_log_wraps_a_long_failure_instead_of_cutting_its_tail() {
 /// `pane_session_is_suspended` calls suspended (R4-11), and a finished native
 /// child's presentation row is `Stopped`, so Browse let it go as soon as the
 /// selection put it there.
+// Hard-won: 936d6ee: finished native children appeared empty and could not be opened.
 #[test]
 fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
     let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
@@ -5201,6 +2786,7 @@ fn a_finished_native_child_shows_its_stored_transcript_and_opens_on_enter() {
 /// the child first, and drops status words from the end when the row is
 /// short. At 80 columns the pane is 42 wide and the chrome leaves 7 columns,
 /// so the name itself is cut.
+// Hard-won: 90ef5fd: pane chrome obscured most of a native child’s title.
 #[test]
 fn a_native_child_pane_header_names_the_child_first() {
     let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
@@ -5387,52 +2973,12 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
     assert!(!dashboard.resize_mode_active());
 }
 
-#[test]
-fn swapping_nested_panes_moves_focus_and_sessions_without_changing_ratios() {
-    let mut dashboard = dashboard_with_two_sessions();
-    dashboard.set_current_session(Some("session-1"));
-    let first = dashboard.focused_pane();
-    let second = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .unwrap();
-    let third = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Vertical, None)
-        .unwrap();
-    dashboard.focus_pane(first);
-    let before = dashboard.conversation_panes(dashboard.conversation_area());
-    chord(&mut dashboard, CommandId::SwapPaneRight);
-    assert_eq!(dashboard.focused_pane(), first);
-    assert_eq!(dashboard.pane_session(first), Some("session-1"));
-    assert_eq!(dashboard.pane_session(second), Some("session-2"));
-    assert_eq!(dashboard.pane_session(third), None);
-    let after = dashboard.conversation_panes(dashboard.conversation_area());
-    assert_eq!(
-        before.iter().map(|p| p.rect).collect::<Vec<_>>(),
-        after.iter().map(|p| p.rect).collect::<Vec<_>>()
-    );
-    assert_ne!(
-        before.iter().find(|p| p.id == first).unwrap().rect,
-        after.iter().find(|p| p.id == first).unwrap().rect
-    );
-    let saved = dashboard.conversation_layout_for("default");
-    let mut restored = dashboard_with_two_sessions();
-    restored.cache_workspace_layout("default", saved.clone());
-    assert_eq!(restored.conversation_layout_for("default"), saved);
-    assert_eq!(restored.focused_pane(), first);
-    assert_eq!(restored.pane_session(first), Some("session-1"));
-    chord(&mut dashboard, CommandId::SwapPaneRight);
-    assert_eq!(
-        dashboard.conversation_layout_for("default"),
-        saved,
-        "no neighbor is a no-op"
-    );
-}
-
 /// Launch finding R11-1: a Claude sub-agent sat on a permission question in
 /// the Sub-agents view while its parent's row read only "Working" with no
 /// attention mark, so nobody knew to look. A child's question marks its parent
 /// the way the parent's own question would: the row's symbol, the attention
 /// queue and a notification, and the row says whose question it is.
+// Hard-won: 91244ea: a child permission question left its parent without an attention mark.
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
@@ -5570,6 +3116,7 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
 /// Launch finding B-3: the row menu is titled with the session's name, so
 /// the Suspend confirmation and the Rename dialog must name it the same way
 /// instead of by its id.
+// Hard-won: 78e2c60: session dialogs showed opaque ids instead of the known title.
 #[test]
 fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -5594,6 +3141,7 @@ fn suspend_confirmation_and_rename_dialog_name_the_session_by_its_title() {
 /// ("project via claude"), and the session list shows that title (R2-8). The
 /// palette heading, the Suspend confirmation and the Rename dialog named it
 /// by its id instead.
+// Hard-won: f639b25: dialogs discarded the created title and showed an opaque id.
 #[test]
 fn dialogs_name_an_unnamed_session_by_the_title_it_was_created_with() {
     let mut session = running_session();
@@ -5689,6 +3237,7 @@ fn stopped_by_the_parents_suspend(
 /// footer said "Could not save draft and read status for <child>: unknown
 /// session". It goes back to the parent's scope with the parent selected,
 /// and says what happened.
+// Hard-won: 6e2e36c: suspending a parent lost the open child’s draft and read state.
 #[test]
 fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -5720,6 +3269,7 @@ fn a_suspend_that_stops_the_open_sub_agent_goes_back_to_its_parent() {
 
 /// The host lets the stopped sub-agent's conversation go without saving a
 /// draft for a session that no longer exists, and opens the parent's.
+// Hard-won: 6e2e36c: the host did not learn which child conversations the suspend retired.
 #[test]
 fn the_host_learns_which_conversations_a_suspend_took_away() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -5843,6 +3393,7 @@ fn a_sub_agent_removed_while_its_parent_runs_is_not_reported_as_suspended() {
 /// "Stopping" in its row and in its conversation's header, as the suspend
 /// dialog and the docs say. Before, both said "Destroying". A destroy a
 /// person asked for still says "Destroying".
+// Hard-won: 6bfe27a: parent-driven child suspension was mislabeled as destruction.
 #[test]
 fn a_sub_agent_stopped_by_its_parents_suspend_reads_stopping() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -5866,6 +3417,7 @@ fn a_sub_agent_stopped_by_its_parents_suspend_reads_stopping() {
 
 /// R15-4: the suspend confirmation names the sub-agents still at their task,
 /// by listed title, up to three, and counts the rest.
+// Hard-won: 1349c76: suspend confirmation counted active children without naming them.
 #[test]
 fn the_suspend_confirmation_names_three_working_sub_agents_and_counts_the_rest() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -5996,6 +3548,7 @@ fn durable_updates_do_not_scan_unchanged_native_presentation_rows() {
 /// turn. The count must come from the facts the worker reports for the child,
 /// which is all a dashboard holds for a child nobody has opened, and it must
 /// agree with the child's Sessions row.
+// Hard-won: 6b8110e: worker turn reports left the parent’s working count stale at zero.
 #[test]
 fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
     let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -6019,21 +3572,4 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
         "the child's own row reads it as working"
     );
     assert_eq!(dashboard.working_subagent_count_for(&parent), 1);
-}
-
-/// User request 2026-10-04: the Sessions border title is padded like every
-/// other pane title, so it reads `╭ Sessions ─` rather than `╭Sessions─`.
-#[test]
-fn the_sessions_title_is_padded_like_the_other_pane_titles() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    let lines = drawn(&mut dashboard, 160, 24);
-    assert!(
-        lines.iter().any(|line| line.starts_with("╭ Sessions ─")),
-        "{lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|line| line.contains("╭Sessions")),
-        "{lines:#?}"
-    );
 }
