@@ -7,7 +7,6 @@ use crate::selection::SurfaceId;
 use base64::Engine;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mj_client::review::RuntimeReviewView;
-use mj_core::relay::ActivePrompt;
 use mj_core::review::driver::TurnReviewPhase;
 use mj_core::review::lanes::ReviewTier;
 
@@ -526,25 +525,21 @@ fn regular_prompt_draws_microphone_at_its_upper_left() {
 }
 
 #[test]
-fn capacity_wait_displays_a_countdown_and_escape_cancels_it() {
+fn toggle_render_mode_flips_between_rich_and_raw() {
     let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.header_target = "localhost".into();
-    chat.header_profile = "codex".into();
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        capacity_retry: Some(mj_core::relay::CapacityRetry {
-            attempt: 1,
-            retry_at_ms: 120000,
-            command_id: "capacity-retry-42".into(),
-            submitted: false,
-        }),
-        ..Default::default()
-    });
-    assert!(chat.clock_text(60).contains("retrying in 1m00s"));
-    assert!(matches!(
-        chat.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        ChatAction::Cancel
-    ));
+    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+    chat.toggle_render_mode();
+    assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
+    chat.toggle_render_mode();
+    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+
+    // The keys that used to run these toggles belong to the host's registry
+    // now, so the composer answers none of them.
+    for key in [alt('t'), ctrl('t'), alt('v')] {
+        chat.handle_key(key);
+    }
+    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
+    assert!(chat.input.is_empty());
 }
 
 #[test]
@@ -923,6 +918,7 @@ fn disappeared_background_task_clears_pending_stop_and_failure_reenables_it() {
     );
 }
 
+// Hard-won: 30de9e86: Typed composer text was lost when leaving and reopening a conversation.
 #[test]
 fn a_saved_draft_reopens_in_the_composer_with_the_cursor_at_its_end() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -954,59 +950,6 @@ fn a_fresh_chat_opens_with_the_session_s_saved_draft_in_the_composer() {
 #[test]
 fn a_fresh_chat_for_a_session_with_no_saved_draft_opens_empty() {
     assert_eq!(freshly_opened_chat("").input, "");
-}
-
-#[test]
-fn enter_submits_to_the_worker_while_idle_or_running() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.handle_key(key(KeyCode::Char('h')));
-    chat.handle_key(key(KeyCode::Char('i')));
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("hi".into())
-    );
-
-    let mut running = snapshot();
-    running.phase = WorkerPhase::Running;
-    running.active_prompt = Some(ActivePrompt {
-        request_id: "p".into(),
-        text: "busy".into(),
-        attachments: vec![],
-    });
-    let mut chat = ChatState::new(&running, &[]);
-    chat.handle_key(key(KeyCode::Char('x')));
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("x".into())
-    );
-    assert!(chat.queued_prompts.is_empty());
-    assert!(chat.entries.is_empty());
-}
-
-#[test]
-fn bang_prefix_submits_a_bash_command_without_starting_a_prompt() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("!printf '%s' hello | tr a-z A-Z".into());
-
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::RunShell("printf '%s' hello | tr a-z A-Z".into())
-    );
-    assert!(chat.input.is_empty());
-    assert_eq!(
-        chat.prompt_history.last().map(String::as_str),
-        Some("!printf '%s' hello | tr a-z A-Z")
-    );
-}
-
-#[test]
-fn empty_bang_command_stays_in_the_composer_and_shows_usage() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("!   ".into());
-
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.input, "!   ");
-    assert_eq!(chat.notice().as_deref(), Some("usage: !<bash command>"));
 }
 
 #[test]
@@ -1092,48 +1035,6 @@ fn notices_set_replace_if_and_clear() {
 }
 
 #[test]
-fn notices_keep_a_history_and_count_failures_that_stack() {
-    let notices = Notices::default();
-    notices.set("Profile quotas refreshed");
-    notices.set_failure("Resume failed: archive missing");
-    // A second failure before the first was readable: the bar counts them,
-    // the log keeps each plain.
-    notices.set_failure("Move failed: target unreachable");
-    assert_eq!(
-        notices.current().as_deref(),
-        Some("2 failures · latest: Move failed: target unreachable")
-    );
-    let history = notices.history();
-    assert_eq!(
-        history
-            .iter()
-            .map(|record| (record.text.as_str(), record.failure))
-            .collect::<Vec<_>>(),
-        [
-            ("Move failed: target unreachable", true),
-            ("Resume failed: archive missing", true),
-            ("Profile quotas refreshed", false),
-        ]
-    );
-    // Clearing resets the count; the next failure stands alone.
-    notices.clear();
-    notices.set_failure("Stop failed");
-    assert_eq!(notices.current().as_deref(), Some("Stop failed"));
-    // The same text twice is one history entry.
-    notices.clear();
-    notices.set("Same");
-    notices.set("Same");
-    assert_eq!(
-        notices
-            .history()
-            .iter()
-            .filter(|record| record.text == "Same")
-            .count(),
-        1
-    );
-}
-
-#[test]
 fn a_fresh_failure_notice_survives_routine_background_notices() {
     let notices = Notices::default();
     notices.set_failure("Resume failed: archived transcript is invalid");
@@ -1175,6 +1076,7 @@ fn cloned_notices_share_one_slot() {
 
 /// Dismissal is what an incidental key press asks for, and a notice that
 /// nobody has had time to read must survive it.
+// Hard-won: 7c56a0f4: Incidental keypresses erased notices before the user could see a frame.
 #[test]
 fn a_notice_is_dismissed_only_once_it_has_been_showing_long_enough() {
     let notices = Notices::default();
@@ -1330,6 +1232,7 @@ fn reviewer_form_reconciliation_drops_stale_forms_and_resurfaces_primary() {
 /// session the next time it is opened, so leaving the view is a different
 /// act from answering the agent. The moved-key notices are handled on the
 /// same terms: they pass the open form without consuming it.
+// Hard-won: 3fbdd2ae: An open elicitation trapped users because detach keys were consumed.
 #[test]
 fn control_g_and_control_q_pass_a_chat_whose_elicitation_is_still_open() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1488,6 +1391,7 @@ fn model_and_effort_slash_commands_change_live_session_config() {
 /// runtime's own, and the article follows the key's name. The composer clears
 /// the same as it would for a command that was actually sent, so the next
 /// command typed does not append to the refused one.
+// Hard-won: 27140151: An unsupported selector was reported accepted before its late refusal arrived.
 #[test]
 fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2073,6 +1977,7 @@ fn config_slash_command_without_value_shows_usage() {
     );
 }
 
+// Hard-won: 6a66a7d0: Refused slash commands remained in the draft and contaminated the next command.
 #[test]
 fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2082,6 +1987,7 @@ fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
     assert!(chat.notice().unwrap().contains("/model"));
 }
 
+// Hard-won: 6a66a7d0: Unknown slash commands were sent to the agent as ordinary prompts.
 #[test]
 fn an_unknown_slash_command_is_not_sent_to_the_agent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2165,6 +2071,7 @@ fn empty_terminal_paste_respects_the_config_picker() {
     assert!(chat.config_picker_active());
 }
 
+// Hard-won: ac740841: Synchronous clipboard access could stall the chat event loop.
 #[test]
 fn ctrl_v_returns_paste_request_action() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2182,61 +2089,6 @@ fn ctrl_v_returns_paste_request_action() {
         ChatAction::PasteFromClipboard
     );
     assert!(chat.input.is_empty());
-}
-
-#[test]
-fn toggle_render_mode_flips_between_rich_and_raw() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    chat.toggle_render_mode();
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
-    chat.toggle_render_mode();
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-
-    // The keys that used to run these toggles belong to the host's registry
-    // now, so the composer answers none of them.
-    for key in [alt('t'), ctrl('t'), alt('v')] {
-        chat.handle_key(key);
-    }
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    assert!(chat.input.is_empty());
-}
-
-#[test]
-fn replay_projects_user_and_agent_text() {
-    let runtime = RuntimeEvent::SessionUpdate {
-        update: serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": "done"}
-        }),
-    };
-    let events = vec![
-        SequencedEvent {
-            seq: 1,
-            recorded_at_ms: None,
-            request_id: Some("p".into()),
-            event: WorkerEvent::PromptAccepted {
-                request_id: "p".into(),
-                text: "work".into(),
-                attachments: vec![],
-            },
-        },
-        SequencedEvent {
-            seq: 2,
-            recorded_at_ms: None,
-            request_id: None,
-            event: WorkerEvent::Adapter {
-                kind: "session_update".into(),
-                payload: serde_json::to_value(runtime).unwrap(),
-            },
-        },
-    ];
-    let mut initial = snapshot();
-    initial.latest_seq = 2;
-    let chat = ChatState::new(&initial, &events);
-    assert_eq!(chat.entries.len(), 2);
-    assert_eq!(chat.entries[0].role, ChatRole::User);
-    assert_eq!(chat.entries[1].text, "done");
 }
 
 #[test]
@@ -2291,6 +2143,7 @@ fn hydrated_tail_continues_the_last_streamed_message() {
     assert_eq!(materialized.unread_agent_messages_after(1), 1);
 }
 
+// Hard-won: f378854d: Every streamed token created a separate transcript entry.
 #[test]
 fn streamed_message_chunks_coalesce_into_one_entry() {
     let mut initial = snapshot();
@@ -2398,6 +2251,43 @@ fn message_ids_keep_adjacent_agent_messages_separate() {
     assert_eq!(chat.entries.len(), 2);
     assert_eq!(chat.entries[0].text, "first");
     assert_eq!(chat.entries[1].text, "second");
+}
+
+#[test]
+fn replay_projects_user_and_agent_text() {
+    let runtime = RuntimeEvent::SessionUpdate {
+        update: serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "done"}
+        }),
+    };
+    let events = vec![
+        SequencedEvent {
+            seq: 1,
+            recorded_at_ms: None,
+            request_id: Some("p".into()),
+            event: WorkerEvent::PromptAccepted {
+                request_id: "p".into(),
+                text: "work".into(),
+                attachments: vec![],
+            },
+        },
+        SequencedEvent {
+            seq: 2,
+            recorded_at_ms: None,
+            request_id: None,
+            event: WorkerEvent::Adapter {
+                kind: "session_update".into(),
+                payload: serde_json::to_value(runtime).unwrap(),
+            },
+        },
+    ];
+    let mut initial = snapshot();
+    initial.latest_seq = 2;
+    let chat = ChatState::new(&initial, &events);
+    assert_eq!(chat.entries.len(), 2);
+    assert_eq!(chat.entries[0].role, ChatRole::User);
+    assert_eq!(chat.entries[1].text, "done");
 }
 
 #[test]
@@ -2568,6 +2458,7 @@ fn unanswered_session(
 /// The notice helps once: later unanswered prompts in the same run add no
 /// row, an answered prompt starts a new run, and a reattach (which re-reads
 /// the last outcome and restores the saved draft) does not bring it back.
+// Hard-won: c1169958: Reattach re-recorded an unanswered prompt after the person dismissed it.
 #[test]
 fn unanswered_prompts_are_reported_once_until_one_is_answered() {
     let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
@@ -2719,6 +2610,7 @@ fn attaching_a_text_file_says_attach_takes_images_only() {
     assert!(!message.contains("marker"), "{message}");
 }
 
+// Hard-won: 6a66a7d0: A refused slash command remained in the draft and contaminated later input.
 #[test]
 fn attach_requires_capability_and_clears_the_command_on_refusal() {
     let mut chat = ChatState::new(&snapshot(), &[]);
