@@ -8,7 +8,11 @@ use std::time::Duration;
 
 #[cfg(unix)]
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
-use anyhow::{Context, Result};
+// `anyhow::Error::context` is inherent; only the Unix-only `Option`/`Result`
+// calls need the trait in scope.
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 
 #[cfg(unix)]
 use crate::controller::now;
