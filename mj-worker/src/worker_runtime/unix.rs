@@ -1113,6 +1113,7 @@ pub(super) async fn serve_client_with_memory(
                 &envelope.request,
                 RelayRequest::ProjectMemorySnapshot
                     | RelayRequest::InstallProjectMemorySnapshot { .. }
+                    | RelayRequest::ReplaceProjectMemoryTree { .. }
             ) {
                 let operation = envelope.request.method_name();
                 let response = project_memory_response(envelope, &project_memory).await;

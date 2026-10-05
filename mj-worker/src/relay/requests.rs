@@ -161,6 +161,7 @@ impl DurableRelay {
             | RelayRequest::HistoryQuery { .. }
             | RelayRequest::CompleteHistoryRequest { .. }
             | RelayRequest::InstallProjectMemorySnapshot { .. }
+            | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::CompleteSubagentRequest { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,

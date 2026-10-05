@@ -427,33 +427,33 @@ action: None
 │ default                                                                                                              │
 ╰─────────                                                                                                             │
 ╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
-│ Create    │Machine CPU share · hourly average / recent                                                   │           │
-│  · CPU s  │podman  171% hourly                                                                           │           │
-│  Idle  p  │  ACP pretty name  [codex-1]  18% hourly / 23% recent                                         │           │
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 18  [codex-1]  9.8% hourly / 12% recent                                         │           │
-│           │                                                                                              │           │
-│  · CPU s  │  CPU session 17  [codex-1]  9.7% hourly / 12% recent                                         │           │
+│ Create    │podman · 171% hourly                                                                          │           │
+│  · CPU s  │  ACP pretty name  [codex-1]  18% hourly / 23% recent                                         │           │
 │  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 16  [codex-1]  9.6% hourly / 12% recent                                         │           │
+│  │ No me  │  CPU session 18  [codex-1]  9.8% hourly / 12% recent                                         │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 15  [codex-1]  9.5% hourly / 12% recent                                         │           │
+│           │  CPU session 17  [codex-1]  9.7% hourly / 12% recent                                         │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly / 11% recent                                         │           │
+│  Idle  p  │  CPU session 16  [codex-1]  9.6% hourly / 12% recent                                         │           │
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 13  [codex-1]  9.3% hourly / 11% recent                                         │           │
+│  │        │  CPU session 15  [codex-1]  9.5% hourly / 12% recent                                         │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly / 11% recent                                         │           │
-│  Idle  p  │                                                                                              │  ─────────╯
-│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly / 11% recent                                         │  ─────────╮
+│  · CPU s  │  CPU session 14  [codex-1]  9.4% hourly / 11% recent                                         │           │
+│  Idle  p  │                                                                                              │           │
+│  │ No me  │  CPU session 13  [codex-1]  9.3% hourly / 11% recent                                         │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 10  [codex-1]  9.0% hourly / 11% recent                                         │           │
-│› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly / 11% recent                                         │  ── ▁   ▪ ╮
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 08  [codex-1]  8.8% hourly / 11% recent                                         │  ─────────╯
-│           │                                                                                              │  ── ▁   ▪ ╮
+│           │  CPU session 12  [codex-1]  9.2% hourly / 11% recent                                         │           │
 │  · CPU s  │                                                                                              │           │
+│  Idle  p  │  CPU session 11  [codex-1]  9.1% hourly / 11% recent                                         │  ─────────╯
+│  │ No me  │                                                                                              │  ─────────╮
+│  │        │  CPU session 10  [codex-1]  9.0% hourly / 11% recent                                         │           │
+│           │                                                                                              │           │
+│› · ACP p  │  CPU session 09  [codex-1]  8.9% hourly / 11% recent                                         │  ─────────╯
+│  Idle  p  │                                                                                              │  ── ▁   ▪ ╮
+│  │ No me  │  CPU session 08  [codex-1]  8.8% hourly / 11% recent                                         │           │
+│  │        │                                                                                              │  ─────────╯
+│           │  CPU session 07  [codex-1]  8.7% hourly / 11% recent                                         │  ── ▁   ▪ ╮
+│  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │  │                                                                                                                   │
@@ -465,33 +465,33 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                              │
 ╰─────────                                                                                                             │
 ╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
-│ Create    │  CPU session 15  [codex-1]  9.5% hourly / 12% recent                                         │           │
-│  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly / 11% recent                                         │           │
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 13  [codex-1]  9.3% hourly / 11% recent                                         │           │
-│           │                                                                                              │           │
-│  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly / 11% recent                                         │           │
+│ Create    │podman · 171% hourly                                                                          │           │
+│  · CPU s  │  CPU session 15  [codex-1]  9.5% hourly / 12% recent                                         │           │
 │  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly / 11% recent                                         │           │
+│  │ No me  │  CPU session 14  [codex-1]  9.4% hourly / 11% recent                                         │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 10  [codex-1]  9.0% hourly / 11% recent                                         │           │
+│           │  CPU session 13  [codex-1]  9.3% hourly / 11% recent                                         │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly / 11% recent                                         │           │
+│  Idle  p  │  CPU session 12  [codex-1]  9.2% hourly / 11% recent                                         │           │
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 08  [codex-1]  8.8% hourly / 11% recent                                         │           │
+│  │        │  CPU session 11  [codex-1]  9.1% hourly / 11% recent                                         │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 07  [codex-1]  8.7% hourly / 11% recent                                         │           │
-│  Idle  p  │                                                                                              │  ─────────╯
-│  │ No me  │  CPU session 06  [codex-1]  8.6% hourly / 11% recent                                         │  ─────────╮
+│  · CPU s  │  CPU session 10  [codex-1]  9.0% hourly / 11% recent                                         │           │
+│  Idle  p  │                                                                                              │           │
+│  │ No me  │  CPU session 09  [codex-1]  8.9% hourly / 11% recent                                         │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 05  [codex-1]  8.5% hourly / 11% recent                                         │           │
-│› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 04  [codex-1]  8.4% hourly / 10% recent                                         │  ── ▁   ▪ ╮
-│  │ No me  │                                                                                              │           │
-│  │        │  CPU session 03  [codex-1]  8.3% hourly / 10% recent                                         │  ─────────╯
-│           │                                                                                              │  ── ▁   ▪ ╮
+│           │  CPU session 08  [codex-1]  8.8% hourly / 11% recent                                         │           │
 │  · CPU s  │                                                                                              │           │
+│  Idle  p  │  CPU session 07  [codex-1]  8.7% hourly / 11% recent                                         │  ─────────╯
+│  │ No me  │                                                                                              │  ─────────╮
+│  │        │  CPU session 06  [codex-1]  8.6% hourly / 11% recent                                         │           │
+│           │                                                                                              │           │
+│› · ACP p  │  CPU session 05  [codex-1]  8.5% hourly / 11% recent                                         │  ─────────╯
+│  Idle  p  │                                                                                              │  ── ▁   ▪ ╮
+│  │ No me  │  CPU session 04  [codex-1]  8.4% hourly / 10% recent                                         │           │
+│  │        │                                                                                              │  ─────────╯
+│           │  CPU session 03  [codex-1]  8.3% hourly / 10% recent                                         │  ── ▁   ▪ ╮
+│  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │
 │  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │  │                                                                                                                   │

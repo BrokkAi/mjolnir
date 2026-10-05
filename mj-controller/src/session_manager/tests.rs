@@ -1205,6 +1205,8 @@ const RETIRED_SUBMIT_TEST_CHILD: &str = "MJ_TEST_RETIRED_SUBMIT_CHILD";
 #[cfg(unix)]
 const RETURNED_LEASE_VIEW_TEST_CHILD: &str = "MJ_TEST_RETURNED_LEASE_VIEW_CHILD";
 #[cfg(unix)]
+const EXPLICIT_MEMORY_SYNC_TEST_CHILD: &str = "MJ_TEST_EXPLICIT_MEMORY_SYNC_CHILD";
+#[cfg(unix)]
 const SUBMIT_WITHOUT_SYNC_TEST_CHILD: &str = "MJ_TEST_SUBMIT_WITHOUT_SYNC_CHILD";
 #[cfg(unix)]
 const MANAGER_SHUTDOWN_TEST_CHILD: &str = "MJ_TEST_MANAGER_SHUTDOWN_CHILD";
@@ -1607,6 +1609,47 @@ async fn a_blocked_reviewer_keeps_primary_responsive_and_disconnects_on_cancella
         .await
         .unwrap()
         .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_attach_does_not_probe_or_install_project_memory() {
+    if std::env::var_os(EXPLICIT_MEMORY_SYNC_TEST_CHILD).is_none() {
+        run_in_isolated_child(
+            EXPLICIT_MEMORY_SYNC_TEST_CHILD,
+            "relay_attach_does_not_probe_or_install_project_memory",
+        );
+        return;
+    }
+    // Alone in this child process, so it installs the one writer.
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let relay_root = tempfile::tempdir().unwrap();
+    let canonical = tempfile::tempdir().unwrap();
+    let mut target = leased_relay_target(relay_root.path());
+    target.project_memory = Some(ProjectMemorySyncTarget {
+        canonical_root: canonical.path().to_path_buf(),
+    });
+
+    let mut connection = StandaloneSession::connect(&target)
+        .await
+        .expect("relay attach must not depend on its memory endpoint");
+    assert!(
+        connection.project_memory.is_some(),
+        "attach must leave memory pending for an explicit checkpoint sync"
+    );
+
+    connection
+        .sync_project_memory(
+            &mj_core::config::Config::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("an explicit sync may detect a legacy memory endpoint");
+    assert!(
+        connection.project_memory.is_none(),
+        "the explicit sync reached the relay and disabled its unavailable endpoint"
+    );
 }
 
 /// Catching the local projection up to an accepted command is the

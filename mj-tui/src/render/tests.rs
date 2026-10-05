@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
@@ -18,7 +18,7 @@ use super::*;
 use crate::test_support::*;
 
 use crate::ingest::SessionDetail;
-use crate::{DashboardState, Focus, SessionOperationKind};
+use crate::{DashboardAction, DashboardState, Focus, SessionOperationKind};
 
 fn session_metadata_text(
     session: &SessionRecord,
@@ -2080,9 +2080,11 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        text.find("machine-a").unwrap() < text.find("machine-b").unwrap(),
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
         "{text}"
     );
+    assert!(text.contains("machine-a · 40% hourly"), "{text}");
+    assert!(text.contains("machine-b · 20% hourly"), "{text}");
     assert!(
         text.find("fast  [codex-1]").unwrap() < text.find("slow  [codex-1]").unwrap(),
         "{text}"
@@ -2092,8 +2094,37 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         "{text}"
     );
     assert!(text.contains("permission denied"));
-    assert!(text.contains("no CPU data yet"));
     assert!(text.contains("(14m)"));
+    assert!(
+        !text.contains("other  [codex-1]"),
+        "the second machine is a tab:\n{text}"
+    );
+
+    // Tabs stay alphabetically ordered, and Right displays the next machine.
+    dashboard.handle_key(key(KeyCode::Right));
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("other  [codex-1]"), "{text}");
+    assert!(text.contains("no CPU data yet"), "{text}");
+    assert!(!text.contains("fast  [codex-1]"), "{text}");
+
+    // A click on a tab selects it without changing the alphabetic tab order.
+    let tab = point(
+        &text.lines().map(str::to_owned).collect::<Vec<_>>(),
+        "machine-a ·",
+    );
+    click_cpu_report(&mut dashboard, tab);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("fast  [codex-1]"), "{text}");
+    assert!(
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
+        "{text}"
+    );
     dashboard.acknowledge_render();
     cpu.insert(
         "other".into(),
@@ -2116,9 +2147,62 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        text.find("machine-b").unwrap() < text.find("machine-a").unwrap(),
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
         "{text}"
     );
+}
+
+fn click_cpu_report(dashboard: &mut DashboardState, position: (u16, u16)) -> DashboardAction {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let action = dashboard.handle_mouse(mouse_at(kind, position));
+        if kind == MouseEventKind::Up(MouseButton::Left) {
+            return action;
+        }
+    }
+    unreachable!()
+}
+
+#[test]
+fn session_cpu_report_opens_on_the_selected_sessions_machine() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut first = running_session();
+    first.id = "machine-a-session".into();
+    first.title = first.id.clone();
+    first.acp_session_title = None;
+    first.target_template_id = "machine-a".into();
+    let mut selected = running_session();
+    selected.id = "machine-b-session".into();
+    selected.title = selected.id.clone();
+    selected.acp_session_title = None;
+    selected.target_template_id = "machine-b".into();
+    let mut state = dashboard.state.clone();
+    state.sessions.clear();
+    state.sessions.insert(first.id.clone(), first);
+    state.sessions.insert(selected.id.clone(), selected.clone());
+    dashboard.set_state(state);
+    dashboard.set_deployment_capacity_targets(
+        ["machine-a", "machine-b"]
+            .into_iter()
+            .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                id: host.into(),
+                host: host.into(),
+                target_ids: vec![host.into()],
+                kind: DeploymentCapacityKind::Host,
+                local: true,
+                probes: Vec::new(),
+                probe_error: None,
+            })
+            .collect(),
+    );
+    dashboard.select_active_session(&selected.id);
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+
+    let text = drawn(&mut dashboard, 120, 32).join("\n");
+    assert!(text.contains("machine-b-session  [codex-1]"), "{text}");
+    assert!(!text.contains("machine-a-session  [codex-1]"), "{text}");
 }
 
 fn measured_cpu(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpuView {
@@ -2161,6 +2245,181 @@ fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
         cpu.insert((*id).into(), measured_cpu(*recent, *hourly));
     }
     dashboard.set_session_cpu(cpu);
+}
+
+#[test]
+fn session_cpu_report_excludes_parked_stopped_and_failed_subagents() {
+    let (mut dashboard, _) = dashboard_with_subagents(&[
+        "parked-child",
+        "stopped-child",
+        "error-child",
+        "active-child",
+    ]);
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut("parked-child").unwrap().state = SessionState::Parked;
+    state.sessions.get_mut("stopped-child").unwrap().state = SessionState::Stopped;
+    state.sessions.get_mut("error-child").unwrap().state = SessionState::Error;
+    dashboard.set_state(state);
+
+    let ids = crate::session_cpu_report::report_groups(&dashboard)
+        .into_iter()
+        .flat_map(|group| group.session_ids)
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"session-1".to_owned()),
+        "parent is active: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"active-child".to_owned()),
+        "active child: {ids:?}"
+    );
+    assert!(!ids.contains(&"parked-child".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"stopped-child".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"error-child".to_owned()), "{ids:?}");
+}
+
+#[test]
+fn session_cpu_report_selection_stays_with_its_session_after_cpu_resort() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut state = dashboard.state.clone();
+    state.sessions.clear();
+    for id in ["fast", "middle", "slow"] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.title = id.into();
+        session.acp_session_title = None;
+        session.target_template_id = "shared-machine".into();
+        state.sessions.insert(id.into(), session);
+    }
+    dashboard.set_state(state);
+    set_cpu(
+        &mut dashboard,
+        &[("fast", 300, 300), ("middle", 200, 200), ("slow", 100, 100)],
+    );
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::End));
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("CPU report is open");
+    };
+    assert_eq!(dialog.selected_session_id.borrow().as_deref(), Some("slow"));
+
+    set_cpu(
+        &mut dashboard,
+        &[("fast", 50, 50), ("middle", 200, 200), ("slow", 500, 500)],
+    );
+    let _ = drawn(&mut dashboard, 120, 30);
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("CPU report remains open");
+    };
+    assert_eq!(
+        dialog.selected_session_id.borrow().as_deref(),
+        Some("slow"),
+        "the cursor follows the selected id through re-sorting"
+    );
+    assert_eq!(dialog.selected_row.get(), 0);
+}
+
+#[test]
+fn enter_on_a_cpu_report_top_level_row_opens_its_session() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let session_id = dashboard.selected_session_id().unwrap().to_owned();
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: session_id.clone()
+        }
+    );
+    assert!(matches!(dashboard.mode, crate::Mode::Dashboard));
+    assert_eq!(dashboard.selected_session_id(), Some(session_id.as_str()));
+}
+
+#[test]
+fn enter_on_a_cpu_report_subagent_opens_its_parent_view_and_conversation() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    // A filter that would hide the child is cleared by going to it.
+    *dashboard.sessions_filter = Some(crate::SessionsFilter {
+        query: mj_chat::text_input::TextInput::from_value("matches nothing"),
+        state: None,
+        editing: false,
+    });
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::Down));
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: "kid-a".into()
+        }
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn double_click_on_a_cpu_report_subagent_opens_its_parent_view() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    let first = drawn(&mut dashboard, 120, 35);
+    let child_row = point(&first, "kid-a");
+    assert_eq!(
+        click_cpu_report(&mut dashboard, child_row),
+        DashboardAction::None
+    );
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("first click keeps the CPU report open");
+    };
+    assert_eq!(
+        dialog.selected_session_id.borrow().as_deref(),
+        Some("kid-a")
+    );
+    let _ = drawn(&mut dashboard, 120, 35);
+
+    assert_eq!(
+        click_cpu_report(&mut dashboard, child_row),
+        DashboardAction::Open {
+            session_id: "kid-a".into()
+        }
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+}
+
+#[test]
+fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switch() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut(&parent).unwrap().workspace_id = "other".into();
+    state.sessions.get_mut("kid-a").unwrap().workspace_id = "other".into();
+    dashboard.set_state(state);
+    dashboard.workspace_order.push("other".into());
+    dashboard
+        .workspace_names
+        .insert("other".into(), "Other".into());
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::Down));
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    assert_eq!(dashboard.navigation_session.as_deref(), Some("kid-a"));
+    assert_eq!(
+        dashboard.navigation_subagent_parent.as_deref(),
+        Some(parent.as_str())
+    );
+
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+    assert_eq!(
+        dashboard.take_navigation_session().as_deref(),
+        Some("kid-a")
+    );
 }
 
 #[test]

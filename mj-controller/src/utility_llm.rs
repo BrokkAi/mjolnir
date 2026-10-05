@@ -291,6 +291,61 @@ impl UtilityCompactionBackend {
     }
 }
 
+/// Make one structured text request with an already selected utility model.
+/// Callers that need a hard operation deadline own the timeout and cancellation
+/// token; this helper only builds and sends the request.
+pub(crate) async fn infer_text_once(
+    candidate: &UtilityCandidate,
+    system_prompt: &str,
+    user_prompt: String,
+    output_field: &str,
+    cancel: CancellationToken,
+) -> Result<String> {
+    let request = StructuredInferRequest {
+        messages: vec![
+            InferMessage::system(system_prompt),
+            InferMessage::user(user_prompt),
+        ],
+        schema_name: "utility_text".into(),
+        schema: json!({
+            "type": "object",
+            "properties": { (output_field): { "type": "string" } },
+            "required": [output_field],
+            "additionalProperties": false
+        }),
+    };
+    let response = infer_structured(
+        candidate.backend.as_ref(),
+        candidate.model.clone(),
+        request,
+        InferOptions {
+            reasoning_effort: candidate.reasoning_effort.clone(),
+            ..InferOptions::default()
+        },
+        cancel,
+    )
+    .await
+    .map_err(|error| {
+        anyhow!(
+            "{} model {}: {error:#}",
+            candidate.profile_id,
+            candidate.model
+        )
+    })?;
+    response
+        .output
+        .get(output_field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow!(
+                "{} model {} returned no {output_field} string",
+                candidate.profile_id,
+                candidate.model
+            )
+        })
+}
+
 /// How much transcript to send this model in one request. Providers publish a
 /// context window in tokens; four bytes per token is the estimator this
 /// codebase already uses, and half the window is left for the system prompt

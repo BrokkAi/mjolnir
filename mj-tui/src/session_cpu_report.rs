@@ -1,34 +1,48 @@
-//! A live report built from the same CPU table as the session rows.
+//! A live, selectable CPU report grouped by machine.
 //!
-//! A parent's line shows its tree total (itself plus its live sub-agents,
-//! from [`DashboardState::cpu_rollup`]) and its own share; the sub-agents are
-//! indented below it.
+//! A parent's row shows its tree total (itself plus its listed sub-agents) and
+//! its own share. Listed sub-agents appear below their parent.
 use crate::DashboardState;
 use crate::session_view::clamp_permille;
 use mj_chat::theme;
 use mj_client::runtime_feed::SessionCpuView;
 use mj_client::usage_format::format_cpu_permille;
-use mj_core::state::{SessionRecord, live_session_ids};
+use mj_core::state::{SessionRecord, SessionState};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
-    let operations = dashboard.session_operations.keys().cloned().collect();
-    let live = live_session_ids(
-        &dashboard.state.sessions,
-        &dashboard.state.subagents,
-        &operations,
-    );
+#[derive(Debug, Clone)]
+pub(crate) struct MachineReport {
+    pub(crate) key: String,
+    pub(crate) hourly_permille: u32,
+    /// Display rows include blank root separators. `row_map` is `None` for
+    /// those separators and maps session rows to `session_ids` otherwise.
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) row_map: Vec<Option<usize>>,
+    pub(crate) session_ids: Vec<String>,
+}
+
+impl MachineReport {
+    pub(crate) fn tab_label(&self) -> String {
+        format!(
+            "{} · {} hourly",
+            self.key,
+            format_cpu_permille(clamp_permille(self.hourly_permille))
+        )
+    }
+}
+
+/// Groups and orders the report. Machine keys are sorted by name so CPU
+/// changes update totals without moving tabs around.
+pub(crate) fn report_groups(dashboard: &DashboardState) -> Vec<MachineReport> {
     let mut groups = BTreeMap::<String, Vec<&SessionRecord>>::new();
-    for session in dashboard
-        .state
-        .sessions
-        .values()
-        .filter(|session| live.contains(&session.id))
-    {
+    for session in dashboard.state.sessions.values().filter(|session| {
+        session.state.is_active()
+            && !matches!(session.state, SessionState::Parked | SessionState::Error)
+    }) {
         let machine = dashboard
             .capacity_details
             .values()
@@ -49,27 +63,28 @@ pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
             });
         groups.entry(machine).or_default().push(session);
     }
+
     let own_hourly = |session: &SessionRecord| match dashboard.session_cpu.get(&session.id) {
         Some(SessionCpuView::Measured { usage }) => Some(usage.hourly_permille),
         _ => None,
     };
     let tree_hourly = |session: &SessionRecord| dashboard.cpu_rollup(&session.id).hourly_permille;
-    // A live sub-agent is drawn under its parent when the parent is listed.
-    let listed: BTreeSet<&str> = groups
+    let listed: BTreeSet<String> = groups
         .values()
         .flatten()
-        .map(|session| session.id.as_str())
+        .map(|session| session.id.clone())
         .collect();
     let nested: BTreeSet<String> = listed
         .iter()
         .flat_map(|id| dashboard.cpu_children(id))
-        .filter(|child| listed.contains(child.as_str()))
+        .filter(|child| listed.contains(child))
         .collect();
-    let mut groups: Vec<_> = groups
+
+    groups
         .into_iter()
-        .map(|(machine, mut sessions)| {
-            // The machine total sums each session's own share once.
-            let sum: u32 = sessions
+        .map(|(key, mut sessions)| {
+            // The machine total sums each listed session's own share once.
+            let hourly_permille = sessions
                 .iter()
                 .filter_map(|session| own_hourly(session))
                 .map(u32::from)
@@ -80,10 +95,30 @@ pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
                     .cmp(&tree_hourly(a))
                     .then_with(|| a.id.cmp(&b.id))
             });
-            (machine, sessions, sum)
+
+            let mut report = MachineReport {
+                key,
+                hourly_permille,
+                lines: Vec::new(),
+                row_map: Vec::new(),
+                session_ids: Vec::new(),
+            };
+            for (index, session) in sessions.into_iter().enumerate() {
+                if index > 0 {
+                    report.lines.push(Line::default());
+                    report.row_map.push(None);
+                }
+                push_tree(dashboard, session, &listed, 1, &mut report);
+            }
+            report
         })
-        .collect();
-    groups.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        .collect()
+}
+
+/// All groups as plain lines, used to detect live report changes even when a
+/// different machine tab is currently visible.
+pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
+    let groups = report_groups(dashboard);
     let mut lines = Vec::new();
     if !groups.is_empty() {
         lines.push(Line::styled(
@@ -91,27 +126,21 @@ pub(crate) fn report_lines(dashboard: &DashboardState) -> Vec<Line<'static>> {
             theme::muted(),
         ));
     }
-    for (index, (machine, sessions, sum)) in groups.into_iter().enumerate() {
+    for (index, group) in groups.into_iter().enumerate() {
         if index > 0 {
             lines.push(Line::default());
         }
         lines.push(Line::styled(
             format!(
-                "{machine}  {} hourly",
-                format_cpu_permille(clamp_permille(sum))
+                "{}  {} hourly",
+                group.key,
+                format_cpu_permille(clamp_permille(group.hourly_permille))
             ),
             Style::default()
                 .fg(theme::palette().text)
                 .add_modifier(Modifier::BOLD),
         ));
-        // Each root with its nested sub-agents is a block; one empty line
-        // separates blocks.
-        for (index, session) in sessions.into_iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::default());
-            }
-            push_tree(dashboard, session, &listed, 1, &mut lines);
-        }
+        lines.extend(group.lines);
     }
     lines
 }
@@ -202,13 +231,13 @@ pub(crate) fn cpu_summary(dashboard: &DashboardState, session_id: &str) -> CpuSu
     }
 }
 
-/// One session's line, then its live sub-agents indented below it.
+/// One session's selectable line, then its listed sub-agents indented below.
 fn push_tree(
     dashboard: &DashboardState,
     session: &SessionRecord,
-    listed: &BTreeSet<&str>,
+    listed: &BTreeSet<String>,
     depth: usize,
-    lines: &mut Vec<Line<'static>>,
+    report: &mut MachineReport,
 ) {
     let summary = cpu_summary(dashboard, &session.id);
     let mut spans = vec![
@@ -223,11 +252,15 @@ fn push_tree(
     if let Some(detail) = &summary.detail {
         spans.push(Span::styled(format!(" ({detail})"), theme::muted()));
     }
-    lines.push(Line::from(spans));
+    let row_index = report.session_ids.len();
+    report.session_ids.push(session.id.clone());
+    report.lines.push(Line::from(spans));
+    report.row_map.push(Some(row_index));
+
     let mut children: Vec<&SessionRecord> = dashboard
         .cpu_children(&session.id)
         .iter()
-        .filter(|child| listed.contains(child.as_str()))
+        .filter(|child| listed.contains(*child))
         .filter_map(|child| dashboard.state.sessions.get(child))
         .collect();
     let subtree_hourly = |s: &SessionRecord| dashboard.cpu_rollup(&s.id).hourly_permille;
@@ -237,6 +270,6 @@ fn push_tree(
             .then_with(|| a.id.cmp(&b.id))
     });
     for child in children {
-        push_tree(dashboard, child, listed, depth + 1, lines);
+        push_tree(dashboard, child, listed, depth + 1, report);
     }
 }

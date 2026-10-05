@@ -928,6 +928,9 @@ pub struct DashboardState {
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
     pub(crate) navigation_session: Option<String>,
+    /// When a workspace switch was requested for a child, open its parent's
+    /// Sub-agents view before restoring `navigation_session`.
+    pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
     /// arrangement underneath is untouched, so unzooming puts every pane back
@@ -1206,6 +1209,7 @@ impl DashboardState {
             pin_ids: BTreeMap::new(),
 
             navigation_session: None,
+            navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,
             opening_session: None,

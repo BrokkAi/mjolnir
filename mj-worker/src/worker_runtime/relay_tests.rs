@@ -20,6 +20,7 @@ use crate::relay::{
 };
 use mj_core::config::ExecutionPolicy;
 use mj_core::elicitation::ElicitationResponse;
+use mj_core::worker_launch::ProjectMemoryMcpDelivery;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
@@ -5776,6 +5777,175 @@ fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
         ),
         Path::new("/home/ubuntu/.local/share/hel/workers/session")
     );
+}
+
+#[test]
+fn project_memory_connection_requests_round_trip_replica_and_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "base".into()),
+                ("/baseline-only.md".into(), "keep baseline".into()),
+            ]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "changed".into()),
+                ("/replica-only.md".into(), "keep replica".into()),
+            ]),
+        })
+        .unwrap();
+
+    let payload =
+        unix::apply_project_memory_request(&memory, &RelayRequest::ProjectMemorySnapshot).unwrap();
+    let RelayResponsePayload::ProjectMemorySnapshot {
+        baseline: captured_baseline,
+        replica: captured_replica,
+    } = payload
+    else {
+        panic!("unexpected project-memory payload")
+    };
+    assert_eq!(captured_baseline.files["/MEMORY.md"], "base");
+    assert_eq!(captured_replica.files["/MEMORY.md"], "changed");
+
+    unix::apply_project_memory_request(
+        &memory,
+        &RelayRequest::InstallProjectMemorySnapshot {
+            snapshot: mj_core::project_memory::ProjectMemorySnapshot {
+                files: BTreeMap::from([("/MEMORY.md".into(), "installed".into())]),
+            },
+        },
+    )
+    .unwrap();
+    let installed_baseline = baseline.snapshot().unwrap();
+    let installed_replica = replica.snapshot().unwrap();
+    assert_eq!(installed_baseline.files["/MEMORY.md"], "installed");
+    assert_eq!(
+        installed_baseline.files["/baseline-only.md"],
+        "keep baseline"
+    );
+    assert_eq!(installed_replica.files["/MEMORY.md"], "installed");
+    assert_eq!(installed_replica.files["/replica-only.md"], "keep replica");
+}
+
+#[test]
+fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "baseline memory".into()),
+                ("/old-baseline.md".into(), "remove".into()),
+            ]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "replica memory".into()),
+                ("/old-replica.md".into(), "remove".into()),
+            ]),
+        })
+        .unwrap();
+    let expected_replica = replica.snapshot().unwrap().version();
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled".into())]),
+    };
+
+    let payload = unix::apply_project_memory_request(
+        &memory,
+        &RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree: tree.clone(),
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        payload,
+        RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
+        }
+    ));
+    assert_eq!(replica.snapshot().unwrap(), tree);
+    assert_eq!(baseline.snapshot().unwrap(), tree);
+}
+
+#[test]
+fn project_memory_replace_refuses_a_changed_replica_without_writing_either_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "baseline".into())]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "initial replica".into())]),
+        })
+        .unwrap();
+    let expected_replica = replica.snapshot().unwrap().version();
+    let baseline_before = baseline.snapshot().unwrap();
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/concurrent.md".into(), "external edit".into())]),
+        })
+        .unwrap();
+    let replica_after_concurrent_edit = replica.snapshot().unwrap();
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled".into())]),
+    };
+
+    let payload = unix::apply_project_memory_request(
+        &memory,
+        &RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        payload,
+        RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+        }
+    ));
+    assert_eq!(replica.snapshot().unwrap(), replica_after_concurrent_edit);
+    assert_eq!(baseline.snapshot().unwrap(), baseline_before);
 }
 
 #[tokio::test]

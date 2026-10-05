@@ -4,19 +4,29 @@
 //! protocol rather than a one-shot CLI command. Keep the JSONL client isolated
 //! from the UI so protocol parsing and unavailable states remain testable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 // A cold Codex app-server start can be slow on busy machines. The client is
 // reused after initialization, so this primarily bounds the initial probe.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+// Enough of app-server's stderr to explain a failure, such as a rejected
+// token refresh, without holding its whole log.
+const STDERR_TAIL_LINES: usize = 20;
+const STDERR_LINE_BYTES: usize = 2 * 1024;
+// How long a stopped app-server's stderr gets to reach end of stream.
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+// Shorter runs of token characters are left alone so that ordinary words,
+// paths and numbers stay readable.
+const SECRET_RUN_CHARS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexUsageStatus {
@@ -42,6 +52,8 @@ pub struct CodexUsageClient {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr: StderrTail,
+    stderr_reader: tokio::task::JoinHandle<()>,
     next_id: u64,
     initialized: bool,
 }
@@ -58,10 +70,17 @@ impl CodexUsageClient {
             .stdout
             .take()
             .ok_or(QueryError::Protocol(ProtocolError::Io))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(QueryError::Protocol(ProtocolError::Io))?;
+        let (stderr, stderr_reader) = StderrTail::capture(stderr);
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr,
+            stderr_reader,
             next_id: 1,
             initialized: false,
         })
@@ -97,12 +116,17 @@ impl CodexUsageClient {
     /// refresh-token flow; in external auth mode this flag is ignored". An
     /// app-server too old to know the flag answers `-32601`, which means there
     /// is nothing to do here rather than a failed poll.
+    ///
+    /// The request succeeds even when the refresh does not: app-server records
+    /// the failure and answers with no account. Only a ChatGPT account in the
+    /// answer means the login is still usable.
     async fn refresh_token(&mut self) -> Result<(), QueryError> {
         let id = self
             .send_request("account/read", json!({ "refreshToken": true }))
             .await?;
         match self.read_result(id).await {
-            Ok(_) | Err(QueryError::Unsupported) => Ok(()),
+            Ok(account) => classify_account(&account),
+            Err(QueryError::Unsupported) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -157,7 +181,24 @@ impl CodexUsageClient {
         }
     }
 
-    pub async fn shutdown(mut self) {
+    /// Stop app-server and return the end of its stderr. Waiting for the
+    /// reader to reach end of stream keeps lines that were still in the pipe
+    /// when the failed answer arrived.
+    async fn shutdown_with_diagnostics(self) -> Vec<String> {
+        let tail = self.stderr.clone();
+        let reader = self.stop().await;
+        // A process app-server started could still hold the pipe open.
+        let _ = tokio::time::timeout(STDERR_DRAIN_TIMEOUT, reader).await;
+        tail.lines()
+    }
+
+    pub async fn shutdown(self) {
+        self.stop().await;
+    }
+
+    /// Stop the process and hand back its stderr reader, which ends on its
+    /// own once the pipe closes.
+    async fn stop(mut self) -> tokio::task::JoinHandle<()> {
         drop(self.stdin);
         // Closing stdin asks app-server to stop. The quota process is always
         // launched directly (never through npx), so killing the recorded child
@@ -170,7 +211,98 @@ impl CodexUsageClient {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Codex quota process");
         }
+        self.stderr_reader
     }
+}
+
+/// The last lines app-server wrote to stderr, cleaned of terminal controls and
+/// anything that looks like a token.
+#[derive(Clone, Default)]
+struct StderrTail(Arc<Mutex<VecDeque<String>>>);
+
+impl StderrTail {
+    /// Keep reading `stderr` until app-server closes it. Reading also keeps a
+    /// chatty process from blocking on a full pipe.
+    fn capture(stderr: ChildStderr) -> (Self, tokio::task::JoinHandle<()>) {
+        let tail = Self::default();
+        let writer = tail.clone();
+        let reader = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::new();
+            loop {
+                let available = match reader.fill_buf().await {
+                    Ok(available) if !available.is_empty() => available,
+                    _ => break,
+                };
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let content = newline.unwrap_or(available.len());
+                let room = STDERR_LINE_BYTES.saturating_sub(line.len());
+                line.extend_from_slice(&available[..content.min(room)]);
+                reader.consume(content + usize::from(newline.is_some()));
+                if newline.is_some() {
+                    writer.push(&line);
+                    line.clear();
+                }
+            }
+            writer.push(&line);
+        });
+        (tail, reader)
+    }
+
+    fn push(&self, line: &[u8]) {
+        let line = redact_secrets(&mj_core::transcript::sanitize_terminal_text(
+            &String::from_utf8_lossy(line),
+        ));
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let mut lines = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lines.len() == STDERR_TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line.to_owned());
+    }
+
+    fn lines(&self) -> Vec<String> {
+        let lines = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        lines.iter().cloned().collect()
+    }
+}
+
+/// Replace every long run of token characters. Access, refresh and id tokens,
+/// API keys and account ids are all long runs of base64url, hex or dotted JWT
+/// segments, and a diagnostic has no use for them.
+fn redact_secrets(text: &str) -> String {
+    fn is_token_char(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+')
+    }
+    fn flush(run: &mut String, redacted: &mut String) {
+        if run.chars().count() >= SECRET_RUN_CHARS {
+            redacted.push_str("[redacted]");
+        } else {
+            redacted.push_str(run);
+        }
+        run.clear();
+    }
+    let mut redacted = String::with_capacity(text.len());
+    let mut run = String::new();
+    for ch in text.chars() {
+        if is_token_char(ch) {
+            run.push(ch);
+        } else {
+            flush(&mut run, &mut redacted);
+            redacted.push(ch);
+        }
+    }
+    flush(&mut run, &mut redacted);
+    redacted
 }
 
 async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<Vec<u8>>, QueryError>
@@ -219,11 +351,17 @@ async fn prepare(
     Ok(ready)
 }
 
-/// Drop a client the failure says is no longer usable. A transport or protocol
-/// break leaves the stream out of step, so the next call needs a fresh child.
+/// Drop a client the failure says is no longer usable, logging what its
+/// app-server wrote to stderr so the cause is not lost with the process.
 async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceable: bool) {
     if replaceable && let Some(stale_client) = client.take() {
-        stale_client.shutdown().await;
+        let diagnostics = stale_client.shutdown_with_diagnostics().await;
+        if !diagnostics.is_empty() {
+            tracing::warn!(
+                stderr = %diagnostics.join("\n"),
+                "Codex quota process diagnostics before restart"
+            );
+        }
     }
 }
 
@@ -242,11 +380,7 @@ pub async fn refresh(
     match result {
         Ok(Ok(report)) => CodexUsageStatus::Available(report),
         Ok(Err(error)) => {
-            discard_failed_client(
-                client,
-                matches!(error, QueryError::Protocol(_) | QueryError::Unsupported),
-            )
-            .await;
+            discard_failed_client(client, error.needs_fresh_client()).await;
             tracing::warn!("codex quota query failed: {error}");
             CodexUsageStatus::Unavailable(error.user_reason().to_string())
         }
@@ -256,6 +390,15 @@ pub async fn refresh(
             CodexUsageStatus::Unavailable("request timed out".to_string())
         }
     }
+}
+
+/// Why [`refresh_login`] could not rotate the login.
+#[derive(Debug)]
+pub struct LoginRefreshFailure {
+    /// The failure in full, for the log.
+    pub detail: String,
+    /// The failure as [`refresh`] would report it to the user.
+    pub reason: &'static str,
 }
 
 /// Rotate the profile's Codex login ahead of its expiry, reusing the cached
@@ -269,7 +412,7 @@ pub async fn refresh_login(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<(), LoginRefreshFailure> {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
         prepare(client, cwd, env).await?.refresh_token().await
     })
@@ -278,12 +421,18 @@ pub async fn refresh_login(
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
-            discard_failed_client(client, matches!(error, QueryError::Protocol(_))).await;
-            Err(error.to_string())
+            discard_failed_client(client, error.needs_fresh_client()).await;
+            Err(LoginRefreshFailure {
+                detail: error.to_string(),
+                reason: error.user_reason(),
+            })
         }
         Err(_) => {
             discard_failed_client(client, true).await;
-            Err("request timed out".to_string())
+            Err(LoginRefreshFailure {
+                detail: "request timed out".to_string(),
+                reason: "request timed out",
+            })
         }
     }
 }
@@ -306,10 +455,14 @@ fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, Quer
         for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
             command.env_remove(name);
         }
+        // Its stderr is kept for diagnostics. At error level app-server reports
+        // a rejected token refresh; a broader level inherited from the daemon
+        // would add HTTP request bodies that carry the refresh token.
+        command.env("RUST_LOG", "error");
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         command.kill_on_drop(true);
         match command.spawn() {
             Ok(child) => return Ok(child),
@@ -345,6 +498,21 @@ enum ProtocolError {
 }
 
 impl QueryError {
+    /// Whether the cached app-server must be replaced before the next call.
+    ///
+    /// A transport or protocol break leaves the stream out of step. An
+    /// authentication failure can be state inside app-server rather than in
+    /// the credential file: once a token refresh fails, app-server reports no
+    /// account until it restarts, even after the file is fixed (#1224). A new
+    /// process reads the file again. While the login stays invalid each poll
+    /// starts one process, so the poll interval bounds the cost.
+    fn needs_fresh_client(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol(_) | Self::Unsupported | Self::NotSignedIn | Self::UnsupportedAccount
+        )
+    }
+
     fn user_reason(&self) -> &'static str {
         match self {
             Self::NotInstalled => "Codex CLI is not installed",
@@ -633,20 +801,22 @@ mod tests {
         let (mut env, _log) = fake_codex_env(
             &temp,
             &format!(
-                "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"${{OPENAI_API_KEY-unset}}\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_ACCESS_TOKEN-unset}}\" \"${{OPENAI_BASE_URL-unset}}\" > {}\nexit 1\n",
+                "#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"${{OPENAI_API_KEY-unset}}\" \"${{CODEX_API_KEY-unset}}\" \"${{CODEX_ACCESS_TOKEN-unset}}\" \"${{OPENAI_BASE_URL-unset}}\" \"${{RUST_LOG-unset}}\" > {}\nexit 1\n",
                 mj_core::targets::posix_quote(&seen.to_string_lossy())
             ),
         );
         for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
             env.insert(name.to_owned(), "sk-svcacct-test".to_owned());
         }
+        // Trace level would log request bodies that carry the refresh token.
+        env.insert("RUST_LOG".to_owned(), "trace".to_owned());
         let mut client = None;
 
         let _ = refresh(&mut client, temp.path().to_path_buf(), env).await;
 
         assert_eq!(
             std::fs::read_to_string(seen).expect("the fake codex ran"),
-            "unset|unset|unset|unset\n"
+            "unset|unset|unset|unset|error\n"
         );
     }
 
@@ -825,5 +995,170 @@ printf '%s\n' '{"id":1,"error":{"code":-32601,"message":"unknown method"}}'
             )
         );
         assert!(client.is_none());
+    }
+
+    /// A fake app-server that records each start and answers `account/read`
+    /// with no account on its first start, as one whose token refresh failed
+    /// does, and with a usable login on every later start.
+    #[cfg(unix)]
+    const SIGNED_OUT_UNTIL_RESTART: &str = r#"#!/bin/sh
+starts="$CODEX_USAGE_TEST_LOG.starts"
+started_before=no
+[ -e "$starts" ] && started_before=yes
+printf 'start\n' >> "$starts"
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+if [ "$started_before" = no ]; then
+    printf '%s\n' '{"id":2,"result":{"account":null}}'
+else
+    printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+    IFS= read -r line || exit 1
+    printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":29,"windowDurationMins":10080}}}}'
+fi
+IFS= read -r line
+"#;
+
+    #[cfg(unix)]
+    fn starts(log: &std::path::Path) -> usize {
+        let mut path = log.as_os_str().to_owned();
+        path.push(".starts");
+        std::fs::read_to_string(path)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// App-server answers a refresh whose token exchange failed with no
+    /// account rather than an error (#1224).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_login_reports_a_missing_account_as_a_failed_refresh() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, log) = fake_codex_env(&temp, SIGNED_OUT_UNTIL_RESTART);
+        let mut client = None;
+
+        let failure = refresh_login(&mut client, temp.path().to_path_buf(), env)
+            .await
+            .expect_err("no account means the refresh failed");
+
+        assert_eq!(failure.reason, "not signed in with ChatGPT");
+        assert!(client.is_none(), "the signed-out app-server is replaced");
+        assert_eq!(starts(&log), 1);
+    }
+
+    /// An app-server that has recorded an authentication failure keeps
+    /// reporting it until it restarts, even once the credential file works
+    /// again (#1224). The next poll starts a new one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_recovers_after_a_cached_authentication_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, log) = fake_codex_env(&temp, SIGNED_OUT_UNTIL_RESTART);
+        let mut client = None;
+
+        let first = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
+        assert_eq!(
+            first,
+            CodexUsageStatus::Unavailable("not signed in with ChatGPT".to_string())
+        );
+        assert!(client.is_none());
+
+        let second = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        assert!(matches!(
+            second,
+            CodexUsageStatus::Available(CodexUsageReport {
+                primary: Some(CodexUsageWindow {
+                    remaining_percent: 71,
+                    ..
+                }),
+                ..
+            })
+        ));
+        assert_eq!(starts(&log), 2);
+
+        client.take().expect("client").shutdown().await;
+    }
+
+    /// A login that is invalid in the file too costs one app-server start per
+    /// call, never a retry inside the call.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_invalid_login_starts_one_app_server_per_call() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+printf 'start\n' >> "$CODEX_USAGE_TEST_LOG.starts"
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"result":{"account":null}}'
+IFS= read -r line
+"#,
+        );
+        let mut client = None;
+
+        for poll in 1..=3 {
+            let status = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
+            assert_eq!(
+                status,
+                CodexUsageStatus::Unavailable("not signed in with ChatGPT".to_string())
+            );
+            assert!(client.is_none());
+            assert_eq!(starts(&log), poll);
+        }
+    }
+
+    /// The tail is read only after app-server has stopped and its stderr has
+    /// drained, so a line written just before the failed answer is kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_client_keeps_a_redacted_tail_of_app_server_stderr() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, _log) = fake_codex_env(
+            &temp,
+            r#"#!/bin/sh
+i=0
+while [ "$i" -lt 25 ]; do
+    printf 'noise %s\n' "$i" >&2
+    i=$((i + 1))
+done
+IFS= read -r line || exit 1
+printf '\033[31mERROR\033[0m failed to refresh token: refresh_token=rt_abcdefghijklmnopqrstuvwxyz0123 reused\n' >&2
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line
+"#,
+        );
+        let mut client = None;
+        prepare(&mut client, temp.path().to_path_buf(), env)
+            .await
+            .expect("initialized client");
+
+        let lines = client
+            .take()
+            .expect("client")
+            .shutdown_with_diagnostics()
+            .await;
+
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines[0], "noise 6");
+        assert_eq!(
+            lines.last().unwrap(),
+            "ERROR failed to refresh token: refresh_token=[redacted] reused"
+        );
+    }
+
+    #[test]
+    fn redaction_removes_token_runs_and_keeps_ordinary_text() {
+        assert_eq!(
+            redact_secrets(
+                "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl, key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX"
+            ),
+            "Bearer [redacted], key [redacted]"
+        );
+        let ordinary = "2026-10-05T12:00:00Z WARN codex_login::auth: POST https://auth.openai.com/oauth/token returned 401";
+        assert_eq!(redact_secrets(ordinary), ordinary);
     }
 }
