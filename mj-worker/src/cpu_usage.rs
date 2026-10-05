@@ -167,21 +167,20 @@ mod tests {
     #[test]
     fn process_tree_cpu_time_counts_a_busy_child_after_it_is_reaped() {
         const CHILD: &str = "MJ_CPU_REAPED_TEST_CHILD";
+        const BURN: &str = "MJ_CPU_REAPED_TEST_BURN";
+        // A loaded runner slows the wall clock, not the child's own CPU use,
+        // so waiting for this much CPU keeps the lower bound valid under
+        // parallel test load instead of scaling it with the clock.
+        const CHILD_CPU: Duration = Duration::from_millis(1200);
+        if std::env::var_os(BURN).is_some() {
+            burn_own_cpu(CHILD_CPU);
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
         if std::env::var_os(CHILD).is_none() {
             // The counter includes every thread and descendant of this process.
             // Run alone so parallel worker tests cannot contribute CPU time.
-            let directory = tempfile::tempdir().unwrap();
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "cpu_usage::tests::process_tree_cpu_time_counts_a_busy_child_after_it_is_reaped",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("MJ_INSTANCE", "cpu-counter-test")
-                .env("MJ_DATA_DIR", directory.path().join("data"))
-                .env("MJ_CONFIG_DIR", directory.path().join("config"));
+            let mut command = cpu_test_command(&directory, CHILD);
             let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
             assert!(
                 output.status.success(),
@@ -192,14 +191,66 @@ mod tests {
             return;
         }
         let before = process_tree_cpu_time(std::process::id()).unwrap();
-        // Pure shell work with infrequent clock reads avoids launching thousands
-        // of short-lived date processes and makes the CPU lower bound reliable.
-        let output = mj_core::subprocess::run_with_input(std::process::Command::new("sh").args(["-c", "end=$(($(date +%s)+3)); while [ $(date +%s) -lt $end ]; do i=0; while [ $i -lt 10000 ]; do i=$((i+1)); done; done"]), &[]).unwrap();
-        assert!(output.status.success());
+        // A separate process burns the CPU, so this process counts it only
+        // through the reaped-child accounting of the process tree.
+        let mut command = cpu_test_command(&directory, BURN);
+        let output = mj_core::subprocess::run_with_input(&mut command, &[]).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let used = process_tree_cpu_time(std::process::id())
             .unwrap()
             .saturating_sub(before);
         assert!(used >= Duration::from_secs(1), "{used:?}");
         assert!(used < Duration::from_secs(5), "{used:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn cpu_test_command(directory: &tempfile::TempDir, variable: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cpu_usage::tests::process_tree_cpu_time_counts_a_busy_child_after_it_is_reaped",
+                "--nocapture",
+            ])
+            .env(variable, "1")
+            .env("MJ_INSTANCE", "cpu-counter-test")
+            .env("MJ_DATA_DIR", directory.path().join("data"))
+            .env("MJ_CONFIG_DIR", directory.path().join("config"));
+        command
+    }
+
+    /// Spend `target` of this process's own CPU, however slowly the scheduler
+    /// runs it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn burn_own_cpu(target: Duration) {
+        let start = own_cpu_time();
+        let mut state = 0_u64;
+        while own_cpu_time().saturating_sub(start) < target {
+            for step in 0..1_000_000_u64 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(step);
+            }
+            std::hint::black_box(state);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn own_cpu_time() -> Duration {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `getrusage` writes the usage counters for the requested id.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(result, 0, "read own CPU time");
+        let usage = unsafe { usage.assume_init() };
+        let seconds = u64::try_from(usage.ru_utime.tv_sec).unwrap()
+            + u64::try_from(usage.ru_stime.tv_sec).unwrap();
+        let micros = u64::try_from(usage.ru_utime.tv_usec).unwrap()
+            + u64::try_from(usage.ru_stime.tv_usec).unwrap();
+        Duration::from_secs(seconds) + Duration::from_micros(micros)
     }
 }

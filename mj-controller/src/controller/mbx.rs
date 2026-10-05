@@ -32,10 +32,10 @@ use mj_core::state::{
 
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
-pub(crate) const MBX_VERSION: &str = "1.21.1";
+pub(crate) const MBX_VERSION: &str = "1.22.0";
 
-const MBX_X86_64_SHA256: &str = "780ccb52aa3a95ac1b0ee0ecf5184561b1a4bdf1fe88180333dc0e11a92980f5";
-const MBX_AARCH64_SHA256: &str = "80fbd510a3e9cee763ad40cbadbfbf22fc54af02589fcfd8f0070d7058493553";
+const MBX_X86_64_SHA256: &str = "c375135e2a3916f58da1b47537b6a954159eeacd55523d9a618b42259bd89014";
+const MBX_AARCH64_SHA256: &str = "ae4d66308c706ffbf912beb45b3166cf1cfda4d3efd23273262791235d0accf5";
 
 /// Overrides the download with a local mbx binary for the current machine's
 /// architecture. Used for development against an unreleased mbx.
