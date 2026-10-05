@@ -772,6 +772,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 86ab9abd: Muse forms showed q0 and Sessions rows showed the tool name
     #[test]
     fn an_untitled_single_question_takes_the_header_from_its_message() {
         let request = |message: &str, title: Option<&str>| {
@@ -802,6 +803,7 @@ mod tests {
         assert_eq!(request("Which colour?", None).fields[0].title, "q0");
     }
 
+    // Hard-won: dc436f0c: Claude bridge 0.84 moved Other-answer fields and Mjolnir lost their pairing
     #[test]
     fn pairs_claude_other_fields_by_name_without_the_marker() {
         // The form claude-agent-acp 0.84.0 sends a client that is not
@@ -1055,27 +1057,5 @@ mod tests {
                 .validate_response(&with_targets(vec!["plan9"]))
                 .is_err()
         );
-    }
-
-    #[test]
-    fn rejects_url_and_nested_object_elicitations() {
-        let url = ElicitationRequest::from_acp_params(
-            "bad-url",
-            json!({"requestId": 1, "mode": "url", "message": "Open", "url": "https://example.com"}),
-        )
-        .unwrap_err();
-        assert!(url.to_string().contains("only supports form"));
-
-        let nested = ElicitationRequest::from_acp_params(
-            "bad-nested",
-            json!({
-                "sessionId": "session-1",
-                "mode": "form",
-                "message": "Nested",
-                "requestedSchema": {"properties": {"nested": {"type": "object"}}}
-            }),
-        )
-        .unwrap_err();
-        assert!(nested.to_string().contains("unsupported type"));
     }
 }

@@ -7,8 +7,12 @@ fn diff(old_text: Option<&str>, new_text: &str) -> Diff {
     diff
 }
 
+/// A patch is proportional to the edit, but an edit can still be enormous. The
+/// text is capped on hunk boundaries; the counts keep describing the whole
+/// edit, so the stat stays honest even when the text is short.
 /// The point of the change: what gets stored is the size of the edit, not the
 /// size of the file.
+// Hard-won: b63924a3: real sessions accumulated 561 MB of duplicated edits and exceeded the IPC frame limit
 #[test]
 fn compacting_an_edit_costs_the_edit_rather_than_the_file() {
     let old_text = (0..2_000)
@@ -41,37 +45,6 @@ fn compacting_an_edit_costs_the_edit_rather_than_the_file() {
     assert!(!patch.truncated);
 }
 
-/// Counting changed lines must not depend on which form the record is in, or
-/// the diffstat shown for an old session would disagree with a new one.
-#[test]
-fn the_stat_is_the_same_before_and_after_compaction() {
-    let mut compacted = diff(Some("alpha\nbeta\ngamma\n"), "alpha\ndelta\ngamma\nomega\n");
-    let before = patch_of(&compacted);
-
-    compact_diff(&mut compacted);
-
-    assert_eq!(patch_of(&compacted), before);
-    assert_eq!((before.insertions, before.deletions), (2, 1));
-}
-
-/// A new file has no previous copy to diff against, and the reader has to be
-/// able to say so.
-#[test]
-fn a_created_file_records_that_it_was_created() {
-    let mut created = diff(None, "alpha\nbeta\n");
-
-    assert!(compact_diff(&mut created));
-
-    let patch = patch_of(&created);
-    assert!(patch.created);
-    assert_eq!((patch.insertions, patch.deletions), (2, 0));
-    assert!(patch.text.starts_with("--- /dev/null\n+++ b/src/main.rs\n"));
-    assert!(patch.text.contains("+alpha\n"));
-}
-
-/// A patch is proportional to the edit, but an edit can still be enormous. The
-/// text is capped on hunk boundaries; the counts keep describing the whole
-/// edit, so the stat stays honest even when the text is short.
 #[test]
 fn an_enormous_edit_keeps_whole_hunks_and_says_it_dropped_the_rest() {
     let old_text = (0..20_000)

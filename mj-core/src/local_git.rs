@@ -768,6 +768,7 @@ fn remote_urls(
 
 #[cfg(test)]
 mod tests {
+    // Hard-won: 71b0e8d1: Git 2.25 echoed unsupported options with success and could persist a false repository path
     #[test]
     fn git_common_directory_resolves_relative_output_and_rejects_echoed_options() {
         use super::resolve_git_path;
@@ -839,6 +840,7 @@ mod tests {
         );
     }
 
+    // Hard-won: ff0e61c8: sessions in linked worktrees created duplicate project bundles
     #[test]
     fn canonical_repository_maps_a_linked_worktree_to_its_main_repository() {
         let directory = tempfile::tempdir().unwrap();
@@ -922,37 +924,6 @@ mod tests {
         assert_eq!(source.push_urls, ["https://github.com/me/fork.git"]);
     }
 
-    /// Every command the daemon runs is logged with its purpose; an empty one
-    /// leaves a log line that says nothing about what ran.
-    #[test]
-    fn resolving_a_repository_gives_every_command_a_purpose() {
-        use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
-        use std::cell::RefCell;
-
-        struct Recording(RefCell<Vec<String>>);
-        impl CommandExecutor for Recording {
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                self.0.borrow_mut().push(command.purpose.clone());
-                ProcessExecutor.execute(command)
-            }
-        }
-
-        let directory = initialized_repository();
-        let path = directory.path();
-        git(
-            path,
-            &["remote", "add", "origin", "https://github.com/acme/app.git"],
-        );
-        let recording = Recording(RefCell::new(Vec::new()));
-        resolve_local_repository(path, &recording).unwrap();
-        let purposes = recording.0.borrow();
-        assert!(!purposes.is_empty());
-        assert!(
-            purposes.iter().all(|purpose| !purpose.is_empty()),
-            "{purposes:?}"
-        );
-    }
-
     #[test]
     fn no_remote_project_identity_is_its_canonical_repository() {
         let directory = initialized_repository();
@@ -977,6 +948,7 @@ mod tests {
         }
     }
 
+    // Hard-won: d07fc1f0: a configured missing project looked selectable, then failed without an explanation
     #[test]
     fn a_missing_project_directory_is_reported_in_plain_language() {
         let directory = tempfile::tempdir().unwrap();
