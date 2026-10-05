@@ -2006,6 +2006,74 @@ fn reopening_the_dialog_cannot_accept_the_previous_querys_answer() {
     assert!(resume_dialog(&dashboard.mode).unwrap().wiki.is_empty());
 }
 
+/// Cost of the merged row list and of one keypress, on a dialog the size a
+/// long-lived harness home produces. Run with
+/// `cargo test -p brokk-mj-tui resume_row_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement, not a behavior assertion"]
+fn resume_row_cost_for_a_few_thousand_sessions() {
+    const NATIVE: usize = 4_000;
+    const RECORDS: usize = 400;
+    const ROUNDS: usize = 200;
+
+    let records = (0..RECORDS)
+        .map(|index| {
+            let mut session = stopped_session();
+            session.id = format!("session-{index:04}");
+            session.native_session_id = None;
+            session.acp_session_title = Some(format!("Record {index}"));
+            session
+        })
+        .collect::<Vec<_>>();
+    let sessions = (0..NATIVE)
+        .map(|index| {
+            native(
+                &format!("native-{index:04}"),
+                &format!("Native conversation {index}"),
+                index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut dashboard = DashboardState::new(config(), state_with(records), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(sessions)]);
+    switch_to_import(&mut dashboard);
+
+    let Mode::ResumeDialog(dialog) = dashboard.mode.clone() else {
+        panic!("expected the resume dialog");
+    };
+    // What one rebuild costs: the merge, the sizes, and search.
+    let started = Instant::now();
+    let mut built = 0;
+    for _ in 0..ROUNDS {
+        built += build_resume_rows(
+            &dashboard.config,
+            &dashboard.state,
+            &dialog,
+            &dashboard.checkpoint_archive_sizes,
+        )
+        .0
+        .len();
+    }
+    let rebuild = started.elapsed();
+
+    // What the dialog actually pays per key press, which reads the rows
+    // rather than rebuilding them.
+    let started = Instant::now();
+    for _ in 0..ROUNDS {
+        dashboard.handle_key(key(KeyCode::Down));
+    }
+    let keypresses = started.elapsed();
+
+    println!(
+        "rows={} rebuild={:?} per_rebuild={:?} keypresses={:?} per_key={:?}",
+        built / ROUNDS,
+        rebuild,
+        rebuild / ROUNDS as u32,
+        keypresses,
+        keypresses / ROUNDS as u32,
+    );
+}
+
 /// A query's hits are counted on every tab, not only the one on screen, and
 /// an empty tab says where the other hits are rather than switching by itself.
 // Hard-won: 62ba3c1b: Issue #1161 found stopped sub-agent records could fill the resume list with dozens of rows for one session.
