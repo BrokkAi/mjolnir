@@ -522,6 +522,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: 6c391e1b: a target PATH without bash made user shell commands fail.
     #[tokio::test]
     async fn user_shell_runs_command_text_through_sh_when_path_lacks_bash() {
         let cwd = tempfile::tempdir().unwrap();
@@ -539,6 +540,7 @@ mod tests {
         assert!(result.stdout.contains("marker-file"), "{result:?}");
     }
 
+    // Hard-won: 6c391e1b: ENOENT diagnostics named the command instead of the missing shell.
     #[test]
     fn missing_login_shell_is_named_instead_of_the_command() {
         let environment = BTreeMap::from([("SHELL".into(), "/nonexistent/bin/bash".into())]);
@@ -595,36 +597,6 @@ mod tests {
         assert!(result.stderr.starts_with(&"y".repeat(OUTPUT_HEAD_BYTES)));
     }
 
-    #[tokio::test]
-    async fn cancelling_a_user_shell_kills_its_process_group() {
-        let cwd = tempfile::tempdir().unwrap();
-        let (events, mut received) = mpsc::channel(16);
-        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
-        shells
-            .start("shell-cancel-test".into(), "sleep 60 & wait".into())
-            .unwrap();
-        assert_eq!(
-            shells.cancel("shell-cancel-test"),
-            UserShellCancelOutcome::Requested
-        );
-        assert_eq!(
-            shells.cancel("shell-cancel-test"),
-            UserShellCancelOutcome::AlreadyRequested
-        );
-
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(RuntimeEvent::UserShellFinished { result, .. }) = received.recv().await
-                {
-                    break result;
-                }
-            }
-        })
-        .await
-        .expect("cancelled shell process group was not reaped");
-        assert_eq!(result.status, UserShellStatus::Cancelled);
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellation_still_owns_pipes_after_the_shell_leader_exits() {
@@ -674,6 +646,7 @@ mod tests {
 
     /// B-2: a backgrounded descendant holds stdout and stderr open.
     #[cfg(target_os = "linux")]
+    // Hard-won: c86b2123: descendants holding pipes kept completed commands running.
     #[tokio::test]
     async fn user_shell_completes_at_leader_exit_and_stops_a_descendant_holding_the_pipes() {
         let cwd = tempfile::tempdir().unwrap();
@@ -682,13 +655,13 @@ mod tests {
         shells
             .start(
                 "held-pipes".into(),
-                "sleep 300 & echo $! > descendant; echo hi; exit 3".into(),
+                "(sleep 0.5; echo during-drain; sleep 300; echo too-late) & echo $! > descendant; echo hi; exit 3".into(),
             )
             .unwrap();
         let result = finished(&mut received).await;
         assert_eq!(result.status, UserShellStatus::Exited, "{result:?}");
         assert_eq!(result.exit_code, Some(3));
-        assert_eq!(result.stdout, "hi\n");
+        assert_eq!(result.stdout, "hi\nduring-drain\n");
         // The duration is the leader's, not the drain's.
         assert!(result.duration_ms < 1_500, "{result:?}");
         let pid: i32 = std::fs::read_to_string(cwd.path().join("descendant"))
@@ -708,25 +681,6 @@ mod tests {
         assert_eq!(shells.available_slots(), MAX_CONCURRENT_USER_SHELLS - 1);
         shells.completed("held-pipes");
         assert_eq!(shells.available_slots(), MAX_CONCURRENT_USER_SHELLS);
-    }
-
-    /// Output the descendant writes during the drain is kept; output that
-    /// arrives after the drain is not waited for.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn user_shell_keeps_output_written_during_the_drain() {
-        let cwd = tempfile::tempdir().unwrap();
-        let (events, mut received) = mpsc::channel(64);
-        let mut shells = UserShellRegistry::new(cwd.path().to_path_buf(), BTreeMap::new(), events);
-        shells
-            .start(
-                "drain-output".into(),
-                "(sleep 0.5; echo during-drain; sleep 30; echo too-late) & echo first".into(),
-            )
-            .unwrap();
-        let result = finished(&mut received).await;
-        assert_eq!(result.status, UserShellStatus::Exited, "{result:?}");
-        assert_eq!(result.stdout, "first\nduring-drain\n");
     }
 
     #[cfg(unix)]

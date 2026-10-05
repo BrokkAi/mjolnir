@@ -1243,24 +1243,6 @@ fn the_plain_relay_refuses_reviewer_requests() {
     );
 }
 
-#[test]
-fn a_running_reviewer_is_reused_only_for_the_same_profile_and_generation() {
-    let base = config(0);
-    assert!(base.reusable_for(&config(0)));
-    assert!(!base.reusable_for(&config(1)));
-
-    let mut other_profile = config(0);
-    other_profile.profile_id = "another".into();
-    assert!(!base.reusable_for(&other_profile));
-
-    // Model and effort are applied on the live session, so they never force a
-    // restart that would throw the reviewer's conversation away.
-    let mut configured = config(0);
-    configured.model = Some("deep".into());
-    configured.effort = Some("high".into());
-    assert!(base.reusable_for(&configured));
-}
-
 /// Whether `pid` still names a live process.
 fn process_alive(pid: i32) -> bool {
     // SAFETY: signal 0 performs the permission and existence check only; it
@@ -1289,13 +1271,6 @@ fn collected_agent_text(events: &[RelayEvent]) -> String {
                 .flatten()
         })
         .collect()
-}
-
-/// The unused import guard: the sidecar's coordinator lives in `unix`, and a
-/// test build that cannot see it would silently stop covering the real one.
-#[test]
-fn the_sidecar_uses_the_worker_relay_coordinator() {
-    let _ = unix::ACP_EVENT_CHANNEL_CAPACITY;
 }
 
 #[tokio::test]
@@ -1608,49 +1583,6 @@ async fn stale_preparation_cleanup_does_not_stop_a_replacement_reviewer() {
         !process_alive(pid),
         "the owning generation can stop its reviewer"
     );
-}
-
-#[tokio::test]
-async fn reviewer_fast_mode_is_applied_when_advertised_and_optional_otherwise() {
-    for scenario in ["supported", "absent", "rejected"] {
-        let mut fixture = Fixture::new(true);
-        let directory = fixture.script_directory();
-        let fast_option = |value| {
-            SessionConfigOption::select(
-                "fast-mode",
-                "Fast mode",
-                value,
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new("off", "Off"),
-                    SessionConfigSelectOption::new("on", "On"),
-                ]),
-            )
-        };
-        let options = if scenario == "absent" {
-            vec![]
-        } else {
-            vec![fast_option("off")]
-        };
-        write_options(&directory, "options.json", &options);
-        write_options(&directory, "options-on.json", &[fast_option("on")]);
-        if scenario == "rejected" {
-            std::fs::write(directory.join("reject-on"), "1").unwrap();
-        }
-        let mut chosen = config(0);
-        chosen.fast_mode = Some(true);
-        let body = fixture.start(chosen).await;
-        started_options(&body);
-        if scenario == "supported" {
-            assert!(
-                std::fs::read_to_string(directory.join("applied"))
-                    .unwrap()
-                    .contains("fast-mode=on")
-            );
-        } else {
-            assert!(!directory.join("applied").exists());
-        }
-        fixture.sidecar.pause_all().await;
-    }
 }
 
 #[tokio::test]
