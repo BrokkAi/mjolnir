@@ -91,6 +91,15 @@ fn agent(text: &str) -> CanonicalTranscriptBody {
 
 /// A canonical tool item as `projection` writes it: a whole ACP
 /// `ToolCall`, not a `sessionUpdate`-tagged update.
+fn tool_call(status: &str, text: &str) -> Value {
+    serde_json::json!({
+        "toolCallId": "call-1",
+        "title": "read file",
+        "status": status,
+        "content": [{"type": "content", "content": {"type": "text", "text": text}}]
+    })
+}
+
 fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
     let transcript = bodies
         .into_iter()
@@ -326,6 +335,46 @@ async fn independent_pages_run_at_the_compaction_concurrency_limit() {
     assert_eq!(backend.active.load(Ordering::SeqCst), 0);
 }
 
+/// Merging two summaries at a time cost one request per pair and a round
+/// per level of the tree: 33 pages became 32 further requests, run two at
+/// a time. Packing a whole round into one prompt is the fix.
+// Hard-won: 3ffa75af6113: one handoff used 65 model requests over fourteen minutes
+#[tokio::test]
+async fn page_summaries_that_fit_one_prompt_reduce_in_a_single_request() {
+    let large = "r".repeat(20 * 1024);
+    let turns = (0..20)
+        .map(|index| (format!("prompt {index}"), large.clone()))
+        .collect::<Vec<_>>();
+    let refs = turns
+        .iter()
+        .map(|(prompt, answer)| (prompt.as_str(), answer.as_str()))
+        .collect::<Vec<_>>();
+    let backend = FakeBackend::default();
+
+    compact_snapshot(
+        &exchanges(&refs),
+        CompactionBudget::uniform(32 * 1024),
+        &backend,
+    )
+    .await
+    .unwrap();
+
+    let prompts = backend.prompts.lock().unwrap();
+    let pages = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("<historical_transcript>"))
+        .count();
+    let reductions = prompts
+        .iter()
+        .filter(|prompt| prompt.contains("Merge these contiguous historical state snapshots"))
+        .count();
+    assert!(pages >= 16, "the transcript must page: {pages} pages");
+    assert_eq!(
+        reductions, 1,
+        "summaries that fit one prompt merge in one request"
+    );
+}
+
 /// The summarizer's window and the target harness's window are unrelated
 /// numbers. A transcript that fits the summarizer takes one request even
 /// when the handoff budget is far smaller.
@@ -473,6 +522,60 @@ fn prior_handoff_turn_keeps_its_work_under_a_placeholder() {
             "work done after a handoff is real history"
         );
     }
+}
+
+// Hard-won: 4e8da38f74a9: resumed transcripts dropped real post-resume plan and tool work
+#[test]
+fn plan_and_tool_events_join_their_user_turn() {
+    let turns = turns_from_snapshot(&snapshot(vec![
+        user("do it"),
+        CanonicalTranscriptBody::Plan {
+            plan: serde_json::json!({"entries": [{"content": "step one", "status": "pending", "priority": "medium"}]}),
+        },
+        CanonicalTranscriptBody::Tool {
+            call: tool_call("completed", "tool output"),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+    ]))
+    .unwrap();
+
+    assert_eq!(turns.len(), 1);
+    let rendered = render_turns(&turns, 0);
+    assert!(rendered.contains("step one"));
+    assert!(rendered.contains("tool output"));
+}
+
+#[test]
+fn agent_history_before_a_user_turn_is_an_error() {
+    let error = turns_from_snapshot(&snapshot(vec![agent("orphan")])).unwrap_err();
+
+    assert!(
+        error.to_string().contains("before its first user turn"),
+        "{error}"
+    );
+}
+
+#[test]
+fn startup_tool_history_before_a_user_turn_is_ignored() {
+    let turns = turns_from_snapshot(&snapshot(vec![
+        CanonicalTranscriptBody::Tool {
+            call: tool_call("failed", "MCP server startup was cancelled"),
+            terminal_outputs: Vec::new(),
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+        user("do the work"),
+        agent("done"),
+    ]))
+    .unwrap();
+
+    let rendered = render_turns(&turns, 0);
+    assert_eq!(turns.len(), 1);
+    assert!(rendered.contains("do the work"));
+    assert!(rendered.contains("done"));
+    assert!(!rendered.contains("startup was cancelled"));
 }
 
 #[tokio::test]

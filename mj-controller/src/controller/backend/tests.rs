@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,7 +12,9 @@ use mj_core::config::{
 };
 use mj_core::state::State;
 
-use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate};
+use crate::targets::{
+    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost, RefreshWhen,
+};
 
 use super::*;
 
@@ -230,6 +233,193 @@ fn github_token_is_inherited_only_by_managed_containers() {
             "https://github.com/fork/app.git",
             "ssh://git@example.test/app.git"
         ]
+    );
+}
+
+fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
+    ConfigContainer {
+        build_cache: None,
+        image: image.into(),
+        pull_policy,
+        platform: None,
+        cpus: None,
+        memory: None,
+        environment: Default::default(),
+        workspace_storage: Default::default(),
+    }
+}
+
+// Hard-won: 8c5355ea19ec: auto-policy images were skipped, leaving first Create to download them
+#[test]
+fn the_image_refresh_plan_covers_every_configured_container_image_except_never() {
+    use mj_core::config::ImagePullPolicy;
+
+    let mut config = Config::default();
+    config.targets.insert(
+        "podman".into(),
+        TargetTemplate::LocalPodman {
+            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+        },
+    );
+    // The same image on the same host, named by a second target.
+    config.targets.insert(
+        "podman-again".into(),
+        TargetTemplate::LocalPodman {
+            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+        },
+    );
+    config.targets.insert(
+        "ssh".into(),
+        TargetTemplate::SshPodman {
+            ssh: SshConnection {
+                host: "builder.example.test".into(),
+                user: Some("dev".into()),
+                identity_file: Some(PathBuf::from("/home/dev/.ssh/builder")),
+                extra_args: Vec::new(),
+            },
+            container: ConfigContainer {
+                platform: Some("linux/amd64".into()),
+                ..container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto)
+            },
+        },
+    );
+    config.targets.insert(
+        "docker".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Newer),
+        },
+    );
+    config.targets.insert(
+        "pinned".into(),
+        TargetTemplate::LocalPodman {
+            container: container_target(
+                "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ImagePullPolicy::Auto,
+            ),
+        },
+    );
+    // Apple's engine joins the startup download like every other engine.
+    config.targets.insert(
+        "apple".into(),
+        TargetTemplate::AppleContainer {
+            container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Auto),
+        },
+    );
+    // An explicit `never` is the one way to keep an image out of the plan.
+    config.targets.insert(
+        "never".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/offline:latest", ImagePullPolicy::Never),
+        },
+    );
+    // Two targets sharing one image on one host, wanting it at different
+    // freshness: one download, on the more eager schedule.
+    config.targets.insert(
+        "merge-missing".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/shared:2", ImagePullPolicy::Missing),
+        },
+    );
+    config.targets.insert(
+        "merge-newer".into(),
+        TargetTemplate::LocalDocker {
+            container: container_target("ghcr.io/example/shared:2", ImagePullPolicy::Newer),
+        },
+    );
+
+    let plan = image_refresh_plan(&config);
+    assert_eq!(
+        plan.len(),
+        6,
+        "expected one refresh per host, image and platform: {plan:?}"
+    );
+
+    let entry = |host: &ImageHost, image: &str| {
+        plan.iter()
+            .find(|refresh| &refresh.host == host && refresh.image == image)
+            .unwrap_or_else(|| panic!("no refresh for {image} on {}: {plan:?}", host.label()))
+    };
+
+    let local = entry(&ImageHost::LocalPodman, "ghcr.io/example/dev:latest");
+    assert_eq!(local.when, RefreshWhen::Always);
+    assert_eq!(local.pull.program, "podman");
+    assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
+    assert_eq!(
+        local.prune.as_ref().expect("podman prunes").args,
+        ["image", "prune", "-f"]
+    );
+    assert_eq!(
+        local.image_id.args,
+        [
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "ghcr.io/example/dev:latest"
+        ]
+    );
+
+    let docker = entry(&ImageHost::LocalDocker, "ghcr.io/example/dev:1.2.3");
+    assert_eq!(docker.when, RefreshWhen::Always);
+    assert_eq!(docker.pull.program, "docker");
+    assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
+    assert_eq!(
+        docker.prune.as_ref().expect("docker prunes").args,
+        ["image", "prune", "-f"]
+    );
+
+    // A versioned tag and a digest pin only need the host to have a copy.
+    let apple = entry(&ImageHost::AppleContainer, "ghcr.io/example/dev:1.2.3");
+    assert_eq!(apple.when, RefreshWhen::WhenAbsent);
+    assert_eq!(apple.pull.program, "container");
+    assert_eq!(
+        apple.pull.args,
+        ["image", "pull", "ghcr.io/example/dev:1.2.3"]
+    );
+    let pinned = plan
+        .iter()
+        .find(|refresh| refresh.image.contains("sha256:"))
+        .expect("a digest pin is still downloaded once when absent");
+    assert_eq!(pinned.when, RefreshWhen::WhenAbsent);
+
+    assert!(
+        !plan.iter().any(|refresh| refresh.image.contains("offline")),
+        "a never policy was downloaded in the background: {plan:?}"
+    );
+
+    let shared = entry(&ImageHost::LocalDocker, "ghcr.io/example/shared:2");
+    assert_eq!(
+        shared.when,
+        RefreshWhen::Always,
+        "the more eager of two targets sharing an image wins"
+    );
+
+    let ssh = plan
+        .iter()
+        .find(|refresh| matches!(refresh.host, ImageHost::SshPodman(_)))
+        .expect("the SSH host is refreshed over its own connection");
+    assert_eq!(ssh.when, RefreshWhen::Always);
+    assert_eq!(ssh.pull.program, "ssh");
+    // The identity file and destination come from the same builder
+    // provisioning uses.
+    assert!(ssh.pull.args.contains(&"/home/dev/.ssh/builder".to_owned()));
+    assert!(
+        ssh.pull
+            .args
+            .contains(&"dev@builder.example.test".to_owned())
+    );
+    assert_eq!(
+        ssh.pull.args.last().map(String::as_str),
+        Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
+    );
+    assert_eq!(
+        ssh.prune
+            .as_ref()
+            .expect("podman prunes")
+            .args
+            .last()
+            .map(String::as_str),
+        Some("'podman' 'image' 'prune' '-f'")
     );
 }
 // Hard-won: 69e2f7a632ab: launch and move repeated slow remote container checks on multiple wizard pages

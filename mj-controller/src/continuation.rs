@@ -177,6 +177,28 @@ mod tests {
     }
 
     #[test]
+    fn continuation_preserves_authorization_across_three_exchanges() {
+        let s = session(&[
+            ("user", "Implement the parser, add tests, and commit."),
+            ("assistant", "I will use the existing parser interface."),
+            ("user", "Also handle empty files."),
+            ("assistant", "That fits the plan."),
+            ("user", "Go ahead."),
+            (
+                "assistant",
+                "Implemented with empty-file support. Shall I add tests?",
+            ),
+        ]);
+        let e = evidence(&s).unwrap();
+        assert_eq!(e.messages.len(), 6);
+        assert_eq!(
+            e.messages[0].text,
+            "Implement the parser, add tests, and commit."
+        );
+        assert!(!e.assistant_history_omitted);
+    }
+
+    #[test]
     fn continuation_never_clips_user_consent_and_marks_omitted_assistant_context() {
         let oversized = "x".repeat(mj_core::continuation::USER_BYTES + 1);
         assert!(evidence(&session(&[("user", &oversized), ("assistant", "Done")])).is_err());

@@ -543,6 +543,31 @@ Last 7d · 5966 requests · 78 sessions
 ";
 
     #[test]
+    fn banked_resets_count_unspent_grants_without_requiring_immediate_use() {
+        let payload = serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+            {"resets_left": 1, "usable_now": false, "use_requires_limit": true},
+            {"resets_left": 2, "starts_at": "1970-01-01T00:01:40Z", "ends_at": "1970-01-01T00:03:20Z"},
+            {"resets_left": 5, "ends_at": "1970-01-01T00:01:40Z"},
+            {"resets_left": 7, "starts_at": "1970-01-01T00:03:20Z"}
+        ]}});
+        assert_eq!(super::parse_banked_resets(&payload, 100), Some(3));
+        assert_eq!(
+            super::parse_banked_resets(
+                &serde_json::json!({"cedar_ember": {"eligible": false}}),
+                100
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            super::parse_banked_resets(
+                &serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}}),
+                100
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn unknown_reset_metadata_does_not_discard_claude_usage() {
         for block in [
             serde_json::Value::Null,
@@ -956,5 +981,48 @@ Last 7d · 5966 requests · 78 sessions
 
         assert_eq!(report.week.unwrap().remaining_percent, 60);
         server.abort();
+    }
+
+    #[test]
+    fn expired_oauth_access_token_is_login_expired() {
+        let credentials = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-test",
+                "expiresAt": 1_000
+            }
+        });
+        assert_eq!(
+            oauth_access_token(&credentials, 1_001),
+            Err(ClaudeUsageError::LoginExpired)
+        );
+        assert_eq!(
+            oauth_access_token(&credentials, 1_000),
+            Err(ClaudeUsageError::LoginExpired)
+        );
+    }
+
+    #[test]
+    fn current_oauth_access_token_is_usable() {
+        let credentials = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-test",
+                "expiresAt": 2_000
+            }
+        });
+        assert_eq!(
+            oauth_access_token(&credentials, 1_999).expect("token"),
+            "sk-ant-oat01-test"
+        );
+    }
+
+    #[test]
+    fn oauth_access_token_without_expiry_is_usable() {
+        let credentials = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "sk-ant-oat01-test" }
+        });
+        assert_eq!(
+            oauth_access_token(&credentials, 9_000).expect("token"),
+            "sk-ant-oat01-test"
+        );
     }
 }
