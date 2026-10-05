@@ -644,6 +644,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
     }
+    #[cfg(unix)]
     use super::*;
 
     // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
