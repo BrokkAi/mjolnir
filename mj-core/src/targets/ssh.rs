@@ -1738,6 +1738,29 @@ pub fn ssh_retry_delay(attempts_made: usize) -> Duration {
 mod tests {
     use super::*;
 
+    #[test]
+    fn remote_podman_exec_keeps_the_container_configured_user() {
+        let command = ssh_command_owned(
+            &plain_target("podman-root-test"),
+            vec![
+                "podman".into(),
+                "exec".into(),
+                "--detach".into(),
+                "session".into(),
+                "true".into(),
+            ],
+        );
+        assert!(
+            command
+                .args
+                .last()
+                .unwrap()
+                .contains("'podman' 'exec' '--detach' 'session' 'true'"),
+            "{:?}",
+            command.args
+        );
+    }
+
     /// Launch finding R3-11: `*.lock` files stayed in the instance's socket
     /// directory after their masters exited. The daemon clears, when it
     /// starts, each lock whose master's socket is gone, and leaves a lock that

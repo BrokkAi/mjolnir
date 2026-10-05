@@ -293,6 +293,7 @@ fn bootstrap_login_environment(
             );
             mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
         }
+        environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
         // environment-isolating re-exec. Carry only those feature-gated test
         // controls across; ordinary launcher variables must stay excluded.

@@ -1633,7 +1633,7 @@ fn ssh_podman_runtime_check(
                     format!("On {destination}: {remediation} See {PODMAN_DOCUMENTATION_URL}.")
                 }
                 None => format!(
-                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.3 or newer there. See {PODMAN_DOCUMENTATION_URL}."
+                    "Verify `ssh {destination}` succeeds noninteractively from this host, then install rootless Podman 4.0 or newer there. See {PODMAN_DOCUMENTATION_URL}."
                 ),
             };
             return DoctorCheck::fixable(check_id, title, detail, remediation);

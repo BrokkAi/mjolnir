@@ -1729,7 +1729,7 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
             &ProcessExecutor,
             CommandSpec::new(
                 "docker",
-                container_upload_ownership_args(&container_id, &root, &[&root]),
+                container_upload_ownership_args("docker", &container_id, &root, &[&root]),
             ),
         )?;
         execute_checked(
@@ -1845,7 +1845,7 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
 
     let mut lines = rendered(&executor.commands.borrow());
     let ownership = lines.remove(1);
-    assert!(ownership.starts_with(&format!("podman exec --user 0 {container_id} sh -c")));
+    assert!(ownership.starts_with(&format!("podman exec --user 0:0 {container_id} sh -c")));
     assert!(ownership.contains("chown -R"));
     assert!(ownership.ends_with(&format!("/var/lib/hel/workers/{session}/hel.next")));
     assert_eq!(
@@ -1862,6 +1862,68 @@ fn replacing_an_installed_podman_worker_writes_through_a_next_path() {
         ]
     );
 }
+
+#[test]
+fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
+    let session = "26262626262626262626262626262626";
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), stamped_worker(b"replacement"))
+        .expect("write a stamped replacement worker");
+    let local_name = targets::resource_name(session).unwrap();
+    let ssh = SshTarget {
+        destination: "user@example.test".into(),
+        ssh_args: Vec::new(),
+    };
+    let locators = [
+        (
+            "local",
+            targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: local_name.clone(),
+                workspace_storage: Default::default(),
+            },
+        ),
+        (
+            "ssh",
+            targets::TargetLocator::SshPodman {
+                borrowed_from: None,
+                ssh,
+                container_id: local_name.clone(),
+                workspace_storage: Default::default(),
+            },
+        ),
+    ];
+
+    for (kind, locator) in locators {
+        let start = start_worker_command(&locator, "/var/lib/hel/workers/session");
+        let start_text = format!("{} {}", start.program, start.args.join(" "));
+        assert!(
+            !start_text.contains("--user"),
+            "{kind} worker start must inherit the configured container user: {start_text}"
+        );
+
+        let upgrade =
+            installed_worker_binary_replacement_plan(&locator, session, source.path()).unwrap();
+        let commands = rendered(&upgrade.commands);
+        let ownership = commands
+            .iter()
+            .find(|command| command.contains("chown -R"))
+            .expect("the upload owner is normalized");
+        assert!(
+            ownership.contains("--user") && ownership.contains("0:0"),
+            "{kind} ownership normalization still needs container root: {ownership}"
+        );
+        for command in commands.iter().filter(|command| command.contains("exec ")) {
+            if !command.contains("chown -R") {
+                assert!(
+                    !command.contains("--user"),
+                    "{kind} worker promotion must inherit the configured user: {command}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
@@ -2915,6 +2977,68 @@ fn launches_on_every_target(
 }
 
 #[test]
+fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() {
+    let home = tempfile::tempdir().unwrap();
+    let codex = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&codex) {
+        if target == "localhost" {
+            assert!(!launch.environment.contains_key("HOME"));
+            assert!(
+                !launch
+                    .environment
+                    .contains_key(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+            );
+            continue;
+        }
+        assert!(!launch.target_environment.contains_key("HOME"), "{target}");
+        assert!(!launch.environment.contains_key("HOME"), "{target}");
+        assert_eq!(
+            launch
+                .target_environment
+                .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+                .map(String::as_str),
+            Some("/home/hel/.gitconfig"),
+            "{target}"
+        );
+        assert_eq!(
+            launch
+                .environment
+                .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+                .map(String::as_str),
+            Some("/home/hel/.gitconfig"),
+            "{target}"
+        );
+        assert!(!launch.environment.contains_key("IS_SANDBOX"), "{target}");
+    }
+
+    let claude = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+    for (target, launch) in launches_on_every_target(&claude) {
+        if target == "localhost" {
+            assert!(!launch.environment.contains_key("IS_SANDBOX"));
+            continue;
+        }
+        assert!(!launch.environment.contains_key("HOME"), "{target}");
+        assert_eq!(
+            launch
+                .environment
+                .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+                .map(String::as_str),
+            Some("/home/hel/.gitconfig"),
+            "{target}"
+        );
+        assert_eq!(launch.environment["IS_SANDBOX"], "1", "{target}");
+    }
+}
+
+#[test]
 fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
     let home = tempfile::tempdir().unwrap();
     let profile = codex_login_profile(home.path(), "chatgpt");
@@ -3055,6 +3179,13 @@ fn a_child_in_a_remote_container_takes_its_login_in_its_own_staged_home() {
     .unwrap();
 
     assert_eq!(launch.harness_home, PathBuf::from(&target_home));
+    assert_eq!(
+        launch
+            .environment
+            .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+            .map(String::as_str),
+        Some("/home/hel/.gitconfig")
+    );
     assert_eq!(
         launch.harness_home,
         PathBuf::from(format!("/var/lib/hel/profiles/{child_id}")),

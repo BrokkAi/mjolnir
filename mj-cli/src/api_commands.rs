@@ -130,7 +130,7 @@ pub(crate) struct NewArgs {
     /// Title shown in session lists. Defaults to the project and profile.
     #[arg(long)]
     title: Option<String>,
-    /// Choose a quota-ranked eligible profile for this model and optional effort.
+    /// Choose a quota-ranked usable profile for this model and optional effort.
     #[arg(long, conflicts_with = "profile")]
     model: Option<String>,
     /// Harness reasoning effort to select before the first prompt.
@@ -237,23 +237,54 @@ pub(crate) struct TranscriptArgs {
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
-    /// Resume from the highest sequence already read.
+    /// Start after this sequence; use next_after_seq to resume after a page.
     #[arg(long)]
     after_seq: Option<u64>,
-    /// Most items to return in one page.
+    /// Target number of matching entries in a page; sequence ties stay together.
     #[arg(long)]
     limit: Option<usize>,
-    /// Return only items with this role: user, agent, thought, tool, terminal,
-    /// plan, plan_proposal, or system.
+    /// Return only items with this role; repeat to select several roles.
     #[arg(long, value_parser = parse_transcript_role)]
-    role: Option<mj_core::transcript::TranscriptRole>,
+    role: Vec<mj_core::transcript::TranscriptRole>,
+    /// Return finished agent messages only, with a cursor held before open messages.
+    #[arg(long)]
+    finished_only: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
 }
 
 fn parse_transcript_role(value: &str) -> Result<mj_core::transcript::TranscriptRole, String> {
-    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|e| e.to_string())
+    serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
+        format!(
+            "unknown transcript role {value:?}; expected user, agent, thought, tool, terminal, plan, plan_proposal, or system"
+        )
+    })
+}
+
+fn requested_transcript_roles(
+    args: &TranscriptArgs,
+) -> Result<Vec<mj_core::transcript::TranscriptRole>> {
+    use mj_core::transcript::TranscriptRole;
+
+    if args.finished_only {
+        if args.role.iter().any(|role| *role != TranscriptRole::Agent) {
+            bail!("--finished-only can only be combined with --role agent");
+        }
+        return Ok(vec![TranscriptRole::Agent]);
+    }
+
+    if args.role.is_empty() {
+        return Ok(vec![
+            TranscriptRole::User,
+            TranscriptRole::Agent,
+            TranscriptRole::Thought,
+            TranscriptRole::Plan,
+            TranscriptRole::PlanProposal,
+            TranscriptRole::System,
+        ]);
+    }
+    Ok(args.role.clone())
 }
 
 #[derive(Debug, Args)]
@@ -1290,9 +1321,16 @@ fn outcome_name(outcome: WaitOutcome) -> &'static str {
 }
 
 pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
+    let roles = requested_transcript_roles(&args)?;
     let client = ApiClient::connect().await?;
     let page = client
-        .transcript(&args.session, args.after_seq, args.limit, args.role)
+        .transcript(
+            &args.session,
+            args.after_seq,
+            args.limit,
+            &roles,
+            args.finished_only,
+        )
         .await?;
     if args.json {
         return print_json(&page);
@@ -2710,6 +2748,7 @@ mod tests {
             (args.after_seq, args.limit, args.json),
             (Some(5), Some(10), true)
         );
+        assert!(args.role.is_empty());
 
         let cli = Cli::try_parse_from([
             "mj",
@@ -2840,6 +2879,105 @@ mod tests {
             });
             assert_eq!(crate::command_name(cli.command.as_ref()), matched);
         }
+    }
+
+    #[test]
+    fn transcript_role_selection_is_repeatable_and_defaults_omit_verbose_roles() {
+        use mj_core::transcript::TranscriptRole;
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "transcript",
+            "--session",
+            "s1",
+            "--role",
+            "agent",
+            "--role",
+            "user",
+        ])
+        .expect("repeated role filters parse");
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert_eq!(args.role, [TranscriptRole::Agent, TranscriptRole::User]);
+        assert_eq!(requested_transcript_roles(&args).unwrap(), args.role);
+
+        let cli = Cli::try_parse_from(["mj", "transcript", "--session", "s1"])
+            .expect("the default role selection parses");
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert!(args.role.is_empty());
+        assert_eq!(
+            requested_transcript_roles(&args).unwrap(),
+            [
+                TranscriptRole::User,
+                TranscriptRole::Agent,
+                TranscriptRole::Thought,
+                TranscriptRole::Plan,
+                TranscriptRole::PlanProposal,
+                TranscriptRole::System,
+            ]
+        );
+
+        assert!(
+            Cli::try_parse_from(["mj", "transcript", "--session", "s1", "--all-roles"]).is_err()
+        );
+        let error =
+            Cli::try_parse_from(["mj", "transcript", "--session", "s1", "--role", "unknown"])
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("unknown transcript role \"unknown\""),
+            "{error}"
+        );
+
+        let cli = Cli::try_parse_from(["mj", "transcript", "--session", "s1", "--finished-only"])
+            .expect("finished-only parses without an explicit role");
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert!(args.finished_only);
+        assert_eq!(
+            requested_transcript_roles(&args).unwrap(),
+            [TranscriptRole::Agent]
+        );
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "transcript",
+            "--session",
+            "s1",
+            "--role",
+            "agent",
+            "--finished-only",
+        ])
+        .expect("finished-only accepts an explicit agent role");
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert_eq!(
+            requested_transcript_roles(&args).unwrap(),
+            [TranscriptRole::Agent]
+        );
+
+        let cli = Cli::try_parse_from([
+            "mj",
+            "transcript",
+            "--session",
+            "s1",
+            "--role",
+            "user",
+            "--finished-only",
+        ])
+        .expect("role options parse before their combination is validated");
+        let Some(Command::Transcript(args)) = cli.command else {
+            panic!("expected the transcript subcommand");
+        };
+        assert_eq!(
+            requested_transcript_roles(&args).unwrap_err().to_string(),
+            "--finished-only can only be combined with --role agent"
+        );
     }
 
     /// F-16: `mj usage` added text output while keeping partial coverage visible.

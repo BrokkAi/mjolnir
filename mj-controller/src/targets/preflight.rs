@@ -506,7 +506,7 @@ impl PodmanProbe {
     /// What running this probe checks, in words that follow "to check".
     fn checks(self) -> &'static str {
         match self {
-            Self::Version => "that Podman 4.3.0 or newer is installed",
+            Self::Version => "that Podman 4.0.0 or newer is installed",
             Self::UidMap => "that rootless Podman maps container UIDs 0 and 1",
         }
     }
@@ -522,7 +522,7 @@ fn unshare_refused_non_rootless(stderr: &str) -> bool {
 impl PodmanPostcondition {
     pub(super) fn statement(self) -> &'static str {
         match self {
-            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.3.0 or newer",
+            Self::Version => "Postcondition `podman --version` succeeds with Podman 4.0.0 or newer",
             Self::Rootless => {
                 "Postcondition Podman is local and rootless (`podman unshare` is allowed)"
             }
@@ -942,58 +942,6 @@ pub(super) fn valid_rootless_uid_map(stdout: &[u8]) -> bool {
                 .is_some_and(|end| *inside <= container_id && container_id < end)
         })
     })
-}
-
-/// The uid and gid of the container image's configured user, read on the host
-/// that runs the container engine. `ssh` names that host for a remote Podman
-/// target; `None` reads it on this machine.
-///
-/// The image is asked rather than assumed, because `--userns=keep-id` has to
-/// name the ids the container will actually run as. The probe carries the
-/// template's own pull policy, so it reads the same image the launch will run
-/// and never pulls one the launch would not. The entrypoint is cleared so the
-/// answer comes from an image whose entrypoint is a long-running program.
-pub fn probe_image_user(
-    ssh: Option<&SshTarget>,
-    template: &ContainerTemplate,
-    executor: &impl CommandExecutor,
-) -> Result<ImageUser> {
-    let host = match ssh {
-        Some(ssh) => PodmanHost::Ssh(ssh),
-        None => PodmanHost::Local,
-    };
-    let mut args = vec!["podman".to_owned(), "run".to_owned(), "--rm".to_owned()];
-    args.extend(podman_pull_argument(template));
-    args.extend([
-        "--entrypoint".to_owned(),
-        String::new(),
-        template.image.clone(),
-        "sh".to_owned(),
-        "-c".to_owned(),
-        "id -u; id -g".to_owned(),
-    ]);
-    let output = executor.execute(&host.command_owned(args, "read the container image user"))?;
-    if output.status != 0 {
-        bail!(
-            "image user probe failed with status {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut ids = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let mut next = |field: &str| -> Result<u32> {
-        ids.next()
-            .with_context(|| format!("image user probe reported no {field}"))?
-            .parse()
-            .with_context(|| format!("image user probe reported an unreadable {field}"))
-    };
-    let uid = next("uid")?;
-    let gid = next("gid")?;
-    Ok(ImageUser { uid, gid })
 }
 
 /// Filesystem type of each directory, probed on the host that runs the

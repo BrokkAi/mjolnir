@@ -445,12 +445,14 @@ struct FakeBackend {
     summary: Option<TurnSummary>,
     /// Follow-ups the start handler asked for.
     followups: Mutex<Vec<(String, StartFollowup)>>,
-    /// A custom quota-ranked candidate set for new-session model selection.
-    model_candidates: Option<SubagentCandidates>,
+    /// Candidate sets stay distinct to model session and sub-agent scope.
+    session_model_candidates: Option<SubagentCandidates>,
+    subagent_model_candidates: Option<SubagentCandidates>,
     start_status: Option<StartStatus>,
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
     transcript_limits: Mutex<Vec<usize>>,
+    transcript_filters: Mutex<Vec<(Vec<mj_core::transcript::TranscriptRole>, bool)>>,
     history: Option<mj_core::storage::TranscriptHistoryPage>,
     history_cursors: Mutex<Vec<Option<mj_core::storage::TranscriptCursor>>>,
     /// Export answers. `None` stands for a refusal, which is what an
@@ -580,7 +582,7 @@ impl SubagentBackend for FakeBackend {
         &self,
         parent_profile: String,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
-        let model_candidates = self.model_candidates.clone();
+        let model_candidates = self.subagent_model_candidates.clone();
         Box::pin(async move {
             if let Some(candidates) = model_candidates {
                 return Ok(candidates);
@@ -597,6 +599,13 @@ impl SubagentBackend for FakeBackend {
                 }],
                 unavailable: Vec::new(),
             })
+        })
+    }
+
+    fn session_profile_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        let candidates = self.session_model_candidates.clone();
+        Box::pin(async move {
+            candidates.ok_or_else(|| anyhow::anyhow!("session profile candidates are unavailable"))
         })
     }
 
@@ -683,10 +692,15 @@ impl SubagentBackend for FakeBackend {
         _session_id: String,
         _after_seq: u64,
         limit: usize,
-        _role: Option<mj_core::transcript::TranscriptRole>,
+        roles: Vec<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
         Box::pin(async move {
             self.transcript_limits.lock().unwrap().push(limit);
+            self.transcript_filters
+                .lock()
+                .unwrap()
+                .push((roles, finished_only));
             Ok(self.transcript.lock().unwrap().clone())
         })
     }
@@ -1389,15 +1403,30 @@ fn start_request(body: String) -> Request<Body> {
         .unwrap()
 }
 
-fn model_candidate(
+fn model_candidate(profile_id: &str, remaining_percent: u8, model: &str) -> SubagentCandidate {
+    model_candidate_with_efforts(profile_id, remaining_percent, model, &["high"])
+}
+
+fn model_candidate_for_harness(
     profile_id: &str,
-    harness: mj_core::config::HarnessKind,
+    remaining_percent: u8,
     model: &str,
-    efforts: &[&str],
+    harness: mj_core::config::HarnessKind,
+) -> SubagentCandidate {
+    let mut candidate = model_candidate(profile_id, remaining_percent, model);
+    candidate.harness = harness;
+    candidate
+}
+
+fn model_candidate_with_efforts(
+    profile_id: &str,
+    remaining_percent: u8,
+    model: &str,
+    effort_values: &[&str],
 ) -> SubagentCandidate {
     SubagentCandidate {
         profile_id: profile_id.into(),
-        harness,
+        harness: mj_core::config::HarnessKind::Codex,
         choices: mj_core::worker_launch::ProfileConfig {
             model: Some(model.into()),
             models: vec![mj_core::acp::SessionConfigChoice {
@@ -1405,7 +1434,7 @@ fn model_candidate(
                 name: model.into(),
                 description: None,
             }],
-            efforts: efforts
+            efforts: effort_values
                 .iter()
                 .map(|effort| mj_core::acp::SessionConfigChoice {
                     value: (*effort).into(),
@@ -1415,7 +1444,7 @@ fn model_candidate(
                 .collect(),
             observed_at: 1,
         },
-        remaining_percent: Some(80),
+        remaining_percent: Some(remaining_percent),
     }
 }
 
@@ -1425,19 +1454,14 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
     let preferences_path = directory.path().join("go.json");
     save_global_default(&preferences_path, "codex-1", "podman");
     let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
+        session_model_candidates: Some(SubagentCandidates {
             offered: vec![
-                model_candidate(
-                    "codex-1",
-                    mj_core::config::HarnessKind::Codex,
-                    "gpt-6.6",
-                    &[],
-                ),
-                model_candidate(
+                model_candidate_with_efforts("codex-1", 80, "gpt-6.6", &[]),
+                model_candidate_for_harness(
                     "grok-main",
-                    mj_core::config::HarnessKind::Grok,
+                    80,
                     "grok-4.6",
-                    &["high"],
+                    mj_core::config::HarnessKind::Grok,
                 ),
             ],
             unavailable: Vec::new(),
@@ -1489,13 +1513,8 @@ async fn model_first_session_start_reports_incompatible_profiles_in_the_api_erro
     let preferences_path = directory.path().join("go.json");
     save_global_default(&preferences_path, "codex-1", "podman");
     let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
-            offered: vec![model_candidate(
-                "codex-1",
-                mj_core::config::HarnessKind::Codex,
-                "gpt-6.6",
-                &[],
-            )],
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate_with_efforts("codex-1", 80, "gpt-6.6", &[])],
             unavailable: vec![("claude-2".into(), "authentication expired".into())],
         }),
         ..FakeBackend::default()
@@ -1580,6 +1599,297 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     );
 }
 
+// Hard-won: e47f4581: session creation ignored configured profiles outside the sub-agent pool.
+#[tokio::test]
+async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let eligible_candidates = SubagentCandidates {
+        offered: vec![
+            model_candidate("codex-1", 5, "luna"),
+            model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
+            model_candidate("quota-winner", 92, "luna"),
+        ],
+        unavailable: Vec::new(),
+    };
+    let mut session_candidates = eligible_candidates.clone();
+    session_candidates.offered.push(model_candidate_for_harness(
+        "claude4",
+        98,
+        "luna",
+        mj_core::config::HarnessKind::Claude,
+    ));
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(session_candidates),
+        subagent_model_candidates: Some(eligible_candidates),
+        ..FakeBackend::default()
+    });
+    let expected = "claude4";
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend.clone(),
+        |snapshot| {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "quota-winner".into(),
+                harness_kind: "codex".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "claude4".into(),
+                harness_kind: "claude".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+        },
+        preferences,
+    );
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","model":"luna","effort":"high","prompt":"go"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { profile_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, expected);
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+    let followups = backend.followups.lock().unwrap();
+    assert_eq!(followups[0].1.model.as_deref(), Some("luna"));
+    assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
+    assert_eq!(followups[0].1.prompt.as_deref(), Some("go"));
+}
+
+#[tokio::test]
+async fn subagent_model_selection_stays_within_eligible_profiles() {
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("codex-1", 5, "luna"),
+                model_candidate_for_harness(
+                    "claude4",
+                    98,
+                    "luna",
+                    mj_core::config::HarnessKind::Claude,
+                ),
+            ],
+            unavailable: Vec::new(),
+        }),
+        subagent_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 5, "luna")],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+
+    let selection = crate::server::api::resolve_subagent_selection(
+        &backend,
+        "parent-session",
+        "codex-1",
+        None,
+        Some("luna"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(selection.profile_id, "codex-1");
+}
+
+#[tokio::test]
+async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("claude4", 80, "luna"),
+                model_candidate("codex-1", 80, "luna"),
+            ],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","model":"luna"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { profile_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "codex-1");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target() {
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("zeta", 80, "luna"),
+                model_candidate("alpha", 80, "luna"),
+            ],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app(backend, |snapshot| {
+        for id in ["alpha", "zeta"] {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: id.into(),
+                harness_kind: "codex".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+        }
+    });
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","target_id":"podman","model":"luna"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "alpha", "ties without an anchor use profile id");
+    assert_eq!(target_id, "podman");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_a_saved_target_requires_an_explicit_target() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"luna"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("target_id"), "{message}");
+    assert!(message.contains("no saved default"), "{message}");
+    assert!(actions.try_recv().is_err());
+}
+
+// Hard-won: e47f4581: unavailable-model errors described session candidates as sub-agent eligible.
+#[tokio::test]
+async fn start_without_a_profile_reports_configured_profiles_for_an_unavailable_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 5, "luna")],
+            unavailable: vec![("broken-login".into(), "login was rejected".into())],
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"missing"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        body.contains("no configured profile offers model \"missing\""),
+        "{body}"
+    );
+    assert!(!body.contains("eligible"), "{body}");
+    assert!(!body.contains("sub-agent"), "{body}");
+    assert!(body.contains("broken-login (login was rejected)"), "{body}");
+    assert!(actions.try_recv().is_err(), "nothing was launched");
+}
+
+// Hard-won: e47f4581: model-first effort refusals called configured profiles “eligible”.
+#[tokio::test]
+async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_offer() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 80, "luna")],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"luna","effort":"ultra"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        body.contains("no configured profile offers model \"luna\" with effort \"ultra\""),
+        "{body}"
+    );
+    assert!(!body.contains("eligible"), "{body}");
+    assert!(body.contains("codex-1 offers efforts: high"), "{body}");
+    assert!(actions.try_recv().is_err(), "nothing was launched");
+}
 // Hard-won: 00325fa0: API start refusals dropped running and limit counts.
 #[tokio::test]
 async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
@@ -1775,6 +2085,180 @@ async fn start_rejects_a_request_that_still_sends_an_idempotency_key() {
     assert!(backend.followups.lock().unwrap().is_empty());
 }
 
+// Hard-won: 0e7cbe7a: transcript API defaults silently omitted verbose roles.
+#[tokio::test]
+async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
+    let backend = Arc::new(FakeBackend {
+        transcript: Mutex::new(Some(TranscriptPage {
+            next_after_seq: 9,
+            items: vec![Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id: "item-1".into(),
+                position: 4,
+                latest_content_event_ordinal: Some(9),
+                created_at_ms: 10,
+                last_changed_at_ms: 20,
+                body: mj_core::transcript::TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content": {"type": "text", "text": "added "}}),
+                        serde_json::json!({"content": {"type": "text", "text": "the line"}}),
+                    ],
+                    streaming: false,
+                },
+            })],
+            latest_seq: 9,
+            execution: MaterializedExecutionState::Idle,
+        })),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?after_seq=3&limit=5000",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    // A paging caller needs both halves of the cursor contract: the session it
+    // is reading, and the sequence to continue from.
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["next_after_seq"], 9);
+    assert_eq!(body["latest_seq"], 9);
+    assert_eq!(
+        body["items"][0]["seq"], 9,
+        "an agent message pages by its latest content, not by where it started"
+    );
+    assert_eq!(body["items"][0]["role"], "agent");
+    assert_eq!(
+        body["items"][0]["text"], "added the line",
+        "a reading caller gets the message, not its chunks"
+    );
+    assert_eq!(body["items"][0]["body"]["kind"], "agent");
+    assert_eq!(
+        backend.transcript_limits.lock().unwrap().as_slice(),
+        [MAX_TRANSCRIPT_LIMIT],
+        "an oversized limit is clamped rather than refused"
+    );
+    assert_eq!(
+        backend.transcript_filters.lock().unwrap().as_slice(),
+        [(Vec::new(), false)],
+        "the default API request still includes every role"
+    );
+}
+
+#[tokio::test]
+async fn transcript_accepts_one_or_repeated_role_query_parameters() {
+    use mj_core::transcript::TranscriptRole;
+
+    let backend = Arc::new(FakeBackend {
+        transcript: Mutex::new(Some(TranscriptPage {
+            next_after_seq: 0,
+            items: Vec::new(),
+            latest_seq: 0,
+            execution: MaterializedExecutionState::Idle,
+        })),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    for path in [
+        "/api/v1/sessions/session-1/transcript?role=agent",
+        "/api/v1/sessions/session-1/transcript?role=agent&role=user",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path}: {}",
+            String::from_utf8_lossy(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+            )
+        );
+    }
+    assert_eq!(
+        backend.transcript_filters.lock().unwrap().as_slice(),
+        [
+            (vec![TranscriptRole::Agent], false),
+            (vec![TranscriptRole::Agent, TranscriptRole::User], false),
+        ],
+        "one role remains compatible and repeated role keys select both roles"
+    );
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?role=unrecognized",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(error.contains("unrecognized"), "{error}");
+}
+
+#[tokio::test]
+async fn finished_transcript_mode_implies_agent_role_and_rejects_other_roles() {
+    let backend = Arc::new(FakeBackend {
+        transcript: Mutex::new(Some(TranscriptPage {
+            next_after_seq: 0,
+            items: Vec::new(),
+            latest_seq: 0,
+            execution: MaterializedExecutionState::Idle,
+        })),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?finished_only=true",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        backend.transcript_filters.lock().unwrap().as_slice(),
+        [(vec![mj_core::transcript::TranscriptRole::Agent], true)]
+    );
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?finished_only=true&role=thought",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(backend.transcript_filters.lock().unwrap().len(), 1);
+}
 #[tokio::test]
 async fn a_session_with_no_projection_row_has_no_transcript() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});

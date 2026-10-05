@@ -1216,6 +1216,18 @@ fn a_worker_rebuilt_after_the_daemon_started_is_reported_as_changed() {
     );
 }
 
+// Hard-won: d7afd671: setup instructions rejected supported Podman 4.0 releases.
+#[test]
+fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
+    let instructions = setup_instructions(InstructionsPlatform::Linux);
+    assert!(instructions.contains("mj doctor --json"));
+    assert!(instructions.contains("mj doctor --json --smoke"));
+    assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
+    assert!(instructions.contains("Podman **4.0.0 or newer**"));
+    assert!(instructions.contains("kind = \"docker\""));
+    assert!(instructions.contains("--opt type=overlay"));
+}
+
 // Hard-won: 592318d8: setup instructions used the old product name and misstated local-bare prerequisites.
 #[test]
 fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {

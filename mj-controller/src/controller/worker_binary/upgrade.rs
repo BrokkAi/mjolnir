@@ -553,9 +553,9 @@ fn worker_binary_replacement_plan(
                 .purpose("stage replacement Mjolnir worker"),
                 CommandSpec::new(
                     engine,
-                    container_upload_ownership_args(container_id, &worker_root, &[&staged]),
+                    container_upload_ownership_args(engine, container_id, &worker_root, &[&staged]),
                 )
-                .purpose("assign replacement worker to the worker user"),
+                .purpose("match replacement worker to the worker directory owner"),
                 CommandSpec::new(
                     engine,
                     [
@@ -619,12 +619,13 @@ fn worker_binary_replacement_plan(
                 crate::targets::ssh_command(
                     ssh,
                     std::iter::once(engine.to_owned()).chain(container_upload_ownership_args(
+                        engine,
                         container_id,
                         &worker_root,
                         &[&staged],
                     )),
                 )
-                .purpose("assign replacement worker to the worker user"),
+                .purpose("match replacement worker to the worker directory owner"),
                 crate::targets::ssh_command(
                     ssh,
                     [

@@ -335,12 +335,13 @@ default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bund
 `project_directory`, or both: a directory with no bundle is bundled the way the
 viewer's own form does it.
 
-When `model` is supplied without `profile_id`, the saved default profile
-anchors the eligible-profile set. Mjolnir chooses the profile with the most
-quota that offers the exact model and, when named, the exact effort. If no
-eligible profile supports that selection, the request fails without changing
-the requested model or effort. Supplying both `profile_id` and `model` pins the
-profile and validates the model and effort on it.
+When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
+usable profile and chooses the one offering the exact model and, when named,
+the exact effort. It ranks by remaining quota, using the saved default profile
+to break ties. If no configured profile supports that selection, the request
+fails without changing the requested model or effort. Supplying both
+`profile_id` and `model` pins the profile and validates the model and effort on
+it.
 
 Three fields choose where the session starts:
 
@@ -1009,13 +1010,33 @@ records.
 session amount, currency, and observation timestamp. It is not summed across
 provider session resets. Context-window occupancy is not consumed tokens.
 
-`GET /api/v1/sessions/{id}/transcript?role=agent&after_seq=0&limit=200`
-filters before applying the limit. Roles are `user`, `agent`, `thought`, `tool`,
-`terminal`, `plan`, `plan_proposal`, and `system`. Omit `role` for all items.
-Use `next_after_seq` to resume, including empty filtered pages. The requested
-limit is soft when several items share an event sequence: all tied items travel
-together so paging cannot skip them. Streaming updates are still returned when
-their sequence advances.
+`GET /api/v1/sessions/{id}/transcript?role=agent&role=user&after_seq=0&limit=200`
+filters the selected roles before applying the limit. Send `role` once for one
+role or repeat it to select several. Roles are `user`, `agent`, `thought`,
+`tool`, `terminal`, `plan`, `plan_proposal`, and `system`. Omit `role` for all
+items; that API default is unchanged. Use `next_after_seq` to resume, including
+empty filtered pages. When no more matching items remain, the cursor advances
+across excluded roles to `latest_seq`. The requested limit is soft when several
+items share an event sequence: all tied items travel together so paging cannot
+skip them. Streaming updates are still returned when their sequence advances.
+
+Add `finished_only=true` to request only agent items whose `body.streaming` is
+`false`; this opt-in does not change the default response. It implies
+`role=agent`, so omitting `role` or supplying only `role=agent` works, while
+including any other role returns `400 Bad Request`. In this mode,
+`next_after_seq` is an exclusive resume cursor for the finished prefix: it
+never passes the sequence of the earliest currently open agent item. When the
+page limit is reached before that barrier, the cursor is the last returned
+sequence; otherwise it advances through filtered non-agent rows to just before
+the barrier, or to `latest_seq` when no agent item is open. Pass that exact
+cursor on the next poll; the open item remains eligible and is returned when
+its stream closes. `latest_seq` remains the newest sequence across all roles
+and is not a resume cursor for this mode.
+
+Closed means `body.streaming` was `false` in the projection read. ACP can still
+append late chunks to the same `stable_id` afterward, advancing that item's
+sequence. A consumer that deduplicates only by `stable_id` may ignore that late
+revision; finished-only polling does not promise delivery of post-close chunks.
 
 ```sh
 mj usage --session SESSION --json

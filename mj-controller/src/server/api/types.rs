@@ -163,9 +163,9 @@ pub struct CreateWorkspaceResponse {
 ///
 /// `profile_id` and `target_id` may be omitted, and each resolves
 /// independently: a caller may name a profile and take the saved default
-/// target. When `model` is supplied without `profile_id`, the saved default
-/// profile anchors the eligible-profile set and the daemon chooses a profile
-/// that offers the model (and any requested effort) by quota. An omitted
+/// target. When `model` is supplied without `profile_id`, the daemon considers
+/// all configured, usable profiles and ranks them by quota, using the saved
+/// default profile as the tie-breaking anchor. An omitted
 /// identifier otherwise comes from the pair the user last saved with the
 /// `mj go` workflow, which the first setup also becomes, so a caller that has
 /// never read `config.toml` can create a session by naming neither. The
@@ -299,8 +299,7 @@ pub struct SpawnSubagentRequest {
     pub working_directory: Option<PathBuf>,
 }
 
-/// One profile a parent may start a sub-agent on, with what it offers and how
-/// much of its quota is left.
+/// A candidate profile with its discovered choices and remaining quota.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentCandidate {
     pub profile_id: String,
@@ -312,8 +311,8 @@ pub struct SubagentCandidate {
     pub remaining_percent: Option<u8>,
 }
 
-/// The profiles a parent may delegate to, split into those whose choices are
-/// known and those whose discovery failed, with the reason.
+/// Candidate profiles split into those whose choices are known and those
+/// whose discovery failed, with the reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubagentCandidates {
     pub offered: Vec<SubagentCandidate>,
@@ -515,15 +514,74 @@ pub struct WaitResponse {
 pub const DEFAULT_TRANSCRIPT_LIMIT: usize = 200;
 pub const MAX_TRANSCRIPT_LIMIT: usize = 1_000;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TranscriptQuery {
-    #[serde(default)]
-    pub role: Option<mj_core::transcript::TranscriptRole>,
+    pub role: Vec<mj_core::transcript::TranscriptRole>,
+    /// Return only closed agent messages and keep the cursor before any open one.
+    pub finished_only: bool,
     /// Resume from the highest sequence the caller has already seen.
-    #[serde(default)]
     pub after_seq: Option<u64>,
-    #[serde(default)]
     pub limit: Option<usize>,
+}
+
+impl<'de> serde::Deserialize<'de> for TranscriptQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TranscriptQueryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TranscriptQueryVisitor {
+            type Value = TranscriptQuery;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("transcript query parameters")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut role = Vec::new();
+                let mut finished_only = None;
+                let mut after_seq = None;
+                let mut limit = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "role" => role.push(map.next_value()?),
+                        "finished_only" => {
+                            if finished_only.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("finished_only"));
+                            }
+                        }
+                        "after_seq" => {
+                            if after_seq.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("after_seq"));
+                            }
+                        }
+                        "limit" => {
+                            if limit.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("limit"));
+                            }
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(TranscriptQuery {
+                    role,
+                    finished_only: finished_only.unwrap_or_default(),
+                    after_seq,
+                    limit,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TranscriptQueryVisitor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -181,7 +181,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", real_bin.display()),
     )]);
-    unix::configure_github_cli(worker.path(), &mut environment).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
     let token_path = worker.path().join("github-token");
     mj_core::credentials::remove_github_token(&token_path).unwrap();
 
@@ -268,9 +268,9 @@ fi
         ("GIT_CONFIG_KEY_0".into(), "user.email".into()),
         ("GIT_CONFIG_VALUE_0".into(), "harness@example.test".into()),
     ]);
-    unix::configure_github_cli(worker.path(), &mut environment).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
     let configured_once = environment.clone();
-    unix::configure_github_cli(worker.path(), &mut environment).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
     assert_eq!(environment, configured_once);
 
     // Git settings reach the harness through one worker-owned file, not

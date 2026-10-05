@@ -67,6 +67,12 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("sub-agent profiles are unavailable") })
     }
+    /// Every enabled profile usable for a user-created session, with its
+    /// discovered choices and remaining quota. This is independent of the
+    /// profile set allowed for sub-agent use.
+    fn session_profile_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async { anyhow::bail!("session profile selection is unavailable") })
+    }
     fn start_subagent(
         &self,
         _request: crate::controller::RegisterSubagentRequest,
@@ -180,7 +186,8 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         after_seq: u64,
         limit: usize,
-        role: Option<mj_core::transcript::TranscriptRole>,
+        roles: Vec<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>>;
 
     fn usage(

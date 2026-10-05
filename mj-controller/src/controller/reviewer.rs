@@ -365,7 +365,7 @@ fn upload_reviewer_profile(
                     format!("{}/.", local.display()),
                     format!("{container_id}:{home}"),
                 ],
-                container_upload_ownership_args(container_id, worker_root, &[&home]),
+                container_upload_ownership_args(engine, container_id, worker_root, &[&home]),
                 vec![
                     "exec".to_owned(),
                     container_id.clone(),
@@ -473,6 +473,7 @@ fn upload_reviewer_profile(
                 ],
                 std::iter::once(engine.to_owned())
                     .chain(container_upload_ownership_args(
+                        engine,
                         container_id,
                         worker_root,
                         &[&home],

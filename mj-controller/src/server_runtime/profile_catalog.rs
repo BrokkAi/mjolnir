@@ -431,6 +431,14 @@ impl ProfileCatalog {
             .collect())
     }
 
+    pub(crate) fn configured_candidates(&self) -> Result<Vec<(String, HarnessKind)>> {
+        Ok(self
+            .live()?
+            .enabled_profiles()
+            .map(|(id, profile)| (id.into(), profile.kind))
+            .collect())
+    }
+
     pub(crate) async fn model_capabilities(
         self: &Arc<Self>,
         profile: String,
@@ -926,5 +934,44 @@ mod tests {
         );
         assert!(catalog.capabilities(&["parent".into()]).await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_candidates_include_enabled_profiles_outside_subagent_eligibility() {
+        let catalog = ProfileCatalog::new(CancellationToken::new());
+        let mut config = test_config(
+            &[
+                ("codex", HarnessKind::Codex),
+                ("helper", HarnessKind::Codex),
+                ("claude4", HarnessKind::Claude),
+                ("disabled", HarnessKind::Kimi),
+            ],
+            &["helper"],
+        );
+        config.profiles.get_mut("disabled").unwrap().enabled = false;
+        catalog.sync(&config);
+
+        let subagent_ids = catalog
+            .candidates("codex")
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let configured_ids = catalog
+            .configured_candidates()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(subagent_ids, vec!["codex".to_owned(), "helper".to_owned()]);
+        assert_eq!(
+            configured_ids,
+            vec![
+                "claude4".to_owned(),
+                "codex".to_owned(),
+                "helper".to_owned()
+            ]
+        );
     }
 }

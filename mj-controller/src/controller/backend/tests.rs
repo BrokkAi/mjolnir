@@ -535,6 +535,94 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
+struct PreflightExecutor {
+    outputs: RefCell<Vec<CommandOutput>>,
+    notices: RefCell<Vec<String>>,
+}
+impl CommandExecutor for PreflightExecutor {
+    fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+        Ok(self.outputs.borrow_mut().remove(0))
+    }
+
+    fn notify_notice(&self, notice: &str) {
+        self.notices.borrow_mut().push(notice.to_owned());
+    }
+}
+
+// Hard-won: d7afd671: the old preflight rejected Podman 4.0 despite root-default sessions no longer needing keep-id.
+#[test]
+fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
+    let template = TargetTemplate::LocalPodman {
+        container: ConfigContainer {
+            build_cache: None,
+            image: "ubuntu:24.04".into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let executor = PreflightExecutor {
+        outputs: RefCell::new(vec![CommandOutput {
+            status: 0,
+            stdout: b"podman version 3.4.7\n".to_vec(),
+            stderr: vec![],
+        }]),
+        notices: RefCell::new(vec![]),
+    };
+
+    let error = preflight_target(&template, &executor, TargetCheck::Launch)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Retry launch"));
+    assert!(error.contains("Podman 4.0.0"));
+}
+
+// Hard-won: d7afd671: the old preflight rejected Podman 4.0 despite root-default sessions no longer needing keep-id.
+#[test]
+fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
+    let template = TargetTemplate::SshPodman {
+        ssh: SshConnection {
+            host: "example.test".into(),
+            user: Some("dev".into()),
+            identity_file: None,
+            extra_args: vec![],
+        },
+        container: ConfigContainer {
+            build_cache: None,
+            image: "ubuntu:24.04".into(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+        },
+    };
+    let executor = PreflightExecutor {
+        outputs: RefCell::new(vec![CommandOutput {
+            status: 0,
+            stdout: crate::targets::ssh_podman_probe_fixture(&[(
+                "version",
+                0,
+                "podman version 3.4.7\n",
+                "",
+            )]),
+            stderr: vec![],
+        }]),
+        notices: RefCell::new(vec![]),
+    };
+
+    let error = verify_target(&template, &executor, TargetCheck::Launch)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Retry launch"));
+    assert!(error.contains("dev@example.test"));
+    assert!(error.contains("Podman 4.0.0"));
+}
+
 // Hard-won: 69e2f7a632ab: launch and move repeated slow remote container checks on multiple wizard pages
 #[test]
 fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {

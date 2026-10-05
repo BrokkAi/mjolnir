@@ -216,7 +216,8 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
-mj transcript --session <id> [--after-seq <seq>] [--limit <count>] [--role <role>] [--json]
+mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
+             [--role <role>]... [--finished-only] [--json]
 mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
@@ -254,9 +255,9 @@ cannot be combined with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
-- `mj new --model <name>` chooses the highest-quota eligible profile offering
-  that exact model and starts the session on it. It conflicts with `--profile`;
-  the saved default profile anchors the eligible-profile list. If `--effort` is
+- `mj new --model <name>` chooses the highest-quota enabled, usable profile
+  offering that exact model and starts the session on it. It conflicts with
+  `--profile`; the saved default profile breaks quota ties. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
 - `mj new --subagents native|single-model|none` selects delegation
@@ -283,8 +284,12 @@ cannot be combined with a session that runs directly in the selected directory.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.
-- `--role` limits `mj transcript` to one kind of entry: `user`, `agent`,
-  `thought`, `tool`, `terminal`, `plan`, `plan_proposal`, or `system`.
+- By default, `mj transcript` omits `tool` and `terminal` entries. Repeat
+  `--role` to select several kinds of entry from `user`, `agent`, `thought`,
+  `tool`, `terminal`, `plan`, `plan_proposal`, and `system`. To include every
+  kind, list all eight roles; there is no `--all-roles` option. `--finished-only`
+  selects closed agent messages and can be combined only with `--role agent`;
+  it implies the `agent` role when no role is given.
 - `mj events` prints durable session events as line-delimited JSON, following
   new events until you stop it. `--after-seq` replays from that sequence first.
 - `mj usage` reads recorded token usage for a session.
@@ -428,12 +433,33 @@ replacement and perform no lifecycle action.
 `--kind branch` pushes the session's work and reports the branch and remote
 instead. With `--json` and `--out`, `mj export` prints one object with the
 `path`, the `bytes` written, and the `format` (`patch`, `bundle`, or `file`);
-with `--json` and no `--out` the export itself is still the output. `mj transcript` pages by `--after-seq`, so a caller that
-remembers the last `seq` it read sees only what is new.
+with `--json` and no `--out` the export itself is still the output. `mj transcript`
+pages by `--after-seq`; use the response's `next_after_seq` for the next page.
+The selected roles are filtered before the page limit. The cursor advances
+across entries outside that selection, so a page with no matching items can
+still make progress. `latest_seq` is the newest sequence in the full transcript.
+`--limit` sets a target number of matching items per page; tied entries with
+the same sequence stay together, so a page can exceed the target.
+
+With `--finished-only`, `next_after_seq` is an exclusive resume cursor for the
+finished agent prefix: it never passes the sequence of the earliest currently
+open agent message. If the page reaches that open message, the cursor stops at
+the preceding sequence; poll again with that exact cursor, and the message is
+returned after its body reports `streaming: false`. If the page limit is
+reached first, the cursor is the last returned sequence. With no open agent
+message remaining, it can advance across non-agent rows to `latest_seq`, even
+when the page has no items. Here, "finished" means the stored stream was closed
+at the time of the read. ACP can still append late chunks to the same
+`stable_id`; a consumer that deduplicates only by `stable_id` may ignore that
+later revision.
 
 Each command in this section except `mj events` and `mj respond` takes
-`--json` and then prints the API response unchanged. `mj events` always prints
-JSON lines. `mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
+`--json` to print its JSON result. For `mj transcript`, the server applies the
+default role selection or the repeated `--role` selection before paging, and
+returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
+filters agent messages and uses the finished-prefix cursor described above.
+`mj events` always prints JSON lines.
+`mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these

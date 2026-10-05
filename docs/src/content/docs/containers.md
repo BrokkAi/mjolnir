@@ -68,7 +68,7 @@ the workspace volume are not checkpointed.
 
 Install each runtime you want to use as a target:
 
-- **Rootless Podman 4.3 or newer** on Linux or WSL2. See
+- **Rootless Podman 4.0 or newer** on Linux or WSL2. See
   [Podman for Mjolnir](/podman/) for installation and verification steps.
 - **Docker with a reachable Linux daemon**, including Colima on macOS. See
   [Docker for Mjolnir](/docker/) for its OverlayFS and lifecycle contract.
@@ -238,12 +238,22 @@ or another overlay, the wizard doesn't offer `cow` for it, and an existing
 `cow` attachment is mounted read-only instead, with a notice while the
 session launches.
 
-On rootless Podman, every session container runs in a user namespace that
-maps the image's user onto your host user, so an `rw` attachment is writable
-and the files the container creates in it are owned by you. Mjolnir reads the
-image's user and group ids once per image before it creates the container. If
-that read fails, the container runs with Podman's default user mapping, the
-way it did before this mapping existed, and the session log says so.
+New rootless Podman session containers run as uid and gid `0:0` in Podman's
+default user namespace. Container uid 0 maps to the account running Mjolnir,
+so read-write attachments, the workspace, and the mbx cache are writable and
+files created there belong to you on the host. Mjolnir sets
+`HOME=/home/hel` when creating these containers. A root login shell can reset
+`HOME` to `/root`, the root account's passwd home; Mjolnir writes inherited Git
+identity and behavior settings to `/home/hel/.gitconfig`. The worker's
+session-global Git config includes that file by absolute path, independent of
+the worker or harness `HOME`. The include path is stored with the worker launch
+settings and is applied when a worker restarts, resumes, or upgrades. Harness
+profiles remain staged under `/var/lib/hel/profiles/<session>`. This avoids
+copying and changing ownership of image layers. Existing containers keep the
+user and HOME recorded when they were created; Podman exec uses those saved
+defaults when a stopped legacy session resumes, and the same absolute Git
+config include applies. Docker and Apple Container keep their existing
+image-user behavior.
 
 ## Build cache (mbx)
 
