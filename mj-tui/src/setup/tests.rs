@@ -1959,6 +1959,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             application: Default::default(),
             budget_note: None,
             native_mbx: Some("1.12.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/mnt/fast/mbx-cache".into()),
             max_total_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
             stats: None,
@@ -1966,6 +1969,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
                 "the filesystem under /mnt/fast/mbx-cache does not support reflinks".into(),
             )),
         })),
+        false,
     );
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
@@ -2108,6 +2112,9 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
             application: Default::default(),
             budget_note: None,
             native_mbx: Some("1.12.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/home/dev/.cache/mbx".into()),
             max_total_size: Some(BuildCacheLimit::Size("100000000000B".into())),
             stats: Some(mj_core::state::BuildCacheStats {
@@ -2118,6 +2125,7 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
             }),
             off_reason: None,
         })),
+        false,
     );
     let checked = drawn(&mut dashboard, 140, 30).join("\n");
     assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
@@ -3021,8 +3029,12 @@ fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
     let (_, preview_key) = dialog.build_cache_page().unwrap();
     dialog.build_cache_preview = Some(BuildCachePreviewState {
         key: preview_key,
+        install_mbx_available: false,
         result: BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
             native_mbx: Some("1.21.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/native/cache".into()),
             max_total_size: Some(mj_core::state::BuildCacheLimit::HostConfiguration(Some(
                 "500GB".into(),
@@ -3192,6 +3204,9 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
         &key,
         Ok(Some(mj_core::state::BuildCachePreview {
             native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: None,
             max_total_size: None,
             user_managed: false,
@@ -3202,6 +3217,7 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
                 "Shared mbx requires a Linux host".into(),
             )),
         })),
+        false,
     );
     let lines = drawn(&mut dashboard, 160, 40);
     assert!(
@@ -3212,6 +3228,244 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
     );
 }
 
+#[test]
+fn machine_page_confirms_mbx_install_shows_busy_and_refreshes_after_success() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            mbx_profile_file: Some("~/.profile".into()),
+            mbx_profile_warning: Some(
+                "Your login shell may not read ~/.profile. Add this PATH line to a startup file it reads:".into(),
+            ),
+            mbx_manual_path_line: Some(
+                "export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}".into(),
+            ),
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: None,
+        })),
+        true,
+    );
+    assert!(
+        drawn(&mut dashboard, 140, 34)
+            .join("\n")
+            .contains("Install mbx")
+    );
+
+    activate(&mut dashboard, SetupControl::InstallMbx);
+    let Mode::Confirm(confirm) = &dashboard.mode else {
+        panic!("confirmation");
+    };
+    let (_, lines) = crate::dialogs::confirmation_body(&confirm.confirmation, None, 72);
+    let prompt = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "the local machine",
+        "mbx setup --yes",
+        "~/.profile",
+        "may not read ~/.profile",
+        "export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}",
+    ] {
+        assert!(prompt.contains(expected), "missing {expected:?}: {prompt}");
+    }
+
+    dashboard.handle_key(key(KeyCode::Right));
+    let DashboardAction::InstallMbx {
+        generation: confirmed_generation,
+        key: confirmed_key,
+        machine_id,
+        ..
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("confirmed mbx install");
+    };
+    assert_eq!(confirmed_generation, generation);
+    assert_eq!(confirmed_key, preview_key);
+    assert_eq!(machine_id, "local");
+    assert!(dashboard.mbx_install_started(generation, &preview_key, "local"));
+    let busy = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(busy.contains("Installing mbx…"), "{busy}");
+
+    dashboard.mbx_install_finished(
+        generation,
+        &preview_key,
+        "local",
+        Ok("Installed mbx at /home/test/.local/bin/mbx (version 1.22.0). Updated ~/.profile. Your login shell may not read ~/.profile. Add this PATH line: export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}".into()),
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.22.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: Some("/home/test/.cache/mbx".into()),
+            max_total_size: None,
+            user_managed: true,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: None,
+        })),
+        false,
+    );
+    let finished = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(
+        finished.contains("Installed mbx at /home/test/.local/bin/mbx"),
+        "{finished}"
+    );
+    assert!(finished.contains("Updated ~/.profile"), "{finished}");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
+    );
+}
+
+#[test]
+fn machine_page_labels_old_mbx_as_upgrade_and_hides_unavailable_actions() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.21.0".into()),
+            mbx_profile_file: Some("~/.bash_profile".into()),
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: true,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "the host's mbx 1.21.0 is older than the pinned release".into(),
+            )),
+        })),
+        true,
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(
+        dialog
+            .actions()
+            .iter()
+            .any(
+                |(control, label, enabled)| *control == SetupControl::InstallMbx
+                    && *label == "Upgrade mbx"
+                    && *enabled
+            )
+    );
+
+    let preview = dialog.build_cache_preview.as_mut().unwrap();
+    preview.install_mbx_available = false;
+    dialog.prepare();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
+    );
+    let preview = dialog.build_cache_preview.as_mut().unwrap();
+    preview.result =
+        BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        })));
+    dialog.prepare();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
+    );
+}
+
+#[test]
+fn machine_page_reports_mbx_install_failure_and_preserves_the_retry_action() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    let absent = || mj_core::state::BuildCachePreview {
+        native_mbx: None,
+        mbx_profile_file: Some("~/.profile".into()),
+        mbx_profile_warning: None,
+        mbx_manual_path_line: None,
+        directory: None,
+        max_total_size: None,
+        user_managed: false,
+        application: Default::default(),
+        budget_note: None,
+        stats: None,
+        off_reason: None,
+    };
+    dashboard.build_cache_previewed(generation, &preview_key, Ok(Some(absent())), true);
+    assert!(dashboard.mbx_install_started(generation, &preview_key, "local"));
+    dashboard.mbx_install_finished(
+        generation,
+        &preview_key,
+        "local",
+        Err("mbx setup exited with status 1: setup refused".into()),
+        Ok(Some(absent())),
+        true,
+    );
+    let lines = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(
+        lines.contains("Could not install mbx: mbx setup exited"),
+        "{lines}"
+    );
+    assert!(lines.contains("Install mbx"), "{lines}");
+}
+
+#[test]
 // Hard-won: 37a8681f: the unset effort label disagreed with save behavior and refusal navigation.
 #[test]
 fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page() {

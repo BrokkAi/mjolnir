@@ -3,6 +3,7 @@
 
 use super::*;
 use mj_core::state::BuildCacheApplication;
+use sha2::{Digest, Sha256};
 
 const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 

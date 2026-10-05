@@ -12,15 +12,14 @@
 //! configuration failures are reported rather than launching with stale policy.
 
 mod configuration;
+pub(crate) mod install;
 pub(crate) mod release;
 pub(crate) mod service;
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use sha2::{Digest, Sha256};
 
 use super::cache_host::CacheHost;
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
@@ -33,9 +32,6 @@ use mj_core::state::{
 /// The mbx release containers run. A native mbx older than this must not share
 /// the same store, so a host that has one runs its sessions without the cache.
 pub(crate) const MBX_VERSION: &str = "1.22.0";
-
-const MBX_X86_64_SHA256: &str = "c375135e2a3916f58da1b47537b6a954159eeacd55523d9a618b42259bd89014";
-const MBX_AARCH64_SHA256: &str = "ae4d66308c706ffbf912beb45b3166cf1cfda4d3efd23273262791235d0accf5";
 
 /// Overrides the download with a local mbx binary for the current machine's
 /// architecture. Used for development against an unreleased mbx.
@@ -251,7 +247,14 @@ pub fn preview_build_cache(
         return Ok(None);
     };
     let settings = machine.build_cache().cloned().unwrap_or_default();
-    inspect(&host, &settings, Freshness::Fresh, executor).map(|inspection| Some(inspection.preview))
+    let mut preview = inspect(&host, &settings, Freshness::Fresh, executor)?.preview;
+    if install::install_kind(&preview).is_some() {
+        let profile = install::login_profile_details(&host, executor)?;
+        preview.mbx_profile_file = Some(profile.file);
+        preview.mbx_profile_warning = profile.warning;
+        preview.mbx_manual_path_line = profile.manual_path_line;
+    }
+    Ok(Some(preview))
 }
 
 /// Apply one machine's desired policy. Both provisioning and the daemon use
@@ -439,6 +442,9 @@ fn inspect_host(
         return Ok(Inspection {
             preview: BuildCachePreview {
                 native_mbx: None,
+                mbx_profile_file: None,
+                mbx_profile_warning: None,
+                mbx_manual_path_line: None,
                 directory: None,
                 max_total_size: None,
                 user_managed: false,
@@ -461,6 +467,9 @@ fn inspect_host(
     {
         return Ok(off(BuildCachePreview {
             native_mbx: native_version.clone(),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: None,
             max_total_size: None,
             user_managed: true,
@@ -530,6 +539,9 @@ fn inspect_host(
     let stats = read_stats(host, &directory, executor);
     let preview = |off_reason: Option<BuildCacheOff>| BuildCachePreview {
         native_mbx: native_version.clone(),
+        mbx_profile_file: None,
+        mbx_profile_warning: None,
+        mbx_manual_path_line: None,
         directory: Some(directory.clone()),
         max_total_size: Some(limit.clone()),
         user_managed,
@@ -960,7 +972,7 @@ pub(super) fn binary_for(
              for the target instead"
         );
     }
-    download(triple)
+    install::download(triple)
 }
 
 /// This machine's architecture in the same spelling `target_architecture`
@@ -971,87 +983,6 @@ fn host_architecture() -> &'static str {
     } else {
         "x86_64"
     }
-}
-
-fn release_url(triple: &str) -> String {
-    format!(
-        "https://github.com/jdx/mr-boxington/releases/download/v{MBX_VERSION}/mbx-{triple}-unknown-linux-musl.tar.gz"
-    )
-}
-
-fn expected_digest(triple: &str) -> Result<&'static str> {
-    match triple {
-        "x86_64" => Ok(MBX_X86_64_SHA256),
-        "aarch64" => Ok(MBX_AARCH64_SHA256),
-        _ => bail!("no pinned mbx release for {triple}"),
-    }
-}
-
-/// Download the pinned release once into the data directory. The archive is
-/// verified against the release checksum before anything is extracted.
-fn download(triple: &str) -> Result<PathBuf> {
-    let expected = expected_digest(triple)?;
-    let directory = mj_core::config::data_dir()
-        .join("mbx")
-        .join(MBX_VERSION)
-        .join(triple);
-    let destination = directory.join("mbx");
-    if destination.is_file() {
-        return Ok(destination);
-    }
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("create the mbx cache {}", directory.display()))?;
-    let url = release_url(triple);
-    let archive = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download {url}"))?
-        .bytes()?;
-    let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
-    ensure!(
-        actual.eq_ignore_ascii_case(expected),
-        "downloaded mbx checksum mismatch: expected {expected}, got {actual}"
-    );
-    let binary = extract_binary(&archive)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    std::io::Write::write_all(&mut temporary, &binary)?;
-    temporary.as_file_mut().sync_all()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
-    }
-    match temporary.persist_noclobber(&destination) {
-        Ok(_) => Ok(destination),
-        Err(error) if destination.is_file() => {
-            drop(error);
-            Ok(destination)
-        }
-        Err(error) => Err(error.error)
-            .with_context(|| format!("publish the mbx binary {}", destination.display())),
-    }
-}
-
-/// The single `mbx` file from the release archive, which also carries its
-/// licence texts.
-fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
-    let mut reader = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-    for entry in reader.entries().context("read the mbx release archive")? {
-        let mut entry = entry.context("read the mbx release archive")?;
-        if entry.path().context("read an mbx archive path")?.as_ref() != Path::new("mbx") {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .context("read the mbx binary from its release archive")?;
-        return Ok(bytes);
-    }
-    bail!("the mbx release archive contains no mbx binary")
 }
 
 // -- per-session decision -------------------------------------------------
@@ -1207,6 +1138,26 @@ mod tests {
             } else {
                 line.clone()
             };
+            if searchable.contains("hel-mbx-home") {
+                let configured_home = self
+                    .answers
+                    .iter()
+                    .find(|(needle, _, _)| *needle == "hel-mbx-home")
+                    .map(|(_, _, stdout)| stdout.clone())
+                    .unwrap_or_else(|| "/home/dev".into());
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: configured_home.into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            if searchable.contains("hel-mbx-profile") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"preview\n~/.profile\nposix\n/home/dev/.local/share/mbx/bin".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             for (needle, status, stdout) in &self.answers {
                 if searchable.contains(needle) {
                     return Ok(CommandOutput {
@@ -1215,6 +1166,13 @@ mod tests {
                         stderr: Vec::new(),
                     });
                 }
+            }
+            if searchable.contains("hel-mbx-install-probe") {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
             }
             Ok(CommandOutput {
                 status: 127,
@@ -1930,8 +1888,9 @@ mod tests {
             "{:?}",
             preview.off_reason
         );
-        // A preview reads the host; it never creates the directory.
-        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
+        // A preview reads the host; it never creates the directory. The profile
+        // probe contains a mkdir branch in its script but does not run it.
+        assert!(!executor.ran().iter().any(|line| line.starts_with("mkdir ")));
 
         let executor = ProbeExecutor::new(&[
             ("$m\" --version", 0, current_native_mbx().as_str()),
@@ -1959,6 +1918,6 @@ mod tests {
             Some(BuildCacheLimit::MbxDefault(None))
         );
         assert_eq!(preview.off_reason, None);
-        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
+        assert!(!executor.ran().iter().any(|line| line.starts_with("mkdir ")));
     }
 }

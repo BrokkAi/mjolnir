@@ -348,6 +348,13 @@ pub enum DashboardAction {
         key: serde_json::Value,
         machine: Box<mj_core::config::Machine>,
     },
+    /// Install the controller-pinned mbx release on a machine's container host.
+    InstallMbx {
+        generation: u64,
+        key: serde_json::Value,
+        machine_id: String,
+        machine: Box<mj_core::config::Machine>,
+    },
     /// Measure how much disk Mjolnir's session copies use, and how much an
     /// `archive_after_days` value would free, for the SessionWiki settings
     /// page. `older_than_days` is the value being shown or typed.

@@ -1285,6 +1285,12 @@ pub struct ArchiveSpacePreview {
 pub struct BuildCachePreview {
     /// The host's own mbx version, or `None` when it has none on `PATH`.
     pub native_mbx: Option<String>,
+    /// The login profile the host would update when mbx is installed.
+    pub mbx_profile_file: Option<String>,
+    /// Why an unrecognized login shell may not read the selected profile.
+    pub mbx_profile_warning: Option<String>,
+    /// A literal POSIX PATH line for users whose shell does not read the selected profile.
+    pub mbx_manual_path_line: Option<String>,
     /// The cache directory sessions would mount, once known.
     pub directory: Option<PathBuf>,
     /// The budget sessions would run with, once known.

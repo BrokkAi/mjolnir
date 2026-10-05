@@ -295,6 +295,15 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         key: serde_json::Value,
         result: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
+    },
+    MbxInstalled {
+        generation: u64,
+        key: serde_json::Value,
+        machine_id: String,
+        result: std::result::Result<String, String>,
+        preview: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
     },
     ArchiveSpacePreviewed {
         generation: u64,
@@ -1283,9 +1292,28 @@ impl DashboardContext {
                 generation,
                 key,
                 result,
-            } => self
-                .dashboard
-                .build_cache_previewed(generation, &key, result),
+                install_mbx_available,
+            } => self.dashboard.build_cache_previewed(
+                generation,
+                &key,
+                result,
+                install_mbx_available,
+            ),
+            DashboardIoUpdate::MbxInstalled {
+                generation,
+                key,
+                machine_id,
+                result,
+                preview,
+                install_mbx_available,
+            } => self.dashboard.mbx_install_finished(
+                generation,
+                &key,
+                &machine_id,
+                result,
+                preview,
+                install_mbx_available,
+            ),
             DashboardIoUpdate::ArchiveSpacePreviewed {
                 generation,
                 older_than_days,
