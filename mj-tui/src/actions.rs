@@ -1942,9 +1942,8 @@ impl DashboardState {
             CommandId::WebViewer => self.open_web_dialog(),
             CommandId::RestartDaemon => DashboardAction::RestartDaemon,
             CommandId::SessionCpuReport => {
-                self.mode = crate::Mode::SessionCpuReport(
-                    crate::dialogs::SessionCpuReportDialog::default(),
-                );
+                self.mode =
+                    crate::Mode::SessionCpuReport(crate::dialogs::SessionCpuReportDialog::new());
                 DashboardAction::None
             }
             CommandId::NoticeLog => {

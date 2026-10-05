@@ -25,7 +25,7 @@ use mj_core::config::{HarnessKind, mount_history_host};
 use mj_core::state::{MoveOperation, MovePhase, ResumeQueueDisposition};
 
 use mj_chat::components::{
-    Button, Checkbox, ChoiceList, ControlKind, Dialog, EditOutcome, Interaction, TextField,
+    Button, Checkbox, ControlKind, Dialog, EditOutcome, Interaction, TextField,
 };
 use mj_chat::selection::FrameSurfaces;
 use mj_chat::text_input::TextInput;
@@ -74,6 +74,8 @@ pub(crate) enum DialogControl {
     ChangedFilesRefresh,
     ChangedFilesClose,
     NoticeLogClose,
+    SessionCpuReportTabs,
+    SessionCpuReportRows,
     SessionCpuReportClose,
 }
 
@@ -119,11 +121,24 @@ pub(crate) struct NoticeLogDialog {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SessionCpuReportDialog {
-    /// First wrapped line drawn.
-    pub(crate) scroll: usize,
-    /// The largest useful `scroll`, measured by the renderer at its width.
-    pub(crate) max_scroll: std::cell::Cell<usize>,
+    /// Machine identity survives CPU re-sorting and tab list changes.
+    pub(crate) machine_key: RefCell<Option<String>>,
+    /// Session identity survives live CPU re-sorting.
+    pub(crate) selected_session_id: RefCell<Option<String>>,
+    /// Used to choose the nearest row if the selected session leaves the report.
+    pub(crate) selected_row: std::cell::Cell<usize>,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
+}
+
+impl SessionCpuReportDialog {
+    pub(crate) fn new() -> Self {
+        let mut dialog = Self::default();
+        dialog
+            .form
+            .get_mut()
+            .focus(DialogControl::SessionCpuReportRows);
+        dialog
+    }
 }
 
 /// The changed-files overlay for one session. The data lives on the
@@ -1274,24 +1289,62 @@ impl DashboardState {
         event: Event,
         mut dialog: SessionCpuReportDialog,
     ) -> DashboardAction {
-        let last = dialog.max_scroll.get();
+        let groups = crate::session_cpu_report::report_groups(self);
+        let group_index = reconcile_session_cpu_report(self, &dialog, &groups);
         if let Event::Key(key) = &event
-            && key.kind != KeyEventKind::Release
+            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         {
-            let scrolled = match key.code {
-                KeyCode::Down | KeyCode::Char('j') => Some(dialog.scroll.saturating_add(1)),
-                KeyCode::Up | KeyCode::Char('k') => Some(dialog.scroll.saturating_sub(1)),
-                KeyCode::PageDown => Some(dialog.scroll.saturating_add(10)),
-                KeyCode::PageUp => Some(dialog.scroll.saturating_sub(10)),
-                KeyCode::Home => Some(0),
-                KeyCode::End => Some(last),
+            let tab_step = match key.code {
+                KeyCode::Left => Some(-1isize),
+                KeyCode::Right => Some(1),
                 _ => None,
             };
-            if let Some(scroll) = scrolled {
-                dialog.scroll = scroll.min(last);
+            if let Some(step) = tab_step
+                && groups.len() > 1
+            {
+                let current = group_index.unwrap_or(0) as isize;
+                let next = (current + step).rem_euclid(groups.len() as isize) as usize;
+                switch_session_cpu_report_tab(&dialog, &groups, next);
                 self.record_event_handled();
                 self.mode = Mode::SessionCpuReport(dialog);
                 return DashboardAction::None;
+            }
+            let row_delta = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(1isize),
+                KeyCode::Up | KeyCode::Char('k') => Some(-1),
+                KeyCode::PageDown => Some(10),
+                KeyCode::PageUp => Some(-10),
+                KeyCode::Home => Some(isize::MIN),
+                KeyCode::End => Some(isize::MAX),
+                _ => None,
+            };
+            if let (Some(delta), Some(group_index)) = (row_delta, group_index) {
+                move_session_cpu_report_selection(&dialog, &groups[group_index], delta);
+                self.record_event_handled();
+                self.mode = Mode::SessionCpuReport(dialog);
+                return DashboardAction::None;
+            }
+            if key.code == KeyCode::Enter {
+                let focused = dialog.form.borrow().focused();
+                match focused {
+                    Some(DialogControl::SessionCpuReportTabs) => {
+                        dialog
+                            .form
+                            .get_mut()
+                            .focus(DialogControl::SessionCpuReportRows);
+                        self.record_event_handled();
+                        self.mode = Mode::SessionCpuReport(dialog);
+                        return DashboardAction::None;
+                    }
+                    Some(DialogControl::SessionCpuReportClose) => {}
+                    Some(DialogControl::SessionCpuReportRows) | None => {
+                        if let Some(session_id) = dialog.selected_session_id.borrow().clone() {
+                            self.record_event_handled();
+                            return self.focus_session_from_cpu_report(&session_id);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         let result = dialog.form.get_mut().handle(&event);
@@ -1300,6 +1353,37 @@ impl DashboardState {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::SessionCpuReportClose)) => {
                 self.cancel_modal();
+            }
+            Some(Interaction::Select(DialogControl::SessionCpuReportTabs, index)) => {
+                switch_session_cpu_report_tab(&dialog, &groups, index);
+                self.mode = Mode::SessionCpuReport(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::SessionCpuReportTabs)) => {
+                dialog
+                    .form
+                    .get_mut()
+                    .focus(DialogControl::SessionCpuReportRows);
+                self.mode = Mode::SessionCpuReport(dialog);
+            }
+            Some(Interaction::Select(DialogControl::SessionCpuReportRows, index)) => {
+                if let Some(group_index) = group_index {
+                    select_session_cpu_report_row(&dialog, &groups[group_index], index);
+                }
+                self.mode = Mode::SessionCpuReport(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::SessionCpuReportRows)) => {
+                let selection = dialog
+                    .form
+                    .borrow()
+                    .selected(DialogControl::SessionCpuReportRows)
+                    .unwrap_or_else(|| dialog.selected_row.get());
+                if let Some(group_index) = group_index {
+                    select_session_cpu_report_row(&dialog, &groups[group_index], selection);
+                }
+                if let Some(session_id) = dialog.selected_session_id.borrow().clone() {
+                    return self.focus_session_from_cpu_report(&session_id);
+                }
+                self.mode = Mode::SessionCpuReport(dialog);
             }
             _ => self.mode = Mode::SessionCpuReport(dialog),
         }
@@ -1822,6 +1906,116 @@ impl crate::wizards::CompletesPaths for RepositoryOriginDialog {
             self.replacement.dismiss_completion();
         }
     }
+}
+
+fn reconcile_session_cpu_report(
+    dashboard: &DashboardState,
+    dialog: &SessionCpuReportDialog,
+    groups: &[crate::session_cpu_report::MachineReport],
+) -> Option<usize> {
+    if groups.is_empty() {
+        *dialog.machine_key.borrow_mut() = None;
+        *dialog.selected_session_id.borrow_mut() = None;
+        dialog.selected_row.set(0);
+        return None;
+    }
+
+    let remembered_key = dialog.machine_key.borrow().clone();
+    let dashboard_selection = dashboard.selected_session_id().map(str::to_owned);
+    let group_index = remembered_key
+        .as_deref()
+        .and_then(|key| groups.iter().position(|group| group.key == key))
+        .or_else(|| {
+            remembered_key
+                .is_none()
+                .then(|| {
+                    dashboard_selection.as_deref().and_then(|selected| {
+                        groups.iter().position(|group| {
+                            group.session_ids.iter().any(|session| session == selected)
+                        })
+                    })
+                })
+                .flatten()
+        })
+        .unwrap_or(0);
+    let group = &groups[group_index];
+    *dialog.machine_key.borrow_mut() = Some(group.key.clone());
+
+    let previous_row = dialog.selected_row.get();
+    let stored_selection = dialog.selected_session_id.borrow().clone();
+    let row_index = stored_selection
+        .as_deref()
+        .and_then(|selected| group.session_ids.iter().position(|id| id == selected))
+        .or_else(|| {
+            (stored_selection.is_none())
+                .then(|| {
+                    dashboard_selection
+                        .as_deref()
+                        .and_then(|selected| group.session_ids.iter().position(|id| id == selected))
+                })
+                .flatten()
+        })
+        .unwrap_or_else(|| previous_row.min(group.session_ids.len().saturating_sub(1)));
+    *dialog.selected_session_id.borrow_mut() = group.session_ids.get(row_index).cloned();
+    dialog.selected_row.set(row_index);
+    dialog
+        .form
+        .borrow_mut()
+        .set_selected(DialogControl::SessionCpuReportRows, row_index);
+    Some(group_index)
+}
+
+fn switch_session_cpu_report_tab(
+    dialog: &SessionCpuReportDialog,
+    groups: &[crate::session_cpu_report::MachineReport],
+    index: usize,
+) {
+    let Some(group) = groups.get(index) else {
+        return;
+    };
+    *dialog.machine_key.borrow_mut() = Some(group.key.clone());
+    dialog.selected_row.set(0);
+    *dialog.selected_session_id.borrow_mut() = group.session_ids.first().cloned();
+    let mut form = dialog.form.borrow_mut();
+    form.set_selected(DialogControl::SessionCpuReportRows, 0);
+    form.focus(DialogControl::SessionCpuReportRows);
+}
+
+fn move_session_cpu_report_selection(
+    dialog: &SessionCpuReportDialog,
+    group: &crate::session_cpu_report::MachineReport,
+    delta: isize,
+) {
+    let last = group.session_ids.len().saturating_sub(1);
+    let selected = match delta {
+        isize::MIN => 0,
+        isize::MAX => last,
+        delta if delta < 0 => dialog
+            .selected_row
+            .get()
+            .saturating_sub(delta.unsigned_abs()),
+        delta => dialog
+            .selected_row
+            .get()
+            .saturating_add(delta.unsigned_abs())
+            .min(last),
+    };
+    select_session_cpu_report_row(dialog, group, selected);
+}
+
+fn select_session_cpu_report_row(
+    dialog: &SessionCpuReportDialog,
+    group: &crate::session_cpu_report::MachineReport,
+    index: usize,
+) {
+    let Some(session_id) = group.session_ids.get(index).cloned() else {
+        return;
+    };
+    dialog.selected_row.set(index);
+    *dialog.selected_session_id.borrow_mut() = Some(session_id);
+    let mut form = dialog.form.borrow_mut();
+    form.set_selected(DialogControl::SessionCpuReportRows, index);
+    form.focus(DialogControl::SessionCpuReportRows);
 }
 
 #[cfg(test)]
