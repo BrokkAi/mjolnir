@@ -216,6 +216,15 @@ fn checkpoint_bundle_header_rejects_metadata_mismatch_and_malformed_payloads() {
     assert!(error.contains("no pack payload"), "{error}");
 }
 
+#[test]
+fn checkpoint_without_a_bundle_uses_its_head_as_the_source_boundary() {
+    let head = "b".repeat(40);
+    assert_eq!(
+        checkpoint_bundle_prerequisites(&checkpoint_bundle(&head, Vec::new())).unwrap(),
+        [head]
+    );
+}
+
 fn input() -> ArchiveInput {
     ArchiveInput {
         session: SessionManifest {
@@ -346,11 +355,48 @@ fn archive_round_trip_verifies_multi_repo_payloads_and_mode() {
     }
 }
 
+#[test]
+fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
+    const LARGE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large.hel.zip");
+    let mut archive_input = input();
+    archive_input.repositories.clear();
+    archive_input.native_artifacts = vec![NativeArtifact {
+        relative_path: PathBuf::from("sessions/native-1/large-rollout.jsonl"),
+        data: vec![b'x'; LARGE_PAYLOAD_BYTES],
+        mode: 0o600,
+    }];
+
+    let verified = write_archive_atomic(&path, &archive_input).unwrap();
+    drop(archive_input);
+
+    let native = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert_eq!(native.size, LARGE_PAYLOAD_BYTES as u64);
+    assert_eq!(verified.canonical_session, input().canonical_session);
+    let retained_metadata_bytes = serde_json::to_vec(&verified.manifest).unwrap().len()
+        + serde_json::to_vec(&verified.canonical_session)
+            .unwrap()
+            .len()
+        + verified.archive_sha256.len();
+    assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
+}
+
 const TEST_PART_BYTES: usize = 4096;
 
 fn zip_entry_names(path: &Path) -> Vec<String> {
     let archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
     archive.file_names().map(str::to_owned).collect()
+}
+
+fn zip_entry_method(path: &Path, name: &str) -> CompressionMethod {
+    let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+    archive.by_name(name).unwrap().compression()
 }
 
 /// Writes an archive whose native artifact and first untracked tar are both
@@ -426,6 +472,80 @@ fn oversized_payloads_shard_into_parts_and_read_back_whole() {
         "restore consumers only ever see whole payload paths"
     );
     assert!(verified.payloads.contains_key(native_path));
+}
+
+#[test]
+fn payload_parts_follow_the_threshold_and_never_split_stored_payloads() {
+    let bundle = PayloadRole::GitBundle {
+        repository_id: "hel".into(),
+    };
+    let artifact = PayloadRole::NativeArtifact {
+        relative_path: PathBuf::from("rollout.jsonl"),
+    };
+    assert_eq!(payload_compression(&bundle), CompressionMethod::Stored);
+    assert_eq!(payload_compression(&artifact), CompressionMethod::Zstd);
+
+    let body = vec![b'x'; 10];
+    assert!(
+        plan_payload_parts(
+            "repositories/hel/committed.bundle",
+            &body,
+            CompressionMethod::Stored,
+            4,
+        )
+        .is_empty()
+    );
+    assert!(
+        plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 10).is_empty(),
+        "a payload at the threshold stays whole"
+    );
+    let parts = plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 4);
+    assert_eq!(
+        parts
+            .iter()
+            .map(|part| part.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "native/rollout.jsonl.helpart.00000",
+            "native/rollout.jsonl.helpart.00001",
+            "native/rollout.jsonl.helpart.00002",
+        ]
+    );
+    assert_eq!(
+        parts.iter().map(|part| part.size).collect::<Vec<_>>(),
+        [4, 4, 2]
+    );
+    assert_eq!(parts[2].sha256, digest_bytes(&body[8..]));
+}
+
+#[test]
+fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stored-bundle.hel.zip");
+    write_archive_atomic(&path, &input()).unwrap();
+
+    assert_eq!(
+        zip_entry_method(&path, "repositories/hel/committed.bundle"),
+        CompressionMethod::Stored
+    );
+    assert_eq!(
+        zip_entry_method(&path, CANONICAL_SESSION_PATH),
+        CompressionMethod::Zstd
+    );
+    assert_eq!(
+        zip_entry_method(&path, "repositories/hel/untracked.tar"),
+        CompressionMethod::Zstd
+    );
+
+    let verified = read_archive_verified(&path).unwrap();
+    assert_eq!(
+        verified
+            .payload_by_role(&PayloadRole::GitBundle {
+                repository_id: "hel".into(),
+            })
+            .unwrap(),
+        b"bundle-hel"
+    );
 }
 
 /// Replaces a repository's untracked tar in an already prepared archive,
@@ -2323,11 +2443,24 @@ fn review_capture_preserves_tracked_ignored_files_and_staged_deletions() {
         b"unchanged\nmodified\ndeleted\nstaged-deleted\ncached-deleted\nnew-ignored\nforced\n",
         "ignore tracked files",
     );
+    let index_before_ignored_capture = fs::read(repository.path().join(".git/index")).unwrap();
+    let baseline_tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
+    let ignored_only_tree = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
+    assert_eq!(
+        baseline_tree, ignored_only_tree,
+        "a new ignored file does not change the captured review tree"
+    );
+    assert_eq!(
+        fs::read(repository.path().join(".git/index")).unwrap(),
+        index_before_ignored_capture,
+        "the ignored-file capture leaves the real index unchanged"
+    );
+
     fs::write(repository.path().join("modified"), b"changed\n").unwrap();
     fs::remove_file(repository.path().join("deleted")).unwrap();
     git(repository.path(), &["rm", "staged-deleted"]);
     git(repository.path(), &["rm", "--cached", "cached-deleted"]);
-    fs::write(repository.path().join("new-ignored"), b"ignored\n").unwrap();
     fs::write(repository.path().join("forced"), b"forced\n").unwrap();
     git(repository.path(), &["add", "-f", "forced"]);
     let index = fs::read(repository.path().join(".git/index")).unwrap();
