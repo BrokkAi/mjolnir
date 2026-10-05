@@ -5,6 +5,19 @@ use crate::config::{
 };
 use crate::targets::MountAccess;
 
+#[test]
+fn session_build_cache_defaults_optional_legacy_fields() {
+    let cache: SessionBuildCache = serde_json::from_value(serde_json::json!({
+        "host": "local",
+        "directory": "/srv/mbx-cache"
+    }))
+    .unwrap();
+
+    assert_eq!(cache.directory, PathBuf::from("/srv/mbx-cache"));
+    assert_eq!(cache.max_size, None);
+    assert_eq!(cache.target_root, None);
+}
+
 fn user_item(position: u64, text: &str) -> Arc<TranscriptItem> {
     Arc::new(TranscriptItem {
         stable_id: format!("user:{position}"),

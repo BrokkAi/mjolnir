@@ -1752,10 +1752,17 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         &arguments[..4],
         [
             "shared",
-            crate::controller::MBX_VERSION,
             "/srv/mbx-cache",
-            "/srv/mbx-cache/.mjolnir/config"
+            "/srv/mbx-cache/.mjolnir/config",
+            "/srv/mbx-cache/.mjolnir/bin/mbx"
         ]
+    );
+    assert_eq!(
+        arguments[4],
+        mj_core::config::data_dir()
+            .join("mbx")
+            .to_string_lossy()
+            .as_ref()
     );
     assert_eq!(
         &arguments[5..],

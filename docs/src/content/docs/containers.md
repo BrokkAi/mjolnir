@@ -257,9 +257,9 @@ image-user behavior.
 
 ## Build cache (mbx)
 
-Rust sessions on Podman and Docker container targets share one
-[mbx](https://github.com/jdx/mr-boxington) build cache per container host, with
-no setup. mbx wraps Cargo: it looks each compiler action up in a
+Rust sessions on Podman and Docker container targets can share one
+[mbx](https://github.com/jdx/mr-boxington) build cache per container host when
+that Linux host has mbx 1.22.0 or newer installed. mbx wraps Cargo: it looks each compiler action up in a
 content-addressed store and restores the cached output instead of recompiling.
 The second session to build a project on a host reuses the first one's work.
 
@@ -271,14 +271,21 @@ Mjolnir turns this on for a session when all of the following hold:
   a subdirectory is not detected.
 - The resolved cache directory is on a filesystem that supports reflinks, which
   is what makes restoring a cached output nearly free.
-- The container host either has no mbx of its own, or has one at least as new
-  as the version Mjolnir installs into containers. An older native mbx must not
-  write the same store, so Mjolnir runs those sessions without the cache.
+- The container host has mbx 1.22.0 or newer. A missing or older installation
+  leaves sessions on that host without the shared cache.
 
 The cache directory lives on the container host and is mounted read-write into
-the container at the same absolute path. Nothing is synchronized between hosts,
-and Mjolnir never runs mbx garbage collection: the host's own mbx and the
-automatic collection inside containers are the only collectors.
+the container at the same absolute path. Mjolnir atomically copies the resolved
+host executable to `<cache>/.mjolnir/bin/mbx` inside that directory, then checks
+that this copy runs in the container and reports the expected version before
+installing mbx's Cargo launcher. Session start, resume, and periodic machine
+reconciliation refresh the copy when the native mbx version or file size
+changes. A replacement uses a same-directory temporary file and atomic rename,
+so running processes keep using the inode they already opened. If native mbx
+is absent or too old, the old copy is left in place and new sessions run
+without the cache. Nothing is synchronized between hosts, and Mjolnir never
+runs mbx garbage collection: the host's own mbx and the automatic collection
+inside containers are the only collectors.
 
 ### Settings
 
@@ -289,11 +296,11 @@ by its container runtimes:
 
 | Setting | Default when blank |
 | --- | --- |
-| Enabled | On when the cache filesystem supports reflinks. |
-| Cache directory | The host's native mbx cache if mbx is installed there, otherwise `~/.cache/mbx` on that host. |
-| Cache size limit | The host's own mbx limits if it has a configuration file, otherwise the smaller of 100 GB and a quarter of the free space. |
-| Concurrent compile permits | The mbx scheduler's logical CPU count, shared by all builds on the machine. |
-| Compile admission memory budget | The mbx scheduler's detected-memory budget. This weights concurrent compile admission; it is not a hard memory cap. |
+| Enabled | On when the host has compatible mbx and the cache filesystem supports reflinks. |
+| Cache directory | The directory reported by the host's mbx configuration. A missing or too-old mbx does not get a fallback cache. |
+| Cache size limit | The host's own mbx configuration. Configure limits on the machine with mbx. |
+| Concurrent compile permits | The host's mbx scheduler setting, shared by all builds on the machine. |
+| Compile admission memory budget | The host's mbx scheduler setting. This weights concurrent compile admission; it is not a hard memory cap. |
 
 The two scheduler controls are under
 `[machines.<id>.build_cache.scheduler]` in `config.toml`. Leave either blank
@@ -302,26 +309,27 @@ memory sizes and the `none` option.
 
 Opening a machine's build cache page asks its host for these values, so each
 blank field shows what a session there would actually use, such as
-`/mnt/fast/mbx-cache`. When sessions on that host run without
-the cache, the page says why, for example because the host has no
-reflink-capable filesystem or its own mbx is too old.
+`/mnt/fast/mbx-cache`. When sessions on that host run without the cache, the
+page says why. If mbx is missing or too old, install or upgrade it from
+**Settings › Setup › Machines**.
 
-`mj doctor` also checks the native mbx version on each configured Podman or
-Docker host when the build cache is enabled. If it is older than the version
-Mjolnir installs in containers, doctor warns that sessions will run without
-the shared cache and names the version to install on that host. The warning
-does not make doctor fail because the cache is optional.
+`mj doctor` checks the native mbx version on each configured Podman or Docker
+host when the build cache is enabled. A missing or too-old version produces a
+warning that sessions will run without the shared cache and points to **Settings
+› Setup › Machines**. The warning does not make doctor fail because the cache
+is optional.
 
-When the host has `~/.config/mbx/config.toml`, Mjolnir copies it into the
-container so the container's mbx uses the host's own budgets. If that file
+When the host has `~/.config/mbx/config.toml`, Mjolnir mirrors it into the
+shared cache and links it into the container so mbx uses the host's own
+settings. If that file
 relocates `[target] root` outside the cache directory, that directory is
 mounted read-write at its own path too.
 
-Inside the session, `cargo` is the mbx shim, which runs the image's real Cargo
-underneath. `mbx stats` reports what the cache holds.
-
-`MJ_MBX_BINARY` overrides the pinned download with a local mbx binary, for
-development against an unreleased mbx.
+Inside the session, `cargo` is a small launcher that invokes the shared-cache
+mbx through its supported Cargo-shim mode; mbx finds the image's real Cargo
+underneath. The session PATH also includes an `mbx` launcher for that same
+cache copy.
+`mbx stats` reports what the cache holds.
 
 ## Two useful facts
 

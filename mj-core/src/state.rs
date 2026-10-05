@@ -1244,8 +1244,9 @@ impl CheckpointMetadata {
 }
 
 /// The mbx build cache a container session was provisioned with. The
-/// directory is a host path that is mounted read-write at the same absolute
-/// path inside the container.
+/// directory is a host path mounted read-write at the same absolute path
+/// inside the container. Older containers retain their private binaries until
+/// recreated; the worker's `bin/mbx` contents identify that legacy scheme.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBuildCache {
@@ -1355,7 +1356,7 @@ pub enum BuildCacheLimit {
     HostConfiguration(Option<String>),
     /// An automatic total initialized by mj, independent of later disk growth.
     MjDefault(String),
-    /// The pinned mbx's disk-scaled default, or no combined limit.
+    /// The host's native mbx default, or no combined limit.
     MbxDefault(Option<String>),
 }
 

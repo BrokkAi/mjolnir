@@ -33,15 +33,16 @@ pub(crate) async fn run(
                 }
                 for machine in machines.values() {
                     let Some(host) = CacheHost::for_machine(machine) else { continue; };
-                    if machine.build_cache().and_then(|settings| settings.enabled) == Some(false) { continue; }
                     let key = host.key();
-                    if machine.build_cache().is_none() && !active_hosts.contains(&key) { continue; }
-                    if active.contains(&key) { continue; }
                     let directories: Vec<_> = projection.state.sessions.values()
                         .filter_map(|session| session.build_cache.as_ref())
                         .filter(|cache| cache.host == key)
                         .map(|cache| cache.directory.clone())
                         .collect::<BTreeSet<_>>().into_iter().collect();
+                    if machine.build_cache().and_then(|settings| settings.enabled) == Some(false)
+                        && directories.is_empty() { continue; }
+                    if machine.build_cache().is_none() && !active_hosts.contains(&key) { continue; }
+                    if active.contains(&key) { continue; }
                     let desired = format!("{machine:?}|{directories:?}");
                     if let Some((previous, next, _)) = policies.get(&key)
                         && previous == &desired && Instant::now() < *next { continue; }

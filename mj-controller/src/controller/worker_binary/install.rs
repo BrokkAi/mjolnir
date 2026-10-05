@@ -1,4 +1,5 @@
 use super::*;
+use crate::targets::CommandOutput;
 
 /// Add lifecycle guidance only for targets that Hel destroys as a whole.
 pub(super) fn append_hel_target_environment(
@@ -259,22 +260,82 @@ for root in "$HOME/.config" "$@"; do
 done
 "#;
 
-/// Install the private binary and link configuration; never copy machine policy.
-pub(super) fn install_mbx_files(
+const CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT: &str = r#"set -eu
+bin=$1 source=$2
+shift 2
+scheme=new
+if [ -f "$bin/mbx" ]; then
+    if grep -Fqx '# mjolnir-mbx-shim' "$bin/mbx"; then
+        scheme=new
+    else
+        grep_status=$?
+        case "$grep_status" in
+            1) scheme=legacy ;;
+            *)
+                echo "could not inspect the Mjolnir mbx shim marker in $bin/mbx (grep exited $grep_status)" >&2
+                exit 1
+                ;;
+        esac
+    fi
+fi
+if [ "$scheme" = legacy ]; then
+    [ -r "$source/config.toml" ] || { echo 'shared machine mbx configuration is missing' >&2; exit 1; }
+    for root in "$HOME/.config" "$@"; do
+        mkdir -p -- "$root/mbx"
+        link="$root/mbx/.config.mj-$$"
+        ln -s -- "$source/config.toml" "$link"
+        mv -Tf -- "$link" "$root/mbx/config.toml"
+    done
+    printf 'legacy'
+else
+    printf 'new'
+fi
+"#;
+
+const INSTALL_MBX_SHIMS_SCRIPT: &str = r#"set -eu
+bin=$1 cargo_body=$2 mbx_body=$3
+mkdir -p -- "$bin"
+write_shim() {
+    target=$1 body=$2
+    temporary=$(mktemp "${target}.mj-XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    {
+        printf '%s\n' '#!/bin/sh' '# mjolnir-mbx-shim'
+        printf '%s\n' "$body"
+    } >"$temporary"
+    chmod 755 -- "$temporary"
+    mv -f -- "$temporary" "$target"
+    trap - EXIT HUP INT TERM
+}
+write_shim "$bin/cargo" "$cargo_body"
+write_shim "$bin/mbx" "$mbx_body"
+"#;
+
+const REMOVE_MBX_SHIMS_SCRIPT: &str = r#"set -eu
+bin=$1
+for name in cargo mbx; do
+    path="$bin/$name"
+    if [ -f "$path" ] && [ ! -L "$path" ] && grep -Fqx '# mjolnir-mbx-shim' "$path"; then
+        rm -f -- "$path"
+    fi
+done
+"#;
+
+/// Install marked Cargo and mbx launchers that use the shared cache copy.
+pub(super) fn install_mbx_shims(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
-    session_id: &str,
     worker_root: &str,
-    binary: &Path,
+    mbx_binary: &Path,
     configuration: &Path,
     config_roots: &[PathBuf],
 ) -> Result<()> {
+    ensure!(
+        mbx_binary.is_absolute(),
+        "shared cache mbx path is not absolute: {}",
+        mbx_binary.display()
+    );
     let bin = format!("{worker_root}/bin");
-    let mbx = format!("{bin}/mbx");
-    let cargo = format!("{bin}/cargo");
-    // A hard link keeps one copy of a 30 MB binary; a copy is the fallback for
-    // images whose layer cannot link.
-    let shim_script = format!(r#"ln -f "{mbx}" "{cargo}" 2>/dev/null || cp -f "{mbx}" "{cargo}""#);
     let (engine, container_id, ssh) = match locator {
         targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
         targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
@@ -291,108 +352,136 @@ pub(super) fn install_mbx_files(
             bail!("the build cache is only installed into Podman and Docker containers")
         }
     };
-    // Remote hosts keep the binary in a content-addressed cache so it crosses
-    // the network once per unique mbx, exactly as the worker binary does.
-    let source = match ssh {
-        None => binary.to_string_lossy().into_owned(),
-        Some(ssh) => {
-            let digest = mj_core::worker_launch::worker_executable_digest(binary)?;
-            let cache_dir = format!(".cache/mjolnir/mbx/{digest}");
-            let cached = format!("{cache_dir}/mbx");
-            let present = matches!(
-                executor.execute(
-                    &crate::targets::ssh_command(ssh, ["test", "-f", &cached])
-                        .purpose("probe the cached remote mbx binary"),
-                ),
-                Ok(output) if output.status == 0
-            );
-            if !present {
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command(ssh, ["mkdir", "-p", &cache_dir])
-                        .purpose("create the remote mbx cache"),
-                )?;
-                let partial = format!("{cache_dir}/mbx.partial-{session_id}");
-                execute_checked(
-                    executor,
-                    crate::targets::scp_upload(ssh, binary, &partial, false)
-                        .purpose("upload the remote mbx binary"),
-                )?;
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command(ssh, ["mv", &partial, &cached])
-                        .purpose("publish the cached remote mbx binary"),
-                )?;
-            }
-            cached
+    let quoted_binary = targets::posix_quote(&mbx_binary.to_string_lossy());
+    let cargo_body = format!(
+        "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec {quoted_binary} \"$@\""
+    );
+    let mbx_body = format!("exec {quoted_binary} \"$@\"");
+    let args = vec![
+        engine.to_owned(),
+        "exec".to_owned(),
+        container_id.clone(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        INSTALL_MBX_SHIMS_SCRIPT.to_owned(),
+        "sh".to_owned(),
+        bin,
+        cargo_body,
+        mbx_body,
+    ];
+    let command = match ssh {
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+        Some(ssh) => crate::targets::ssh_command(ssh, args),
+    }
+    .purpose("install the shared-cache mbx shims")
+    .stage(ProvisionStage::Syncing);
+    execute_checked(executor, command)?;
+    link_mbx_configuration(executor, locator, configuration, config_roots)
+}
+
+pub(super) fn remove_generated_mbx_shims(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
         }
     };
-    let steps: Vec<(Vec<String>, &str)> = vec![
-        (
-            vec![
-                engine.into(),
-                "exec".into(),
-                container_id.clone(),
-                "mkdir".into(),
-                "-p".into(),
-                bin.clone(),
-            ],
-            "create the session binary directory",
-        ),
-        (
-            vec![
-                engine.into(),
-                "cp".into(),
-                source,
-                format!("{container_id}:{mbx}"),
-            ],
-            "upload the mbx build cache binary",
-        ),
-        (
-            std::iter::once(engine.to_owned())
-                .chain(container_upload_ownership_args(
-                    engine,
-                    container_id,
-                    worker_root,
-                    &[&bin],
-                ))
-                .collect(),
-            "match the mbx binary to the worker directory owner",
-        ),
-        (
-            vec![
-                engine.into(),
-                "exec".into(),
-                container_id.clone(),
-                "sh".into(),
-                "-c".into(),
-                shim_script,
-            ],
-            "install the mbx Cargo shim",
-        ),
-        (
-            vec![
-                engine.into(),
-                "exec".into(),
-                container_id.clone(),
-                "chmod".into(),
-                "755".into(),
-                mbx.clone(),
-                cargo.clone(),
-            ],
-            "make the mbx build cache executable",
-        ),
+    let args = vec![
+        engine.to_owned(),
+        "exec".to_owned(),
+        container_id.clone(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        REMOVE_MBX_SHIMS_SCRIPT.to_owned(),
+        "sh".to_owned(),
+        format!("{worker_root}/bin"),
     ];
-    for (args, purpose) in steps {
-        let command = match ssh {
-            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-            Some(ssh) => crate::targets::ssh_command(ssh, args),
-        }
-        .purpose(purpose)
-        .stage(ProvisionStage::Syncing);
-        execute_checked(executor, command)?;
+    let container_command = match ssh {
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+        Some(ssh) => crate::targets::ssh_command(ssh, args),
     }
-    link_mbx_configuration(executor, locator, configuration, config_roots)
+    .purpose("remove marked mbx shims after cache verification failed")
+    .stage(ProvisionStage::Syncing);
+    execute_checked(executor, container_command)?;
+    Ok(())
+}
+
+pub(super) fn verify_mbx_binary(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    mbx_binary: &Path,
+    expected_version: &str,
+) -> Result<()> {
+    ensure!(
+        mbx_binary.is_absolute(),
+        "shared cache mbx path is not absolute: {}",
+        mbx_binary.display()
+    );
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
+        }
+    };
+    let args = vec![
+        engine.to_owned(),
+        "exec".to_owned(),
+        container_id.clone(),
+        mbx_binary.to_string_lossy().into_owned(),
+        "--version".to_owned(),
+    ];
+    let command = match ssh {
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+        Some(ssh) => crate::targets::ssh_command(ssh, args),
+    }
+    .purpose("verify the synchronized mbx inside the session container")
+    .stage(ProvisionStage::Syncing);
+    let output = executor.execute(&command)?;
+    let container_version = reported_mbx_version(output, &command)?;
+    ensure!(
+        expected_version == container_version,
+        "the container reports mbx {container_version}, but the synchronized host copy is mbx {expected_version}"
+    );
+    Ok(())
+}
+
+fn reported_mbx_version(output: CommandOutput, command: &CommandSpec) -> Result<String> {
+    ensure!(
+        output.status == 0,
+        "{} failed with status {}: {}",
+        command.purpose,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next_back()
+        .map(str::to_owned)
+        .context("mbx --version returned no version")
 }
 
 /// Upgrade configuration without touching an executable a live build may use.
@@ -444,6 +533,64 @@ pub(super) fn link_mbx_configuration(
         execute_checked(executor, command)?;
     }
     Ok(())
+}
+
+/// Preserve legacy private mbx installations and link their shared config in
+/// the same container command that distinguishes them from generated shims.
+pub(super) fn link_legacy_mbx_configuration(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    configuration: &Path,
+    config_roots: &[PathBuf],
+) -> Result<bool> {
+    let (engine, container_id, ssh) = match locator {
+        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
+        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
+        targets::TargetLocator::SshPodman {
+            ssh, container_id, ..
+        } => ("podman", container_id, Some(ssh)),
+        targets::TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => ("docker", container_id, Some(ssh)),
+        targets::TargetLocator::LocalBare { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::AwsEc2 { .. }
+        | targets::TargetLocator::SshBare { .. } => {
+            bail!("the build cache is only installed into Podman and Docker containers")
+        }
+    };
+    let mut args = vec![
+        engine.to_owned(),
+        "exec".to_owned(),
+        container_id.clone(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT.to_owned(),
+        "sh".to_owned(),
+        format!("{worker_root}/bin"),
+        configuration.to_string_lossy().into_owned(),
+    ];
+    args.extend(
+        config_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    let container_command = match ssh {
+        None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
+        Some(ssh) => crate::targets::ssh_command(ssh, args),
+    }
+    .purpose("inspect legacy mbx and relink its shared configuration")
+    .stage(ProvisionStage::Syncing);
+    let output = execute_checked(executor, container_command)?;
+    match output.stdout.as_slice() {
+        b"legacy" => Ok(true),
+        b"new" => Ok(false),
+        other => bail!(
+            "container mbx scheme inspection returned unexpected output: {}",
+            String::from_utf8_lossy(other)
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -895,4 +1042,179 @@ pub(super) fn install_worker_over_ssh(
             .purpose("restrict SSH harness profile permissions"),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod mbx_shim_tests {
+    use super::*;
+
+    fn execute_script(
+        script: &str,
+        arguments: impl IntoIterator<Item = String>,
+        path: Option<&Path>,
+        home: Option<&Path>,
+    ) -> CommandOutput {
+        let args = std::iter::once("-c".to_owned())
+            .chain(std::iter::once(script.to_owned()))
+            .chain(std::iter::once("sh".to_owned()))
+            .chain(arguments)
+            .collect::<Vec<_>>();
+        let mut command = CommandSpec::new("sh", args);
+        if let Some(path) = path {
+            command
+                .env
+                .insert("PATH".into(), format!("{}:/usr/bin:/bin", path.display()));
+        }
+        if let Some(home) = home {
+            command
+                .env
+                .insert("HOME".into(), home.to_string_lossy().into_owned());
+        }
+        targets::ProcessExecutor.execute(&command).unwrap()
+    }
+
+    fn run_script(script: &str, arguments: impl IntoIterator<Item = String>) {
+        let output = execute_script(script, arguments, None, None);
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_marked_mbx_shims_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let generated = root.path().join("generated");
+        run_script(
+            INSTALL_MBX_SHIMS_SCRIPT,
+            [
+                generated.to_string_lossy().into_owned(),
+                "MBX_CARGO_SHIM_MODE=1\nMBX_CARGO_SHIM_PATH=$(command -v \"$0\")\nexport MBX_CARGO_SHIM_MODE MBX_CARGO_SHIM_PATH\nexec /cache/.mjolnir/bin/mbx \"$@\"".into(),
+                "exec /cache/.mjolnir/bin/mbx \"$@\"".into(),
+            ],
+        );
+        for name in ["cargo", "mbx"] {
+            let script = std::fs::read_to_string(generated.join(name)).unwrap();
+            assert!(script.lines().any(|line| line == "# mjolnir-mbx-shim"));
+        }
+
+        let legacy = root.path().join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("cargo"), b"legacy cargo binary").unwrap();
+        std::fs::write(legacy.join("mbx"), b"legacy copied mbx binary").unwrap();
+
+        run_script(
+            REMOVE_MBX_SHIMS_SCRIPT,
+            [generated.to_string_lossy().into_owned()],
+        );
+        run_script(
+            REMOVE_MBX_SHIMS_SCRIPT,
+            [legacy.to_string_lossy().into_owned()],
+        );
+
+        assert!(!generated.join("cargo").exists());
+        assert!(!generated.join("mbx").exists());
+        assert_eq!(
+            std::fs::read(legacy.join("cargo")).unwrap(),
+            b"legacy cargo binary"
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("mbx")).unwrap(),
+            b"legacy copied mbx binary"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn legacy_detection_distinguishes_grep_miss_match_and_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("shared config");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("config.toml"), "[cache]\n").unwrap();
+        let roots = temp.path().join("config roots");
+        let home = temp.path().join("home");
+        let legacy = temp.path().join("legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(legacy.join("mbx"), b"private copied mbx binary").unwrap();
+        let args = || {
+            vec![
+                legacy.to_string_lossy().into_owned(),
+                source.to_string_lossy().into_owned(),
+                roots.to_string_lossy().into_owned(),
+            ]
+        };
+
+        let legacy_output = execute_script(
+            CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT,
+            args(),
+            None,
+            Some(&home),
+        );
+        assert_eq!(legacy_output.status, 0);
+        assert_eq!(legacy_output.stdout, b"legacy");
+
+        std::fs::write(legacy.join("mbx"), "#!/bin/sh\n# mjolnir-mbx-shim\n").unwrap();
+        let new_output = execute_script(
+            CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT,
+            args(),
+            None,
+            Some(&home),
+        );
+        assert_eq!(new_output.status, 0);
+        assert_eq!(new_output.stdout, b"new");
+
+        let tools = temp.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join("grep"), "#!/bin/sh\nexit 2\n").unwrap();
+        std::fs::set_permissions(tools.join("grep"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::write(legacy.join("mbx"), b"private copied mbx binary").unwrap();
+        let failed = execute_script(
+            CHECK_LEGACY_MBX_AND_LINK_CONFIG_SCRIPT,
+            args(),
+            Some(&tools),
+            Some(&home),
+        );
+        assert_ne!(failed.status, 0);
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("grep exited 2"),
+            "{}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+    }
+
+    #[test]
+    fn legacy_detection_errors_are_returned_to_the_caller() {
+        struct FailedInspection;
+        impl crate::targets::CommandExecutor for FailedInspection {
+            fn execute(&self, _command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"could not inspect the Mjolnir mbx shim marker in /worker/bin/mbx (grep exited 2)".to_vec(),
+                })
+            }
+        }
+
+        let error = link_legacy_mbx_configuration(
+            &FailedInspection,
+            &targets::TargetLocator::LocalPodman {
+                borrowed_from: None,
+                container_id: "mj-test-container".into(),
+                workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+            },
+            "/worker",
+            Path::new("/cache/.mjolnir/config/mbx"),
+            &[],
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("grep exited 2"), "{message}");
+    }
 }

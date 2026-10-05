@@ -781,7 +781,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN checkout_json;
+        "ALTER TABLE sessions DROP COLUMN checkout_json;
         DELETE FROM schema_migrations WHERE version >= 54;
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 53;",

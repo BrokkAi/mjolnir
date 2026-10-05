@@ -443,6 +443,65 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
 }
 
 #[test]
+fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
+    let config = config_with([
+        (
+            "podman",
+            TargetTemplate::LocalPodman {
+                container: container("ubuntu:24.04"),
+            },
+        ),
+        (
+            "docker",
+            TargetTemplate::LocalDocker {
+                container: container("ubuntu:24.04"),
+            },
+        ),
+    ]);
+    let executor = FakeExecutor::new([
+        Ok(output("Linux x86_64")),
+        Ok(output("/usr/local/bin/mbx\nmbx 1.15.0")),
+    ]);
+
+    let checks = build_cache_checks(Ok(&config), &executor);
+
+    assert_eq!(checks.len(), 1);
+    let check = &checks[0];
+    assert_eq!(check.id, "build-cache.local");
+    assert_eq!(check.status, CheckStatus::Warning);
+    assert!(check.detail.contains("1.15.0"));
+    assert!(check.detail.contains(crate::controller::MBX_VERSION));
+    assert!(check.detail.contains("run without the shared build cache"));
+    assert!(check.detail.contains("docker, podman"));
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("Upgrade mbx")
+    );
+    assert_eq!(executor.commands.borrow().len(), 2);
+    assert!(
+        all_ready(&checks),
+        "an optional cache warning preserves doctor's exit status"
+    );
+
+    let json = serde_json::to_value(check).unwrap();
+    assert_eq!(json["status"], "warning");
+    assert!(
+        json["remediation"]
+            .as_str()
+            .unwrap()
+            .contains(crate::controller::MBX_VERSION)
+    );
+    let mut human = Vec::new();
+    render_human(&checks, &mut human).unwrap();
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("warning Build cache on local"));
+    assert!(human.contains("remediation: Upgrade mbx"));
+}
+
+#[test]
 fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     let config = config_with([(
         "podman",
@@ -453,13 +512,17 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     for (response, expected_status, expected_text) in [
         (
             Ok(output(format!(
-                "mbx\nmbx {}",
+                "/usr/local/bin/mbx\nmbx {}",
                 crate::controller::MBX_VERSION
             ))),
             CheckStatus::Ready,
             "compatible",
         ),
-        (Ok(failed("")), CheckStatus::Ready, "No native mbx"),
+        (
+            Ok(failed("")),
+            CheckStatus::Warning,
+            "run without the shared build cache",
+        ),
         (
             Err(anyhow!("probe timed out")),
             CheckStatus::Warning,

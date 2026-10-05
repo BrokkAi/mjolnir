@@ -1,184 +1,6 @@
 use super::launch::*;
 use super::*;
 
-#[cfg(unix)]
-#[test]
-fn install_mbx_files_uses_the_worker_container_layout_and_shared_config_links() {
-    use std::os::unix::fs::PermissionsExt;
-
-    struct ContainerFixtureExecutor {
-        commands: std::cell::RefCell<Vec<CommandSpec>>,
-        filesystem: PathBuf,
-    }
-
-    impl ContainerFixtureExecutor {
-        fn container_path(&self, path: &str) -> PathBuf {
-            self.filesystem.join(path.trim_start_matches('/'))
-        }
-
-        fn run_shell(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
-            let script_index = command
-                .args
-                .iter()
-                .position(|argument| argument == "-c")
-                .context("container shell command has no -c")?
-                + 1;
-            let is_config_script = command.purpose == "link the shared machine mbx configuration";
-            let script = &command.args[script_index];
-            let mut arguments = command.args[script_index + 1..].to_vec();
-            let script = if is_config_script {
-                for root in arguments.iter_mut().skip(2) {
-                    *root = self.container_path(root).display().to_string();
-                }
-                script.clone()
-            } else {
-                script.replace(
-                    "/home/worker/.mjolnir",
-                    &self
-                        .container_path("/home/worker/.mjolnir")
-                        .display()
-                        .to_string(),
-                )
-            };
-            let mut child = std::process::Command::new("sh");
-            child.arg("-c").arg(script).args(arguments);
-            if is_config_script {
-                child.env("HOME", self.container_path("/home/worker").as_os_str());
-            }
-            let output = mj_core::subprocess::run_with_input(&mut child, b"")?;
-            Ok(crate::targets::CommandOutput {
-                status: output.status.code().unwrap_or(1),
-                stdout: output.stdout,
-                stderr: output.stderr,
-            })
-        }
-    }
-
-    impl CommandExecutor for ContainerFixtureExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<crate::targets::CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            match command.purpose.as_str() {
-                "create the session binary directory" => {
-                    let bin = command.args.last().context("container bin path")?;
-                    std::fs::create_dir_all(self.container_path(bin))?;
-                }
-                "upload the mbx build cache binary" => {
-                    let source = Path::new(&command.args[1]);
-                    let (_, destination) = command.args[2]
-                        .split_once(':')
-                        .context("container copy destination")?;
-                    let destination = self.container_path(destination);
-                    std::fs::create_dir_all(destination.parent().context("binary parent")?)?;
-                    std::fs::copy(source, destination)?;
-                }
-                "install the mbx Cargo shim" | "link the shared machine mbx configuration" => {
-                    let output = self.run_shell(command)?;
-                    if output.status != 0 {
-                        return Ok(output);
-                    }
-                }
-                "make the mbx build cache executable" => {
-                    for path in command.args.iter().skip(4) {
-                        std::fs::set_permissions(
-                            self.container_path(path),
-                            std::fs::Permissions::from_mode(0o755),
-                        )?;
-                    }
-                }
-                "match the mbx binary to the worker directory owner" => {}
-                purpose => anyhow::bail!("unexpected container install command: {purpose}"),
-            }
-            Ok(crate::targets::CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let fixture = tempfile::tempdir().expect("container fixture");
-    let filesystem = fixture.path().join("container");
-    let shared = fixture.path().join("shared-mbx");
-    std::fs::create_dir_all(&shared).expect("shared mbx directory");
-    std::fs::write(shared.join("config.toml"), "[build]\ncache = true\n")
-        .expect("shared machine config");
-    let binary = fixture.path().join("mbx");
-    std::fs::write(&binary, b"mbx test binary").expect("mbx binary");
-    let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "fixture-container".to_owned(),
-        workspace_storage: Default::default(),
-    };
-    let config_roots = [
-        PathBuf::from("/root/.config"),
-        PathBuf::from("/opt/mj/.config"),
-    ];
-    let executor = ContainerFixtureExecutor {
-        commands: std::cell::RefCell::new(Vec::new()),
-        filesystem: filesystem.clone(),
-    };
-
-    install_mbx_files(
-        &executor,
-        &locator,
-        "0123456789abcdef0123456789abcdef",
-        "/home/worker/.mjolnir",
-        &binary,
-        &shared,
-        &config_roots,
-    )
-    .expect("install mbx and link its shared policy");
-
-    let bin = filesystem.join("home/worker/.mjolnir/bin");
-    for name in ["mbx", "cargo"] {
-        let installed = bin.join(name);
-        assert_eq!(std::fs::read(&installed).unwrap(), b"mbx test binary");
-        assert_ne!(
-            std::fs::metadata(installed).unwrap().permissions().mode() & 0o111,
-            0,
-            "{name} must be executable"
-        );
-    }
-    for root in [
-        filesystem.join("home/worker/.config"),
-        filesystem.join("root/.config"),
-        filesystem.join("opt/mj/.config"),
-    ] {
-        let link = root.join("mbx/config.toml");
-        assert!(
-            std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(
-            std::fs::read_link(link).unwrap(),
-            shared.join("config.toml")
-        );
-    }
-    assert_eq!(
-        std::fs::read_to_string(shared.join("config.toml")).unwrap(),
-        "[build]\ncache = true\n",
-        "the shared policy source stays intact"
-    );
-    assert_eq!(
-        executor
-            .commands
-            .borrow()
-            .iter()
-            .map(|command| command.purpose.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "create the session binary directory",
-            "upload the mbx build cache binary",
-            "match the mbx binary to the worker directory owner",
-            "install the mbx Cargo shim",
-            "make the mbx build cache executable",
-            "link the shared machine mbx configuration",
-        ]
-    );
-}
-
 fn stamped_worker(body: &[u8]) -> Vec<u8> {
     let mut bytes = body.to_vec();
     bytes.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
@@ -2907,6 +2729,117 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     }
 }
 
+#[test]
+fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_path() {
+    #[derive(Default)]
+    struct RecordingExecutor {
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingExecutor {
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(format!(
+                "{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let executor = RecordingExecutor::default();
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+
+    install_mbx_shims(
+        &executor,
+        &locator,
+        "/home/hel/.hel/worker",
+        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
+        Path::new("/cache/.mjolnir/config/mbx"),
+        &[],
+    )
+    .unwrap();
+
+    let commands = executor.commands();
+    let shim = commands
+        .iter()
+        .find(|line| line.contains("MBX_CARGO_SHIM_MODE=1"))
+        .expect("the supported mbx Cargo launcher is written in the container");
+    assert!(
+        shim.contains("MBX_CARGO_SHIM_PATH=$(command -v \"$0\")"),
+        "{shim}"
+    );
+    assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
+    assert!(
+        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        "both wrappers execute the synchronized cache copy: {shim}"
+    );
+    assert!(!commands.iter().any(|line| line.contains(" cp ")));
+    assert!(
+        commands.iter().any(|line| {
+            line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
+        }),
+        "the machine mbx configuration is linked into the container: {commands:#?}"
+    );
+}
+
+#[test]
+fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
+    #[derive(Default)]
+    struct VersionExecutor {
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for VersionExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(format!(
+                "{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"mbx 1.23.0".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let executor = VersionExecutor::default();
+    let locator = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "hel-session".into(),
+        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
+    };
+    let error = verify_mbx_binary(
+        &executor,
+        &locator,
+        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
+        "1.22.0",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("container reports mbx 1.23.0"));
+    let commands = executor.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert!(
+        commands[0]
+            .contains("podman exec hel-session /mnt/fast/mbx-cache/.mjolnir/bin/mbx --version")
+    );
+}
 /// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
 /// environment sets an API key.
 fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::HarnessProfile {
@@ -3692,6 +3625,125 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         .unwrap();
     let rendered = format!("{} {}", prepare.program, prepare.args.join(" "));
     assert!(rendered.contains("worker' 'prepare-harness' '--config'"));
+}
+
+#[test]
+fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
+    struct CacheLinkExecutor {
+        commands: RefCell<Vec<CommandSpec>>,
+        worker_bin: PathBuf,
+        configuration: PathBuf,
+        home: PathBuf,
+    }
+
+    impl CommandExecutor for CacheLinkExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.borrow_mut().push(command.clone());
+            let mut args = vec![
+                "-c".into(),
+                command.args[4].clone(),
+                "sh".into(),
+                self.worker_bin.to_string_lossy().into_owned(),
+                self.configuration.to_string_lossy().into_owned(),
+            ];
+            args.extend(command.args[8..].iter().cloned());
+            let mut local = CommandSpec::new("/bin/sh", args);
+            local
+                .env
+                .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+            targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(5))
+                .execute(&local)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let shared_cache = directory.path().join("shared-cache");
+    let configuration = shared_cache.join(".mjolnir/config/mbx");
+    std::fs::create_dir_all(&configuration).unwrap();
+    std::fs::write(
+        configuration.join("config.toml"),
+        "[gc]\nmax_total_size = '50GB'\n",
+    )
+    .unwrap();
+    let worker_bin = directory.path().join("worker/bin");
+    std::fs::create_dir_all(&worker_bin).unwrap();
+    let legacy_binary = worker_bin.join("mbx");
+    std::fs::write(&legacy_binary, b"legacy copied mbx executable").unwrap();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let controller = crate::controller::Controller {
+        config: mj_core::config::Config::default(),
+        state: mj_core::state::State::default(),
+    };
+    let mut session = crate::controller::test_support::checkpoint_test_session("legacy-cache");
+    session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local".into(),
+        directory: shared_cache,
+        max_size: None,
+        target_root: None,
+    });
+    let backend = targets::TargetLocator::LocalPodman {
+        container_id: targets::resource_name(&session.id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    };
+    let launch = WorkerLaunchConfig {
+        goal_resume_request: None,
+        run_mode: Default::default(),
+        session_id: session.id.clone(),
+        subagents: mj_core::subagent::SubagentPolicy::Native,
+        handback_tool: false,
+        initial_model: None,
+        review_capture: false,
+        bifrost_binary: None,
+        target_environment: Default::default(),
+        seed_image_environment: true,
+        harness: HarnessKind::Codex,
+        harness_home: directory.path().join("profile"),
+        authentication_marker: None,
+        bridge_command: "codex".into(),
+        bridge_args: Vec::new(),
+        harness_runtime: HarnessRuntimePolicy::Ambient,
+        environment: Default::default(),
+        excluded_environment: Vec::new(),
+        cwd: directory.path().to_path_buf(),
+        additional_directories: Vec::new(),
+        native_session_id: None,
+        project_memory: None,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+    };
+    let executor = CacheLinkExecutor {
+        commands: RefCell::new(Vec::new()),
+        worker_bin,
+        configuration,
+        home: home.clone(),
+    };
+
+    // This is the cache-configuration preflight called by
+    // upgrade_session_worker before it prepares or swaps the worker.
+    controller
+        .prepare_build_cache_links(&session, &backend, &launch, &executor)
+        .unwrap();
+
+    let commands = executor.commands.borrow();
+    assert_eq!(
+        commands.len(),
+        1,
+        "legacy preparation must not probe the host"
+    );
+    assert_eq!(
+        commands[0].purpose,
+        "inspect legacy mbx and relink its shared configuration"
+    );
+    assert_eq!(commands[0].program, "podman");
+    assert!(commands[0].args.iter().any(|argument| {
+        argument.ends_with("/bin") && argument.starts_with("/var/lib/hel/workers/")
+    }));
+    assert_eq!(
+        std::fs::read(&legacy_binary).unwrap(),
+        b"legacy copied mbx executable"
+    );
+    assert!(home.join(".config/mbx/config.toml").is_symlink());
 }
 
 #[test]

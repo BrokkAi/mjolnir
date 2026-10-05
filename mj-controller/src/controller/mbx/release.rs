@@ -21,7 +21,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::{CacheHost, MBX_BINARY_ENV, MBX_VERSION, host_architecture, host_for_locator};
+use super::{CacheHost, host_for_locator};
 use crate::targets::{self, CommandExecutor, SshTarget};
 use mj_core::config::Config;
 use mj_core::state::SessionRecord;
@@ -44,32 +44,27 @@ const FAILURES_MAX_BYTES: u64 = 256 * 1024;
 /// reclaims the output after 30 days by default.
 pub(crate) const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
-/// `$1` mode (`native` or `shared`), `$2` the pinned mbx version, `$3` the
-/// shared cache directory, `$4` its configuration home, `$5` a pinned binary
-/// on this machine; the remaining arguments are workspaces.
+/// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
+/// its configuration home, `$4` the preferred in-cache mbx path, `$5` the
+/// old local binary root; the remaining arguments are workspaces.
 ///
-/// A shared cache prefers the binary at Mjolnir's pinned version, the one the
-/// containers ran, and accepts any other mbx that runs. A bare host's own mbx
-/// is what built there, so whichever one `PATH` or `~/.cargo/bin` has is used,
-/// in the same order the host mbx probe looks.
+/// A shared cache prefers the host executable its container mounted, then
+/// searches the same locations as the native host probe. A bare host uses
+/// that search directly.
 ///
 /// A bare workspace path is resolved through its nearest existing ancestor,
 /// because mbx records the physical path Cargo reported from inside the
 /// checkout, and the checkout itself is already gone. A container path is
 /// passed as written: it was never a path on this host.
 const RELEASE_SCRIPT: &str = r#"set -u
-mode=$1 version=$2 cache=$3 config=$4 pinned=$5
+mode=$1 cache=$2 config=$3 preferred=$4 legacy_root=$5
 shift 5
-mbx= fallback=
+mbx=
 consider() {
     [ -z "$mbx" ] || return 0
     [ -n "$1" ] && [ -x "$1" ] || return 0
-    found=$("$1" --version 2>/dev/null) || return 0
-    if [ "$found" = "mbx $version" ]; then
-        mbx=$1
-    elif [ -z "$fallback" ]; then
-        fallback=$1
-    fi
+    "$1" --version >/dev/null 2>&1 || return 0
+    mbx=$1
 }
 physical() {
     dir=$1 rest=
@@ -83,12 +78,22 @@ physical() {
     printf '%s%s\n' "${resolved%/}" "$rest"
 }
 if [ "$mode" = shared ]; then
-    consider "$pinned"
-    for candidate in "$HOME"/.cache/mjolnir/mbx/*/mbx; do consider "$candidate"; done
+    consider "$preferred"
 fi
 consider "$(command -v mbx 2>/dev/null || true)"
+consider "$HOME/.local/bin/mbx"
 consider "$HOME/.cargo/bin/mbx"
-mbx=${mbx:-$fallback}
+if [ -z "$mbx" ] && [ "$mode" = shared ]; then
+    if [ -n "$legacy_root" ]; then
+        for candidate in "$legacy_root"/*/*/mbx; do
+            consider "$candidate"
+        done
+    else
+        for candidate in "$HOME/.cache/mjolnir/mbx"/*/mbx; do
+            consider "$candidate"
+        done
+    fi
+fi
 if [ -z "$mbx" ]; then
     if [ "$mode" = native ]; then
         echo 'mj-mbx: absent'
@@ -124,6 +129,10 @@ enum Store {
 pub(in crate::controller) struct BuildStateRelease {
     host: CacheHost,
     store: Store,
+    preferred_mbx: Option<PathBuf>,
+    /// The old per-version cache used by local shared-cache sessions. Remote
+    /// copies remain under the SSH user's home directory.
+    legacy_mbx_root: Option<PathBuf>,
     workspaces: Vec<PathBuf>,
 }
 
@@ -133,6 +142,8 @@ impl BuildStateRelease {
         Self {
             host: ssh.map_or(CacheHost::Local, CacheHost::Ssh),
             store: Store::Native,
+            preferred_mbx: None,
+            legacy_mbx_root: None,
             workspaces: vec![root.to_path_buf()],
         }
     }
@@ -147,8 +158,8 @@ impl BuildStateRelease {
         config: &Config,
     ) -> Option<Self> {
         let (host, root) = workspace_root(session, backend)?;
-        let store = match backend {
-            targets::TargetLocator::SshBare { .. } => Store::Native,
+        let (store, preferred_mbx) = match backend {
+            targets::TargetLocator::SshBare { .. } => (Store::Native, None),
             _ => {
                 let cache = session.build_cache.as_ref()?;
                 if host.key() != cache.host {
@@ -160,9 +171,12 @@ impl BuildStateRelease {
                     );
                     return None;
                 }
-                Store::Shared {
-                    directory: cache.directory.clone(),
-                }
+                (
+                    Store::Shared {
+                        directory: cache.directory.clone(),
+                    },
+                    Some(super::cache_binary_path(&cache.directory)),
+                )
             }
         };
         let bundle = session.project_bundle(config)?;
@@ -171,9 +185,17 @@ impl BuildStateRelease {
             .iter()
             .map(|repository| root.join(&repository.destination))
             .collect::<Vec<_>>();
+        let legacy_mbx_root = match (&store, &host) {
+            (Store::Shared { .. }, CacheHost::Local) => {
+                Some(mj_core::config::data_dir().join("mbx"))
+            }
+            _ => None,
+        };
         (!workspaces.is_empty()).then_some(Self {
             host,
             store,
+            preferred_mbx,
+            legacy_mbx_root,
             workspaces,
         })
     }
@@ -268,18 +290,18 @@ impl BuildStateRelease {
                 configuration_home(directory).to_string_lossy().into_owned(),
             ),
         };
-        let pinned = match (&self.host, &self.store) {
-            (CacheHost::Local, Store::Shared { .. }) => pinned_binary()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
         let arguments = [
             mode.to_owned(),
-            MBX_VERSION.to_owned(),
             directory,
             config_home,
-            pinned,
+            self.preferred_mbx
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            self.legacy_mbx_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         ]
         .into_iter()
         .chain(
@@ -350,22 +372,6 @@ fn configuration_home(directory: &Path) -> PathBuf {
     configuration
         .parent()
         .map_or_else(|| configuration.clone(), Path::to_path_buf)
-}
-
-/// The pinned mbx this machine already has for its own architecture, without
-/// downloading one: a teardown never reaches the network for this.
-fn pinned_binary() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(MBX_BINARY_ENV).map(PathBuf::from)
-        && path.is_file()
-    {
-        return Some(path);
-    }
-    let path = mj_core::config::data_dir()
-        .join("mbx")
-        .join(MBX_VERSION)
-        .join(host_architecture())
-        .join("mbx");
-    path.is_file().then_some(path)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -472,10 +478,11 @@ pub(in crate::controller) fn enable_for_test() -> impl Drop {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::controller::mbx::MBX_VERSION;
     use crate::targets::ProcessExecutor;
 
-    /// A directory with a stand-in `mbx` that logs each `clean` and the cache
-    /// environment it ran with, and a home with nothing in it.
+    /// A directory with a test-only `mbx` that logs each `clean` or rejects
+    /// execution, plus a home with nothing in it.
     struct Sandbox {
         root: tempfile::TempDir,
     }
@@ -485,20 +492,19 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(root.path().join("home")).unwrap();
             std::fs::create_dir_all(root.path().join("bin")).unwrap();
-            if with_mbx {
-                let mbx = root.path().join("bin/mbx");
-                std::fs::write(
-                    &mbx,
-                    format!(
-                        "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+            let mbx = root.path().join("bin/mbx");
+            let contents = if with_mbx {
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
                          printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
-                        root.path().join("log").display()
-                    ),
+                    root.path().join("log").display()
                 )
-                .unwrap();
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&mbx, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            } else {
+                "#!/bin/sh\nexit 1\n".to_owned()
+            };
+            std::fs::write(&mbx, contents).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&mbx, std::fs::Permissions::from_mode(0o755)).unwrap();
             Self { root }
         }
 
@@ -506,12 +512,9 @@ mod tests {
             self.root.path().join(relative)
         }
 
-        /// Run `release` with this sandbox's `PATH` and home, and without a
-        /// pinned binary from this machine's data directory.
+        /// Run `release` with this sandbox's `PATH` and home.
         fn run(&self, release: &BuildStateRelease) -> targets::CommandOutput {
             let mut command = release.command();
-            let label = command.args.iter().position(|arg| arg == LABEL).unwrap();
-            command.args[label + 5] = String::new();
             command.env.insert(
                 "PATH".into(),
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),
@@ -527,6 +530,21 @@ mod tests {
         fn log(&self) -> String {
             std::fs::read_to_string(self.path("log")).unwrap_or_default()
         }
+
+        fn install_legacy_mbx(&self, path: &Path) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx 1.19.0'; exit 0; }}\n\
+                     printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                    self.path("log").display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     fn shared(workspaces: &[&str]) -> BuildStateRelease {
@@ -535,6 +553,10 @@ mod tests {
             store: Store::Shared {
                 directory: "/srv/cache".into(),
             },
+            // Exercise PATH and legacy fallbacks without ever probing a
+            // possibly live cache binary on the test host.
+            preferred_mbx: None,
+            legacy_mbx_root: None,
             workspaces: workspaces.iter().map(PathBuf::from).collect(),
         }
     }
@@ -568,6 +590,68 @@ mod tests {
             sandbox.log(),
             "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n\
              clean /workspace/abc/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+        );
+    }
+
+    #[test]
+    fn shared_cache_cleanup_prefers_the_recorded_host_mbx_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let sandbox = Sandbox::new(true);
+        let preferred = sandbox.path("preferred/mbx");
+        std::fs::create_dir_all(preferred.parent().unwrap()).unwrap();
+        std::fs::write(
+            &preferred,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                sandbox.path("preferred.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&preferred, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut release = shared(&["/workspace/abc/app"]);
+        release.preferred_mbx = Some(preferred.clone());
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            std::fs::read_to_string(sandbox.path("preferred.log")).unwrap(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
+        );
+        assert_eq!(sandbox.log(), "");
+    }
+
+    #[test]
+    fn legacy_local_cleanup_finds_any_versioned_private_binary() {
+        let sandbox = Sandbox::new(false);
+        let legacy_root = sandbox.path("data/mbx");
+        sandbox.install_legacy_mbx(&legacy_root.join("1.19.0/x86_64-unknown-linux-musl/mbx"));
+        let mut release = shared(&["/workspace/abc/app"]);
+        release.legacy_mbx_root = Some(legacy_root);
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
+        );
+    }
+
+    #[test]
+    fn shared_remote_cleanup_finds_legacy_digest_directory_copies() {
+        let sandbox = Sandbox::new(false);
+        sandbox.install_legacy_mbx(&sandbox.path("home/.cache/mjolnir/mbx/sha256-old/mbx"));
+        let release = shared(&["/workspace/abc/app"]);
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n"
         );
     }
 

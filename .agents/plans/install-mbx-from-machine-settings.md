@@ -16,31 +16,29 @@ Users will be able to install the pinned Linux mbx binary on a local or SSH cont
 
 ## Surprises & Discoveries
 
-- The current cache preview only stores an mbx version. Its private probe can return `mbx` as a PATH spelling and does not check `~/.local/bin`; the new install module will use an absolute resolved path and check PATH, `~/.local/bin`, then `~/.cargo/bin`, matching the parallel probe contract.
+- The cache preview stores the native version for the UI, while the shared `probe_native_version` returns one canonical absolute path and version for installation, eligibility, and synchronization. The installer uses that shared probe rather than keeping a duplicate.
 - The machine page expands the implied local machine's cache settings before rendering, so its fresh preview can drive the install action even when the saved config omits the default cache block.
 - SSH SCP uploads are already supervised by `CommandExecutor`; an upload can target a home-relative temporary sibling, then publish with a quoted host shell command.
 - An existing `.profile` may lack a final newline; the append script now starts its marked block on a new line and the temporary-HOME test covers this edge case.
 
 ## Decision Log
 
-- Decision: Keep the installer’s absolute-path probe local to `controller/mbx/install.rs` until it can consume the parallel probe contract.
-  Rationale: This worktree still has the old private probe, and the install rules require additional candidates and resolved paths. Keeping the contract-specific code in the new module avoids editing session cache/provisioning/doctor behavior while allowing the parallel change to be reconciled during merge.
-  Date/Author: 2026-10-04 / Codex.
+- Decision: The installer initially used a private absolute-path probe, then adopted the shared probe when the branches merged.
+  Rationale: One `NativeMbx { program: PathBuf, version }` and one candidate search keep install and cache eligibility aligned.
+  Date/Author: 2026-10-04 / Codex; superseded by the 2026-10-05 merge.
 - Decision: Determine whether the TUI should offer installation through a controller helper based on the same preview result.
   Rationale: TUI must not duplicate `MBX_VERSION` comparison or infer Linux support from user-facing reason strings; the controller owns that interpretation.
   Date/Author: 2026-10-04 / Codex.
 
 ## Outcomes & Retrospective
 
-Implemented the machine-settings Install mbx / Upgrade mbx action. The controller checks Linux and architecture, downloads the pinned musl archive into its data cache with checksum verification, selects only an absent or Mjolnir-managed destination, publishes through a temporary sibling, runs setup, appends the marked PATH block idempotently, and verifies the final path/version. The TUI confirms the host mutation, displays a busy state, and shows the result or error with a fresh preview. Tests use fake command executors or temporary HOME directories only; no real host install was run.
+Implemented the machine-settings Install mbx / Upgrade mbx action. The controller checks Linux and architecture, downloads the pinned musl archive into its data cache with checksum verification, selects only an absent or Mjolnir-managed destination, publishes through a temporary sibling, runs setup, appends the marked PATH block idempotently, and verifies the final path/version. The TUI confirms the host mutation, displays a busy state, and shows the result or error with a fresh preview. The merged installer uses the cache module's single resolved-path probe and attempts an immediate cache-copy sync after a successful install; service reconciliation retries if that sync cannot run.
 
-Validation: `cargo fmt --all -- --check` passed; `cargo test -p brokk-mj-controller` passed (2,221 passed, 10 ignored); `cargo test -p brokk-mj-tui -p brokk-mjolnir` passed (TUI: 961 passed, 2 ignored; CLI library: 280 passed, plus its isolated integration suites); the final profile-block test passed after its newline edge-case fix; workspace `cargo clippy --all-targets -- -D warnings` passed, and controller all-target Clippy passed again after the last controller edit.
-
-Remaining integration note: this worktree's cache preview still has the old version-only probe. The installer uses its own resolved absolute-path probe per the agreed contract. Reconcile it with the parallel branch's updated preview probe when merging; `MBX_VERSION` remains in `mbx.rs`.
+Validation: `cargo fmt --all -- --check` passed; the merged four-crate run passed controller (2,222 passed, 10 ignored), core (638 passed plus 3 scenario tests), TUI (961 passed, 2 ignored), and CLI (280 library tests plus all applicable isolated integration suites); workspace `cargo clippy --all-targets -- -D warnings` passed. The Podman smoke test also verified cargo and mbx before and after atomic replacement of the in-cache executable.
 
 ## Context and Orientation
 
-`mj-controller/src/controller/mbx.rs` owns the shared cache preview and remains the source of `MBX_VERSION`; `mj-controller/src/controller/cache_host.rs` represents the local or SSH machine and builds supervised host commands. The new sibling `mj-controller/src/controller/mbx/install.rs` owns downloading the pinned release, host path selection, atomic publication, setup, and profile activation. `mj-tui/src/setup.rs` owns machine settings state and button visibility. `mj-tui/src/lib.rs` describes actions, while `mj-cli/src/dashboard/actions.rs` runs I/O off the UI loop and `mj-cli/src/dashboard/io.rs` returns results to the setup dialog.
+`mj-controller/src/controller/mbx.rs` owns the shared cache preview, `MBX_VERSION`, and the one resolved-path native probe; `mj-controller/src/controller/cache_host.rs` represents the local or SSH machine and builds supervised host commands. The sibling `mj-controller/src/controller/mbx/install.rs` owns downloading the pinned release, host path selection, atomic publication, setup, and profile activation, then asks the shared cache module to synchronize the installed binary. `mj-tui/src/setup.rs` owns machine settings state and button visibility. `mj-tui/src/lib.rs` describes actions, while `mj-cli/src/dashboard/actions.rs` runs I/O off the UI loop and `mj-cli/src/dashboard/io.rs` returns results to the setup dialog.
 
 The release archive contains a static Linux musl binary for either `x86_64` or `aarch64`; `install.rs` extracts and verifies its pinned SHA-256 before transfer. A host path is “managed” for replacement only when its resolved regular file is below `$HOME/.local/bin` or `$HOME/.cargo/bin`. Other locations, including mise-managed versions, are left alone and receive a package-manager upgrade instruction.
 
@@ -70,4 +68,6 @@ No host installation is an acceptable test artifact. Tests may use temporary loc
 
 ## Interfaces and Dependencies
 
-The controller will expose a machine install operation taking `&Machine` and `&impl CommandExecutor`, returning a result containing the absolute program path, verified version, whether the profile block changed, and whether this was an install or upgrade. A separate controller helper will decide whether a preview warrants an Install or Upgrade action. The TUI action will carry its setup generation, preview key, machine identifier, and machine value so stale results can be discarded. No new crate or persisted configuration field is needed.
+The controller exposes a machine install operation taking `&Machine` and `&impl CommandExecutor`, returning a result containing the absolute program path, verified version, whether the profile block changed, and whether this was an install or upgrade. A separate controller helper decides whether a preview warrants an Install or Upgrade action. The TUI action carries its setup generation, preview key, machine identifier, and machine value so stale results can be discarded. No new crate or persisted configuration field is needed.
+
+Plan update note (2026-10-05): merged the install action with the cache implementation, unified the native probe, and wired an immediate cache-copy sync after install. The service loop covers sync failures. The merged implementation and validation are committed on `mbx-host-session`.

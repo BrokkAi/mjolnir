@@ -1994,6 +1994,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
         &preview_key,
         Ok(Some(BuildCachePreview {
             native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: None,
             max_total_size: None,
             user_managed: false,
@@ -2004,6 +2007,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
                 "Shared mbx requires a Linux host".into(),
             )),
         })),
+        false,
     );
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
@@ -3465,7 +3469,6 @@ fn machine_page_reports_mbx_install_failure_and_preserves_the_retry_action() {
     assert!(lines.contains("Install mbx"), "{lines}");
 }
 
-#[test]
 // Hard-won: 37a8681f: the unset effort label disagreed with save behavior and refusal navigation.
 #[test]
 fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page() {

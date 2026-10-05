@@ -411,9 +411,12 @@ pub(crate) async fn apply_dashboard_action(
                             mj_controller::controller::MbxInstallKind::Upgrade => "Upgraded",
                         };
                         let profile = if result.profile_changed {
-                            "updated ~/.profile"
+                            format!("updated {}", result.profile_file)
                         } else {
-                            "left ~/.profile unchanged because its marked PATH block already exists"
+                            format!(
+                                "left {} unchanged because its marked PATH block already exists",
+                                result.profile_file
+                            )
                         };
                         let mut message = format!(
                             "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",

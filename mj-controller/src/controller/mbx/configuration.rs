@@ -5,6 +5,7 @@ use super::*;
 use mj_core::state::BuildCacheApplication;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
@@ -56,14 +57,7 @@ pub(super) fn read_file(
     ))
 }
 
-pub(super) fn automatic_total(text: Option<&str>) -> Option<String> {
-    text?
-        .lines()
-        .find_map(|line| line.strip_prefix(DEFAULT_MARKER))
-        .filter(|size| mj_core::config::parse_build_cache_size(size).is_some())
-        .map(str::to_owned)
-}
-
+#[cfg(test)]
 pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct Document<'a> {
@@ -202,6 +196,10 @@ mod tests {
     fn cache(directory: &Path, previous: Option<String>, text: String) -> ResolvedBuildCache {
         ResolvedBuildCache {
             directory: directory.to_owned(),
+            native_mbx: NativeMbx {
+                program: PathBuf::from("/usr/local/bin/mbx"),
+                version: MBX_VERSION.into(),
+            },
             target_root: None,
             config_directory: shared_directory(directory),
             config_file: Some(text),

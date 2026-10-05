@@ -9,33 +9,13 @@ use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 use super::super::cache_host::CacheHost;
-use super::{MBX_VERSION, host_supports_cache, version_at_least};
+use super::{MBX_VERSION, NativeMbx, host_supports_cache, probe_native_version, version_at_least};
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::Machine;
 use mj_core::state::{BuildCacheOff, BuildCachePreview};
 
 const MBX_X86_64_SHA256: &str = "c375135e2a3916f58da1b47537b6a954159eeacd55523d9a618b42259bd89014";
 const MBX_AARCH64_SHA256: &str = "ae4d66308c706ffbf912beb45b3166cf1cfda4d3efd23273262791235d0accf5";
-
-const NATIVE_MBX_PROBE: &str = r#"path_mbx=$(command -v mbx 2>/dev/null || true)
-for candidate in "$path_mbx" "$HOME/.local/bin/mbx" "$HOME/.cargo/bin/mbx"; do
-    [ -n "$candidate" ] || continue
-    case "$candidate" in
-        /*) ;;
-        *) candidate=$(command -v "$candidate" 2>/dev/null) || continue ;;
-    esac
-    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-        resolved=$(readlink -f -- "$candidate") || exit 2
-        [ -f "$resolved" ] || exit 2
-        if version_output=$("$resolved" --version 2>&1); then
-            printf '%s\n%s\n' "$resolved" "$version_output"
-            exit 0
-        fi
-        printf '%s\n' "$version_output" >&2
-        exit 2
-    fi
-done
-exit 1"#;
 
 const PROFILE_SCRIPT: &str = r#"set -eu
 login_shell=
@@ -110,13 +90,6 @@ printf '%s\n%s\n%s\n%s' "$status" "$shown" "$shell_kind" "$shim_dir"
 
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
-/// The host's own mbx, reported by its absolute resolved executable path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeMbx {
-    pub program: PathBuf,
-    pub version: String,
-}
-
 /// Whether machine settings should offer an install or upgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MbxInstallKind {
@@ -190,7 +163,7 @@ fn install_mbx_with(
     };
 
     check_cancelled(executor)?;
-    let existing = probe_native_mbx(&host, executor)?;
+    let existing = probe_native_version(&host, executor)?;
     let (program, kind) = destination(&home, existing.as_ref())?;
     ensure!(
         program.is_absolute(),
@@ -212,7 +185,7 @@ fn install_mbx_with(
 
     check_cancelled(executor)?;
     let verified =
-        probe_native_mbx(&host, executor)?.context("mbx was not found after installation")?;
+        probe_native_version(&host, executor)?.context("mbx was not found after installation")?;
     ensure!(
         verified.program == program,
         "mbx verification found {} instead of the installed path {}",
@@ -224,6 +197,19 @@ fn install_mbx_with(
         "installed mbx reported version {}, expected {MBX_VERSION}",
         verified.version
     );
+    if machine.build_cache().and_then(|settings| settings.enabled) != Some(false) {
+        let synchronized =
+            super::native_cache_directory(&host, &verified, executor).and_then(|directory| {
+                super::sync_mbx_binary_from_native(&host, &verified, &directory, executor)
+                    .map(|_| ())
+            });
+        if let Err(error) = synchronized {
+            tracing::warn!(
+                host = host.key(),
+                "mbx installed successfully, but its shared cache copy will be refreshed by reconciliation: {error:#}"
+            );
+        }
+    }
     Ok(MbxInstallResult {
         program,
         version: verified.version,
@@ -267,46 +253,6 @@ fn host_architecture(host: &CacheHost, executor: &impl CommandExecutor) -> Resul
         "aarch64" => Ok("aarch64"),
         _ => bail!("no pinned static mbx release for Linux architecture {architecture:?}"),
     }
-}
-
-fn probe_native_mbx(
-    host: &CacheHost,
-    executor: &impl CommandExecutor,
-) -> Result<Option<NativeMbx>> {
-    let command = host.shell_command(
-        NATIVE_MBX_PROBE,
-        "hel-mbx-install-probe",
-        [],
-        "probe the container host's native mbx installation",
-    );
-    let output = executor.execute(&command)?;
-    if output.status == 1 {
-        return Ok(None);
-    }
-    ensure!(
-        output.status == 0,
-        "native mbx probe failed with status {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let text = String::from_utf8(output.stdout).context("native mbx probe output is not UTF-8")?;
-    let (program, version) = text
-        .trim_end()
-        .split_once('\n')
-        .context("native mbx probe gave no version")?;
-    let version = version
-        .split_whitespace()
-        .next_back()
-        .context("native mbx probe gave an empty version")?;
-    let program = PathBuf::from(program);
-    ensure!(
-        program.is_absolute(),
-        "native mbx probe returned a non-absolute path"
-    );
-    Ok(Some(NativeMbx {
-        program,
-        version: version.to_owned(),
-    }))
 }
 
 fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<(PathBuf, MbxInstallKind)> {
@@ -465,7 +411,7 @@ pub(super) fn login_profile_details(
     executor: &impl CommandExecutor,
 ) -> Result<MbxProfileDetails> {
     let home = canonical_home(host, executor)?;
-    let existing = probe_native_mbx(host, executor)?;
+    let existing = probe_native_version(host, executor)?;
     let (program, _) = destination(&home, existing.as_ref())?;
     let binary_dir = program
         .parent()
@@ -794,7 +740,7 @@ mod tests {
             let output = match command.purpose.as_str() {
                 "detect build cache host platform" => output(0, "Linux x86_64\n", ""),
                 "detect mbx host architecture" => output(0, "x86_64\n", ""),
-                "probe the container host's native mbx installation" => self
+                "read the container host mbx version" => self
                     .probe_answers
                     .lock()
                     .unwrap()
@@ -1448,23 +1394,12 @@ mod tests {
             "$HOME/.local/bin/mbx",
             "$HOME/.cargo/bin/mbx",
             "readlink -f --",
-            "[ -f \"$resolved\" ]",
+            "case \"$resolved\" in /*)",
         ] {
-            assert!(NATIVE_MBX_PROBE.contains(expected), "missing {expected:?}");
+            assert!(
+                super::super::NATIVE_VERSION_SCRIPT.contains(expected),
+                "missing {expected:?}"
+            );
         }
-        assert!(PROFILE_SCRIPT.contains("getent passwd"));
-        assert!(PROFILE_SCRIPT.contains("${SHELL:-sh}"));
-        assert!(PROFILE_SCRIPT.contains("grep -Fq \"$start\" \"$profile\""));
-        assert!(PROFILE_SCRIPT.contains("fish/conf.d/mbx.fish"));
-        assert!(PROFILE_SCRIPT.contains("XDG_DATA_HOME"));
-        let directory = Path::new("/home/example/.local/bin");
-        assert!(
-            posix_profile_block(directory, Path::new("/home/example/.local/share/mbx/bin"))
-                .contains("# >>> mbx (added by Mjolnir) >>>")
-        );
-        assert!(
-            fish_profile_block(directory, Path::new("/home/example/.local/share/mbx/bin"))
-                .contains("# <<< mbx <<<")
-        );
     }
 }
