@@ -1114,97 +1114,205 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("e\u{301}")));
         assert!(rendered.iter().any(|line| line.contains("ｶﾞ")));
     }
+    fn append_rendered_markdown(
+        output: &mut String,
+        label: &str,
+        buffer: &ratatui::buffer::Buffer,
+        details: &[String],
+    ) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(
+            output,
+            "=== {label} ({}x{}) ===",
+            buffer.area.width, buffer.area.height
+        )
+        .expect("write state label");
+        output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+        output.push('\n');
+        for detail in details {
+            writeln!(output, "{detail}").expect("write state detail");
+        }
+    }
+
+    fn draw_markdown_lines(lines: Vec<Line<'static>>, width: u16) -> ratatui::buffer::Buffer {
+        let height = u16::try_from(lines.len().max(1)).expect("bounded markdown rows");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("markdown terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines)),
+                    frame.area(),
+                );
+            })
+            .expect("draw markdown lines");
+        terminal.backend().buffer().clone()
+    }
+
+    fn markdown_style_details(lines: &[LogicalLine]) -> Vec<String> {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(row, logical)| {
+                let spans = logical
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        format!(
+                            "{:?}:fg={:?}:mod={:?}",
+                            span.content, span.style.fg, span.style.add_modifier
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if spans.is_empty() {
+                    format!("row {row} styles: <empty>")
+                } else {
+                    format!("row {row} styles: {spans}")
+                }
+            })
+            .collect()
+    }
+
+    fn rendered_span_styles(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.style.fg))
+            .fold(Vec::new(), |mut colors, color| {
+                if colors.last() != Some(&color) {
+                    colors.push(color);
+                }
+                colors
+            })
+            .into_iter()
+            .map(|color| format!("{color:?}"))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
 
     #[test]
-    fn plain_and_styled_text_wrap_identically_including_long_paths() {
+    fn golden_transcript_markdown_render() {
+        let mut output = String::new();
+
+        let parsed = markdown_lines(
+            "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
+            Style::default(),
+            Style::default().fg(theme::palette().success),
+            40,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 40);
+        append_rendered_markdown(
+            &mut output,
+            "heading list and incomplete fenced code",
+            &buffer,
+            &details,
+        );
+
+        let parsed = markdown_lines(
+            "| Name | Description |\n| --- | --- |\n| alpha | a long explanation |",
+            Style::default(),
+            Style::default(),
+            18,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 32);
+        append_rendered_markdown(
+            &mut output,
+            "narrow-width table fallback records",
+            &buffer,
+            &details,
+        );
+
+        let parsed = markdown_lines(
+            "| Name | Score |\n| :--- | ---: |\n| alpha | 7 |",
+            Style::default(),
+            Style::default(),
+            40,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 40);
+        append_rendered_markdown(
+            &mut output,
+            "aligned Markdown table and header rule",
+            &buffer,
+            &details,
+        );
+
         let prefix = "bifrost2 · 2 repositories ";
-        let path = "/tmp/claude-1000/-home-jonathan-Projects-bifrost2/9275cf63-2d14-4cd5-ad2a-5ec29e36c468/scratchpad/replay";
+        let path = "/workspace/project/run-1000/session-9275cf63/scratchpad/replay-with-a-long-stable-name";
         let plain = Line::raw(format!("{prefix}{path}"));
         let styled = Line::from(vec![
             Span::styled(prefix, Style::default().fg(Color::Yellow)),
             Span::styled(path, Style::default().fg(Color::Blue)),
         ]);
         for width in [1, 12, 40, 80] {
-            let rows = wrap_styled_line(plain.clone(), width, 0);
+            let plain_rows = wrap_styled_line(plain.clone(), width, 0);
+            let plain_buffer = draw_markdown_lines(plain_rows.clone(), width as u16);
+            append_rendered_markdown(
+                &mut output,
+                &format!("plain long path wrap at width {width}"),
+                &plain_buffer,
+                &[format!("rows={}", plain_rows.len())],
+            );
+
             let (styled_rows, sources) = wrap_styled_line_with_sources(styled.clone(), width, 0);
-            assert_eq!(text(&rows), text(&styled_rows), "width {width}");
-            assert!(rows.iter().all(|row| row.width() <= width));
-            let actual = text(&rows).join("");
-            assert!(actual.ends_with(path), "{actual}");
-            for (row, source) in styled_rows.iter().zip(sources) {
-                assert_eq!(row.width(), source.len());
-                for span in &row.spans {
-                    assert!(matches!(span.style.fg, Some(Color::Yellow | Color::Blue)));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn markdown_parser_handles_styles_lists_and_incomplete_fences() {
-        let lines = markdown_lines(
-            "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
-            Style::default(),
-            Style::default().fg(theme::palette().success),
-            40,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-        assert_eq!(
-            text(&rendered).join("\n"),
-            "# Heading\n\n• bold and code\n\ncode · rust\nfn main() {}"
-        );
-    }
-
-    #[test]
-    fn narrow_markdown_table_falls_back_to_records() {
-        let lines = markdown_lines(
-            "| Name | Description |\n| --- | --- |\n| alpha | a long explanation |",
-            Style::default(),
-            Style::default(),
-            18,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-        assert_eq!(
-            text(&rendered),
-            ["Name: alpha", "Description: a long explanation"]
-        );
-    }
-
-    #[test]
-    fn markdown_table_aligns_columns_and_draws_a_header_rule() {
-        let lines = markdown_lines(
-            "| Name | Score |\n| :--- | ---: |\n| alpha | 7 |",
-            Style::default(),
-            Style::default(),
-            40,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-
-        assert_eq!(
-            text(&rendered),
-            [" Name     Score ", "───────  ───────", " alpha        7 ",]
-        );
-        assert!(
-            rendered[0]
-                .spans
+            let source_alignment = styled_rows
                 .iter()
-                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-        );
-    }
+                .zip(&sources)
+                .all(|(row, source)| row.width() == source.len());
+            let details = vec![
+                format!(
+                    "rows={} source rows={} widths aligned={source_alignment}",
+                    styled_rows.len(),
+                    sources.len()
+                ),
+                format!("style runs={}", rendered_span_styles(&styled_rows)),
+            ];
+            let styled_buffer = draw_markdown_lines(styled_rows, width as u16);
+            append_rendered_markdown(
+                &mut output,
+                &format!("styled long path wrap at width {width}"),
+                &styled_buffer,
+                &details,
+            );
+        }
 
-    #[test]
-    fn ellipses_remove_cutoff_whitespace_and_punctuation() {
-        assert_eq!(truncate_to_width("alpha, beta", 7), "alpha…");
-
-        let line = Line::from(vec![
+        let plain = truncate_to_width("alpha, beta", 7);
+        let styled = Line::from(vec![
             Span::styled("alpha,", Style::default().fg(theme::palette().error)),
             Span::styled(" beta", Style::default().fg(Color::Blue)),
         ]);
-        let truncated = truncate_line_to_width(line, 7);
-        assert_eq!(text(std::slice::from_ref(&truncated)), ["alpha…"]);
-        assert_eq!(
-            truncated.spans.last().and_then(|span| span.style.fg),
-            Some(Color::Blue)
+        let truncated = truncate_line_to_width(styled, 7);
+        let plain_buffer = draw_markdown_lines(vec![Line::raw(plain)], 7);
+        append_rendered_markdown(
+            &mut output,
+            "ellipsis trims cutoff punctuation and whitespace",
+            &plain_buffer,
+            &[],
+        );
+        let style = truncated.spans.last().and_then(|span| span.style.fg);
+        let truncated_buffer = draw_markdown_lines(vec![truncated], 7);
+        append_rendered_markdown(
+            &mut output,
+            "styled ellipsis preserves its trailing span style",
+            &truncated_buffer,
+            &[format!("ellipsis fg={style:?}")],
+        );
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "transcript-markdown-render",
+            &output,
         );
     }
 

@@ -15,7 +15,7 @@ use mj_core::relay::{SequencedEvent, WorkerEvent};
 use mj_core::transcript::ChatRole;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use std::collections::BTreeMap;
 
 // Hard-won: 61a1cfa: Codex command updates were lost during replay, hiding worker-owned goal controls
@@ -383,39 +383,6 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
         error: None,
     }
 }
-
-#[test]
-fn build_prompt_only_appears_without_session_history() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.phase = WorkerPhase::Idle;
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-    let mut rendered = |chat: &mut ChatState| {
-        terminal
-            .draw(|frame| render_full_frame(frame, chat, false))
-            .expect("draw chat");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
-
-    assert!(rendered(&mut chat).contains("What would you like to build?"));
-    chat.transcript_loading = true;
-    assert!(!rendered(&mut chat).contains("What would you like to build?"));
-    chat.transcript_loading = false;
-    chat.unconverted_prefix = 1;
-    assert!(!rendered(&mut chat).contains("What would you like to build?"));
-    chat.unconverted_prefix = 0;
-    chat.entries
-        .push(ChatEntry::plain(1, ChatRole::User, "Hello"));
-    assert!(!rendered(&mut chat).contains("What would you like to build?"));
-    chat.phase = WorkerPhase::Running;
-    assert!(rendered(&mut chat).contains("Add a follow-up while the agent works…"));
-}
-
 #[test]
 fn detaching_leaves_the_unsent_input_where_the_dashboard_saves_it_from() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -440,214 +407,6 @@ fn detaching_leaves_the_unsent_input_where_the_dashboard_saves_it_from() {
     detach_chat(&mut empty);
     assert_eq!(empty.input, "");
 }
-
-#[test]
-fn an_elicitation_is_bounded_to_the_chat_content_area() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.push(ChatEntry::plain(
-        1,
-        ChatRole::Agent,
-        "UNDERLYING CHAT SENTINEL",
-    ));
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        ElicitationRequest {
-            id: "question-1".into(),
-            message: "Visible dialog message".into(),
-            title: Some("Overlaid dialog".into()),
-            description: None,
-            fields: Vec::new(),
-        },
-    ));
-    chat.task_dialog_open = true;
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("draw elicitation");
-    let buffer = terminal.backend().buffer();
-    let lines = (buffer.area.y..buffer.area.bottom())
-        .map(|y| {
-            (buffer.area.x..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    let row_of = |needle: &str| {
-        lines
-            .iter()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle} in {lines:#?}"))
-    };
-
-    let popup_top = row_of("Overlaid dialog");
-    row_of("Visible dialog message");
-    assert!(!lines.iter().any(|line| line.contains("Background tasks")));
-    // The reduced transcript remains visible above the bottom-anchored
-    // question, rather than being hidden behind it.
-    let sentinel_top = row_of("UNDERLYING CHAT SENTINEL");
-    assert!(sentinel_top < popup_top);
-    // The footer remains outside the question even when width fitting
-    // drops composer hints to make room for the host's function keys.
-    assert_eq!(row_of("? keys"), lines.len() - 1);
-    assert!(row_of("? keys") > popup_top);
-}
-
-#[test]
-fn drawing_the_chat_registers_the_transcript_and_prompt_interiors() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-
-    drawn_transcript(&mut chat, 80, 24);
-
-    let surfaces = chat.frame_surfaces();
-    let transcript = surfaces
-        .surface(SurfaceId::Transcript)
-        .expect("transcript registered");
-    let prompt = surfaces
-        .surface(SurfaceId::PromptInput)
-        .expect("prompt registered");
-    // The registered rect is the text inside each border, which is what
-    // the wheel already hit-tests against.
-    assert_eq!(
-        surfaces
-            .surface_at(prompt.rect.x, prompt.rect.y)
-            .map(|surface| surface.id),
-        Some(SurfaceId::PromptInput)
-    );
-    assert!(
-        transcript.rect.bottom() <= prompt.rect.y,
-        "the transcript sits above the composer: {transcript:?} {prompt:?}"
-    );
-}
-
-#[test]
-fn the_autocomplete_popup_takes_the_cells_it_covers() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("/".into());
-
-    drawn_transcript(&mut chat, 80, 24);
-
-    let surfaces = chat.frame_surfaces();
-    let popup = surfaces
-        .surface(SurfaceId::AutocompletePopup)
-        .expect("popup registered");
-    assert_eq!(
-        surfaces
-            .surface_at(popup.rect.x, popup.rect.bottom() - 1)
-            .map(|surface| surface.id),
-        Some(SurfaceId::AutocompletePopup)
-    );
-}
-
-#[test]
-fn an_open_elicitation_keeps_the_upper_transcript_and_hides_the_prompt() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        ElicitationRequest {
-            id: "question-1".into(),
-            message: "Visible dialog message".into(),
-            title: Some("Overlaid dialog".into()),
-            description: None,
-            fields: Vec::new(),
-        },
-    ));
-
-    drawn_transcript(&mut chat, 80, 24);
-
-    // The question owns the lower half, while the reduced transcript
-    // remains independently selectable and scrollable above it.
-    let surfaces = chat.frame_surfaces();
-    let transcript = surfaces
-        .surface(SurfaceId::Transcript)
-        .expect("reduced transcript registered");
-    let message = surfaces
-        .surface(SurfaceId::ElicitationMessage)
-        .expect("message pane registered");
-    assert!(surfaces.surface(SurfaceId::ModalBody).is_some());
-    assert!(surfaces.surface(SurfaceId::PromptInput).is_none());
-    assert!(transcript.rect.bottom() <= message.rect.y);
-    assert_eq!(
-        surfaces
-            .surface_at(message.rect.x, message.rect.y)
-            .map(|surface| surface.id),
-        Some(SurfaceId::ElicitationMessage)
-    );
-}
-
-#[test]
-fn short_question_stays_natural_and_leaves_more_than_half_to_transcript() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        ElicitationRequest {
-            id: "short-question".into(),
-            message: "One short question".into(),
-            title: Some("Custom title".into()),
-            description: None,
-            fields: Vec::new(),
-        },
-    ));
-    let natural = chat.elicitation.as_ref().unwrap().natural_height(80);
-
-    drawn_transcript(&mut chat, 80, 24);
-
-    let transcript = chat
-        .frame_surfaces()
-        .surface(SurfaceId::Transcript)
-        .expect("transcript registered");
-    let message = chat
-        .frame_surfaces()
-        .surface(SurfaceId::ElicitationMessage)
-        .expect("question message registered");
-    let question_height = 23 - transcript.rect.bottom() - 1;
-    assert_eq!(question_height, natural);
-    assert!(question_height < 23 / 2);
-    assert!(transcript.rect.height > message.rect.height);
-}
-
-#[test]
-fn tall_question_is_capped_at_half_and_keeps_both_surfaces_non_overlapping() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        ElicitationRequest {
-            id: "tall-question".into(),
-            message: "Question message".into(),
-            title: Some("Tall question".into()),
-            description: Some("This field description is intentionally long enough to wrap into many rows when it is shown in the focused form.".into()),
-            fields: vec![ElicitationField {
-                id: "answer".into(),
-                title: "Answer".into(),
-                description: Some("The focused answer description also consumes wrapped rows. ".repeat(20)),
-                required: false,
-                secret: false,
-                custom_answer_for: None,
-                custom_answer_option: None,
-                kind: ElicitationFieldKind::Text {
-                    default: None,
-                    min_length: None,
-                    max_length: None,
-                    pattern: None,
-                    format: None,
-                },
-            }],
-        },
-    ));
-    let natural = chat.elicitation.as_ref().unwrap().natural_height(80);
-    assert!(natural > 23 / 2);
-
-    drawn_transcript(&mut chat, 80, 24);
-
-    let surfaces = chat.frame_surfaces();
-    let transcript = surfaces
-        .surface(SurfaceId::Transcript)
-        .expect("transcript registered");
-    let message = surfaces
-        .surface(SurfaceId::ElicitationMessage)
-        .expect("question message registered");
-    let question_height = 23 - transcript.rect.bottom() - 1;
-    assert_eq!(question_height, 23 / 2);
-    assert!(transcript.rect.bottom() <= message.rect.y);
-    assert!(surfaces.surface(SurfaceId::PromptInput).is_none());
-}
-
 #[test]
 fn transcript_wheel_scrolls_the_reduced_viewport_independently() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1502,128 +1261,9 @@ fn retiring_the_session_feed_keeps_a_closing_phase_in_place() {
     ));
     assert_eq!(chat.phase(), WorkerPhase::Closed);
 }
-
-#[test]
-fn a_notice_set_through_a_shared_handle_shows_in_the_chat_footer_in_yellow() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let shared = Notices::default();
-    chat.notices = shared.clone();
-    // Wide enough that the default hint line (over 100 columns) is not
-    // truncated, so the footer text comparisons below are meaningful.
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
-
-    // Set from "outside", the way the surface's clone of the same handle
-    // would.
-    shared.set("Background import finished");
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("draw chat");
-    let buffer = terminal.backend().buffer();
-    let footer_row = buffer.area.bottom() - 1;
-    let footer_text = (buffer.area.x..buffer.area.right())
-        .map(|x| buffer[(x, footer_row)].symbol())
-        .collect::<String>();
-    assert!(footer_text.contains("Background import finished"));
-    assert_eq!(
-        buffer[(buffer.area.x, footer_row)].fg,
-        theme::palette().warning
-    );
-
-    shared.clear();
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("draw chat");
-    let buffer = terminal.backend().buffer();
-    let footer_text = (buffer.area.x..buffer.area.right())
-        .map(|x| buffer[(x, footer_row)].symbol())
-        .collect::<String>();
-    assert!(footer_text.contains("Tab pane"), "{footer_text:?}");
-    assert_eq!(
-        Some(buffer[(buffer.area.x, footer_row)].fg),
-        theme::key_hint().fg
-    );
-}
-
 /// The composer's own row is where a user typing in it learns the keys, so it
 /// carries the same groups the dashboard's row does: the composer's own keys,
 /// then the host's prefix chords.
-#[test]
-fn chat_footer_advertises_the_composer_keys_and_the_host_chords() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut terminal = Terminal::new(TestBackend::new(200, 24)).expect("terminal");
-    let footer_of = |terminal: &Terminal<TestBackend>| {
-        let buffer = terminal.backend().buffer();
-        let row = buffer.area.bottom() - 1;
-        (buffer.area.x..buffer.area.right())
-            .map(|x| buffer[(x, row)].symbol())
-            .collect::<String>()
-    };
-
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, true))
-        .expect("draw chat");
-    let footer = footer_of(&terminal);
-    for hint in [
-        "Ctrl-R history",
-        "│ ctrl+b then b panes · q detach · : palette · ? keys",
-    ] {
-        assert!(footer.contains(hint), "{footer:?} omits {hint}");
-    }
-    // Transcript rendering is a registry command now, so the composer's own
-    // row no longer names a key for it.
-    assert!(!footer.contains("rendering"), "{footer:?}");
-    assert!(!footer.contains("Ctrl-G"), "{footer:?}");
-
-    assert!(!footer.contains("Ctrl-T"), "{footer:?}");
-
-    // The queued-prompt variant is a different string and must say the
-    // same things about the keys it still names.
-    chat.queued_prompts.push_back(queued("queued-1", "next"));
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, true))
-        .expect("draw chat with a queued prompt");
-    let footer = footer_of(&terminal);
-    for hint in [
-        "Ctrl-R history",
-        "│ ctrl+b then b panes · q detach · : palette · ? keys",
-    ] {
-        assert!(footer.contains(hint), "{footer:?} omits {hint}");
-    }
-}
-
-#[test]
-fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
-    let chat = ChatState::new(&snapshot(), &[]);
-    for width in [6, 20, 32, 40, 80] {
-        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                render_chat_footer(frame, test_footer(area), &chat, true);
-            })
-            .expect("draw narrow footer");
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(text.trim_end().ends_with("? keys"), "{width}: {text:?}");
-        if width >= 20 {
-            assert!(text.contains(": palette"), "{width}: {text:?}");
-        }
-        if width == 32 {
-            // The chords give way before the composer's own keys, so what a
-            // narrow row keeps is the key that works right here plus the two
-            // hints that lead to everything else.
-            // The label outranks Tab pane: without it `:` reads as a plain
-            // key, and a plain `:` types a colon (A-12).
-            assert_eq!(text.trim_end(), "ctrl+b then : palette · ? keys");
-        }
-    }
-}
-
 /// A-12: the composer's footer dropped the prefix label with the first chord,
 /// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
 /// as the reader could tell. The label must ride on the first chord left.
@@ -1731,87 +1371,7 @@ fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
     assert!(!dictating.contains('\u{b7}'), "{dictating:?}");
     assert!(dictating.contains("Listening"), "{dictating:?}");
 }
-
-#[test]
-fn composer_title_shows_live_model_and_effort_without_outer_session_frame() {
-    use agent_client_protocol::schema::v1::{
-        SessionConfigSelectOption, SessionConfigSelectOptions,
-    };
-
-    let options = vec![
-        SessionConfigOption::select(
-            "model",
-            "Model",
-            "gpt-5.6-sol",
-            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
-                "gpt-5.6-sol",
-                "Sol",
-            )]),
-        )
-        .category(SessionConfigOptionCategory::Model),
-        SessionConfigOption::select(
-            "effort",
-            "Effort",
-            "high",
-            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
-                "high", "High",
-            )]),
-        )
-        .category(SessionConfigOptionCategory::ThoughtLevel),
-    ];
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.phase = WorkerPhase::Running;
-    chat.set_prompt_in_flight(true);
-    chat.set_config_options(&options);
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("draw chat");
-    let buffer = terminal.backend().buffer();
-    let rendered = buffer
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert_eq!(rendered.matches("Sol ▾ · High ▾").count(), 1);
-    assert!(rendered.contains("Esc interrupts"));
-    assert!(!rendered.contains("Running"));
-    // No outer frame wraps the whole session: the transcript's own titled
-    // border is the first thing on the frame, not a session title bar.
-    assert!(!rendered.contains("HEL /"));
-    assert!(rendered.starts_with("╭ Conversation "), "{rendered:?}");
-}
-
-#[test]
-fn composer_title_shows_fast_only_while_the_confirmed_mode_is_active() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[fast_mode_option("off")]);
-    assert!(!prompt_title(&chat).contains("Fast"));
-
-    chat.set_config_options(&[fast_mode_option("on")]);
-    assert_eq!(prompt_title(&chat), " Fast ");
-
-    chat.set_config_options(&[]);
-    assert!(!prompt_title(&chat).contains("Fast"));
-}
-
 /// A phase alone is not evidence of an interruptible turn.
-#[test]
-fn composer_bottom_offers_esc_only_while_a_prompt_of_ours_is_in_flight() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.phase = WorkerPhase::Running;
-    assert!(prompt_bottom_queue_control(&chat).is_none());
-
-    chat.set_prompt_in_flight(true);
-    assert_eq!(
-        prompt_bottom_queue_control(&chat).unwrap().to_string(),
-        " Esc interrupts"
-    );
-    assert!(!prompt_title(&chat).contains("Esc interrupts"));
-}
-
 #[tokio::test]
 async fn escape_interrupts_a_native_goal_turn_without_an_active_prompt() {
     for harness_started in [false, true] {
@@ -2077,17 +1637,6 @@ fn composer_title_names_the_work_the_agent_left_running() {
     chat.phase = WorkerPhase::Running;
     assert!(!prompt_title(&chat).contains("Running"));
 }
-
-#[test]
-fn composer_title_names_plan_mode_even_during_a_turn() {
-    let mut chat = crate::chat::test_support::grok_chat();
-    chat.finish_plan_mode_change(true);
-    chat.phase = WorkerPhase::Running;
-
-    assert!(prompt_title(&chat).contains("PLAN MODE"));
-    assert!(!prompt_title(&chat).contains("Prompt"));
-}
-
 #[test]
 fn effort_separator_between_prompt_chips_is_not_clickable() {
     for palette in theme::UiTheme::ALL {
@@ -2164,102 +1713,6 @@ fn select_config(key: &str, current: &str, values: &[&'static str]) -> SessionCo
         )),
     )
 }
-
-#[test]
-fn subagents_use_navigation_glyph_and_neutral_surface_until_focused() {
-    for palette in theme::UiTheme::ALL {
-        theme::with_theme(palette, || {
-            let mut chat = ChatState::new(&snapshot(), &[]);
-            chat.set_subagent_count(2);
-            let mut terminal =
-                Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
-            terminal
-                .draw(|frame| render_full_frame(frame, &mut chat, false))
-                .expect("chat draws");
-            let area = chat
-                .subagent_control_area
-                .expect("the sub-agent control is rendered");
-            let buffer = terminal.backend().buffer();
-            let label = (area.x..area.right())
-                .map(|x| buffer[(x, area.y)].symbol())
-                .collect::<String>();
-            assert_eq!(label, " Subagents · 0/2 › ");
-            assert!((area.x..area.right()).all(|x| {
-                let cell = &buffer[(x, area.y)];
-                cell.bg == theme::palette().selection && cell.fg == theme::palette().text
-            }));
-            chat.subagent_control_focused = true;
-            terminal
-                .draw(|frame| render_full_frame(frame, &mut chat, false))
-                .unwrap();
-            let cell = &terminal.backend().buffer()[(area.x, area.y)];
-            let focused = theme::focus_control();
-            if !theme::is_mono() {
-                assert_eq!(Some(cell.bg), focused.bg);
-                assert_eq!(Some(cell.fg), focused.fg);
-            }
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
-        });
-    }
-}
-
-#[test]
-fn running_tasks_use_navigation_glyph_and_neutral_surface_until_focused() {
-    for palette in theme::UiTheme::ALL {
-        theme::with_theme(palette, || {
-            let mut chat = ChatState::new(&snapshot(), &[]);
-            chat.set_session_activity(mj_client::usage_format::SessionActivity {
-                pursuing_goal: Default::default(),
-                checking_response: false,
-                quota_recovery: None,
-                capacity_retry: None,
-                activity_turn_started_at_ms: None,
-                prompt_in_flight: false,
-                idle_since_ms: None,
-                execution: None,
-                harness_turn_started_at_ms: None,
-                state: None,
-                foreground_tool_started_at_ms: None,
-                background_commands: vec![mj_core::relay::BackgroundCommand {
-                    id: "test:task".into(),
-                    started_at_ms: 0,
-                    command: "cargo test".into(),
-                    can_stop: false,
-                }],
-                active_user_shells: Vec::new(),
-            });
-            let mut terminal =
-                Terminal::new(TestBackend::new(100, 24)).expect("test terminal supports drawing");
-            terminal
-                .draw(|frame| render_full_frame(frame, &mut chat, false))
-                .expect("chat draws");
-            let area = chat
-                .task_control_area
-                .expect("the running-task control is rendered");
-            let buffer = terminal.backend().buffer();
-            let label = (area.x..area.right())
-                .map(|x| buffer[(x, area.y)].symbol())
-                .collect::<String>();
-            assert_eq!(label, " Tasks (1) › ");
-            assert!((area.x..area.right()).all(|x| {
-                let cell = &buffer[(x, area.y)];
-                cell.bg == theme::palette().selection && cell.fg == theme::palette().text
-            }));
-            chat.task_control_focused = true;
-            terminal
-                .draw(|frame| render_full_frame(frame, &mut chat, false))
-                .unwrap();
-            let cell = &terminal.backend().buffer()[(area.x, area.y)];
-            let focused = theme::focus_control();
-            if !theme::is_mono() {
-                assert_eq!(Some(cell.bg), focused.bg);
-                assert_eq!(Some(cell.fg), focused.fg);
-            }
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
-        });
-    }
-}
-
 // Hard-won: 6e7ecf3: title styling made hint descriptions bold and erased key emphasis
 #[test]
 fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
@@ -2314,194 +1767,12 @@ fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
         }
     }
 }
-
-#[test]
-fn composer_title_identifies_an_active_advertised_goal() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.apply_session_update(
-        1,
-        &serde_json::json!({
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [
-                {"name": "goal", "description": "set a persistent goal"}
-            ]
-        }),
-    );
-    chat.apply_event(&SequencedEvent {
-        seq: 2,
-        recorded_at_ms: None,
-        request_id: Some("goal".into()),
-        event: WorkerEvent::PromptAccepted {
-            request_id: "goal".into(),
-            text: "/goal ship the release".into(),
-            attachments: Vec::new(),
-        },
-    });
-
-    assert!(prompt_title(&chat).contains("Pursuing goal"));
-    assert!(!prompt_title(&chat).contains("Running"));
-
-    chat.apply_event(&SequencedEvent {
-        seq: 3,
-        recorded_at_ms: None,
-        request_id: None,
-        event: WorkerEvent::TurnCompleted,
-    });
-    assert!(prompt_title(&chat).is_empty());
-    assert!(!prompt_title(&chat).contains("Pursuing goal"));
-}
-
-#[test]
-fn composer_title_does_not_label_ordinary_or_unadvertised_prompts_as_goals() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.mark_prompt_submitted("/goal ship the release");
-    assert!(!prompt_title(&chat).contains("Running"));
-    assert!(!prompt_title(&chat).contains("Pursuing goal"));
-
-    chat.apply_session_update(
-        1,
-        &serde_json::json!({
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [
-                {"name": "goal", "description": "set a persistent goal"}
-            ]
-        }),
-    );
-    chat.mark_prompt_submitted("please ship the release");
-    assert!(!prompt_title(&chat).contains("Running"));
-    assert!(!prompt_title(&chat).contains("Pursuing goal"));
-}
-
 /// The title names the conversation you are in. The rule around it is
 /// chrome and stays dim; the name draws bright white so it stands out.
-#[test]
-fn the_conversation_title_remains_readable_above_its_quiet_rule() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("draw chat");
-
-    let buffer = terminal.backend().buffer();
-    let cells: Vec<_> = (0..80)
-        .map(|x| buffer[(x, 0)].symbol().to_owned())
-        .collect();
-    let title_start = cells
-        .windows(1)
-        .position(|cell| cell[0] == "C")
-        .expect("the title is on the top row");
-    for offset in 0.."Conversation".chars().count() {
-        let column = u16::try_from(title_start + offset).unwrap();
-        assert_eq!(
-            buffer[(column, 0)].fg,
-            theme::palette().text,
-            "the title draws bright white: {}",
-            cells.concat()
-        );
-    }
-    let rule = cells
-        .iter()
-        .rposition(|cell| cell == "\u{2500}")
-        .expect("the rule follows the title");
-    assert_eq!(
-        buffer[(u16::try_from(rule).unwrap(), 0)].fg,
-        theme::palette().border,
-        "the rule stays chrome"
-    );
-}
-
 /// The pane a conversation is drawn into is the whole of what its dialogs
 /// may cover. A host with several panes gives each one a sub-rectangle of
 /// the terminal, so a dialog centred in the frame would paint over its
 /// neighbours.
-#[tokio::test]
-async fn the_task_dialog_and_setup_form_are_centred_within_their_overlay_rect() {
-    use mj_core::config::HarnessKind;
-
-    let pane = Rect::new(50, 2, 48, 26);
-    let regions = || ChatRegions {
-        transcript: Rect::new(50, 2, 48, 19),
-        prompt: Rect::new(50, 21, 48, 7),
-        footer: None,
-        overlay: pane,
-        title_controls: 0,
-        title_lead: 0,
-        pane_focused: true,
-    };
-    let outside_is_untouched = |terminal: &Terminal<TestBackend>, what: &str| {
-        let buffer = terminal.backend().buffer();
-        for y in buffer.area.y..buffer.area.bottom() {
-            for x in buffer.area.x..buffer.area.right() {
-                if pane.contains(Position::new(x, y)) {
-                    continue;
-                }
-                assert_eq!(
-                    buffer[(x, y)],
-                    ratatui::buffer::Cell::default(),
-                    "{what} touched ({x}, {y}) outside its pane"
-                );
-            }
-        }
-    };
-    let modal_body = |chat: &ChatState, what: &str| {
-        let body = chat
-            .frame_surfaces()
-            .surface(SurfaceId::ModalBody)
-            .unwrap_or_else(|| panic!("{what} registers a modal body"))
-            .rect;
-        assert!(
-            pane.contains(Position::new(body.x, body.y))
-                && pane.contains(Position::new(body.right() - 1, body.bottom() - 1)),
-            "{what} body {body:?} must lie inside the pane {pane:?}"
-        );
-        body
-    };
-
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.task_dialog_open = true;
-    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
-    terminal
-        .draw(|frame| render_in(frame, &mut chat, regions(), false, false))
-        .expect("draw the background-task dialog");
-    modal_body(&chat, "the background-task dialog");
-    outside_is_untouched(&terminal, "the background-task dialog");
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-pane-modal", 91);
-    let mut reviewed = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(chat_context(
-            "session-pane-modal",
-            &[("claude-1", HarnessKind::Claude)],
-        )),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-    reviewed.open_second_opinion(
-        ElicitationRequest {
-            id: "plan-pane".into(),
-            message: "may I run this plan?".into(),
-            title: None,
-            description: None,
-            fields: Vec::new(),
-        },
-        "the plan".into(),
-    );
-    assert!(
-        reviewed.state.second_opinion().is_some(),
-        "the reviewer setup form is open"
-    );
-    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
-    terminal
-        .draw(|frame| reviewed.draw_in(frame, regions(), false, false))
-        .expect("draw the reviewer setup form");
-    modal_body(&reviewed.state, "the reviewer setup form");
-    outside_is_untouched(&terminal, "the reviewer setup form");
-}
-
 /// The background-task dialog used to claim every pointer position on the
 /// screen, which swallowed clicks on the host's own panes beside it. It now
 /// answers only for the rectangle it drew into.
@@ -2558,65 +1829,6 @@ fn the_task_dialog_claims_only_the_pointer_over_itself() {
 
 /// A host that owns the rest of the frame gives the chat two rectangles;
 /// nothing it draws may leak outside them.
-#[test]
-fn draw_in_places_the_transcript_and_prompt_in_the_given_regions() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let regions = ChatRegions {
-        transcript: Rect::new(0, 4, 80, 12),
-        prompt: Rect::new(0, 16, 80, 5),
-        footer: None,
-        overlay: Rect::new(0, 0, 80, 24),
-        title_controls: 0,
-        title_lead: 0,
-        pane_focused: false,
-    };
-
-    terminal
-        .draw(|frame| render_in(frame, &mut chat, regions, true, false))
-        .expect("draw chat");
-
-    let buffer = terminal.backend().buffer();
-    let row = |y: u16| -> String {
-        (buffer.area.x..buffer.area.right())
-            .map(|x| buffer[(x, y)].symbol())
-            .collect()
-    };
-    for y in 0..4 {
-        assert_eq!(
-            row(y).trim(),
-            "",
-            "row {y} sits above the transcript region and must stay untouched"
-        );
-    }
-    assert!(
-        row(4).contains("Conversation"),
-        "the transcript's titled border is the region's first row: {:?}",
-        row(4)
-    );
-    assert!(row(16).contains(voice_button_glyph()), "{:?}", row(16));
-    assert!(!row(16).contains("Prompt"), "{:?}", row(16));
-    assert_eq!(
-        row(17).chars().take(4).collect::<String>(),
-        "│> W",
-        "{:?}",
-        row(17)
-    );
-    // Focus changes the border's color without changing its geometry.
-    assert!(
-        row(20).starts_with('╰'),
-        "the prompt's bottom border closes the region: {:?}",
-        row(20)
-    );
-    for y in 21..24 {
-        assert_eq!(
-            row(y).trim(),
-            "",
-            "row {y} sits below the prompt region and must stay untouched"
-        );
-    }
-}
-
 #[test]
 fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
     for width in [16, 32, 48, 80] {
@@ -2698,106 +1910,6 @@ fn composer_border_holds_activity_without_moving_the_transcript_or_input() {
 
 /// The cursor belongs to whatever owns the keyboard, and the host decides
 /// that, so the composer only shows one when it is told it has focus.
-#[test]
-fn draw_in_draws_a_cursor_only_when_the_prompt_has_focus() {
-    use ratatui::backend::Backend as _;
-
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let regions = ChatRegions {
-        transcript: Rect::new(0, 0, 80, 16),
-        prompt: Rect::new(0, 16, 80, 6),
-        footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
-        overlay: Rect::new(0, 0, 80, 24),
-        title_controls: 0,
-        title_lead: 0,
-        pane_focused: false,
-    };
-
-    terminal
-        .draw(|frame| render_in(frame, &mut chat, regions, false, false))
-        .expect("draw chat");
-    terminal.backend_mut().assert_cursor_position((0, 0));
-
-    terminal
-        .draw(|frame| render_in(frame, &mut chat, regions, true, false))
-        .expect("draw chat");
-    let cursor = terminal
-        .backend_mut()
-        .get_cursor_position()
-        .expect("cursor position");
-    assert!(
-        cursor.y > 16 && cursor.y < 21,
-        "the cursor sits inside the prompt region: {cursor:?}"
-    );
-
-    let boolean_question = ElicitationRequest {
-        id: "boolean-question".into(),
-        message: "Should I continue?".into(),
-        title: None,
-        description: None,
-        fields: vec![ElicitationField {
-            id: "continue".into(),
-            title: "Continue".into(),
-            description: None,
-            required: false,
-            secret: false,
-            custom_answer_for: None,
-            custom_answer_option: None,
-            kind: ElicitationFieldKind::Boolean { default: None },
-        }],
-    };
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        boolean_question,
-    ));
-    let mut question_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    question_terminal
-        .draw(|frame| render_in(frame, &mut chat, regions, true, false))
-        .expect("draw question");
-    question_terminal
-        .backend_mut()
-        .assert_cursor_position((0, 0));
-
-    let text_question = ElicitationRequest {
-        id: "text-question".into(),
-        message: "What should I call it?".into(),
-        title: None,
-        description: None,
-        fields: vec![ElicitationField {
-            id: "name".into(),
-            title: "Name".into(),
-            description: None,
-            required: false,
-            secret: false,
-            custom_answer_for: None,
-            custom_answer_option: None,
-            kind: ElicitationFieldKind::Text {
-                default: None,
-                min_length: None,
-                max_length: None,
-                pattern: None,
-                format: None,
-            },
-        }],
-    };
-    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
-        text_question,
-    ));
-    let mut text_terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    text_terminal
-        .draw(|frame| render_in(frame, &mut chat, regions, true, false))
-        .expect("draw text question");
-    let question_cursor = text_terminal
-        .backend_mut()
-        .get_cursor_position()
-        .expect("question cursor position");
-    assert!(
-        question_cursor.y < regions.prompt.bottom(),
-        "the text question owns its cursor: {question_cursor:?}"
-    );
-    assert_ne!(question_cursor, Position::new(0, 0));
-}
-
 /// A conversation long enough that opening it converts the tail only.
 fn long_session() -> MaterializedSession {
     let mut session = MaterializedSession::empty("session-long");
@@ -3252,4 +2364,714 @@ async fn empty_paste_without_image_support_reports_it_without_reading_the_clipbo
         Some(super::super::input_state::IMAGE_PASTE_UNSUPPORTED_NOTICE)
     );
     assert_eq!(chat.state.input, "draft");
+}
+
+fn active_golden_buffer(chat: &mut ChatState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| render_full_frame(frame, chat, false))
+        .expect("draw active chat");
+    terminal.backend().buffer().clone()
+}
+
+fn append_active_golden_state(
+    output: &mut String,
+    label: &str,
+    buffer: &ratatui::buffer::Buffer,
+    details: &[String],
+) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(
+        output,
+        "=== {label} ({}x{}) ===",
+        buffer.area.width, buffer.area.height
+    )
+    .expect("write state label");
+    output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+    output.push('\n');
+    for detail in details {
+        writeln!(output, "{detail}").expect("write state detail");
+    }
+}
+
+fn active_golden_rect(chat: &ChatState, id: SurfaceId) -> String {
+    let rect = chat
+        .frame_surfaces()
+        .surface(id)
+        .map(|surface| surface.rect)
+        .unwrap_or_default();
+    format!(
+        "{id:?} rect=({}, {}, {}, {})",
+        rect.x, rect.y, rect.width, rect.height
+    )
+}
+
+fn active_golden_style(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> String {
+    let cell = &buffer[(x, y)];
+    format!(
+        "fg={:?} bg={:?} modifiers={:?}",
+        cell.fg, cell.bg, cell.modifier
+    )
+}
+
+#[tokio::test]
+async fn golden_active_chat_render() {
+    use mj_client::usage_format::SessionActivity;
+    use mj_core::config::HarnessKind;
+    use mj_core::relay::WorkerPhase;
+    use ratatui::backend::Backend as _;
+    use ratatui::layout::Rect;
+
+    let mut output = String::new();
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.phase = WorkerPhase::Idle;
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "empty conversation prompt", &buffer, &[]);
+    chat.transcript_loading = true;
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "transcript still loading", &buffer, &[]);
+    chat.transcript_loading = false;
+    chat.unconverted_prefix = 1;
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "history prefix not converted", &buffer, &[]);
+    chat.unconverted_prefix = 0;
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::User, "Hello"));
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "conversation has history", &buffer, &[]);
+    chat.entries.clear();
+    chat.phase = WorkerPhase::Running;
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(&mut output, "running conversation follow-up", &buffer, &[]);
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_input("/".into());
+    let buffer = active_golden_buffer(&mut chat, 80, 24);
+    let popup = chat
+        .frame_surfaces()
+        .surface(SurfaceId::AutocompletePopup)
+        .expect("autocomplete popup is registered");
+    let popup_hit = chat
+        .frame_surfaces()
+        .surface_at(popup.rect.x, popup.rect.bottom() - 1)
+        .map(|surface| surface.id);
+    append_active_golden_state(
+        &mut output,
+        "autocomplete popup and hit target",
+        &buffer,
+        &[
+            active_golden_rect(&chat, SurfaceId::Transcript),
+            active_golden_rect(&chat, SurfaceId::PromptInput),
+            format!("popup bottom hit={popup_hit:?}"),
+        ],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let buffer = active_golden_buffer(&mut chat, 80, 24);
+    let transcript = chat
+        .frame_surfaces()
+        .surface(SurfaceId::Transcript)
+        .expect("transcript is registered")
+        .rect;
+    let prompt = chat
+        .frame_surfaces()
+        .surface(SurfaceId::PromptInput)
+        .expect("prompt is registered")
+        .rect;
+    let prompt_hit = chat
+        .frame_surfaces()
+        .surface_at(prompt.x, prompt.y)
+        .map(|surface| surface.id);
+    append_active_golden_state(
+        &mut output,
+        "transcript and composer registered surfaces",
+        &buffer,
+        &[
+            active_golden_rect(&chat, SurfaceId::Transcript),
+            active_golden_rect(&chat, SurfaceId::PromptInput),
+            format!(
+                "transcript before prompt={} prompt hit={prompt_hit:?}",
+                transcript.bottom() <= prompt.y
+            ),
+        ],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "UNDERLYING CHAT SENTINEL",
+    ));
+    chat.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+        ElicitationRequest {
+            id: "question-1".into(),
+            message: "Visible dialog message".into(),
+            title: Some("Overlaid dialog".into()),
+            description: None,
+            fields: Vec::new(),
+        },
+    ));
+    chat.task_dialog_open = true;
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    let transcript = chat
+        .frame_surfaces()
+        .surface(SurfaceId::Transcript)
+        .expect("reduced transcript is registered")
+        .rect;
+    let message = chat
+        .frame_surfaces()
+        .surface(SurfaceId::ElicitationMessage)
+        .expect("question message is registered")
+        .rect;
+    let dialog_hit = chat
+        .frame_surfaces()
+        .surface_at(message.x, message.y)
+        .map(|surface| surface.id);
+    let footer = crate::golden::buffer_lines(&buffer)
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    append_active_golden_state(
+        &mut output,
+        "elicitation stays inside chat and leaves transcript visible",
+        &buffer,
+        &[
+            active_golden_rect(&chat, SurfaceId::Transcript),
+            active_golden_rect(&chat, SurfaceId::ModalBody),
+            active_golden_rect(&chat, SurfaceId::ElicitationMessage),
+            format!(
+                "transcript above message={} prompt hidden={} message hit={dialog_hit:?}",
+                transcript.bottom() <= message.y,
+                chat.frame_surfaces()
+                    .surface(SurfaceId::PromptInput)
+                    .is_none()
+            ),
+            format!("footer={footer}"),
+        ],
+    );
+
+    let mut short = ChatState::new(&snapshot(), &[]);
+    short.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+        ElicitationRequest {
+            id: "short-question".into(),
+            message: "One short question".into(),
+            title: Some("Custom title".into()),
+            description: None,
+            fields: Vec::new(),
+        },
+    ));
+    let buffer = active_golden_buffer(&mut short, 80, 24);
+    let transcript = short
+        .frame_surfaces()
+        .surface(SurfaceId::Transcript)
+        .expect("transcript is registered")
+        .rect;
+    let message = short
+        .frame_surfaces()
+        .surface(SurfaceId::ElicitationMessage)
+        .expect("question message is registered")
+        .rect;
+    let natural = short.elicitation.as_ref().unwrap().natural_height(80);
+    let question_height = 23 - transcript.bottom() - 1;
+    append_active_golden_state(
+        &mut output,
+        "short elicitation uses natural height",
+        &buffer,
+        &[
+            active_golden_rect(&short, SurfaceId::Transcript),
+            active_golden_rect(&short, SurfaceId::ElicitationMessage),
+            format!(
+                "natural question height={natural} actual={question_height} transcript taller than message={}",
+                transcript.height > message.height
+            ),
+        ],
+    );
+
+    let mut tall = ChatState::new(&snapshot(), &[]);
+    tall.elicitation = Some(super::super::elicitation::ElicitationDialog::new(
+        ElicitationRequest {
+            id: "tall-question".into(),
+            message: "Question message".into(),
+            title: Some("Tall question".into()),
+            description: Some("This field description is intentionally long enough to wrap into many rows when it is shown in the focused form.".into()),
+            fields: vec![ElicitationField {
+                id: "answer".into(),
+                title: "Answer".into(),
+                description: Some("The focused answer description also consumes wrapped rows. ".repeat(20)),
+                required: false,
+                secret: false,
+                custom_answer_for: None,
+                custom_answer_option: None,
+                kind: ElicitationFieldKind::Text {
+                    default: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                    format: None,
+                },
+            }],
+        },
+    ));
+    let natural = tall.elicitation.as_ref().unwrap().natural_height(80);
+    let buffer = active_golden_buffer(&mut tall, 80, 24);
+    let transcript = tall
+        .frame_surfaces()
+        .surface(SurfaceId::Transcript)
+        .expect("transcript is registered")
+        .rect;
+    let message = tall
+        .frame_surfaces()
+        .surface(SurfaceId::ElicitationMessage)
+        .expect("question message is registered")
+        .rect;
+    let question_height = 23 - transcript.bottom() - 1;
+    append_active_golden_state(
+        &mut output,
+        "tall elicitation is capped without overlap",
+        &buffer,
+        &[
+            active_golden_rect(&tall, SurfaceId::Transcript),
+            active_golden_rect(&tall, SurfaceId::ElicitationMessage),
+            format!(
+                "natural question height={natural} actual={question_height} transcript before message={} prompt hidden={}",
+                transcript.bottom() <= message.y,
+                tall.frame_surfaces()
+                    .surface(SurfaceId::PromptInput)
+                    .is_none()
+            ),
+        ],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let shared = Notices::default();
+    chat.notices = shared.clone();
+    shared.set("Background import finished");
+    let buffer = active_golden_buffer(&mut chat, 120, 24);
+    let footer_row = buffer.area.bottom() - 1;
+    append_active_golden_state(
+        &mut output,
+        "shared warning notice in the composer footer",
+        &buffer,
+        &[format!(
+            "footer text fg={:?}",
+            buffer[(buffer.area.x, footer_row)].fg
+        )],
+    );
+    shared.clear();
+    let buffer = active_golden_buffer(&mut chat, 120, 24);
+    append_active_golden_state(
+        &mut output,
+        "cleared notice restores normal footer hints",
+        &buffer,
+        &[format!(
+            "footer text fg={:?}",
+            buffer[(buffer.area.x, footer_row)].fg
+        )],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut footer_terminal = Terminal::new(TestBackend::new(200, 1)).expect("footer terminal");
+    footer_terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_chat_footer(frame, test_footer(area), &chat, true);
+        })
+        .expect("draw composer and host key hints");
+    append_active_golden_state(
+        &mut output,
+        "composer and host key hints",
+        footer_terminal.backend().buffer(),
+        &[],
+    );
+    chat.queued_prompts.push_back(queued("queued-1", "next"));
+    footer_terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_chat_footer(frame, test_footer(area), &chat, true);
+        })
+        .expect("draw composer and host key hints with a queued prompt");
+    append_active_golden_state(
+        &mut output,
+        "queued prompt keeps composer hints",
+        footer_terminal.backend().buffer(),
+        &[],
+    );
+
+    let chat = ChatState::new(&snapshot(), &[]);
+    let mut footer_terminal = Terminal::new(TestBackend::new(32, 1)).expect("footer terminal");
+    footer_terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_chat_footer(frame, test_footer(area), &chat, true);
+        })
+        .expect("draw narrow footer");
+    append_active_golden_state(
+        &mut output,
+        "narrow footer preserves palette and help hints",
+        footer_terminal.backend().buffer(),
+        &[],
+    );
+
+    let model_and_effort = vec![
+        SessionConfigOption::select(
+            "model",
+            "Model",
+            "gpt-5.6-sol",
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                "gpt-5.6-sol",
+                "Sol",
+            )]),
+        )
+        .category(SessionConfigOptionCategory::Model),
+        SessionConfigOption::select(
+            "effort",
+            "Effort",
+            "high",
+            SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
+                "high", "High",
+            )]),
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel),
+    ];
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.phase = WorkerPhase::Running;
+    chat.set_prompt_in_flight(true);
+    chat.activity_reachable = false;
+    chat.set_config_options(&model_and_effort);
+    let buffer = active_golden_buffer(&mut chat, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "live model and effort during an in-flight prompt",
+        &buffer,
+        &[],
+    );
+
+    let mut fast = ChatState::new(&snapshot(), &[]);
+    fast.set_config_options(&[fast_mode_option("off")]);
+    let buffer = active_golden_buffer(&mut fast, 80, 24);
+    append_active_golden_state(&mut output, "fast mode disabled", &buffer, &[]);
+    fast.set_config_options(&[fast_mode_option("on")]);
+    let buffer = active_golden_buffer(&mut fast, 80, 24);
+    append_active_golden_state(&mut output, "fast mode confirmed active", &buffer, &[]);
+    fast.set_config_options(&[]);
+    let buffer = active_golden_buffer(&mut fast, 80, 24);
+    append_active_golden_state(&mut output, "fast mode option removed", &buffer, &[]);
+
+    let mut interrupt = ChatState::new(&snapshot(), &[]);
+    interrupt.phase = WorkerPhase::Running;
+    interrupt.activity_reachable = false;
+    let buffer = active_golden_buffer(&mut interrupt, 80, 24);
+    append_active_golden_state(&mut output, "running without our prompt", &buffer, &[]);
+    interrupt.set_prompt_in_flight(true);
+    let buffer = active_golden_buffer(&mut interrupt, 80, 24);
+    append_active_golden_state(&mut output, "our prompt can be interrupted", &buffer, &[]);
+
+    let mut plan = crate::chat::test_support::grok_chat();
+    plan.finish_plan_mode_change(true);
+    plan.phase = WorkerPhase::Running;
+    let buffer = active_golden_buffer(&mut plan, 80, 24);
+    append_active_golden_state(&mut output, "plan mode during a turn", &buffer, &[]);
+
+    let mut goal = ChatState::new(&snapshot(), &[]);
+    goal.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [{"name": "goal", "description": "set a persistent goal"}]
+        }),
+    );
+    goal.apply_event(&SequencedEvent {
+        seq: 2,
+        recorded_at_ms: None,
+        request_id: Some("goal".into()),
+        event: WorkerEvent::PromptAccepted {
+            request_id: "goal".into(),
+            text: "/goal ship the release".into(),
+            attachments: Vec::new(),
+        },
+    });
+    goal.activity_reachable = false;
+    let buffer = active_golden_buffer(&mut goal, 100, 24);
+    append_active_golden_state(&mut output, "advertised active goal title", &buffer, &[]);
+    goal.apply_event(&SequencedEvent {
+        seq: 3,
+        recorded_at_ms: None,
+        request_id: None,
+        event: WorkerEvent::TurnCompleted,
+    });
+    let buffer = active_golden_buffer(&mut goal, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "completed goal clears composer title",
+        &buffer,
+        &[],
+    );
+
+    let mut ordinary = ChatState::new(&snapshot(), &[]);
+    ordinary.mark_prompt_submitted("/goal ship the release");
+    ordinary.set_prompt_in_flight(false);
+    let buffer = active_golden_buffer(&mut ordinary, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "unadvertised goal text stays an ordinary prompt",
+        &buffer,
+        &[],
+    );
+    ordinary.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [{"name": "goal", "description": "set a persistent goal"}]
+        }),
+    );
+    ordinary.mark_prompt_submitted("please ship the release");
+    ordinary.set_prompt_in_flight(false);
+    let buffer = active_golden_buffer(&mut ordinary, 100, 24);
+    append_active_golden_state(
+        &mut output,
+        "ordinary text with goal advertised",
+        &buffer,
+        &[],
+    );
+
+    let mut title = ChatState::new(&snapshot(), &[]);
+    let buffer = active_golden_buffer(&mut title, 80, 24);
+    let title_column = crate::golden::buffer_lines(&buffer)[0]
+        .find("Conversation")
+        .expect("conversation title is visible") as u16;
+    let rule_column = (0..buffer.area.width)
+        .rfind(|x| buffer[(*x, 0)].symbol() == "─")
+        .expect("quiet rule follows the title");
+    append_active_golden_state(
+        &mut output,
+        "conversation title and quiet rule",
+        &buffer,
+        &[
+            format!(
+                "title style {}",
+                active_golden_style(&buffer, title_column, 0)
+            ),
+            format!(
+                "rule style {}",
+                active_golden_style(&buffer, rule_column, 0)
+            ),
+        ],
+    );
+
+    for ui_theme in theme::UiTheme::ALL {
+        let mut controls = ChatState::new(&snapshot(), &[]);
+        controls.set_subagent_count(2);
+        controls.set_session_activity(SessionActivity {
+            pursuing_goal: Default::default(),
+            checking_response: false,
+            quota_recovery: None,
+            capacity_retry: None,
+            activity_turn_started_at_ms: None,
+            prompt_in_flight: false,
+            idle_since_ms: None,
+            execution: None,
+            harness_turn_started_at_ms: None,
+            state: None,
+            foreground_tool_started_at_ms: None,
+            background_commands: vec![mj_core::relay::BackgroundCommand {
+                id: "test:task".into(),
+                started_at_ms: 0,
+                command: "cargo test".into(),
+                can_stop: false,
+            }],
+            active_user_shells: Vec::new(),
+        });
+        controls.activity_reachable = false;
+        let neutral = theme::with_theme(ui_theme, || active_golden_buffer(&mut controls, 100, 24));
+        let subagent = controls
+            .subagent_control_area
+            .expect("subagent control is rendered");
+        let task = controls
+            .task_control_area
+            .expect("task control is rendered");
+        let subagent_label = (subagent.x..subagent.right())
+            .map(|x| neutral[(x, subagent.y)].symbol())
+            .collect::<String>();
+        let task_label = (task.x..task.right())
+            .map(|x| neutral[(x, task.y)].symbol())
+            .collect::<String>();
+        let neutral_styles = format!(
+            "subagents={subagent_label:?} {} tasks={task_label:?} {}",
+            active_golden_style(&neutral, subagent.x, subagent.y),
+            active_golden_style(&neutral, task.x, task.y)
+        );
+        append_active_golden_state(
+            &mut output,
+            &format!("{} theme: neutral navigation controls", ui_theme.label()),
+            &neutral,
+            &[neutral_styles],
+        );
+
+        controls.subagent_control_focused = true;
+        controls.task_control_focused = true;
+        let focused = theme::with_theme(ui_theme, || active_golden_buffer(&mut controls, 100, 24));
+        let focused_styles = format!(
+            "subagents {} tasks {}",
+            active_golden_style(&focused, subagent.x, subagent.y),
+            active_golden_style(&focused, task.x, task.y)
+        );
+        append_active_golden_state(
+            &mut output,
+            &format!("{} theme: focused navigation controls", ui_theme.label()),
+            &focused,
+            &[focused_styles],
+        );
+    }
+
+    let pane = Rect::new(50, 2, 48, 26);
+    let regions = || ChatRegions {
+        transcript: Rect::new(50, 2, 48, 19),
+        prompt: Rect::new(50, 21, 48, 7),
+        footer: None,
+        overlay: pane,
+        title_controls: 0,
+        title_lead: 0,
+        pane_focused: true,
+    };
+    let mut tasks = ChatState::new(&snapshot(), &[]);
+    tasks.task_dialog_open = true;
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("overlay terminal");
+    terminal
+        .draw(|frame| render_in(frame, &mut tasks, regions(), false, false))
+        .expect("draw task dialog in pane");
+    let task_buffer = terminal.backend().buffer().clone();
+    let task_body = tasks
+        .frame_surfaces()
+        .surface(SurfaceId::ModalBody)
+        .expect("task dialog body is registered")
+        .rect;
+    append_active_golden_state(
+        &mut output,
+        "task dialog stays in host overlay",
+        &task_buffer,
+        &[format!(
+            "modal body=({},{},{},{})",
+            task_body.x, task_body.y, task_body.width, task_body.height
+        )],
+    );
+
+    let fixture = mj_client::session::replacement_session_test_fixture("session-pane-modal", 91);
+    let mut reviewed = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(chat_context(
+            "session-pane-modal",
+            &[("claude-1", HarnessKind::Claude)],
+        )),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    reviewed.open_second_opinion(
+        ElicitationRequest {
+            id: "plan-pane".into(),
+            message: "may I run this plan?".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        },
+        "the plan".into(),
+    );
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).expect("review terminal");
+    terminal
+        .draw(|frame| reviewed.draw_in(frame, regions(), false, false))
+        .expect("draw reviewer setup in pane");
+    let review_buffer = terminal.backend().buffer().clone();
+    let review_body = reviewed
+        .state
+        .frame_surfaces()
+        .surface(SurfaceId::ModalBody)
+        .expect("review setup body is registered")
+        .rect;
+    append_active_golden_state(
+        &mut output,
+        "review setup stays in host overlay",
+        &review_buffer,
+        &[format!(
+            "modal body=({},{},{},{})",
+            review_body.x, review_body.y, review_body.width, review_body.height
+        )],
+    );
+
+    let mut regions_chat = ChatState::new(&snapshot(), &[]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("regions terminal");
+    let custom_regions = ChatRegions {
+        transcript: Rect::new(0, 4, 80, 12),
+        prompt: Rect::new(0, 16, 80, 5),
+        footer: None,
+        overlay: Rect::new(0, 0, 80, 24),
+        title_controls: 0,
+        title_lead: 0,
+        pane_focused: false,
+    };
+    terminal
+        .draw(|frame| render_in(frame, &mut regions_chat, custom_regions, true, false))
+        .expect("draw custom chat regions");
+    let regions_buffer = terminal.backend().buffer().clone();
+    let region_transcript = regions_chat
+        .frame_surfaces()
+        .surface(SurfaceId::Transcript)
+        .expect("custom transcript is registered")
+        .rect;
+    let region_prompt = regions_chat
+        .frame_surfaces()
+        .surface(SurfaceId::PromptInput)
+        .expect("custom prompt is registered")
+        .rect;
+    append_active_golden_state(
+        &mut output,
+        "transcript and prompt stay within host regions",
+        &regions_buffer,
+        &[
+            format!("transcript rect={region_transcript:?}"),
+            format!("prompt rect={region_prompt:?}"),
+        ],
+    );
+
+    let mut cursor = ChatState::new(&snapshot(), &[]);
+    let cursor_regions = ChatRegions {
+        transcript: Rect::new(0, 0, 80, 16),
+        prompt: Rect::new(0, 16, 80, 6),
+        footer: Some(test_footer(Rect::new(0, 22, 80, 1))),
+        overlay: Rect::new(0, 0, 80, 24),
+        title_controls: 0,
+        title_lead: 0,
+        pane_focused: false,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("cursor terminal");
+    terminal
+        .draw(|frame| render_in(frame, &mut cursor, cursor_regions, false, false))
+        .expect("draw unfocused composer");
+    let unfocused = terminal.backend().buffer().clone();
+    let unfocused_cursor = terminal.backend_mut().get_cursor_position();
+    append_active_golden_state(
+        &mut output,
+        "composer without keyboard focus",
+        &unfocused,
+        &[format!("cursor={unfocused_cursor:?}")],
+    );
+    terminal
+        .draw(|frame| render_in(frame, &mut cursor, cursor_regions, true, false))
+        .expect("draw focused composer");
+    let focused = terminal.backend().buffer().clone();
+    let focused_cursor = terminal.backend_mut().get_cursor_position();
+    append_active_golden_state(
+        &mut output,
+        "composer with keyboard focus",
+        &focused,
+        &[format!("cursor={focused_cursor:?}")],
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "active-chat-render", &output);
 }

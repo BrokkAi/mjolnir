@@ -1,0 +1,308 @@
+=== heading list and incomplete fenced code (40x6) ===
+# Heading
+
+• bold and code
+
+code · rust
+fn main() {}
+row 0 styles: "# ":fg=Some(Rgb(151, 163, 163)):mod=NONE | "Heading":fg=Some(Rgb(157, 229, 202)):mod=BOLD
+row 1 styles: <empty>
+row 2 styles: "• ":fg=Some(Rgb(151, 163, 163)):mod=NONE | "bold":fg=None:mod=BOLD | " and ":fg=None:mod=NONE | "code":fg=Some(Rgb(158, 194, 238)):mod=NONE
+row 3 styles: <empty>
+row 4 styles: "code · rust":fg=Some(Rgb(151, 163, 163)):mod=BOLD
+row 5 styles: "fn main() {}":fg=Some(Rgb(239, 237, 232)):mod=NONE
+
+=== narrow-width table fallback records (32x2) ===
+Name: alpha
+Description: a long explanation
+row 0 styles: "Name: ":fg=None:mod=BOLD | "alpha":fg=None:mod=NONE
+row 1 styles: "Description: ":fg=None:mod=BOLD | "a long explanation":fg=None:mod=NONE
+
+=== aligned Markdown table and header rule (40x3) ===
+ Name     Score
+───────  ───────
+ alpha        7
+row 0 styles: " ":fg=None:mod=NONE | "Name":fg=None:mod=BOLD | "  ":fg=None:mod=NONE | "  ":fg=None:mod=NONE | " ":fg=None:mod=NONE | "Score":fg=None:mod=BOLD | " ":fg=None:mod=NONE
+row 1 styles: "───────  ───────":fg=Some(Rgb(151, 163, 163)):mod=NONE
+row 2 styles: " ":fg=None:mod=NONE | "alpha":fg=None:mod=NONE | " ":fg=None:mod=NONE | "  ":fg=None:mod=NONE | "     ":fg=None:mod=NONE | "7":fg=None:mod=NONE | " ":fg=None:mod=NONE
+
+=== plain long path wrap at width 1 (1x108) ===
+b
+i
+f
+r
+o
+s
+t
+2
+·
+2
+r
+e
+p
+o
+s
+i
+t
+o
+r
+i
+e
+s
+/
+w
+o
+r
+k
+s
+p
+a
+c
+e
+/
+p
+r
+o
+j
+e
+c
+t
+/
+r
+u
+n
+-
+1
+0
+0
+0
+/
+s
+e
+s
+s
+i
+o
+n
+-
+9
+2
+7
+5
+c
+f
+6
+3
+/
+s
+c
+r
+a
+t
+c
+h
+p
+a
+d
+/
+r
+e
+p
+l
+a
+y
+-
+w
+i
+t
+h
+-
+a
+-
+l
+o
+n
+g
+-
+s
+t
+a
+b
+l
+e
+-
+n
+a
+m
+e
+rows=108
+
+=== styled long path wrap at width 1 (1x108) ===
+b
+i
+f
+r
+o
+s
+t
+2
+·
+2
+r
+e
+p
+o
+s
+i
+t
+o
+r
+i
+e
+s
+/
+w
+o
+r
+k
+s
+p
+a
+c
+e
+/
+p
+r
+o
+j
+e
+c
+t
+/
+r
+u
+n
+-
+1
+0
+0
+0
+/
+s
+e
+s
+s
+i
+o
+n
+-
+9
+2
+7
+5
+c
+f
+6
+3
+/
+s
+c
+r
+a
+t
+c
+h
+p
+a
+d
+/
+r
+e
+p
+l
+a
+y
+-
+w
+i
+t
+h
+-
+a
+-
+l
+o
+n
+g
+-
+s
+t
+a
+b
+l
+e
+-
+n
+a
+m
+e
+rows=108 source rows=108 widths aligned=true
+style runs=Some(Yellow) -> Some(Blue)
+
+=== plain long path wrap at width 12 (12x10) ===
+bifrost2 · 2
+repositories
+/workspace/p
+roject/run-1
+000/session-
+9275cf63/scr
+atchpad/repl
+ay-with-a-lo
+ng-stable-na
+me
+rows=10
+
+=== styled long path wrap at width 12 (12x10) ===
+bifrost2 · 2
+repositories
+/workspace/p
+roject/run-1
+000/session-
+9275cf63/scr
+atchpad/repl
+ay-with-a-lo
+ng-stable-na
+me
+rows=10 source rows=10 widths aligned=true
+style runs=Some(Yellow) -> Some(Blue)
+
+=== plain long path wrap at width 40 (40x3) ===
+bifrost2 · 2 repositories /workspace/pro
+ject/run-1000/session-9275cf63/scratchpa
+d/replay-with-a-long-stable-name
+rows=3
+
+=== styled long path wrap at width 40 (40x3) ===
+bifrost2 · 2 repositories /workspace/pro
+ject/run-1000/session-9275cf63/scratchpa
+d/replay-with-a-long-stable-name
+rows=3 source rows=3 widths aligned=true
+style runs=Some(Yellow) -> Some(Blue)
+
+=== plain long path wrap at width 80 (80x2) ===
+bifrost2 · 2 repositories /workspace/project/run-1000/session-9275cf63/scratchpa
+d/replay-with-a-long-stable-name
+rows=2
+
+=== styled long path wrap at width 80 (80x2) ===
+bifrost2 · 2 repositories /workspace/project/run-1000/session-9275cf63/scratchpa
+d/replay-with-a-long-stable-name
+rows=2 source rows=2 widths aligned=true
+style runs=Some(Yellow) -> Some(Blue)
+
+=== ellipsis trims cutoff punctuation and whitespace (7x1) ===
+alpha…
+
+=== styled ellipsis preserves its trailing span style (7x1) ===
+alpha…
+ellipsis fg=Some(Blue)

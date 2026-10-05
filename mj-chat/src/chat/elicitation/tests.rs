@@ -206,28 +206,6 @@ fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
         "reading position moved from {before_row:?} to {after_row:?}"
     );
 }
-
-#[test]
-fn smallest_question_pane_keeps_other_and_its_draft_visible() {
-    let mut dialog = ElicitationDialog::new(paired_request(1, true));
-    dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
-    dialog.paste("custom draft");
-    let buffer = rendered_in_pane(&dialog, 60, 6);
-    let text = (0..6)
-        .map(|row| buffer_row(&buffer, row, 0, 60))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        text.contains("custom draft"),
-        "focused custom input is hidden: {text}"
-    );
-    assert!(text.contains("Submit"), "submit is hidden: {text}");
-    assert!(
-        text.contains("PgUp/PgDn"),
-        "the footer hints are hidden: {text}"
-    );
-}
-
 #[test]
 fn six_row_plan_pane_keeps_text_and_page_down_actionable() {
     let message = (0..80)
@@ -445,25 +423,6 @@ fn a_range_inside_one_wrapped_line_rejoins_the_rows_word_wrap_split() {
         "beta gam"
     );
 }
-
-#[test]
-fn plan_review_gives_unused_form_rows_to_the_plan_and_scrolls_to_its_end() {
-    let mut dialog = plan_review(80);
-
-    let first = rendered(&dialog);
-    assert!(first.contains("plan-line-12"));
-    assert!(!first.contains("plan-line-79"));
-    assert!(first.contains("PgUp/PgDn or wheel scroll"));
-
-    for _ in 0..10 {
-        dialog.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
-        rendered(&dialog);
-    }
-    let last = rendered(&dialog);
-    assert!(last.contains("plan-line-79"));
-    assert_eq!(dialog.focus_index(), 0);
-}
-
 #[test]
 fn mouse_wheel_scrolls_the_plan_without_moving_the_decision() {
     let mut dialog = plan_review(80);
@@ -481,100 +440,6 @@ fn mouse_wheel_scrolls_the_plan_without_moving_the_decision() {
     assert_eq!(dialog.focus_index(), 0);
     assert!(rendered(&dialog).contains("plan-line-03"));
 }
-
-#[test]
-fn mouse_click_toggles_the_focused_boolean_through_the_form() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::Boolean {
-            default: Some(false),
-        },
-        false,
-    ));
-    let buffer = rendered_in_pane(&dialog, 100, 30);
-    let point = (0..100)
-        .flat_map(|column| (0..30).map(move |row| (column, row)))
-        .find(|&(column, row)| buffer[(column, row)].symbol() == "☐")
-        .expect("boolean control has a hitbox");
-    let mouse = |kind| MouseEvent {
-        kind,
-        column: point.0,
-        row: point.1,
-        modifiers: KeyModifiers::NONE,
-    };
-    dialog.handle_mouse(mouse(MouseEventKind::Down(
-        crossterm::event::MouseButton::Left,
-    )));
-    dialog.handle_mouse(mouse(MouseEventKind::Up(
-        crossterm::event::MouseButton::Left,
-    )));
-    assert!(matches!(dialog.values[0], FieldValue::Boolean(true)));
-}
-
-#[test]
-fn clicking_the_boolean_field_title_toggles_it() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::Boolean {
-            default: Some(false),
-        },
-        false,
-    ));
-    let buffer = rendered_in_pane(&dialog, 100, 30);
-    let title = &dialog.request.fields[0].title;
-    let (column, row) = (0..buffer.area.height)
-        .find_map(|row| {
-            let text = (0..buffer.area.width)
-                .map(|col| buffer[(col, row)].symbol())
-                .collect::<String>();
-            text.find(title)
-                .map(|byte| (text[..byte].chars().count() as u16, row))
-        })
-        .expect("field title is rendered");
-    for kind in [
-        MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        MouseEventKind::Up(crossterm::event::MouseButton::Left),
-    ] {
-        dialog.handle_mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
-    }
-    assert!(matches!(dialog.values[0], FieldValue::Boolean(true)));
-}
-
-#[test]
-fn revise_edits_feedback_inline_and_submits_it_with_the_action() {
-    let mut dialog = plan_review(4);
-
-    assert_eq!(dialog.display_fields.len(), 1);
-    assert!(!rendered(&dialog).contains("> "));
-
-    dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    let revise = rendered(&dialog);
-    assert!(revise.contains("● Revise"));
-    assert!(revise.contains("Describe what the agent should change"));
-    assert!(revise.contains("> "));
-    assert!(revise.contains("1/1"));
-
-    dialog.paste("add a regression test");
-    assert_eq!(
-        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
-        Some(ElicitationResponse::Accept {
-            content: BTreeMap::from([
-                (
-                    "feedback".into(),
-                    ElicitationValue::String("add a regression test".into())
-                ),
-                (
-                    "question_0".into(),
-                    ElicitationValue::String("revise".into())
-                ),
-            ])
-        })
-    );
-}
-
 #[test]
 fn leaving_revise_keeps_its_draft_out_of_the_answer() {
     let mut dialog = plan_review(4);
@@ -591,21 +456,156 @@ fn leaving_revise_keeps_its_draft_out_of_the_answer() {
         })
     );
 }
+fn append_elicitation_golden_state(
+    output: &mut String,
+    label: &str,
+    buffer: &Buffer,
+    details: &[String],
+) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(
+        output,
+        "=== {label} ({}x{}) ===",
+        buffer.area.width, buffer.area.height
+    )
+    .expect("write state label");
+    output.push_str(&buffer_text(buffer));
+    output.push('\n');
+    for detail in details {
+        writeln!(output, "{detail}").expect("write state detail");
+    }
+}
 
 #[test]
-fn paired_custom_answers_share_their_question_page() {
-    let mut dialog = ElicitationDialog::new(paired_request(3, false));
+fn golden_elicitation_dialog() {
+    let mut output = String::new();
 
-    assert_eq!(dialog.display_fields.len(), 3);
-    let first = rendered(&dialog);
-    assert!(first.contains("1/3"));
-    assert!(first.contains("○ Other"));
-    assert!(!first.contains("1/6"));
+    let mut smallest = ElicitationDialog::new(paired_request(1, true));
+    smallest.handle_key(KeyCode::End, KeyModifiers::NONE);
+    smallest.paste("custom draft");
+    let buffer = rendered_in_pane(&smallest, 60, 6);
+    append_elicitation_golden_state(
+        &mut output,
+        "small question pane keeps the focused custom answer and actions",
+        &buffer,
+        &[format!("focused value={:?}", smallest.values)],
+    );
 
-    dialog.handle_key(KeyCode::Right, KeyModifiers::ALT);
-    let second = rendered(&dialog);
-    assert!(second.contains("2/3"));
-    assert!(second.contains("Question 2"));
+    let mut plan = plan_review(80);
+    let before = rendered_in_pane(&plan, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "plan review before scrolling",
+        &before,
+        &[format!("focus index={}", plan.focus_index())],
+    );
+    for _ in 0..10 {
+        plan.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        let _ = rendered_in_pane(&plan, 100, 30);
+    }
+    let after = rendered_in_pane(&plan, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "plan review after paging to the end",
+        &after,
+        &[format!("focus index={}", plan.focus_index())],
+    );
+
+    for (label, click_title) in [
+        ("boolean checkbox click", false),
+        ("boolean field title click", true),
+    ] {
+        let mut dialog = ElicitationDialog::new(request(
+            ElicitationFieldKind::Boolean {
+                default: Some(false),
+            },
+            false,
+        ));
+        let initial = rendered_in_pane(&dialog, 100, 30);
+        let point = if click_title {
+            let title = &dialog.request.fields[0].title;
+            (0..initial.area.height)
+                .find_map(|row| {
+                    let text = (0..initial.area.width)
+                        .map(|column| initial[(column, row)].symbol())
+                        .collect::<String>();
+                    text.find(title)
+                        .map(|byte| (text[..byte].chars().count() as u16, row))
+                })
+                .expect("boolean field title is rendered")
+        } else {
+            (0..initial.area.width)
+                .flat_map(|column| (0..initial.area.height).map(move |row| (column, row)))
+                .find(|&(column, row)| initial[(column, row)].symbol() == "☐")
+                .expect("boolean checkbox is rendered")
+        };
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            dialog.handle_mouse(MouseEvent {
+                kind,
+                column: point.0,
+                row: point.1,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        let buffer = rendered_in_pane(&dialog, 100, 30);
+        append_elicitation_golden_state(
+            &mut output,
+            label,
+            &buffer,
+            &[format!("field value={:?}", dialog.values[0])],
+        );
+    }
+
+    let mut revise = plan_review(4);
+    let buffer = rendered_in_pane(&revise, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "plan review implement option selected",
+        &buffer,
+        &[],
+    );
+    revise.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    let buffer = rendered_in_pane(&revise, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "revise option exposes inline feedback",
+        &buffer,
+        &[],
+    );
+    revise.paste("add a regression test");
+    let action = revise.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    append_elicitation_golden_state(
+        &mut output,
+        "revise submits its feedback with the selected action",
+        &rendered_in_pane(&revise, 100, 30),
+        &[format!("action: {action:?}")],
+    );
+
+    let mut paired = ElicitationDialog::new(paired_request(3, false));
+    let first = rendered_in_pane(&paired, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "paired custom answer starts on question one of three",
+        &first,
+        &[format!("display fields={}", paired.display_fields.len())],
+    );
+    paired.handle_key(KeyCode::Right, KeyModifiers::ALT);
+    let second = rendered_in_pane(&paired, 100, 30);
+    append_elicitation_golden_state(
+        &mut output,
+        "paired custom answer advances to question two of three",
+        &second,
+        &[format!("display fields={}", paired.display_fields.len())],
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "elicitation-dialog", &output);
 }
 
 #[test]
