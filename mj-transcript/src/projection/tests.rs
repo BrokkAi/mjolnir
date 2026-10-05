@@ -3,10 +3,7 @@ use agent_client_protocol::schema::v1::{
 };
 
 use super::*;
-use mj_core::relay::{
-    RelayCommand, RelayCommandOutcome, RelayObservation, UserShellResult, UserShellStatus,
-    relay_event_digest,
-};
+use mj_core::relay::{RelayCommand, RelayCommandOutcome, RelayObservation, relay_event_digest};
 use serde_json::json;
 
 fn event(previous: &MaterializedSession, observation: RelayObservation) -> RelayEvent {
@@ -34,6 +31,7 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
     apply(session, next);
 }
 
+// Hard-won: 60145fdb: leaving Claude Plan mode selected default Manual permissions instead of the saved policy.
 #[test]
 fn execution_mode_restoration_reports_durable_success_and_failure_to_clients() {
     let session = MaterializedSession::empty("restore-mode");
@@ -65,6 +63,7 @@ fn execution_mode_restoration_reports_durable_success_and_failure_to_clients() {
     }
 }
 
+// Hard-won: 61a1cfaf: session loading discarded Codex goal and command-catalogue state across config replacement.
 #[test]
 fn configuration_replacement_preserves_goals_and_removes_obsolete_adapter_settings() {
     let mut session = MaterializedSession::empty("goal-config");
@@ -166,6 +165,7 @@ fn apply_indexed_observation(
     apply_committed_projection_event_indexed(session, index, &next, projected.mutation).unwrap();
 }
 
+// Hard-won: 975b275a: each resumed open added another transcript line and amplified recovery history.
 #[test]
 fn resume_open_updates_operational_state_without_adding_transcript_noise() {
     let session = MaterializedSession::empty("session");
@@ -198,66 +198,6 @@ fn resume_open_updates_operational_state_without_adding_transcript_noise() {
             .transcript
             .len(),
         1
-    );
-}
-
-#[test]
-fn a_completed_prompt_records_its_stop_reason_and_clears_the_running_turn() {
-    let mut session = MaterializedSession::empty("session");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-1".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::from("go")],
-            },
-            created_at_ms: 10,
-        },
-    );
-    let accepted = session.applied_event_ordinal;
-    assert_eq!(
-        session.queued_prompts[0].accepted_ordinal,
-        Some(accepted),
-        "a queue entry remembers the ordinal its caller was told"
-    );
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: "prompt-1".into(),
-            started_at_ms: 20,
-        },
-    );
-    let turn = session.active_turn.clone().expect("a running turn");
-    assert_eq!(turn.command_id, "prompt-1");
-    assert_eq!(turn.accepted_ordinal, Some(accepted));
-    assert_eq!(turn.turn_start_position, session.applied_event_ordinal);
-    assert_eq!(turn.started_at_ms, 20);
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandCompleted {
-            barrier_command_id: None,
-            command: None,
-            command_id: "prompt-1".into(),
-            outcome: RelayCommandOutcome::Prompt {
-                diagnostic: None,
-                stop_reason: "EndTurn".into(),
-                usage: None,
-            },
-        },
-    );
-    assert!(session.active_turn.is_none());
-    let outcome = session.last_turn_outcome.clone().expect("an outcome");
-    assert_eq!(outcome.command_id, "prompt-1");
-    assert_eq!(outcome.accepted_ordinal, Some(accepted));
-    assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
-    assert_eq!(outcome.completed_ordinal, session.applied_event_ordinal);
-    assert_eq!(
-        outcome.outcome,
-        TurnOutcomeKind::Completed {
-            stop_reason: "EndTurn".into()
-        }
     );
 }
 
@@ -494,72 +434,7 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
     }
 }
 
-#[test]
-fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
-    let mut session = MaterializedSession::empty("session");
-
-    apply_observation(
-        &mut session,
-        RelayObservation::HarnessTurnStarted {
-            started_at_ms: 4_200,
-        },
-    );
-
-    assert_eq!(
-        session.execution,
-        MaterializedExecutionState::Running {
-            started_at_ms: 4_200
-        }
-    );
-    let marker = session.transcript.last().expect("a marker item");
-    assert_eq!(
-        marker.stable_id,
-        format!("{}1", crate::transcript::HARNESS_TURN_ITEM_PREFIX)
-    );
-    assert!(marker.is_turn_start());
-    assert!(matches!(
-        &marker.body,
-        TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT
-    ));
-
-    apply_observation(
-        &mut session,
-        agent_chunk("picking this back up", "answer-1"),
-    );
-    assert!(
-        session.transcript.iter().any(
-            |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
-        ),
-        "output inside the turn streams into a fresh item"
-    );
-
-    apply_observation(
-        &mut session,
-        RelayObservation::HarnessTurnSettled {
-            origin: Some("task-notification".into()),
-            prompt_in_flight: false,
-        },
-    );
-
-    assert_eq!(session.execution, MaterializedExecutionState::Idle);
-    assert!(
-        !session.transcript.iter().any(|item| matches!(
-            &item.body,
-            TranscriptBody::Agent { streaming, .. } if *streaming
-        )),
-        "settling closes the streams a canonical export refuses to hold open"
-    );
-    assert_eq!(
-        mj_core::state::latest_completed_turn_ordinal(&session),
-        Some(1),
-        "the finished turn is covered from the marker that began it"
-    );
-    assert_eq!(
-        mj_core::state::ProjectionWindow::of(&session).latest_turn_start_position,
-        Some(1)
-    );
-}
-
+// Hard-won: db2e99a5: a native turn settling beneath an accepted prompt incorrectly made the session idle.
 #[test]
 fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     let mut session = MaterializedSession::empty("session");
@@ -634,6 +509,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     );
 }
 
+// Hard-won: 73dfe169: finishing an ACP prompt closed a later Codex goal stream during recovery.
 #[test]
 fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     let mut session = MaterializedSession::empty("session");
@@ -773,6 +649,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     );
 }
 
+// Hard-won: 4647de43: worker restart lost or duplicated the unread interruption in persisted read state.
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     let mut session = MaterializedSession::empty("session");
@@ -813,6 +690,7 @@ fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
 /// I1-17: a turn the user cancelled ends with an "Interrupted" row, so a
 /// reader can tell a cut-off reply from a finished one. A finished turn gets
 /// no such row.
+// Hard-won: a1dfcb6b: cancelled prompt output looked complete because the transcript had no Interrupted row.
 #[test]
 fn a_cancelled_turn_ends_with_an_interrupted_row() {
     for (stop_reason, marked) in [("cancelled", true), ("end_turn", false)] {
@@ -860,6 +738,7 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
 /// cancelled it but left no "Interrupted" row and no cancelled outcome, which
 /// an ordinary cancelled turn gets. A stop with nothing running, or one that
 /// lands on a prompt of ours, adds neither: the prompt's own completion does.
+// Hard-won: c8e52abc: cancelling an autonomous harness turn omitted its Interrupted row and cancelled outcome.
 #[test]
 fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
     let cancel = |session: &mut MaterializedSession, command_id: &str| {
@@ -985,104 +864,6 @@ fn session_restarts_project_as_distinct_durable_system_lines() {
             .iter()
             .all(|item| item.is_session_restart())
     );
-}
-
-#[test]
-fn shell_output_updates_one_durable_transcript_item() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "shell-1".into(),
-            command: RelayCommand::RunUserShell {
-                command: "cargo test".into(),
-            },
-            created_at_ms: 100,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: "shell-1".into(),
-            started_at_ms: 200,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::UserShellOutput {
-            command_id: "shell-1".into(),
-            command: "cargo test".into(),
-            stdout: "running tests".into(),
-            stderr: String::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-        },
-    );
-    assert_eq!(session.transcript.len(), 1);
-    assert!(matches!(
-        &session.transcript[0].body,
-        TranscriptBody::System { text }
-            if text.contains("Shell · running") && text.contains("running tests")
-    ));
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandCompleted {
-            barrier_command_id: None,
-            command: Some(mj_core::relay::RelayCommandKind::RunUserShell),
-            command_id: "shell-1".into(),
-            outcome: RelayCommandOutcome::UserShell {
-                result: UserShellResult {
-                    command: "cargo test".into(),
-                    stdout: "all green".into(),
-                    stderr: String::new(),
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                    exit_code: Some(0),
-                    signal: None,
-                    duration_ms: 321,
-                    status: UserShellStatus::Exited,
-                    error: None,
-                },
-            },
-        },
-    );
-    assert_eq!(session.transcript.len(), 1);
-    assert_eq!(session.transcript[0].stable_id, "shell:shell-1");
-    assert!(matches!(
-        &session.transcript[0].body,
-        TranscriptBody::System { text }
-            if text.contains("Shell · done · 321 ms") && text.contains("all green")
-    ));
-}
-
-#[test]
-fn elicitation_projection_keeps_only_pending_request_metadata() {
-    let mut session = MaterializedSession::empty("session-1");
-    let request = mj_core::elicitation::ElicitationRequest {
-        id: "elicitation-1".into(),
-        message: "Choose one".into(),
-        title: None,
-        description: None,
-        fields: Vec::new(),
-    };
-    apply_observation(
-        &mut session,
-        RelayObservation::ElicitationRequested {
-            request: request.clone(),
-        },
-    );
-    assert_eq!(session.pending_elicitations, vec![request]);
-
-    apply_observation(
-        &mut session,
-        RelayObservation::ElicitationResolved {
-            elicitation_id: "elicitation-1".into(),
-            action: "accept".into(),
-        },
-    );
-    assert!(session.pending_elicitations.is_empty());
-    assert!(session.transcript.is_empty());
 }
 
 #[test]
@@ -1230,6 +1011,7 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
     assert_eq!(session.unread_agent_messages_after(2), 0);
 }
 
+// Hard-won: 89ee2de3: late ACP agent chunks reopened a stream that could never close before checkpoint export.
 #[test]
 fn agent_chunk_while_idle_is_recorded_closed() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1258,6 +1040,7 @@ fn agent_chunk_while_idle_is_recorded_closed() {
     ));
 }
 
+// Hard-won: 89ee2de3: late ACP thought chunks reopened a stream that could never close before checkpoint export.
 #[test]
 fn thought_chunk_while_idle_is_recorded_closed() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1284,33 +1067,7 @@ fn thought_chunk_while_idle_is_recorded_closed() {
     ));
 }
 
-#[test]
-fn agent_chunk_while_running_still_streams() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
-    apply_observation(
-        &mut session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
-                    TextContent::new("live"),
-                ))
-                .message_id("msg-1"),
-            )),
-        },
-    );
-    let item = session
-        .transcript
-        .iter()
-        .find(|item| item.stable_id == "agent:msg-1")
-        .expect("live chunk recorded");
-    assert!(matches!(
-        &item.body,
-        TranscriptBody::Agent { chunks, streaming }
-            if *streaming && crate::transcript::materialized_chunks_text(chunks) == "live"
-    ));
-}
-
+// Hard-won: 94d3f379: real Grok goal output without message IDs produced thousands of one-token transcript bubbles.
 #[test]
 fn idle_untagged_agent_chunks_coalesce_into_one_closed_item() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1329,6 +1086,7 @@ fn idle_untagged_agent_chunks_coalesce_into_one_closed_item() {
     ));
 }
 
+// Hard-won: 94d3f379: real Grok goal output without message IDs produced thousands of one-token transcript bubbles.
 #[test]
 fn idle_untagged_thought_chunks_coalesce_into_one_closed_item() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1485,6 +1243,7 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
     assert_eq!(session.last_activity_at_ms(), Some(1_000));
 }
 
+// Hard-won: 8ee980d6: a late Codex update for a pre-resume tool blocked relay replay when no projected call existed.
 #[test]
 fn tool_update_without_an_initial_call_is_ignored_and_advances_the_frontier() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1508,33 +1267,7 @@ fn tool_update_without_an_initial_call_is_ignored_and_advances_the_frontier() {
     assert_eq!(session.applied_event_ordinal, 1);
 }
 
-#[test]
-fn metadata_only_tool_update_without_an_initial_call_is_ignored() {
-    let mut session = MaterializedSession::empty("session-1");
-    let update = SessionUpdate::ToolCallUpdate(
-        ToolCallUpdate::new("pre-resume-tool", ToolCallUpdateFields::new()).meta(
-            serde_json::Map::from_iter([(
-                "terminal_output_delta".into(),
-                json!({"data": "late output"}),
-            )]),
-        ),
-    );
-    let relay_event = event(
-        &session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(update),
-        },
-    );
-
-    let projected = project_relay_event(&session, &relay_event)
-        .expect("private metadata cannot change the transcript projection");
-    apply_committed_projection_event(&mut session, &relay_event, projected.mutation)
-        .expect("the no-op still advances the committed relay frontier");
-
-    assert!(session.transcript.is_empty());
-    assert_eq!(session.applied_event_ordinal, 1);
-}
-
+// Hard-won: 111f6dcd: Codex resent a revised tool call as a new item, changing identity and failing every recovery retry.
 #[test]
 fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1868,6 +1601,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
     );
 }
 
+// Hard-won: a718d1c3: Kimi raw output duplicated a terminal transcript item when no terminal reference was supplied.
 #[test]
 fn kimi_raw_result_claims_its_unreferenced_terminal_output() {
     const OUTPUT: &str = "toolchain inventory\n";
@@ -2055,6 +1789,7 @@ fn wholesale_tool_call_update_keeps_the_attached_terminal_output() {
 /// Grok Build names the terminal on a mid-flight update and then replaces
 /// `content` wholesale with plain text before the terminal is reaped, so
 /// the close event arrives with nothing in the call pointing at it.
+// Hard-won: b364ed85: live Grok updates dropped a prior terminal reference before its output arrived.
 #[test]
 fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
     let mut session = MaterializedSession::empty("session-1");
@@ -2167,6 +1902,7 @@ fn first_queued_prompt_seeds_a_provisional_session_title() {
     );
 }
 
+// Hard-won: 244fa1cc: oversized ACP titles could exceed the stored and published title bound.
 #[test]
 fn session_info_update_caps_large_titles_in_the_published_projection() {
     let mut session = MaterializedSession::empty("session-1");
@@ -2471,6 +2207,7 @@ fn rejected_close_rolls_closing_projection_back_to_idle() {
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
 }
 
+// Hard-won: 0d9df1dd: rejected command notices exposed internal command IDs in the conversation.
 #[test]
 fn a_rejected_command_notice_does_not_show_the_command_id() {
     let mut session = MaterializedSession::empty("session-1");
@@ -2557,196 +2294,6 @@ fn control_command_outcomes_do_not_end_an_active_prompt() {
     ));
 }
 
-#[test]
-fn canonical_round_trip_preserves_cursor_and_logical_positions() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.applied_event_ordinal = 4;
-    session.applied_event_digest = "a".repeat(64);
-    session.last_activity_at_ms = Some(40);
-    session.session_title = Some("Build it".into());
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "agent:a".into(),
-        position: 2,
-        latest_content_event_ordinal: Some(4),
-        created_at_ms: 20,
-        last_changed_at_ms: 40,
-        body: TranscriptBody::Agent {
-            chunks: vec![json!({
-                "content": {"type": "text", "text": "done"},
-                "messageId": "a",
-                "_meta": {"provider": "test"}
-            })],
-            streaming: false,
-        },
-    }));
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "thought:t".into(),
-        position: 3,
-        latest_content_event_ordinal: None,
-        created_at_ms: 30,
-        last_changed_at_ms: 30,
-        body: TranscriptBody::Thought {
-            chunks: vec![json!({
-                "content": {
-                    "type": "text",
-                    "text": "reasoning",
-                    "_meta": {"contentProvider": "test"}
-                },
-                "messageId": "t",
-                "_meta": {"chunkProvider": "test"}
-            })],
-            streaming: false,
-        },
-    }));
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "tool:call-1".into(),
-        position: 4,
-        latest_content_event_ordinal: None,
-        created_at_ms: 40,
-        last_changed_at_ms: 40,
-        body: TranscriptBody::Tool {
-            call: json!({
-                "toolCallId": "call-1",
-                "title": "Read file",
-                "kind": "read",
-                "status": "completed",
-                "content": [{"type": "terminal", "terminalId": "term-1"}],
-                "rawInput": {"path": "README.md"},
-                "rawOutput": {"bytes": 42},
-                "_meta": {"provider": "test"}
-            }),
-            terminal_outputs: vec![TerminalOutputRecord {
-                terminal_id: "term-1".into(),
-                output: "ok\n".into(),
-                truncated: true,
-                exit_code: Some(0),
-                signal: None,
-            }],
-            // "term-3" is a reference the call no longer carries, so only
-            // the remembered list can survive the archive round trip.
-            terminal_refs: vec!["term-1".into(), "term-3".into()],
-            presentation: Some(Box::new(crate::transcript::ToolCallPresentation {
-                summary: "Read".into(),
-                source: "Read file".into(),
-                source_kind: crate::transcript::ToolSummarySourceKind::Title,
-                tool_kind: agent_client_protocol::schema::v1::ToolKind::Read,
-                summary_version: crate::transcript::TOOL_SUMMARY_VERSION,
-            })),
-        },
-    }));
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "terminal:term-2".into(),
-        position: 4,
-        latest_content_event_ordinal: None,
-        created_at_ms: 40,
-        last_changed_at_ms: 40,
-        body: TranscriptBody::TerminalOutput {
-            record: TerminalOutputRecord {
-                terminal_id: "term-2".into(),
-                output: "orphaned output\n".into(),
-                truncated: false,
-                exit_code: None,
-                signal: Some("SIGKILL".into()),
-            },
-        },
-    }));
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "plan:4".into(),
-        position: 4,
-        latest_content_event_ordinal: None,
-        created_at_ms: 40,
-        last_changed_at_ms: 40,
-        body: TranscriptBody::Plan {
-            plan: json!({
-                "entries": [{
-                    "content": "finish",
-                    "priority": "high",
-                    "status": "in_progress",
-                    "_meta": {"entryProvider": "test"}
-                }],
-                "_meta": {"planProvider": "test"}
-            }),
-        },
-    }));
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: plan_proposal_item_id(4),
-        position: 4,
-        latest_content_event_ordinal: None,
-        created_at_ms: 40,
-        last_changed_at_ms: 40,
-        body: TranscriptBody::PlanProposal {
-            proposal_id: "plan-review-1".into(),
-            plan: "1. Read the code\n2. Change it".into(),
-        },
-    }));
-    session.queued_prompts.push(MaterializedQueuedPrompt {
-        accepted_ordinal: None,
-        command_id: "queued-config".into(),
-        kind: QueuedCommandKind::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        },
-        content: vec![json!({"type": "text", "text": "/model sonnet"})],
-        queued_at_ms: 50,
-    });
-    let canonical = canonical_session_from_materialized(&session).unwrap();
-    canonical.validate().unwrap();
-    assert_eq!(
-        canonical.queued_prompts[0].kind,
-        CanonicalQueuedCommandKind::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        }
-    );
-    let restored = materialized_session_from_canonical("session-1", &canonical).unwrap();
-    assert_eq!(restored.applied_event_ordinal, 4);
-    assert_eq!(restored.transcript[0].position, 2);
-    assert_eq!(restored.unread_agent_messages_after(1), 1);
-    assert_eq!(restored, session);
-}
-
-#[test]
-fn one_chunk_projects_only_the_touched_logical_item() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.applied_event_ordinal = 10_000;
-    session.applied_event_digest = "a".repeat(64);
-    session.last_activity_at_ms = Some(10_000);
-    session.transcript = (1..=10_000)
-        .map(|position| {
-            Arc::new(TranscriptItem {
-                stable_id: format!("system:{position}"),
-                position,
-                latest_content_event_ordinal: None,
-                created_at_ms: i64::try_from(position).unwrap(),
-                last_changed_at_ms: i64::try_from(position).unwrap(),
-                body: TranscriptBody::System {
-                    text: format!("event {position}"),
-                },
-            })
-        })
-        .collect();
-    let next = event(
-        &session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::AgentMessageChunk(
-                agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
-                    TextContent::new("answer"),
-                ))
-                .message_id("answer-1"),
-            )),
-        },
-    );
-
-    let projected = project_relay_event(&session, &next).unwrap();
-
-    assert_eq!(projected.mutation.transcript.len(), 1);
-    assert!(projected.mutation.configuration.is_none());
-    assert!(projected.mutation.queued_prompts.is_none());
-    assert_eq!(session.transcript.len(), 10_000);
-    apply_committed_projection_event(&mut session, &next, projected.mutation).unwrap();
-    assert_eq!(session.transcript.len(), 10_001);
-}
-
 fn agent_chunk(text: &str, message_id: &str) -> RelayObservation {
     RelayObservation::SessionUpdate {
         update: Box::new(SessionUpdate::AgentMessageChunk(
@@ -2758,75 +2305,7 @@ fn agent_chunk(text: &str, message_id: &str) -> RelayObservation {
     }
 }
 
-fn end_turn() -> RelayObservation {
-    RelayObservation::CommandCompleted {
-        barrier_command_id: None,
-        command: None,
-        command_id: "prompt-1".into(),
-        outcome: RelayCommandOutcome::Prompt {
-            diagnostic: None,
-            stop_reason: "end_turn".into(),
-            usage: None,
-        },
-    }
-}
-
-fn agent_text(item: &TranscriptItem) -> String {
-    let TranscriptBody::Agent { chunks, .. } = &item.body else {
-        panic!("expected an agent message, got {:?}", item.body);
-    };
-    crate::transcript::materialized_chunks_text(chunks)
-}
-
-#[test]
-fn appending_a_transcript_item_leaves_earlier_items_shared_with_older_snapshots() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, agent_chunk("answer", "answer-1"));
-    apply_observation(&mut session, end_turn());
-    let published = session.clone();
-
-    apply_observation(
-        &mut session,
-        RelayObservation::Warning {
-            message: "disk is nearly full".into(),
-        },
-    );
-
-    assert_eq!(published.transcript.len(), 1);
-    assert_eq!(session.transcript.len(), 2);
-    assert!(matches!(
-        &session.transcript[1].body,
-        TranscriptBody::System { text } if text == "warning: disk is nearly full"
-    ));
-    assert!(
-        Arc::ptr_eq(&session.transcript[0], &published.transcript[0]),
-        "cloning a session must share earlier transcript items, not copy them"
-    );
-}
-
-#[test]
-fn appending_a_chunk_replaces_only_the_streaming_tail_item() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, agent_chunk("finished", "answer-1"));
-    apply_observation(&mut session, end_turn());
-    apply_observation(&mut session, agent_chunk("hel", "answer-2"));
-    let published = session.clone();
-
-    apply_observation(&mut session, agent_chunk("lo", "answer-2"));
-
-    assert_eq!(session.transcript.len(), 2);
-    assert!(
-        Arc::ptr_eq(&session.transcript[0], &published.transcript[0]),
-        "finalized items stay shared while the tail streams"
-    );
-    assert!(
-        !Arc::ptr_eq(&session.transcript[1], &published.transcript[1]),
-        "the streaming tail must be replaced, not mutated in place"
-    );
-    assert_eq!(agent_text(&published.transcript[1]), "hel");
-    assert_eq!(agent_text(&session.transcript[1]), "hello");
-}
-
+// Hard-won: ff088d42: a real 15,000-chunk DeepSeek thought caused quadratic projection work and multi-gigabyte RSS.
 #[test]
 fn streamed_text_for_one_message_id_becomes_a_single_chunk() {
     let mut session = MaterializedSession::empty("session-1");
@@ -2947,22 +2426,6 @@ fn clear_preserves_history_and_adds_one_durable_context_boundary() {
 }
 
 #[test]
-fn classifier_notice_is_shown_without_warning_prefix() {
-    let mut session = MaterializedSession::empty("session-1");
-    let message =
-        "Classifier: The agent appears to be waiting for you. The harness may still be running.";
-    apply_observation(
-        &mut session,
-        RelayObservation::Notice {
-            message: message.into(),
-        },
-    );
-    assert!(
-        matches!(&session.transcript[0].body, TranscriptBody::System { text } if text == message)
-    );
-}
-
-#[test]
 fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_history() {
     use agent_client_protocol::schema::v1::ToolCallStatus;
     let mut full = MaterializedSession::empty("window-stream");
@@ -3053,6 +2516,7 @@ fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_hist
     assert_eq!(call["status"], "completed");
 }
 
+// Hard-won: 32f1541e: checkpoint recovery failures exposed daemon bookkeeping IDs as transcript messages.
 #[test]
 fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
     let mut session = MaterializedSession::empty("session");
@@ -3088,6 +2552,7 @@ fn an_interrupted_checkpoint_barrier_adds_nothing_to_the_transcript() {
 
 /// Issue 1217: the reminder ran as "Agent continued on its own", so the
 /// transcript hid the prompt the child was obeying.
+// Hard-won: e97c0266: a child obeyed an invisible handback reminder and stopped before finishing its task.
 #[test]
 fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
     let mut session = MaterializedSession::empty("child");

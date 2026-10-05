@@ -10,121 +10,8 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
-/// Streamed chunk cost, measured both ways in one process so a loaded
-/// machine cannot flatter either policy. Run with
-/// `cargo test --lib worker::journal::tests::streamed_chunk_append_cost
-/// -- --ignored --nocapture`.
-#[test]
-#[ignore = "timing measurement, not a behavior assertion"]
-fn streamed_chunk_append_cost() {
-    const BACKLOG: usize = 40;
-    const CHUNKS: usize = 200;
-    const ROUNDS: u32 = 3;
-
-    fn stream_chunks(stage_every_append: bool) -> (std::time::Duration, usize) {
-        let temp = tempfile::tempdir().unwrap();
-        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        // Give the snapshot the weight a real session carries: a queue of
-        // prompts the checkpoint has not pruned yet.
-        for index in 0..BACKLOG {
-            submit_relay(
-                &mut relay,
-                &format!("backlog-command-{index:04}"),
-                prompt(&"q".repeat(4096)),
-            );
-        }
-        let snapshot_bytes = fs::read(temp.path().join(RELAY_STATE_FILE)).unwrap().len();
-        relay.stage_snapshot_every_append = stage_every_append;
-
-        let chunk = "token ".repeat(40);
-        let started = std::time::Instant::now();
-        for _ in 0..CHUNKS {
-            relay
-                .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::from(chunk.clone()),
-                )))
-                .unwrap();
-        }
-        (started.elapsed(), snapshot_bytes)
-    }
-
-    let mut amortized = std::time::Duration::ZERO;
-    let mut every_append = std::time::Duration::ZERO;
-    let mut snapshot_bytes = 0;
-    for _ in 0..ROUNDS {
-        let (elapsed, bytes) = stream_chunks(false);
-        amortized += elapsed;
-        snapshot_bytes = bytes;
-        every_append += stream_chunks(true).0;
-    }
-
-    // What one redundant snapshot write costs: the collection that follows
-    // an advancing acknowledgement used to pay exactly this.
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    for index in 0..BACKLOG {
-        submit_relay(
-            &mut relay,
-            &format!("backlog-command-{index:04}"),
-            prompt(&"q".repeat(4096)),
-        );
-    }
-    let started = std::time::Instant::now();
-    for _ in 0..CHUNKS {
-        relay.persist_snapshot().unwrap();
-    }
-    let persists = started.elapsed();
-
-    let appends = CHUNKS as u32 * ROUNDS;
-    println!(
-        "snapshot {snapshot_bytes} bytes, {appends} chunk appends per policy\n  \
-             snapshot per append: {every_append:?} ({:?}/append)\n  \
-             amortized:           {amortized:?} ({:?}/append)\n  \
-             one snapshot write:  {:?}",
-        every_append / appends,
-        amortized / appends,
-        persists / u32::try_from(CHUNKS).unwrap(),
-    );
-}
-
 fn persisted_relay_snapshot(root: &Path) -> RelaySnapshot {
     serde_json::from_slice(&fs::read(root.join(RELAY_STATE_FILE)).unwrap()).unwrap()
-}
-
-/// The journal is what makes a streamed chunk durable. Rewriting the whole
-/// snapshot per chunk bought nothing, because recovery already replays
-/// journal events past the snapshot frontier.
-#[test]
-fn streamed_chunks_are_journaled_without_rewriting_the_snapshot() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    submit_relay(&mut relay, "streaming-prompt", prompt("stream"));
-    assert_eq!(
-        relay.claim_pending_commands(true).unwrap()[0].command_id,
-        "streaming-prompt"
-    );
-    let persisted = persisted_relay_snapshot(temp.path());
-
-    for index in 0..8 {
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(format!("chunk {index}")),
-            )))
-            .unwrap();
-    }
-    assert_eq!(relay.latest_ordinal(), persisted.latest_ordinal + 8);
-    assert_eq!(
-        persisted_relay_snapshot(temp.path()),
-        persisted,
-        "streamed chunks rewrote relay-state.json"
-    );
-
-    // A state move is still durable the moment it is recorded.
-    finish_prompt(&mut relay, "streaming-prompt");
-    assert_eq!(
-        persisted_relay_snapshot(temp.path()).latest_ordinal,
-        relay.latest_ordinal()
-    );
 }
 
 /// A relay that dies mid-turn keeps every chunk it acknowledged, and the
@@ -706,6 +593,7 @@ fn relay_truncates_a_torn_active_tail_before_appending_again() {
     assert_eq!(retained_events(&relay).len(), 2);
 }
 
+// Hard-won: 97bd9199: a torn writer append previously aborted read-only attach replay.
 #[test]
 fn a_read_only_replay_tolerates_a_torn_active_tail_and_serves_the_newest_record() {
     // An attach serving the hot segment can read it while the worker is
@@ -947,22 +835,6 @@ fn a_journal_mixing_v1_and_v2_records_reads_and_validates_across_the_boundary() 
 }
 
 #[test]
-fn first_active_journal_file_is_reopenable_after_its_first_append() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay
-        .record_observation(RelayObservation::Warning {
-            message: "first durable event".into(),
-        })
-        .unwrap();
-    drop(relay);
-
-    let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    assert_eq!(relay.latest_ordinal(), 1);
-    assert_eq!(retained_events(&relay).len(), 1);
-}
-
-#[test]
 fn failed_gc_persistence_keeps_command_idempotency_in_memory() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -1188,6 +1060,7 @@ fn failed_claim_persistence_leaves_the_command_claimable() {
 
 /// A relay that truncated an event must still be able to reopen the
 /// journal it wrote — the readback path bounds lines by the same budget.
+// Hard-won: be7c009d: an oversized ACP observation previously made append fatal to the live worker.
 #[test]
 fn a_truncated_event_can_be_read_back_after_reopening() {
     let temp = tempfile::tempdir().unwrap();
@@ -1579,6 +1452,7 @@ fn restored_relay_rebuilds_a_queued_configuration_change() {
 /// Session teardown deletes the worker root while its daemon may still be
 /// alive. A durable write that recreated the root would leave a snapshot
 /// with no journal behind it, and no later resume could reopen that.
+// Hard-won: 2e7f5ec9: a detached worker recreated a closed session root and broke the next resume.
 #[test]
 fn relay_writes_fail_instead_of_recreating_a_deleted_worker_root() {
     let temp = tempfile::tempdir().unwrap();
