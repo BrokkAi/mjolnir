@@ -350,6 +350,51 @@ mod tests {
     }
 
     #[test]
+    fn real_shaped_grok_model_change_builds_the_legacy_acp_set_model_request() {
+        // Hand-authored from Grok's modelState extension and ACP's UntypedMessage envelope.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/grok-model-state.json"))
+                .expect("Grok ACP modelState fixture");
+        let metadata = fixture.as_object().expect("ACP metadata object");
+        let state = model_state(Some(metadata)).expect("Grok model catalogue");
+        let session_id = SessionId::from("grok-session-42");
+
+        let (params, state) = set_model_request(&session_id, &state, "model", "grok-4.5")
+            .expect("select the advertised model");
+        let message = agent_client_protocol::UntypedMessage::new(SET_MODEL_METHOD, params)
+            .expect("build ACP request");
+        assert_eq!(
+            serde_json::to_value(message).expect("serialize ACP request"),
+            serde_json::json!({
+                "method": "session/set_model",
+                "params": {
+                    "sessionId": "grok-session-42",
+                    "modelId": "grok-4.5"
+                }
+            })
+        );
+        assert_eq!(state.current_model_id, "grok-4.5");
+        assert_eq!(state.current_effort.as_deref(), Some("high"));
+
+        let (params, state) = set_model_request(&session_id, &state, "effort", "low")
+            .expect("select an advertised effort");
+        let message = agent_client_protocol::UntypedMessage::new(SET_MODEL_METHOD, params)
+            .expect("build ACP effort request");
+        assert_eq!(
+            serde_json::to_value(message).expect("serialize ACP effort request"),
+            serde_json::json!({
+                "method": "session/set_model",
+                "params": {
+                    "sessionId": "grok-session-42",
+                    "modelId": "grok-4.5",
+                    "_meta": {"reasoningEffort": "low"}
+                }
+            })
+        );
+        assert_eq!(state.current_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
     fn config_options_do_not_invent_an_unknown_effort() {
         let mut meta = model_meta();
         meta["modelState"]["availableModels"][0]["_meta"]
