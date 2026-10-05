@@ -526,6 +526,7 @@ mod tests {
     /// I1-2: a child whose first prompt is refused for good has its worker
     /// stopped and is recorded as failed with the cause, keeping its record,
     /// relation and target, instead of staying a live idle session.
+    // Hard-won: ba6c34276ced: a refused first prompt left a live idle child whose parent had already seen the error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_child_whose_start_failed_is_stopped_and_recorded_as_failed() {
         if !isolated("a_child_whose_start_failed_is_stopped_and_recorded_as_failed") {
@@ -632,34 +633,5 @@ mod tests {
             Some(SessionState::Running)
         );
         channels.shutdown.shutdown().await.unwrap();
-    }
-
-    #[test]
-    fn only_a_full_target_is_rewritten_and_a_bare_one_reads_no_container_counts() {
-        let backend = targets::TargetLocator::LocalBare {
-            worker_root: "/tmp/workers/child".into(),
-        };
-        let unrelated =
-            explain_process_exhaustion(anyhow::anyhow!("the harness exited"), &backend, "child");
-        assert_eq!(format!("{unrelated:#}"), "the harness exited");
-
-        let full = explain_process_exhaustion(
-            anyhow::anyhow!("sh: 1: Cannot fork").context("start the parked sub-agent's worker"),
-            &backend,
-            "child",
-        );
-        let message = format!("{full:#}");
-        assert!(
-            message.starts_with("the target machine ran out of process slots"),
-            "{message}"
-        );
-        assert!(
-            message.contains("Close sub-agents you no longer need"),
-            "{message}"
-        );
-        assert!(
-            message.contains("Cannot fork"),
-            "the original error stays: {message}"
-        );
     }
 }

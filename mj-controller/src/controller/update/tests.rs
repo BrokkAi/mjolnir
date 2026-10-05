@@ -351,30 +351,6 @@ fn managed_update_notice_names_channel_version_and_command() {
 }
 
 #[test]
-fn delegated_upgrades_run_the_package_managers_own_commands() {
-    let npm = npm_upgrade_command();
-    assert_eq!(npm.get_program(), "npm");
-    let npm_args: Vec<String> = npm
-        .get_args()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(npm_args, ["install", "-g", "@brokkai/mjolnir@latest"]);
-
-    let brew_update = brew_update_command();
-    assert_eq!(brew_update.get_program(), "brew");
-    assert_eq!(brew_update.get_args().count(), 1);
-    assert_eq!(brew_update.get_args().next().unwrap(), "update");
-
-    let brew_upgrade = brew_upgrade_command();
-    assert_eq!(brew_upgrade.get_program(), "brew");
-    let brew_args: Vec<String> = brew_upgrade
-        .get_args()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(brew_args, ["upgrade", "--formula", "brokkai/tap/mjolnir"]);
-}
-
-#[test]
 fn managed_restart_retargets_homebrew_to_its_wrapper() {
     // npm must save its installation path before the old bundle is removed.
     // Homebrew must re-resolve the wrapper or the

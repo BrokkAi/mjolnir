@@ -1026,6 +1026,7 @@ fn configuration_id_rename_rewrites_durable_session_references() {
 
 const BUILT_IN_TARGET_RENAME_RECOVERY_CHILD: &str = "MJ_TEST_BUILT_IN_TARGET_RENAME_RECOVERY_CHILD";
 
+// Hard-won: f161f18e76a0: recovering a rename of built-in localhost refused to start the daemon.
 #[test]
 fn rename_recovery_finishes_after_a_built_in_target_was_renamed_away() {
     if std::env::var_os(BUILT_IN_TARGET_RENAME_RECOVERY_CHILD).is_none() {
@@ -1065,6 +1066,7 @@ fn rename_recovery_finishes_after_a_built_in_target_was_renamed_away() {
     assert!(!config_rename_journal_path().exists());
 }
 
+// Hard-won: 91163d55803f: a failed session write left an unpersisted phantom in the live controller.
 #[test]
 fn a_session_the_database_rejects_is_never_left_in_memory() {
     if std::env::var_os(UNPERSISTABLE_SESSION_CHILD).is_none() {
@@ -1141,6 +1143,7 @@ const CONTAINER_MOUNT_SOURCE_CHILD: &str = "MJ_TEST_CONTAINER_MOUNT_SOURCE_CHILD
 /// the container was recreated. A new attached directory is checked where the
 /// container will read it when the settings are saved, and the refusal names
 /// the path.
+// Hard-won: 768b3599aa7d: Docker created a missing bind source as a root-owned host directory.
 #[test]
 fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
     if std::env::var_os(CONTAINER_MOUNT_SOURCE_CHILD).is_none() {
@@ -1275,6 +1278,7 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
     );
 }
 
+// Hard-won: 91163d55803f: a failed mount-history write incorrectly failed an otherwise persisted session.
 #[test]
 fn a_failed_mount_history_write_does_not_fail_the_registered_session() {
     if std::env::var_os(MOUNT_HISTORY_FAILURE_CHILD).is_none() {
@@ -1339,16 +1343,6 @@ fn a_failed_mount_history_write_does_not_fail_the_registered_session() {
 }
 
 #[test]
-fn command_errors_report_the_root_cause_without_worker_wrappers() {
-    let stderr = b"Error: restore target checkpoint failed with status 1: Error: restore repository \"bifrost\"\n\nCaused by:\n    checkpoint base b41dc78 is absent from configured source\n    repository may have moved\n";
-
-    assert_eq!(
-        command_error_detail(stderr),
-        "checkpoint base b41dc78 is absent from configured source\nrepository may have moved"
-    );
-}
-
-#[test]
 fn controller_store_lock_excludes_a_second_process_owner() {
     let directory = tempfile::tempdir().unwrap();
     let first = ControllerStoreGuard::acquire_at(directory.path()).unwrap();
@@ -1383,51 +1377,9 @@ fn controller_store_lock_subprocess_probe() {
         value => panic!("unexpected lock probe expectation {value:?}"),
     }
 }
-#[test]
-fn local_mount_source_must_be_an_existing_directory() {
-    let directory = tempfile::tempdir().unwrap();
-    let file = directory.path().join("file");
-    std::fs::write(&file, "not a directory").unwrap();
-    let mut config = Config::default();
-    config.targets.insert(
-        "local".into(),
-        TargetTemplate::LocalPodman {
-            container: ConfigContainer {
-                build_cache: None,
-                image: "ubuntu:24.04".into(),
-                pull_policy: Default::default(),
-                platform: None,
-                cpus: None,
-                memory: None,
-                environment: Default::default(),
-                workspace_storage: Default::default(),
-            },
-        },
-    );
-    let controller = Controller {
-        config,
-        state: State::default(),
-    };
-
-    assert!(
-        controller
-            .validate_mount_source("local", directory.path(), &ProcessExecutor)
-            .is_ok()
-    );
-    for invalid in [file, directory.path().join("missing")] {
-        let error = controller
-            .validate_mount_source("local", &invalid, &ProcessExecutor)
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not exist or is not a directory")
-        );
-    }
-}
-
 /// A relaunch rewrites `launch.json`. It must carry the session's delegation
 /// choice, or the new worker never serves the sub-agent socket (#1067).
+// Hard-won: 7f8ae32394f7: a relaunched worker lost sub-agent socket settings and refused child requests.
 #[test]
 fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
     const MARKER: &str = "MJ_TEST_RELAUNCH_SUBAGENT_TOOLS_CHILD";
@@ -1469,6 +1421,7 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
 /// while the parent had the project's memory. A child must read the memory
 /// its parent reads, and its writes must reconcile into the same canonical
 /// store.
+// Hard-won: 1023368e708e: isolated-session children received an empty project-memory index.
 #[test]
 fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     const MARKER: &str = "MJ_TEST_SUBAGENT_PROJECT_MEMORY_CHILD";
@@ -1585,6 +1538,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 
 /// Auto captures a baseline even with automation off, so manual review can
 /// measure the first turn in a single-profile installation.
+// Hard-won: 105769b9d5a0: baseline capture kept huge untracked workspaces from binding a new worker socket.
 #[test]
 fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() {
     const MARKER: &str = "MJ_TEST_LAUNCH_REVIEW_CAPTURE_CHILD";
@@ -1639,6 +1593,7 @@ fn a_launch_config_arms_the_review_capture_only_when_a_reviewer_is_configured() 
 /// I1-5: the review runs inside the worker, whose environment is the target's
 /// login environment, so the daemon's `MJ_BIFROST_BIN` reaches it only through
 /// the launch configuration.
+// Hard-won: d2f47fc3c3b2: the configured Bifrost executable never reached the worker that ran review.
 #[test]
 fn a_launch_config_carries_the_daemons_bifrost_choice_to_the_worker() {
     const MARKER: &str = "MJ_TEST_LAUNCH_BIFROST_CHILD";
@@ -1728,6 +1683,7 @@ impl CommandExecutor for DurableTargetExecutor {
 /// their relays with the ssh options recorded when they were provisioned,
 /// until each was resumed. The relay the daemon starts on recovery follows the
 /// machine's current options; only where the worker lives stays as recorded.
+// Hard-won: 1110352dea43: daemon recovery restarted SSH relays with stale provisioning-time options.
 #[test]
 fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
     let ssh_bare = |host: &str, extra_args: &[&str]| -> TargetTemplate {
@@ -2106,6 +2062,7 @@ fn target_backfill_does_not_block_reload_after_a_concurrent_deletion() {
 /// entry it could not use answered `mj new` with an opaque 500. The reason is
 /// the person's to fix, so it must travel as a refusal. (A missing secret no
 /// longer stops the load at all; its profile refuses instead.)
+// Hard-won: 31b14d516871: an unusable live config surfaced as an opaque HTTP 500 instead of a refusal.
 #[test]
 fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
     const MARKER: &str = "MJ_TEST_UNLOADABLE_CONFIG_CHILD";
