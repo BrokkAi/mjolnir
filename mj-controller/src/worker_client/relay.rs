@@ -301,6 +301,29 @@ impl RelayClient {
         }
     }
 
+    /// Whether the worker can replace its whole memory tree, deletions included.
+    pub fn supports_project_memory_replace(&self) -> bool {
+        mj_core::relay::RelayVersionRange::CURRENT.contains(self.protocol_version)
+            && self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL
+    }
+
+    /// Replace the worker's replica and baseline with `tree`, only if the
+    /// replica still has `expected_replica`.
+    pub async fn replace_project_memory_tree(
+        &mut self,
+        expected_replica: mj_core::project_memory::TreeVersion,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+    ) -> Result<mj_core::project_memory::ReplicaReplaceOutcome> {
+        let request = RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree,
+        };
+        match self.call(request).await? {
+            RelayResponsePayload::ProjectMemoryTreeReplaced { outcome } => Ok(outcome),
+            _ => bail!("relay returned an unexpected project-memory replace response"),
+        }
+    }
+
     /// Replace this session's synced skills trees with an encoded
     /// `skills::SkillsArchive`. The destination directories are fixed by
     /// the session's launch config and the harness skills whitelist.

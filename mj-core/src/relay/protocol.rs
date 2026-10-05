@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::elicitation::ElicitationResponse;
-use crate::project_memory::ProjectMemorySnapshot;
+use crate::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
 
 use super::snapshot::{RelayCommand, RelayEvent, RelayOperationalState};
 use super::{MAX_FRAME_BYTES, RELAY_MIN_PROTOCOL_VERSION, RELAY_PROTOCOL_VERSION};
@@ -93,6 +93,12 @@ pub enum RelayRequest {
     /// baseline for the next three-way synchronization.
     InstallProjectMemorySnapshot {
         snapshot: ProjectMemorySnapshot,
+    },
+    /// Replace the complete session replica and baseline only if the replica
+    /// still matches the tree the controller read.
+    ReplaceProjectMemoryTree {
+        expected_replica: TreeVersion,
+        tree: ProjectMemorySnapshot,
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
@@ -303,6 +309,7 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
+            Self::ReplaceProjectMemoryTree { .. } => "replace_project_memory_tree",
             Self::AttachmentPresent { .. } => "attachment_present",
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
@@ -328,8 +335,9 @@ impl RelayRequest {
 
     /// Oldest protocol that understands this method or command payload. Form
     /// answers landed in protocol 2, hidden context in 3, project-memory sync
-    /// in 4, user shell commands in 5, the reviewer sidecar in 6, and the
-    /// non-steering turn cancellation in 7.
+    /// in 4, user shell commands in 5, the reviewer sidecar in 6, the
+    /// non-steering turn cancellation in 7, and project-memory replacement in
+    /// protocol 31.
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
@@ -345,6 +353,7 @@ impl RelayRequest {
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
+            Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request: ReviewerRequest::PauseGeneration { .. },
@@ -457,6 +466,9 @@ pub enum RelayResponsePayload {
         replica: ProjectMemorySnapshot,
     },
     ProjectMemorySnapshotInstalled,
+    ProjectMemoryTreeReplaced {
+        outcome: ReplicaReplaceOutcome,
+    },
     /// Fingerprint and freshness of a session's harness credentials. Neither
     /// value is secret.
     CpuUsage {

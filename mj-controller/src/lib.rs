@@ -42,6 +42,7 @@ pub mod termination;
 
 pub mod daemon;
 pub mod pollers;
+pub(crate) mod project_memory_merge;
 pub mod server_runtime;
 pub mod web_viewer;
 

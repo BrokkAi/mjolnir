@@ -1061,6 +1061,11 @@ The platform data directory, or `MJ_DATA_DIR`, contains operational state:
   and viewer credentials and logout records; and
 - `diagnostics/` for diagnostic reports.
 
+Session replicas sync with canonical project memory at checkpoints using a
+line-by-line three-way merge, including deletions. If sessions change the same
+lines, an available utility model merges them; otherwise the session being
+merged wins. Mjolnir does not create a conflicts folder.
+
 Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
 in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)
 before moving or deleting session archives.

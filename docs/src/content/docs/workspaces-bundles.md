@@ -310,7 +310,7 @@ repository-specific material may live below `/roots/<repository-id>/`.
 The startup context also tells the agent which repository ID maps to each
 workspace root.
 
-### Writes, limits, and conflicts
+### Writes, limits, and synchronization
 
 `write` replaces a complete document. To create one, the agent passes
 `if_version = "new"`; to update one, it must pass the version returned by
@@ -325,14 +325,14 @@ Project memory has these limits:
 - 50 entries per listing page.
 
 Empty documents, unsafe path components, hidden/reserved path segments, and
-symbolic-link traversal are rejected. There is no delete operation.
+symbolic-link traversal are rejected. The service has no explicit delete tool,
+but deleting a document from a session replica syncs at the next checkpoint.
 
-Every session works on a private replica. At explicit durable/checkpoint
-boundaries, Mjolnir reconciles that replica with the canonical controller copy.
-Edits to different files merge. If two sessions change the same file from the
-same baseline, the controller's current version remains at the original path
-and the other version is preserved under
-`/conflicts/<session>-<digest>.md`. Nothing is silently discarded.
+Every session works on a private replica. At checkpoints, Mjolnir combines it
+with the canonical controller copy using a line-by-line three-way merge.
+Additions and deletions sync too. When two sessions change the same lines, an
+available utility model merges their edits; if none is available, the session
+being merged wins. Mjolnir does not create a conflicts folder.
 
 The canonical copy lives below:
 
@@ -343,7 +343,7 @@ The canonical copy lives below:
 Memory is background context, not authoritative project state. Agents are told
 to verify it against the working tree. Do not store credentials or other
 secrets there; it is deliberately available to every session for that project
-and participates in checkpoint reconciliation.
+and syncs at checkpoints.
 
 ## Choose the right scope
 

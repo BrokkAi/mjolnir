@@ -532,7 +532,11 @@ impl StandaloneSession {
     /// boundary. Normal relay attachment and polling must never perform this
     /// filesystem work: a degraded target could otherwise turn reconnects
     /// into an unbounded queue of timed-out snapshot writes.
-    pub async fn sync_project_memory(&mut self) -> Result<()> {
+    pub async fn sync_project_memory(
+        &mut self,
+        config: &mj_core::config::Config,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         let Some(target) = self.project_memory.clone() else {
             return Ok(());
         };
@@ -562,28 +566,55 @@ impl StandaloneSession {
             }
             Err(error) => return Err(error),
         };
-        let canonical_root = target.canonical_root;
-        let session_id = self.materialized.session_id.clone();
-        let (reconciliation, worker_install_needed) = tokio::task::spawn_blocking(move || {
-            let reconciliation = mj_core::project_memory::reconcile_into_canonical(
-                &canonical_root,
-                &baseline,
-                &replica,
-                &session_id,
-            )?;
-            let worker_install_needed =
-                reconciliation.merged != baseline || reconciliation.merged != replica;
-            Ok::<_, anyhow::Error>((reconciliation, worker_install_needed))
-        })
-        .await
-        .context("project memory reconciliation task failed")??;
-        for conflict in &reconciliation.conflicts {
-            tracing::warn!(session_id = self.materialized.session_id, %conflict, "project memory conflict preserved");
+        let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
+        let sync = crate::project_memory_merge::merge_and_swap_canonical(
+            &target.canonical_root,
+            &baseline,
+            &replica,
+            &resolver,
+            cancel,
+        )
+        .await?;
+        let sync = match sync {
+            crate::project_memory_merge::CanonicalSyncOutcome::Swapped(sync) => sync,
+            crate::project_memory_merge::CanonicalSyncOutcome::AttemptsExhausted { attempts } => {
+                tracing::warn!(
+                    session_id = self.materialized.session_id,
+                    attempts,
+                    "project memory changed during every canonical compare-and-swap attempt; checkpoint will continue"
+                );
+                return Ok(());
+            }
+        };
+        for resolution in &sync.resolutions {
+            tracing::warn!(
+                session_id = self.materialized.session_id,
+                path = %resolution.conflict.path,
+                resolution = resolution.method.as_str(),
+                "project memory conflict resolved"
+            );
+            tracing::debug!(
+                session_id = self.materialized.session_id,
+                path = %resolution.conflict.path,
+                base = ?resolution.conflict.base,
+                canonical = %resolution.conflict.canonical,
+                replica = %resolution.conflict.replica,
+                replica_wins = %resolution.conflict.replica_wins,
+                "project memory conflict source text"
+            );
         }
-        if worker_install_needed {
-            self.client
-                .install_project_memory_snapshot(reconciliation.merged)
-                .await?;
+        let install = crate::project_memory_merge::install_merged_tree(
+            &mut self.client,
+            &baseline,
+            &replica,
+            sync.tree,
+        )
+        .await?;
+        if install == Some(crate::project_memory_merge::WorkerInstallOutcome::ReplicaChanged) {
+            tracing::debug!(
+                session_id = self.materialized.session_id,
+                "worker project-memory replica changed after the snapshot; skipped installing the merged tree"
+            );
         }
         Ok(())
     }
