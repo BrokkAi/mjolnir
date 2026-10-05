@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::Request;
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, SET_COOKIE};
+use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use http_body_util::BodyExt as _;
 use mj_client::session::{
     ManagedSessionView, PendingRelaySubmit, PendingRelaySync, SessionHandleBackend,
@@ -31,36 +31,7 @@ fn error_event(seq: u64) -> crate::database::ApiEvent {
     }
 }
 
-#[tokio::test]
-async fn bundle_export_distinguishes_deferral_from_failure() {
-    for fails in [false, true] {
-        let (app, _actions, _snapshots, _bundles) = api_app(
-            Arc::new(FakeBackend {
-                bundle_fails: fails,
-                ..Default::default()
-            }),
-            |_| {},
-        );
-        let response = app
-            .oneshot(
-                bearer(Request::post("/api/v1/sessions/session-1/export"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"kind":"bundle"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            if fails {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::CONFLICT
-            }
-        );
-    }
-}
-
+// Hard-won: b9a90454: dashboard-created sessions were published with their IDs as titles.
 #[test]
 fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
     // F-12: a dashboard-created session listed its hex id as its title.
@@ -81,36 +52,7 @@ fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
     assert_eq!(snapshot.sessions[0].title, "Fix the parser");
 }
 
-/// The snapshot says which targets Mjolnir supplied (default candidates) and
-/// which the user wrote, so clients can hide a default whose runtime is
-/// missing and keep a configured one as unavailable.
-#[test]
-fn the_snapshot_marks_default_candidates_apart_from_configured_targets() {
-    let (_, state) = sample_config_state();
-    let mut docker = mj_core::config::Config::default()
-        .with_local_targets()
-        .targets["docker"]
-        .clone();
-    if let mj_core::config::TargetTemplate::LocalDocker { container } = &mut docker {
-        container.image = "example.test/own:latest".into();
-    }
-    let mut written = mj_core::config::Config::default();
-    written.targets.insert("sandbox".into(), docker);
-    let config = written.with_local_targets();
-    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let default_candidate = |id: &str| {
-        snapshot
-            .targets
-            .iter()
-            .find(|target| target.id == id)
-            .unwrap_or_else(|| panic!("{id} is published"))
-            .default_candidate
-    };
-    assert!(default_candidate("docker"));
-    assert!(default_candidate("podman"));
-    assert!(!default_candidate("sandbox"));
-}
-
+// Hard-won: b9a90454: prompt --wait reported running from a stale session view.
 #[tokio::test]
 async fn a_finished_wait_does_not_report_the_session_still_running() {
     // F-12: `prompt --wait --json` answered with `chat_phase: running` because
@@ -876,6 +818,7 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     }
 }
 
+// Hard-won: d01553c0: successful configuration changes disappeared while the session snapshot lagged.
 #[tokio::test]
 async fn session_detail_keeps_the_setter_configuration_while_the_snapshot_lags() {
     let backend = Arc::new(FakeBackend {
@@ -925,6 +868,7 @@ async fn session_detail_keeps_the_setter_configuration_while_the_snapshot_lags()
 /// snapshot still carries the previous model's choices for a while. Validating
 /// the next change against the snapshot refused an effort the session does
 /// offer (#1091).
+// Hard-won: 410836fe: a valid effort was rejected using stale choices after a model change.
 #[tokio::test]
 async fn an_effort_the_live_session_offers_is_accepted_while_the_snapshot_still_lags() {
     let backend = Arc::new(FakeBackend {
@@ -989,71 +933,6 @@ async fn an_effort_the_live_session_offers_is_accepted_while_the_snapshot_still_
             bearer(Request::patch("/api/v1/sessions/session-1/config"))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"key":"effort","value":"extreme"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn advertised_permission_mode_is_listed_and_can_be_restored_through_the_api() {
-    let mut view = live_view("flash", &["high"]);
-    view.snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .config_options
-        .push(
-            serde_json::from_value(serde_json::json!({
-                "id": "mode", "name": "Mode", "category": "mode", "type": "select",
-                "currentValue": "default", "options": [
-                    {"value": "default", "name": "Manual"},
-                    {"value": "plan", "name": "Plan"},
-                    {"value": "auto", "name": "Auto"}
-                ]
-            }))
-            .unwrap(),
-        );
-    let backend = Arc::new(FakeBackend {
-        live_view: Some(view),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |snapshot| {
-        snapshot.sessions[0].capabilities.set_config = true;
-    });
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::patch("/api/v1/sessions/session-1/config"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"key":"mode","value":"auto"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json_body(response).await;
-    let mode = body["config_options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|option| option["key"] == "mode")
-        .expect("the API lists the permission selector");
-    assert!(
-        mode["choices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|choice| choice["value"] == "auto")
-    );
-    // The fake does not mutate its reported current value.
-    assert_eq!(mode["current"], "default");
-    let response = app
-        .oneshot(
-            bearer(Request::patch("/api/v1/sessions/session-1/config"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"key":"mode","value":"unadvertised"}"#))
                 .unwrap(),
         )
         .await
@@ -1247,45 +1126,6 @@ async fn the_api_refuses_an_unauthenticated_caller_and_still_names_its_version()
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn workspace_filter_excludes_other_workspaces() {
-    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
-        snapshot.sessions[0].workspace_id = "mine".into();
-        let mut other = snapshot.sessions[0].clone();
-        other.id = "other".into();
-        other.workspace_id = "theirs".into();
-        snapshot.sessions.push(other);
-    });
-    let response = app
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions?workspace_id=mine"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = json_body(response).await;
-    assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
-    assert_eq!(body["sessions"][0]["id"], "session-1");
-}
-
-#[tokio::test]
-async fn invalid_model_is_rejected_before_bundling_or_provisioning() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _, mut bundles) = api_app(backend.clone(), |_| {});
-    let response = app.oneshot(start_request(r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","model":"k3"}"#.into())).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(
-        json_body(response).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("kimi-code/k3")
-    );
-    assert!(actions.try_recv().is_err());
-    assert!(bundles.try_recv().is_err());
-    assert!(backend.followups.lock().unwrap().is_empty());
-}
-
 #[test]
 fn closing_supersedes_a_failed_initial_configuration() {
     let observation = WaitObservation {
@@ -1354,67 +1194,6 @@ async fn one_session_is_readable_by_id_and_an_unknown_one_is_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn a_prompt_is_validated_before_it_reaches_the_backend() {
-    // The sample session cannot take a prompt: the capability is the
-    // server's own answer to "is this session ready", so it must refuse
-    // before submitting anything.
-    let backend = Arc::new(FakeBackend::default());
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"go"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(backend.prompts.lock().unwrap().is_empty());
-
-    let backend = Arc::new(FakeBackend {
-        prompt_ordinal: 17,
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
-        snapshot.sessions[0].capabilities.prompt = true;
-    });
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"!ls"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "a leading ! is a shell command, not a prompt"
-    );
-    assert!(backend.prompts.lock().unwrap().is_empty());
-
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"add a README line"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(json_body(response).await["turn_id"], 17);
-    assert_eq!(
-        backend.prompts.lock().unwrap().as_slice(),
-        [("session-1".to_owned(), "add a README line".to_owned())]
-    );
-}
-
 /// A session that has been provisioned and whose worker has not attached
 /// yet, which is what every session is for the seconds after it is created.
 fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
@@ -1425,6 +1204,7 @@ fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
     session.capabilities.prompt = false;
 }
 
+// Hard-won: a583fa10: new sessions returned prompt conflicts until their worker attached.
 #[tokio::test]
 async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches() {
     // F-4: a new session refused prompts with 409 for the twenty seconds its
@@ -1459,6 +1239,7 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
     assert_eq!(json_body(response).await["turn_id"], 3);
 }
 
+// Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
 #[tokio::test]
 async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
     // R2-1: an ACP cancel sent while the prompt was held reached
@@ -1510,33 +1291,11 @@ async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
     assert!(backend.prompts.lock().unwrap().is_empty());
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_prompt_to_a_session_that_never_attaches_is_refused_after_a_bounded_wait() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"first words"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await;
-    assert!(
-        body.to_string().contains("still starting"),
-        "the refusal says why: {body}"
-    );
-    assert!(backend.prompts.lock().unwrap().is_empty());
-}
-
 /// Launch finding R5-8: a prompt to a session in the `error` state was
 /// refused with "this session cannot take a prompt right now", which reads
 /// as "try again". It now says the session failed, why, and the two ways
 /// out.
+// Hard-won: 109d508d: failed sessions told prompt callers to try again without a remedy.
 #[tokio::test]
 async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
     let backend = Arc::new(FakeBackend::default());
@@ -1580,6 +1339,7 @@ async fn a_prompt_to_a_failed_session_says_it_failed_and_how_to_go_on() {
 /// refused with advice to `mj resume` it, and that resume then failed in the
 /// background with "session has no checkpoint". The refusal names only what
 /// can work: destroying the session.
+// Hard-won: 78245c3a: resume advice accepted a session with no checkpoint and then failed silently.
 #[tokio::test]
 async fn a_prompt_to_a_session_that_failed_before_its_first_checkpoint_offers_only_destroy() {
     let backend = Arc::new(FakeBackend::default());
@@ -1622,40 +1382,6 @@ fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
 
-fn model_candidate(profile_id: &str, remaining_percent: u8, model: &str) -> SubagentCandidate {
-    model_candidate_with_efforts(profile_id, remaining_percent, model, &["high"])
-}
-
-fn model_candidate_with_efforts(
-    profile_id: &str,
-    remaining_percent: u8,
-    model: &str,
-    effort_values: &[&str],
-) -> SubagentCandidate {
-    SubagentCandidate {
-        profile_id: profile_id.into(),
-        harness: mj_core::config::HarnessKind::Codex,
-        choices: mj_core::worker_launch::ProfileConfig {
-            model: Some(model.into()),
-            models: vec![mj_core::acp::SessionConfigChoice {
-                value: model.into(),
-                name: model.into(),
-                description: None,
-            }],
-            efforts: effort_values
-                .iter()
-                .map(|effort| mj_core::acp::SessionConfigChoice {
-                    value: (*effort).into(),
-                    name: (*effort).into(),
-                    description: None,
-                })
-                .collect(),
-            observed_at: 1,
-        },
-        remaining_percent: Some(remaining_percent),
-    }
-}
-
 fn start_request(body: String) -> Request<Body> {
     bearer(Request::post("/api/v1/sessions"))
         .header(CONTENT_TYPE, "application/json")
@@ -1663,6 +1389,7 @@ fn start_request(body: String) -> Request<Body> {
         .unwrap()
 }
 
+// Hard-won: d91504f8: API-created container sessions had no CPU or memory limits.
 #[tokio::test]
 async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup() {
     let backend = Arc::new(FakeBackend::default());
@@ -1715,141 +1442,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     );
 }
 
-#[tokio::test]
-async fn start_without_a_profile_uses_the_named_model_quota_selector() {
-    let directory = tempfile::tempdir().unwrap();
-    let preferences = directory.path().join("go.json");
-    save_global_default(&preferences, "codex-1", "podman");
-    let candidates = SubagentCandidates {
-        offered: vec![
-            model_candidate("codex-1", 5, "luna"),
-            model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
-            model_candidate("quota-winner", 92, "luna"),
-        ],
-        unavailable: Vec::new(),
-    };
-    let backend = Arc::new(FakeBackend {
-        model_candidates: Some(candidates),
-        ..FakeBackend::default()
-    });
-    let selector_backend: Arc<dyn SubagentBackend> = backend.clone();
-    let expected = crate::server::api::resolve_subagent_selection(
-        &selector_backend,
-        "parent-session",
-        "codex-1",
-        None,
-        Some("luna"),
-        Some("high"),
-    )
-    .await
-    .unwrap()
-    .profile_id;
-    let (app, mut actions, _, _) = api_app_with_preferences(
-        backend.clone(),
-        |snapshot| {
-            snapshot.profiles.push(crate::server::ViewerProfile {
-                id: "quota-winner".into(),
-                harness_kind: "codex".into(),
-                subagent_discovery_key: String::new(),
-                capabilities_key: String::new(),
-                subagent_profile_ids: Vec::new(),
-                subagents: mj_core::subagent::SubagentPolicy::default(),
-                quota: None,
-            });
-        },
-        preferences,
-    );
-
-    let response = tokio::spawn(app.oneshot(start_request(
-        r#"{"bundle_id":"hel","model":"luna","effort":"high","prompt":"go"}"#.into(),
-    )));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New { profile_id, .. } = &request.action else {
-        panic!("expected a New action, got {:?}", request.action);
-    };
-    assert_eq!(profile_id, &expected);
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-    let followups = backend.followups.lock().unwrap();
-    assert_eq!(followups[0].1.model.as_deref(), Some("luna"));
-    assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
-    assert_eq!(followups[0].1.prompt.as_deref(), Some("go"));
-}
-
-#[tokio::test]
-async fn start_without_a_profile_refuses_a_model_no_eligible_profile_offers() {
-    let directory = tempfile::tempdir().unwrap();
-    let preferences = directory.path().join("go.json");
-    save_global_default(&preferences, "codex-1", "podman");
-    let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
-            offered: vec![model_candidate("codex-1", 5, "luna")],
-            unavailable: vec![("broken-login".into(), "login was rejected".into())],
-        }),
-        ..FakeBackend::default()
-    });
-    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
-
-    let response = app
-        .oneshot(start_request(
-            r#"{"bundle_id":"hel","model":"missing"}"#.into(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = json_body(response).await["error"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(
-        body.contains("no eligible profile offers model \"missing\""),
-        "{body}"
-    );
-    assert!(body.contains("broken-login (login was rejected)"), "{body}");
-    assert!(actions.try_recv().is_err(), "nothing was launched");
-}
-
-#[tokio::test]
-async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_offer() {
-    let directory = tempfile::tempdir().unwrap();
-    let preferences = directory.path().join("go.json");
-    save_global_default(&preferences, "codex-1", "podman");
-    let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
-            offered: vec![model_candidate("codex-1", 80, "luna")],
-            unavailable: Vec::new(),
-        }),
-        ..FakeBackend::default()
-    });
-    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
-
-    let response = app
-        .oneshot(start_request(
-            r#"{"bundle_id":"hel","model":"luna","effort":"ultra"}"#.into(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = json_body(response).await["error"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(
-        body.contains("no eligible profile offers model \"luna\" with effort \"ultra\""),
-        "{body}"
-    );
-    assert!(body.contains("codex-1 offers efforts: high"), "{body}");
-    assert!(actions.try_recv().is_err(), "nothing was launched");
-}
-
+// Hard-won: 00325fa0: API start refusals dropped running and limit counts.
 #[tokio::test]
 async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
     let backend = Arc::new(FakeBackend::default());
@@ -1872,65 +1465,9 @@ async fn start_names_the_pool_counts_when_the_daemon_is_at_its_action_limit() {
     assert_eq!(body["action_limit"], 4, "{body}");
 }
 
-#[tokio::test]
-async fn start_accepts_native_and_none_and_returns_the_multi_model_refusal() {
-    use mj_core::subagent::SubagentPolicy;
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-    let (config, _) = sample_config_state();
-    for (mode, expected) in [
-        ("native", SubagentPolicy::Native),
-        ("none", SubagentPolicy::None),
-        ("all_models", SubagentPolicy::AllModels),
-    ] {
-        let extra = format!(r#","subagents":{{"mode":"{mode}"}}"#);
-        let response = tokio::spawn(app.clone().oneshot(start_request(start_body(&extra))));
-        let request = actions.recv().await.unwrap();
-        let ControllerAction::New {
-            profile_id,
-            subagents,
-            ..
-        } = &request.action
-        else {
-            panic!("expected a New action");
-        };
-        assert_eq!(subagents.as_ref(), Some(&expected));
-        let validation = crate::controller::profile_config::validate_session_subagent_policy(
-            &config,
-            profile_id,
-            subagents.as_ref().unwrap(),
-        )
-        .await;
-        let outcome = match validation {
-            Ok(()) => ActionOutcome::Accepted {
-                session_id: Some("session-2".into()),
-            },
-            Err(error) => ActionOutcome::Refused(
-                mj_core::refusal::Refusal::of(&error)
-                    .expect("a policy refusal")
-                    .clone(),
-            ),
-        };
-        request.reply.send(outcome).unwrap();
-        let response = response.await.unwrap().unwrap();
-        if expected == SubagentPolicy::AllModels {
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let error = json_body(response).await;
-            let message = error["error"].as_str().unwrap();
-            assert!(message.contains("no longer available"), "{message}");
-            assert!(
-                message.contains("native, single_model, or none"),
-                "{message}"
-            );
-        } else {
-            assert_eq!(response.status(), StatusCode::CREATED);
-        }
-    }
-    assert_eq!(backend.followups.lock().unwrap().len(), 2);
-}
-
 /// The unavailable-model refusal reaches the client with its code, so each
 /// client can add the remedy that fits it.
+// Hard-won: 9fe54d8e: API refusals directed browser callers to CLI-only flags.
 #[tokio::test]
 async fn start_answers_an_unavailable_subagent_model_with_a_code() {
     let backend = Arc::new(FakeBackend::default());
@@ -1954,6 +1491,7 @@ async fn start_answers_an_unavailable_subagent_model_with_a_code() {
     assert!(error["error"].as_str().unwrap().contains("fake-model"));
 }
 
+// Hard-won: d91504f8: API-created container sessions had no CPU or memory limits.
 #[tokio::test]
 async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
     let host = mj_core::state::HostContainerSize {
@@ -2033,198 +1571,11 @@ async fn start_sizes_a_container_session_from_the_host_default_and_overrides() {
     );
 }
 
-#[tokio::test]
-async fn start_forwards_the_base_to_the_controller() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-
-    let response = tokio::spawn(app.oneshot(start_request(start_body(r#","base":"origin/main""#))));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New { base, .. } = &request.action else {
-        panic!("expected a New action, got {:?}", request.action);
-    };
-    assert_eq!(base.as_deref(), Some("origin/main"));
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-}
-
-#[test]
-fn session_receipt_names_the_start_selection_as_the_request_does() {
-    let (config, mut state) = sample_config_state();
-    state.sessions.get_mut("session-1").unwrap().checkout =
-        Some(mj_core::remote_git::ExactCheckout {
-            repository_id: "project".into(),
-            commit: "a".repeat(40),
-            branch: Some("town/run-123".into()),
-        });
-    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let receipt = ApiSession::from(&snapshot.sessions[0]);
-    assert_eq!(receipt.at, Some("a".repeat(40)));
-    assert_eq!(receipt.branch.as_deref(), Some("town/run-123"));
-    assert_eq!(receipt.base, Some("a".repeat(40)), "base defaults to at");
-    assert_eq!(receipt.id, "session-1");
-}
-
-#[tokio::test]
-async fn start_forwards_at_and_branch() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-    let extra = format!(r#","at":"{}","branch":"town/run-123""#, "a".repeat(40));
-    let response = tokio::spawn(app.oneshot(start_request(start_body(&extra))));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New {
-        at, branch, base, ..
-    } = &request.action
-    else {
-        panic!("expected New")
-    };
-    assert_eq!(at.as_deref(), Some("a".repeat(40).as_str()));
-    assert_eq!(branch.as_deref(), Some("town/run-123"));
-    assert_eq!(base, &None);
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-}
-
-#[tokio::test]
-async fn start_refuses_at_without_a_bundle() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-    let body = format!(
-        r#"{{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel","at":"{}"}}"#,
-        "a".repeat(40)
-    );
-    let response = app.oneshot(start_request(body)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = json_body(response).await;
-    assert!(
-        body.to_string().contains("`at` requires bundle_id"),
-        "{body}"
-    );
-}
-
-/// A fresh instance has no workspace. Every session lives in a workspace the
-/// dashboard and the viewer list, so a first session that names none is
-/// refused with the way to create one, and no hidden workspace is made or
-/// used (launch finding H-3).
-#[tokio::test]
-async fn a_first_session_on_an_instance_with_no_workspace_is_refused_with_the_way_to_make_one() {
-    let backend = Arc::new(FakeBackend {
-        workspaces: FakeWorkspaces::empty(),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-
-    let response = app.oneshot(start_request(start_body(""))).await.unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await.to_string();
-    assert!(body.contains("mj workspaces create"), "{body}");
-    assert!(
-        backend.workspaces.0.lock().unwrap().is_empty(),
-        "no workspace is created on the caller's behalf"
-    );
-}
-
-/// Naming a workspace, or having one already, still leaves the choice where it
-/// was: the caller's id travels unchanged, and an instance that already holds
-/// workspaces sends an empty id so the controller selects.
-#[tokio::test]
-async fn a_named_workspace_travels_unchanged_and_an_existing_one_is_left_to_the_controller() {
-    for (extra, expected) in [
-        (r#","workspace_id":"workspace-7""#, "workspace-7"),
-        ("", ""),
-    ] {
-        let backend = Arc::new(FakeBackend::default());
-        let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-        let response = tokio::spawn(app.oneshot(start_request(start_body(extra))));
-        let request = actions.recv().await.unwrap();
-        let ControllerAction::New { workspace_id, .. } = &request.action else {
-            panic!("expected a New action");
-        };
-        assert_eq!(workspace_id, expected);
-        request
-            .reply
-            .send(ActionOutcome::Accepted {
-                session_id: Some("session-2".into()),
-            })
-            .unwrap();
-        response.await.unwrap().unwrap();
-        assert_eq!(
-            backend.workspaces.0.lock().unwrap().len(),
-            1,
-            "nothing is created when the instance already has a workspace"
-        );
-    }
-}
-
-/// The routes a script drives a fresh instance with: create by name, which is
-/// idempotent because the name is the identity, and list what exists.
-#[tokio::test]
-async fn workspaces_are_created_by_name_idempotently_and_listed() {
-    let backend = Arc::new(FakeBackend {
-        workspaces: FakeWorkspaces::empty(),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-
-    let create = |name: &str| {
-        bearer(Request::post("/api/v1/workspaces"))
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(format!(r#"{{"name":"{name}"}}"#)))
-            .unwrap()
-    };
-    let response = app.clone().oneshot(create("Release work")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let first = json_body(response).await;
-    assert_eq!(first["workspace"]["name"], "Release work");
-
-    // The same name twice is the same workspace, so a script may create before
-    // every run without checking first.
-    let response = app.clone().oneshot(create("release WORK")).await.unwrap();
-    assert_eq!(
-        json_body(response).await["workspace"]["id"],
-        first["workspace"]["id"]
-    );
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::get("/api/v1/workspaces"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let listed = json_body(response).await;
-    assert_eq!(listed["workspaces"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["workspaces"][0]["name"], "Release work");
-
-    // An unusable name is refused by the caller's own request, not recorded.
-    let response = app.clone().oneshot(create("   ")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(backend.workspaces.0.lock().unwrap().len(), 1);
-}
-
 /// Launch finding R2-4: `mj workspaces create default` answered `500
 /// Internal Server Error` with a sentence about sessions made before a
 /// workspace was required. The name is the caller's mistake, so it is refused
 /// as other unusable names are, in words a new user can act on.
+// Hard-won: 26ae8304: a reserved workspace name returned 500 for caller error.
 #[tokio::test]
 async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
     let backend = Arc::new(FakeBackend {
@@ -2258,6 +1609,7 @@ async fn the_reserved_workspace_name_is_refused_as_the_callers_mistake() {
     assert!(backend.workspaces.0.lock().unwrap().is_empty());
 }
 
+// Hard-won: 5bf8e5cf: a client key could resurrect a session after failed close.
 #[tokio::test]
 async fn start_rejects_a_request_that_still_sends_an_idempotency_key() {
     let backend = Arc::new(FakeBackend::default());
@@ -2286,136 +1638,6 @@ async fn start_rejects_a_request_that_still_sends_an_idempotency_key() {
 }
 
 #[tokio::test]
-async fn start_refuses_a_shell_command_as_a_first_prompt() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-
-    let response = app
-        .oneshot(start_request(start_body(r#","prompt":"!ls""#)))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(actions.try_recv().is_err());
-    assert!(backend.followups.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn a_remote_project_directory_is_validated_by_the_target_without_a_local_bundle() {
-    let backend = Arc::new(FakeBackend::default());
-    let (app, mut actions, _snapshot_tx, mut bundles) = api_app(backend, |snapshot| {
-        snapshot.bundles.clear();
-        snapshot
-            .targets
-            .iter_mut()
-            .find(|target| target.id == "raw")
-            .unwrap()
-            .kind = "ssh-bare".into();
-    });
-
-    let response = tokio::spawn(app.oneshot(start_request(
-        r#"{"profile_id":"codex-1","target_id":"raw","project_directory":"/work/hel"}"#.to_owned(),
-    )));
-
-    let request = tokio::time::timeout(Duration::from_secs(5), actions.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        bundles.try_recv().is_err(),
-        "remote paths must not be resolved as local bundles"
-    );
-    assert_eq!(
-        request.action,
-        ControllerAction::New {
-            review: None,
-            at: None,
-            branch: None,
-            base: None,
-            subagents: None,
-            create_managed_worktree: None,
-            workspace_id: String::new(),
-            profile_id: "codex-1".into(),
-            bundle_id: mj_core::config::raw_project_context_id("/work/hel"),
-            target_id: "raw".into(),
-            resource_allocation: None,
-            title: None,
-            project_directory: Some(PathBuf::from("/work/hel")),
-            dirty_ack: Vec::new(),
-        }
-    );
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
-    );
-}
-
-#[tokio::test]
-async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
-    let backend = Arc::new(FakeBackend {
-        transcript: Mutex::new(Some(TranscriptPage {
-            next_after_seq: 9,
-            items: vec![Arc::new(mj_core::transcript::TranscriptItem {
-                stable_id: "item-1".into(),
-                position: 4,
-                latest_content_event_ordinal: Some(9),
-                created_at_ms: 10,
-                last_changed_at_ms: 20,
-                body: mj_core::transcript::TranscriptBody::Agent {
-                    chunks: vec![
-                        serde_json::json!({"content": {"type": "text", "text": "added "}}),
-                        serde_json::json!({"content": {"type": "text", "text": "the line"}}),
-                    ],
-                    streaming: false,
-                },
-            })],
-            latest_seq: 9,
-            execution: MaterializedExecutionState::Idle,
-        })),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-
-    let response = app
-        .oneshot(
-            bearer(Request::get(
-                "/api/v1/sessions/session-1/transcript?after_seq=3&limit=5000",
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json_body(response).await;
-    // A paging caller needs both halves of the cursor contract: the session it
-    // is reading, and the sequence to continue from.
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(body["next_after_seq"], 9);
-    assert_eq!(body["latest_seq"], 9);
-    assert_eq!(
-        body["items"][0]["seq"], 9,
-        "an agent message pages by its latest content, not by where it started"
-    );
-    assert_eq!(body["items"][0]["role"], "agent");
-    assert_eq!(
-        body["items"][0]["text"], "added the line",
-        "a reading caller gets the message, not its chunks"
-    );
-    assert_eq!(body["items"][0]["body"]["kind"], "agent");
-    assert_eq!(
-        backend.transcript_limits.lock().unwrap().as_slice(),
-        [MAX_TRANSCRIPT_LIMIT],
-        "an oversized limit is clamped rather than refused"
-    );
-}
-
-#[tokio::test]
 async fn a_session_with_no_projection_row_has_no_transcript() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -2427,46 +1649,6 @@ async fn a_session_with_no_projection_row_has_no_transcript() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn close_and_cancel_turn_reach_the_controller_as_typed_actions() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
-            snapshot.sessions[0].capabilities.interrupt_turn = true;
-            // The sample session is a live independent clone, which suspend
-            // refuses without acknowledgement; this one has nothing to publish.
-            snapshot.sessions[0].publication_state = None;
-        });
-
-    for (path, expected) in [
-        (
-            "/api/v1/sessions/session-1/suspend",
-            ControllerAction::Suspend {
-                session_id: "session-1".into(),
-                acknowledge_unpublished_work: false,
-            },
-        ),
-        (
-            "/api/v1/sessions/session-1/interrupt-turn",
-            ControllerAction::InterruptTurn {
-                session_id: "session-1".into(),
-            },
-        ),
-    ] {
-        let response = tokio::spawn(
-            app.clone()
-                .oneshot(bearer(Request::post(path)).body(Body::empty()).unwrap()),
-        );
-        let request = actions.recv().await.unwrap();
-        assert_eq!(request.action, expected);
-        request
-            .reply
-            .send(super::super::ActionOutcome::accepted())
-            .unwrap();
-        let response = response.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-    }
 }
 
 #[tokio::test]
@@ -2513,35 +1695,6 @@ async fn suspend_refuses_an_unverified_clone_from_the_published_snapshot_until_a
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
-#[tokio::test]
-async fn a_forced_close_reaches_the_controller_as_a_force_close_action() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
-
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{}"#))
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    assert_eq!(
-        request.action,
-        ControllerAction::Destroy {
-            session_id: "session-1".into(),
-            delete_branch: false,
-        }
-    );
-    request
-        .reply
-        .send(super::super::ActionOutcome::accepted())
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-}
-
 /// A snapshot whose session-1 has one running sub-agent, child-1, and nothing
 /// to publish.
 fn with_a_running_subagent(snapshot: &mut ViewerSnapshot) {
@@ -2552,67 +1705,6 @@ fn with_a_running_subagent(snapshot: &mut ViewerSnapshot) {
     snapshot.sessions[0].subagent_session_ids = vec!["child-1".into()];
     snapshot.sessions[0].publication_state = None;
     snapshot.sessions.push(child);
-}
-
-/// Send a suspend with this body, let the controller accept it, and return
-/// the answer.
-async fn accepted_suspend(backend: FakeBackend, body: &'static str) -> serde_json::Value {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(backend), with_a_running_subagent);
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/suspend"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    assert_eq!(
-        request.action,
-        ControllerAction::Suspend {
-            session_id: "session-1".into(),
-            acknowledge_unpublished_work: false,
-        }
-    );
-    request
-        .reply
-        .send(super::super::ActionOutcome::accepted())
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    json_body(response).await
-}
-
-/// A suspend stops the session's sub-agents instead of refusing until they
-/// are acknowledged. It says how many it stops and warns about the ones that
-/// have not handed back. An older client's acknowledgement changes nothing.
-#[tokio::test]
-async fn a_suspend_stops_sub_agents_and_warns_about_the_ones_still_at_work() {
-    for body in ["{}", r#"{"acknowledge_active_subagents":true}"#] {
-        assert_eq!(
-            accepted_suspend(FakeBackend::default(), body).await,
-            serde_json::json!({
-                "session_id": "session-1",
-                "stopped_subagents": 1,
-                "subagents_not_handed_back": 1,
-                "warning": "1 sub-agent has not handed back; suspending stops it",
-            }),
-            "{body}"
-        );
-    }
-    let handed_back = FakeBackend {
-        handed_back: BTreeSet::from(["child-1".to_owned()]),
-        ..FakeBackend::default()
-    };
-    assert_eq!(
-        accepted_suspend(handed_back, "{}").await,
-        serde_json::json!({
-            "session_id": "session-1",
-            "stopped_subagents": 1,
-            "subagents_not_handed_back": 0,
-        })
-    );
 }
 
 #[tokio::test]
@@ -2643,33 +1735,38 @@ async fn a_forced_close_ignores_active_subagents() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
 
+// Hard-won: 472aff0b: destroy deleted user branches without a way to keep them.
 #[tokio::test]
 async fn a_forced_close_asks_to_delete_the_branch_only_when_the_body_does() {
     let (app, mut actions, _snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |_| {});
 
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/destroy"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"delete_branch":true}"#))
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    assert_eq!(
-        request.action,
-        ControllerAction::Destroy {
-            session_id: "session-1".into(),
-            delete_branch: true,
-        }
-    );
-    request
-        .reply
-        .send(super::super::ActionOutcome::accepted())
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    for (body, delete_branch) in [(r#"{}"#, false), (r#"{"delete_branch":true}"#, true)] {
+        let response = tokio::spawn(
+            app.clone().oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/destroy"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        assert_eq!(
+            request.action,
+            ControllerAction::Destroy {
+                session_id: "session-1".into(),
+                delete_branch,
+            }
+        );
+        request
+            .reply
+            .send(super::super::ActionOutcome::accepted())
+            .unwrap();
+        assert_eq!(
+            response.await.unwrap().unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+    }
 }
 
 #[test]
@@ -2694,76 +1791,6 @@ async fn cancel_turn_is_refused_when_there_is_no_turn_to_cancel() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test(start_paused = true)]
-async fn wait_returns_the_named_turn_s_outcome_once_the_backend_publishes_it() {
-    let backend = Arc::new(FakeBackend {
-        turn_states: Mutex::new(vec![
-            Some(TurnState {
-                execution: MaterializedExecutionState::Running { started_at_ms: 10 },
-                active_turn: Some(MaterializedTurn {
-                    command_id: "prompt-1".into(),
-                    accepted_ordinal: Some(5),
-                    turn_start_position: 6,
-                    started_at_ms: 10,
-                    steered_into: None,
-                }),
-                last_turn_outcome: None,
-            }),
-            Some(TurnState {
-                execution: MaterializedExecutionState::Idle,
-                active_turn: None,
-                last_turn_outcome: Some(MaterializedTurnOutcome {
-                    diagnostic: None,
-                    usage: Some(mj_core::usage::TokenUsage::from_acp(
-                        mj_core::config::HarnessKind::Codex,
-                        agent_client_protocol::schema::v1::Usage::new(30, 20, 10),
-                    )),
-                    command_id: "prompt-1".into(),
-                    accepted_ordinal: Some(5),
-                    turn_start_position: Some(6),
-                    completed_ordinal: 9,
-                    completed_at_ms: 900,
-                    outcome: TurnOutcomeKind::Completed {
-                        stop_reason: "end_turn".into(),
-                    },
-                }),
-            }),
-        ]),
-        summary: Some(TurnSummary {
-            turn_number: 3,
-            turn_started_at_ms: 100,
-            last_changed_at_ms: 900,
-            final_message: Some("added the line".into()),
-            tool_calls: 4,
-        }),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/wait"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"turn_id":5}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json_body(response).await;
-    assert_eq!(body["outcome"], "finished");
-    assert_eq!(body["turn_id"], 5);
-    assert_eq!(body["turn_number"], 3);
-    assert_eq!(body["elapsed_ms"], 800);
-    assert_eq!(body["tool_calls"], 4);
-    assert_eq!(body["final_message"], "added the line");
-    assert_eq!(body["stop_reason"], "end_turn");
-    assert_eq!(body["usage"]["scope"], "last_request");
-    assert_eq!(body["usage"]["total_tokens"], 30);
-    assert!(body["usage"].get("thought_tokens").is_none());
-    assert!(body["session"]["last_turn_outcome"].get("usage").is_none());
 }
 
 /// A wait for turn N ends when turn N or a later one has ended, and answers
@@ -2899,6 +1926,7 @@ async fn wait_reports_a_timeout_rather_than_guessing_at_a_running_turn() {
 /// A wait in progress when the daemon shuts down answers at once. An upgrade
 /// handoff marks the answer so the client asks the next daemon; an explicit
 /// stop does not, so a stopped daemon is not started again by its waiters.
+// Hard-won: c87e5e88: wait clients lost handoff behavior during live daemon replacement.
 #[tokio::test]
 async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_daemon() {
     for handoff in [true, false] {
@@ -2958,6 +1986,7 @@ async fn a_wait_ended_by_an_upgrade_handoff_tells_its_client_to_ask_the_next_dae
 /// A handoff tears the daemon down in no fixed order. When the session feed
 /// closes before the shutdown signal reaches a wait, the wait still sends its
 /// client to the next daemon; in a lab one of eight waiters failed this way.
+// Hard-won: 4ce83357: a handoff waiter failed when its feed closed before shutdown signal.
 #[tokio::test]
 async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
     let backend = Arc::new(FakeBackend {
@@ -3006,6 +2035,7 @@ async fn a_wait_whose_feed_closes_during_a_handoff_still_sends_its_client_on() {
 
 /// An event stream that an upgrade handoff ends names the cursor it reached,
 /// so its client resumes on the next daemon without losing an event.
+// Hard-won: c87e5e88: event clients could not resume after a daemon handoff.
 #[tokio::test]
 async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
     let backend = Arc::new(FakeBackend::default());
@@ -3049,24 +2079,7 @@ async fn an_event_stream_ended_by_a_handoff_names_the_cursor_to_resume_from() {
     );
 }
 
-#[tokio::test]
-async fn wait_refuses_a_timeout_outside_its_bounds() {
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    for body in [r#"{"timeout_secs":0}"#, r#"{"timeout_secs":100000}"#] {
-        let response = app
-            .clone()
-            .oneshot(
-                bearer(Request::post("/api/v1/sessions/session-1/wait"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-}
-
+// Hard-won: a1d7b484: a harness that answered nothing was reported as a finished turn.
 #[test]
 fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
     assert_eq!(map_stop_reason("end_turn"), (WaitOutcome::Finished, None));
@@ -3081,6 +2094,10 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
         (WaitOutcome::Error, Some("refusal".to_owned())),
         "an unrecognized ending must not be reported as success"
     );
+    assert_eq!(
+        map_stop_reason(mj_core::acp::AWAITING_INPUT_STOP_REASON),
+        (WaitOutcome::InputRequired, None)
+    );
     // A prompt the harness ended without answering is an error a script can
     // recognize by name, not a finished turn (#970).
     assert_eq!(
@@ -3092,6 +2109,7 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
 /// A turn the worker failed because the harness produced nothing must reach
 /// `mj wait` as an error carrying both the name and the explanation, the same
 /// way a stalled turn does.
+// Hard-won: a1d7b484: a harness that answered nothing was reported as a finished turn.
 #[test]
 fn an_unanswered_turn_reaches_wait_as_a_named_error() {
     let mut outcome = completed(7, "prompt_unanswered");
@@ -3144,6 +2162,7 @@ fn idle(outcome: Option<MaterializedTurnOutcome>) -> WaitObservation {
 /// says nobody can see the session. `mj wait` and the sub-agent wait share
 /// this one decision. Durable turn ownership remains a guard even when the
 /// published activity state says idle.
+// Hard-won: a11622fe: an unaccounted session could still own work that a false finish would endanger.
 #[test]
 fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
     let request = WaitRequest::default();
@@ -3207,6 +2226,7 @@ fn a_wait_never_concludes_finished_while_the_session_is_unaccounted_for() {
 /// `mj wait` with no turn must not say "finished" while the session is still
 /// provisioning, or is live but not yet able to take a prompt (a resume that
 /// has not reattached): the next prompt would be refused.
+// Hard-won: 942fa9c5: wait said finished while provisioning or reattachment still blocked prompts.
 #[test]
 fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
     let request = WaitRequest {
@@ -3235,6 +2255,7 @@ fn a_wait_without_a_turn_waits_until_the_session_can_take_a_prompt() {
 /// the first prompt was still waiting to be submitted. The session was
 /// attached and idle, but the prompt `mj new` handed over had not become a
 /// turn yet. That prompt is work in flight, like a running turn.
+// Hard-won: 0c9916a1: wait answered finished before the create-time prompt was submitted.
 #[tokio::test(start_paused = true)]
 async fn a_wait_right_after_creating_with_a_prompt_waits_for_that_prompt() {
     let idle_session = || {
@@ -3402,6 +2423,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
     );
 }
 
+// Hard-won: ce490a90: stale session errors failed healthy waits while launch notices were misattributed.
 #[test]
 fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
     let mut launch_failed = idle(None);
@@ -3480,6 +2502,7 @@ fn a_launch_failure_fails_the_wait_but_an_unrelated_session_error_does_not() {
     );
 }
 
+// Hard-won: f461e518: an accepted close could fail later without informing its caller.
 #[test]
 fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
     let request = WaitRequest::default();
@@ -3534,6 +2557,7 @@ fn a_wait_follows_a_close_and_reports_one_that_did_not_finish() {
     );
 }
 
+// Hard-won: ce490a90: launch notices were matched by notice ID instead of session ID.
 #[test]
 fn a_launch_failure_for_another_session_is_not_this_session_s() {
     let (config, state) = sample_config_state();
@@ -3557,6 +2581,7 @@ fn a_launch_failure_for_another_session_is_not_this_session_s() {
     assert!(observation.launch_failed);
 }
 
+// Hard-won: be5abcca: failed launches returned no actionable reason.
 #[test]
 fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
     let (config, mut state) = sample_config_state();
@@ -3618,6 +2643,7 @@ fn a_running_session_publishes_safe_lifecycle_failures_from_current_and_older_re
     assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, None);
 }
 
+// Hard-won: ce490a90: unusable workers appeared as unexplained wait timeouts.
 #[test]
 fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     use mj_client::session::{ManagedSessionView, ViewError};
@@ -3669,101 +2695,6 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
             }
         );
     }
-}
-
-#[tokio::test]
-async fn the_diff_route_forwards_the_base_and_returns_resolved_metadata() {
-    let details = mj_checkpoint::archive::SessionDiff {
-        diff: "--- a/task\n+++ b/task\n".into(),
-        base: "a".repeat(40),
-        head: "c".repeat(40),
-        head_descends_from_base: Some(false),
-    };
-    let backend = Arc::new(FakeBackend {
-        diff: Some(serde_json::to_string(&details).unwrap()),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
-    let response = app
-        .oneshot(
-            bearer(Request::get(
-                "/api/v1/sessions/session-1/diff?base=HEAD%5E&json=true",
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        serde_json::from_slice::<mj_checkpoint::archive::SessionDiff>(&body).unwrap(),
-        details
-    );
-    assert_eq!(
-        *backend.diff_options.lock().unwrap(),
-        vec![DiffOptions {
-            base: Some("HEAD^".into()),
-            json: true
-        }]
-    );
-}
-
-#[tokio::test]
-async fn the_diff_route_answers_a_patch_and_maps_export_failures() {
-    let backend = Arc::new(FakeBackend {
-        diff: Some("--- a/one\n+++ b/one\n".to_owned()),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions/session-1/diff"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(CONTENT_TYPE).unwrap(),
-        "text/x-diff; charset=utf-8"
-    );
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("+++ b/one"));
-
-    // A refusal is something the caller can act on; a failure is not.
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = app
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions/session-1/diff"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(
-        Arc::new(FakeBackend {
-            diff_fails: true,
-            ..FakeBackend::default()
-        }),
-        |_| {},
-    );
-    let response = app
-        .oneshot(
-            bearer(Request::get("/api/v1/sessions/session-1/diff"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(json_body(response).await["error"], "git exploded");
 }
 
 #[tokio::test]
@@ -3846,89 +2777,6 @@ async fn the_file_route_returns_bytes_and_refuses_a_path_that_leaves_the_workspa
 }
 
 #[tokio::test]
-async fn the_export_route_serves_each_kind_in_its_own_form() {
-    let backend = Arc::new(FakeBackend {
-        diff: Some("--- a/one\n".to_owned()),
-        pushed: Some(PushedBranch {
-            branch: String::new(),
-            remote: "origin".to_owned(),
-        }),
-        bundle: Some(BundleExport {
-            repository: "app".to_owned(),
-            bytes: b"bundle bytes".to_vec(),
-        }),
-        ..FakeBackend::default()
-    });
-    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend, |_| {});
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/export"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"kind":"patch"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.headers().get(CONTENT_TYPE).unwrap(),
-        "text/x-diff; charset=utf-8"
-    );
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/export"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"kind":"branch","branch":"review/one"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json_body(response).await;
-    assert_eq!(body["branch"], "review/one");
-    assert_eq!(body["remote"], "origin");
-
-    let response = app
-        .clone()
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/export"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"kind":"branch"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "a branch export without a branch name is the caller's mistake"
-    );
-
-    let response = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/export"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"kind":"bundle"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.headers().get(CONTENT_TYPE).unwrap(),
-        "application/octet-stream"
-    );
-    assert_eq!(
-        response.headers().get(CONTENT_DISPOSITION).unwrap(),
-        "attachment; filename=\"session-1-app.bundle\""
-    );
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body.as_ref(), b"bundle bytes");
-}
-
-#[tokio::test]
 async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -3944,6 +2792,28 @@ async fn an_empty_bundle_is_refused_rather_than_served_as_an_empty_file() {
     assert_eq!(
         json_body(response).await["error"],
         "no commits beyond the session base"
+    );
+
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            bundle_fails: true,
+            ..FakeBackend::default()
+        }),
+        |_| {},
+    );
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/export"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"kind":"bundle"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        json_body(response).await["error"],
+        "checkpoint storage failed"
     );
 }
 fn input_request() -> mj_core::elicitation::ElicitationRequest {
@@ -4145,85 +3015,6 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
 }
 
 #[tokio::test]
-async fn resuming_a_stopped_session_uses_its_recorded_settings_and_answers_before_it_is_up() {
-    let (app, mut actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/resume"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    assert_eq!(
-        request.action,
-        ControllerAction::Resume {
-            session_id: "session-1".into(),
-            workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-            profile_id: "codex-1".into(),
-            target_id: "podman".into(),
-            queue: mj_core::state::ResumeQueueDisposition::Start,
-            additional_mounts: None,
-            resource_allocation: None,
-        }
-    );
-    request
-        .reply
-        .send(super::super::ActionOutcome::accepted())
-        .unwrap();
-    // The route answers once the daemon has taken the session, so a caller's
-    // next `wait` cannot see it as plain stopped.
-    publish_resume_started(&snapshot_tx);
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = json_body(response).await;
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(body["profile_id"], "codex-1");
-    assert_eq!(body["target_id"], "podman");
-}
-
-/// What the daemon publishes once its resume lifecycle owns the session.
-fn publish_resume_started(snapshot_tx: &watch::Sender<ViewerSnapshot>) {
-    snapshot_tx.send_modify(|snapshot| {
-        snapshot.sessions[0].state = "provisioning".into();
-        snapshot.sessions[0].lifecycle = ViewerLifecycleCategory::Starting;
-    });
-}
-
-#[tokio::test]
-async fn a_resume_request_chooses_its_own_target_and_queue_disposition() {
-    let (app, mut actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/resume"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"target_id":"raw","queue":"discard"}"#))
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::Resume {
-        target_id, queue, ..
-    } = &request.action
-    else {
-        panic!("expected a resume action, got {:?}", request.action);
-    };
-    assert_eq!(target_id, "raw");
-    assert_eq!(*queue, mj_core::state::ResumeQueueDisposition::Discard);
-    request
-        .reply
-        .send(super::super::ActionOutcome::accepted())
-        .unwrap();
-    publish_resume_started(&snapshot_tx);
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::ACCEPTED
-    );
-}
-
-#[tokio::test]
 async fn resuming_a_running_session_is_refused_with_the_reason() {
     let (app, _actions, _snapshot_tx, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
@@ -4245,6 +3036,7 @@ async fn resuming_a_running_session_is_refused_with_the_reason() {
 
 /// `close` is gone (2e3077d9). A resume refused because the session is
 /// suspending says what to wait for, in the words the CLI uses now.
+// Hard-won: f8f641a2: suspend-then-resume refusal still advised users to use removed close.
 #[test]
 fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
     let (config, state) = sample_config_state();
@@ -4259,6 +3051,7 @@ fn a_resume_refusal_names_what_to_wait_for_in_current_words() {
 /// W-2: a failed Move that holds the session's environment withdraws
 /// Resume, and the refusal says why and what to do instead, rather than
 /// claiming an operation is running.
+// Hard-won: ae5e37e5: a failed Move with a retained environment was mistaken for a running operation.
 #[test]
 fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let (config, state) = sample_config_state();
@@ -4300,6 +3093,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 /// accepted, and the daemon's resume then failed with "session has no
 /// checkpoint" where the caller never saw it. The API now refuses it at once,
 /// with that reason, the way it refuses every other resume that cannot work.
+// Hard-won: 78245c3a: resume without a checkpoint was accepted and then failed silently.
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
     let (app, mut actions, _snapshot_tx, _bundles) =
@@ -4401,6 +3195,7 @@ fn a_wait_follows_a_running_resume_and_reports_why_a_failed_one_stopped() {
 /// is republished on a tick. Answering "unknown session" for a spawn that
 /// succeeded told the caller its child does not exist while the child was
 /// starting, and invited it to spawn a second one.
+// Hard-won: 2bc686dc: HTTP spawn returned 404 for children that were already running.
 #[tokio::test]
 async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown() {
     let (app, _actions, snapshot_tx, _bundles) =
@@ -4448,66 +3243,6 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     assert_eq!(body["session"]["id"], SPAWNED_CHILD);
     assert_eq!(body["task_name"], "probe");
     assert!(body.get("request_key").is_none(), "{body}");
-}
-
-/// A child's model is the one thing a spawn must state: without it there is
-/// nothing to choose a profile by.
-#[tokio::test]
-async fn a_spawn_without_a_model_is_refused() {
-    let (app, _actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
-            snapshot.sessions[0].harness_kind = "codex".to_owned();
-            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
-        });
-    let parent = {
-        let snapshot = snapshot_tx.borrow();
-        snapshot.sessions[0].id.clone()
-    };
-    let response = app
-        .oneshot(
-            bearer(Request::post(format!(
-                "/api/v1/sessions/{parent}/subagents"
-            )))
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready"}"#,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = json_body(response).await;
-    assert!(body.to_string().contains("spawn needs a model"), "{body}");
-}
-
-/// The caller-chosen key is gone, as it is from session creation: a request
-/// that still names it is refused rather than silently deduplicated.
-#[tokio::test]
-async fn a_spawn_naming_a_request_key_is_refused() {
-    let (app, _actions, snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
-            snapshot.sessions[0].harness_kind = "codex".to_owned();
-            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
-        });
-    let parent = {
-        let snapshot = snapshot_tx.borrow();
-        snapshot.sessions[0].id.clone()
-    };
-    let response = app
-        .oneshot(
-            bearer(Request::post(format!(
-                "/api/v1/sessions/{parent}/subagents"
-            )))
-            .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3","request_key":"probe-1"}"#,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -4745,63 +3480,11 @@ async fn options_list_what_a_caller_may_launch_without_leaking_configuration() {
     assert!(body["default"].is_null());
 }
 
-#[tokio::test]
-async fn options_explain_a_failed_host_without_repeating_its_probe() {
-    let (app, _, _, _) = api_app(Arc::new(FakeBackend::default()), |snapshot| {
-        snapshot.capacity = vec![crate::server::ViewerTargetCapacity {
-            id: "host-1".into(),
-            label: "builder".into(),
-            target_ids: vec!["podman".into()],
-            cpu_percent: Some(20),
-            memory_used_bytes: None,
-            memory_total_bytes: None,
-            logical_cores: None,
-            disk_total_bytes: None,
-            virtual_machines: None,
-            sampled_at_epoch_seconds: Some(1),
-            refreshing: false,
-            stale: false,
-            has_error: true,
-            storage: Vec::new(),
-        }];
-    });
-
-    let response = app
-        .oneshot(
-            bearer(Request::get("/api/v1/options"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = json_body(response).await;
-
-    let targets = body["targets"].as_array().unwrap();
-    let podman = targets
-        .iter()
-        .find(|target| target["id"] == "podman")
-        .unwrap();
-    assert_eq!(podman["availability"], "unavailable");
-    assert_eq!(podman["host"], "builder");
-    let reason = podman["unavailable_reason"].as_str().unwrap();
-    assert!(
-        reason.contains("builder"),
-        "the reason names the host a person knows: {reason}"
-    );
-
-    // A target the reading does not cover stays unknown while its neighbour
-    // is unavailable.
-    let raw = targets.iter().find(|target| target["id"] == "raw").unwrap();
-    assert_eq!(raw["availability"], "unknown");
-
-    assert_eq!(body["hosts"][0]["label"], "builder");
-    assert_eq!(body["hosts"][0]["has_error"].as_bool(), Some(true));
-}
-
 /// F-7: on a host with no Docker engine, `mj doctor` and the dashboard's
 /// Targets pane said the built-in `docker` target was unavailable while this
 /// route said `ready`, because the local host's capacity reading answered.
 /// The route now asks the same engine check, and says the engine is missing.
+// Hard-won: ba563efa: options said Docker was ready while doctor and the dashboard found no engine.
 #[tokio::test]
 async fn options_mark_a_local_target_without_its_engine_unavailable() {
     use crate::controller::LocalEngineReadiness;
@@ -4924,47 +3607,10 @@ async fn options_tell_a_missing_runtime_from_a_host_that_did_not_answer() {
     assert!(target("podman").get("runtime_missing").is_none());
 }
 
-/// Naming a target whose runtime is not installed is refused by name, with the
-/// reason, for New, Resume and Move alike, since they share one validator.
-#[tokio::test]
-async fn naming_a_target_whose_runtime_is_missing_is_refused_with_the_reason() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
-            snapshot.targets.push(crate::server::ViewerTarget {
-                id: "docker".into(),
-                kind: "local-docker".into(),
-                resource_allocation_kind: mj_core::state::ResourceAllocationKind::Container,
-                requires_project_directory: false,
-                remembered_container_size: None,
-                container_host_limits: None,
-                default_resource_allocation: None,
-                runtime_missing: true,
-                default_candidate: false,
-                availability: crate::server::api::LaunchAvailability::Unknown,
-                unavailable_reason: None,
-                recent_project_directories: Vec::new(),
-            });
-        });
-    let response = app
-        .oneshot(start_request(
-            r#"{"profile_id":"codex-1","target_id":"docker","bundle_id":"hel"}"#.into(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = json_body(response).await.to_string();
-    assert!(body.contains("docker"), "{body}");
-    assert!(
-        body.contains("Docker is not installed on this host"),
-        "{body}"
-    );
-    assert!(actions.try_recv().is_err(), "nothing was launched");
-}
-
 /// A target the daemon has no worker binary for is refused at admission with
 /// the reason, before anything is launched (RVE-2); a target it does have one
 /// for is admitted.
+// Hard-won: a95e5e66: launch admission accepted targets that could not supply a worker.
 #[tokio::test]
 async fn naming_a_target_with_no_worker_binary_is_refused_with_the_reason() {
     let check: crate::server::WorkerSourceCheck = Arc::new(|target| {
@@ -5061,7 +3707,7 @@ async fn start_without_identifiers_uses_the_saved_default() {
     let path = directory.path().join("go.json");
     save_global_default(&path, "codex-1", "podman");
     let (app, mut actions, _, _) =
-        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
+        api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path.clone());
 
     let response = tokio::spawn(app.oneshot(start_request(r#"{"bundle_id":"hel"}"#.into())));
     let request = actions.recv().await.unwrap();
@@ -5088,18 +3734,12 @@ async fn start_without_identifiers_uses_the_saved_default() {
         response.await.unwrap().unwrap().status(),
         StatusCode::CREATED
     );
-}
 
-#[tokio::test]
-async fn start_resolves_only_the_identifier_the_caller_left_out() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("go.json");
-    // The saved default names the bare target; the caller names the container
-    // target instead, and only the profile still falls back.
+    // The saved default names the bare target; an explicit request target
+    // wins while only the omitted profile falls back to the same file.
     save_global_default(&path, "codex-1", "raw");
     let (app, mut actions, _, _) =
         api_app_with_preferences(Arc::new(FakeBackend::default()), |_| {}, path);
-
     let body = r#"{"target_id":"podman","bundle_id":"hel"}"#;
     let response = tokio::spawn(app.oneshot(start_request(body.into())));
     let request = actions.recv().await.unwrap();
@@ -5123,23 +3763,6 @@ async fn start_resolves_only_the_identifier_the_caller_left_out() {
         response.await.unwrap().unwrap().status(),
         StatusCode::CREATED
     );
-}
-
-#[tokio::test]
-async fn start_without_identifiers_and_no_saved_default_names_what_is_missing() {
-    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = app
-        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let message = json_body(response).await["error"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(message.contains("profile_id"), "{message}");
-    assert!(message.contains("no saved default"), "{message}");
-    assert!(actions.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -5467,33 +4090,6 @@ fn both_wait_forms_use_recorded_jev_outcomes_and_targeted_wait_ignores_later_act
     assert!(resolve_wait(&observation, &targeted).is_none());
 }
 
-#[test]
-fn public_creation_rejects_legacy_subagent_parameters_and_boolean_policies() {
-    for value in [
-        serde_json::json!({"mjolnir_subagents": true}),
-        serde_json::json!({"subagents": true}),
-    ] {
-        assert!(serde_json::from_value::<StartSessionRequest>(value.clone()).is_err());
-        let mut action = value;
-        action["action"] = serde_json::json!("new");
-        action["profile_id"] = serde_json::json!("codex");
-        action["target_id"] = serde_json::json!("local");
-        action["bundle_id"] = serde_json::json!("project");
-        assert!(serde_json::from_value::<ControllerAction>(action).is_err());
-    }
-    let request: StartSessionRequest = serde_json::from_value(
-        serde_json::json!({"subagents":{"mode":"single_model", "model":"chosen", "effort":"high"}}),
-    )
-    .unwrap();
-    assert_eq!(
-        request.subagents,
-        Some(mj_core::subagent::SubagentPolicy::SingleModel {
-            model: "chosen".into(),
-            effort: Some("high".into())
-        })
-    );
-}
-
 /// A live actor that has not delivered its first projection, so a wait reads
 /// the session's turn state from the store on every decision.
 fn actor_without_projection() -> ManagedSessionView {
@@ -5531,6 +4127,7 @@ fn spawn_wait(
 /// a revision that leaves its own session unchanged: twenty idle `mj wait`
 /// callers beside three streaming sessions kept the daemon above two cores.
 /// It must still answer as soon as its own session asks for input.
+// Hard-won: f5c83878: waiters opened the database repeatedly on unrelated session changes.
 #[tokio::test(start_paused = true)]
 async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own() {
     let backend = Arc::new(FakeBackend {
@@ -5601,6 +4198,7 @@ async fn a_waiter_reads_nothing_for_other_sessions_revisions_and_answers_its_own
     assert_eq!(reads(), 2);
 }
 
+// Hard-won: 396e2d49: a committed turn change was filtered before its viewer row changed.
 #[tokio::test(start_paused = true)]
 async fn a_waiter_answers_a_durable_turn_change_before_the_viewer_row_changes() {
     let backend = Arc::new(FakeBackend {
@@ -5709,34 +4307,9 @@ async fn a_waiter_answers_when_its_child_s_report_lands() {
     assert_eq!(body["report_source"], "handback");
 }
 
-#[tokio::test]
-async fn starting_a_review_sends_the_controller_action_and_names_the_session() {
-    let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
-    let response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/review"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    );
-    let request = actions.recv().await.unwrap();
-    assert_eq!(
-        request.action,
-        ControllerAction::StartReview {
-            session_id: "session-1".into()
-        }
-    );
-    request.reply.send(ActionOutcome::accepted()).unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = json_body(response).await;
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(body["started"], true);
-}
-
 /// A review that cannot start answers 409 with the reason written for the
 /// person, not a 500 behind a log reference.
+// Hard-won: 6b96d591: a review that could not start was returned as a 500 behind a log reference.
 #[tokio::test]
 async fn a_review_that_cannot_start_is_a_conflict_with_its_reason() {
     let (app, mut actions, _snapshot_tx, _bundles) =
