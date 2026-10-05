@@ -58,6 +58,7 @@ pub fn find_program_on_path(program: &str, path: Option<&OsStr>) -> Option<PathB
 mod tests {
     use super::*;
 
+    // Hard-won: 3bf8fb93: Windows could not find docker.exe or podman.exe because PATH lookup ignored PATHEXT.
     #[test]
     fn pathext_extensions_are_appended_in_order() {
         assert_eq!(

@@ -3126,6 +3126,97 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
     );
 }
 
+// Hard-won: bff62757: phone requests timed out during long actions and showed failure while the action kept running.
+#[tokio::test]
+async fn each_rejected_action_keeps_its_own_status_and_guidance() {
+    for (outcome, status, guidance) in [
+        (
+            ActionOutcome::Busy {
+                running: 4,
+                limit: 4,
+            },
+            StatusCode::TOO_MANY_REQUESTS,
+            "the daemon is at its limit of 4 concurrent actions (4 running; a session that is still starting holds one until it is ready)",
+        ),
+        (
+            ActionOutcome::SessionBusy,
+            StatusCode::CONFLICT,
+            "another operation is already running",
+        ),
+        (
+            ActionOutcome::NotCancellable,
+            StatusCode::CONFLICT,
+            "no cancellable operation",
+        ),
+        (
+            ActionOutcome::Failed {
+                reference: "4321-9".to_owned(),
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reference 4321-9",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(
+                "this instance has no workspace yet; create one before starting a session",
+            )),
+            StatusCode::CONFLICT,
+            "no workspace yet",
+        ),
+        (
+            ActionOutcome::Refused(mj_core::refusal::Refusal::unusable(
+                "no target named laptop is configured",
+            )),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no target named laptop",
+        ),
+        (
+            ActionOutcome::Refused(
+                mj_core::refusal::Refusal::unusable(
+                    "Selected subagent model \"x\" is unavailable.",
+                )
+                .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "is unavailable",
+        ),
+    ] {
+        let (app, mut actions, _, _, _) = app();
+        let cookie = login_cookie(&app).await;
+        let response = tokio::spawn(
+            app.oneshot(
+                Request::post("/api/actions")
+                    .header(COOKIE, cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"action":"suspend","session_id":"session-1"}"#,
+                    ))
+                    .unwrap(),
+            ),
+        );
+        let request = actions.recv().await.unwrap();
+        request.reply.send(outcome.clone()).unwrap();
+
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), status, "{outcome:?}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains(guidance), "{outcome:?} answered {error:?}");
+        if matches!(outcome, ActionOutcome::Busy { .. }) {
+            assert_eq!(body["running_actions"], 4, "{body}");
+            assert_eq!(body["action_limit"], 4, "{body}");
+        } else {
+            assert!(body.get("running_actions").is_none(), "{body}");
+        }
+        // A refusal's code reaches the viewer, so it can add its own remedy.
+        let expected_code = match &outcome {
+            ActionOutcome::Refused(refusal) => refusal.code(),
+            _ => None,
+        };
+        assert_eq!(body["code"].as_str(), expected_code, "{body}");
+    }
+}
+
 // Hard-won: bff62757: mobile networks dropped long accepted-action requests while later session failures were only visible in snapshots.
 #[tokio::test]
 async fn the_viewer_shows_a_session_whose_action_failed_after_it_was_accepted() {

@@ -2817,6 +2817,7 @@ fn saved_config(dialog: &mut SetupDialog) -> Config {
     }
 }
 
+// Hard-won: #1153: saving unrelated Settings fields overwrote named-instance web listener ports.
 #[test]
 fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
     const CHILD: &str = "MJ_TEST_SETTINGS_INSTANCE_CHILD";

@@ -455,6 +455,7 @@ mod tests {
         }
     }
 
+    // Hard-won: #1018: removing a target template left running sessions without the access data needed to reconnect.
     #[test]
     fn recorded_ec2_access_preserves_region_profile_and_identity_without_launch_template() {
         let template: TargetTemplate = serde_json::from_value(serde_json::json!({

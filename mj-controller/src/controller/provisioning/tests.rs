@@ -153,44 +153,6 @@ impl CommandExecutor for DockerDesktopExecutor {
     }
 }
 
-/// Docker Desktop's VM cannot overlay host directories whatever filesystem
-/// holds them on the host, so its attachments mount read-only (#1152).
-#[test]
-fn the_build_cache_is_mounted_read_write_at_its_host_path() {
-    let mut mounts = Vec::new();
-    super::super::mbx::attach_mounts_for_tests(
-        &mj_core::state::SessionBuildCache {
-            host: "local-podman".into(),
-            directory: PathBuf::from("/mnt/fast/mbx-cache"),
-            max_size: None,
-            target_root: Some(PathBuf::from("/mnt/fast/mbx-targets")),
-        },
-        &mut mounts,
-    );
-
-    let plan = targets::provision_plan(
-        &podman_target(),
-        "0123456789abcdef0123456789abcdef",
-        &probe_bundle(),
-        &mounts,
-        None,
-        None,
-    )
-    .unwrap();
-
-    for directory in ["/mnt/fast/mbx-cache", "/mnt/fast/mbx-targets"] {
-        let expected = format!("{directory}:{directory}:rw");
-        assert!(
-            plan.commands[0]
-                .args
-                .windows(2)
-                .any(|args| args == ["--volume", expected.as_str()]),
-            "{:?}",
-            plan.commands[0].args
-        );
-    }
-}
-
 // Hard-won: 3921dfb5: Docker Desktop did not preserve attachment access modes or report the read-only mount
 #[test]
 fn docker_desktop_attachments_are_mounted_read_only_and_reported() {

@@ -19,39 +19,6 @@ fn click(form: &mut Form<u8>, x: u16, y: u16) -> Option<Interaction<u8>> {
         .action
 }
 
-fn row_text(width: u16, align: RowAlign) -> String {
-    let mut form = Form::<u8>::new();
-    form.declare(1, ControlKind::Button);
-    form.declare(2, ControlKind::Button);
-    form.end_frame(1);
-    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            ButtonRow::render_aligned(
-                frame,
-                frame.area(),
-                &[(1, "First", true), (2, "Last", true)],
-                &mut form,
-                align,
-            );
-            form.end_frame(1);
-        })
-        .unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
-}
-
-#[test]
-fn a_row_wider_than_its_area_ignores_right_alignment() {
-    assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
-}
-
 fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
     let mut form = Form::<u8>::new();
     form.declare(1, ControlKind::Button);

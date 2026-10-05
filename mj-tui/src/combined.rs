@@ -1762,6 +1762,7 @@ mod tests {
     /// Launch finding E-8 (right edge): a conversation title too long for its
     /// row stopped at the pane chips with no ellipsis ("End to follo ◇").
     /// The title must end in an ellipsis before the chips.
+    // Hard-won: 41bf4a6f83: the launch re-verification capture showed long titles overlapping the pin and menu chips.
     #[tokio::test]
     async fn a_long_conversation_title_ends_in_an_ellipsis_before_the_pane_chips() {
         let session = running_session();

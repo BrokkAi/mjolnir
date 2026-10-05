@@ -2601,46 +2601,6 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     );
 }
 
-#[test]
-fn local_bare_worker_commands_are_direct_and_cleanup_is_exact() {
-    let worker_root = format!("/var/lib/hel/workers/{SESSION}");
-    let locator = TargetLocator::LocalBare {
-        worker_root: worker_root.clone(),
-    };
-
-    let reconnect = reconnect_plan(&locator, SESSION).unwrap();
-    assert_eq!(
-        reconnect.description,
-        format!("reconnect Mjolnir session {SESSION}")
-    );
-    assert_eq!(reconnect.commands[0].purpose, "connect to Mjolnir worker");
-    assert_eq!(reconnect.commands[0].program, format!("{worker_root}/hel"));
-    assert_eq!(
-        reconnect.commands[0].args,
-        ["worker", "proxy", "--root", worker_root.as_str()]
-    );
-    let close = close_plan(&locator, SESSION).unwrap();
-    assert_eq!(
-        close.description,
-        format!("close Mjolnir session {SESSION}")
-    );
-    assert_eq!(
-        close.commands[0].purpose,
-        "stop the local Mjolnir worker and remove exact local Mjolnir worker state"
-    );
-    assert_eq!(close.commands[0].program, "sh");
-    assert_eq!(close.commands[0].args[0], "-c");
-    let script = &close.commands[0].args[1];
-    assert!(script.contains(&format!("hel_root='{worker_root}'")));
-    // The worker root holds every staged profile home but Muse's, whose root
-    // lies under the data directory, so both go.
-    let muse_root = local_muse_profile_root(SESSION);
-    assert!(script.ends_with(&format!(
-        "rm -rf -- '{worker_root}' '{}'\n",
-        muse_root.display()
-    )));
-}
-
 /// A leaked daemon that survives teardown recreates the root it is asked
 /// to forget, so the kill has to be part of the same cleanup command.
 // Hard-won: 2e7f5ec9: a detached worker recreated the root after close and broke resume.

@@ -718,6 +718,30 @@ fn a_paste_during_a_starting_transition_joins_the_standby_draft() {
     );
 }
 
+// Hard-won: c4fbb1a6: a missing session bundle blocked opening the affected session without repair guidance.
+#[test]
+fn opening_a_session_with_missing_configuration_explains_repair() {
+    let session = running_session();
+    let mut dashboard = dashboard_with_session(session);
+    let bundle_id = dashboard.selected_session().unwrap().bundle_id.clone();
+    let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
+    assert_eq!(dashboard.open_selected_session(), DashboardAction::None);
+    let Mode::Confirm(dialog) = &dashboard.mode else {
+        panic!("repair dialog expected")
+    };
+    let Confirmation::ConfigurationRepair { error, .. } = &dialog.confirmation else {
+        panic!("repair details expected")
+    };
+    assert!(error.contains("missing bundle"));
+    assert!(error.contains("config.toml"));
+    dashboard.handle_key(key(KeyCode::Esc));
+    dashboard.config.bundles.insert(bundle_id, bundle);
+    assert!(!matches!(
+        dashboard.open_selected_session(),
+        DashboardAction::None
+    ));
+}
+
 /// The notice bar is the only report a background failure gets, so a key
 /// press that happens to arrive while one is fresh must not wipe it.
 // Hard-won: 7c56a0f: incidental keys hid a background notice before it rendered.

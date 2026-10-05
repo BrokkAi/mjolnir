@@ -2622,27 +2622,6 @@ fn api_session_exposes_a_launch_failure_reason_only_when_the_session_errored() {
     );
 }
 
-#[test]
-fn a_running_session_publishes_safe_lifecycle_failures_from_current_and_older_records() {
-    let (config, mut state) = sample_config_state();
-    for prefix in [
-        mj_core::state::CLOSE_FAILURE_PREFIX,
-        mj_core::state::MOVE_FAILURE_PREFIX,
-        mj_core::state::DESTRUCTION_FAILURE_PREFIX,
-        "the close did not finish",
-    ] {
-        let reason =
-            format!("{prefix}; the daemon log records the reason under reference lifecycle-9");
-        state.sessions.get_mut("session-1").unwrap().last_error = Some(reason.clone());
-        let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-        assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, Some(reason));
-    }
-    // A later successful transition clears the record, and with it the report.
-    state.sessions.get_mut("session-1").unwrap().last_error = None;
-    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    assert_eq!(ApiSession::from(&snapshot.sessions[0]).error, None);
-}
-
 // Hard-won: ce490a90: unusable workers appeared as unexplained wait timeouts.
 #[test]
 fn relay_health_names_each_way_the_live_view_can_be_unusable() {

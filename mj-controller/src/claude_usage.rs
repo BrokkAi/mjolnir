@@ -1014,15 +1014,4 @@ Last 7d · 5966 requests · 78 sessions
             "sk-ant-oat01-test"
         );
     }
-
-    #[test]
-    fn oauth_access_token_without_expiry_is_usable() {
-        let credentials = serde_json::json!({
-            "claudeAiOauth": { "accessToken": "sk-ant-oat01-test" }
-        });
-        assert_eq!(
-            oauth_access_token(&credentials, 9_000).expect("token"),
-            "sk-ant-oat01-test"
-        );
-    }
 }

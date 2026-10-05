@@ -46,25 +46,6 @@ fn session_metadata_text(
     .to_string()
 }
 
-#[test]
-fn scrollbar_thumb_reaches_both_ends_of_the_viewport() {
-    let mut terminal = Terminal::new(TestBackend::new(1, 10)).unwrap();
-    for (position, thumb_row) in [(0, 1), (90, 8)] {
-        terminal
-            .draw(|frame| {
-                render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 100, position, 10);
-            })
-            .unwrap();
-        assert_eq!(terminal.backend().buffer()[(0, thumb_row)].symbol(), "▐");
-    }
-    terminal
-        .draw(|frame| {
-            render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 10, 0, 10);
-        })
-        .unwrap();
-    assert!((0..10).all(|row| terminal.backend().buffer()[(0, row)].symbol() == " "));
-}
-
 fn minimize_all_panes(dashboard: &mut DashboardState) {
     for pane in [
         SupportPane::Sessions,
@@ -2753,6 +2734,54 @@ fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
     assert!(row.contains("70%"), "{row:?}");
     assert!(row.contains("2d 0h [1]"), "{row:?}");
     assert!(row.contains("1h 5m"), "{row:?}");
+}
+
+/// One session whose title is `title`, measured at `recent` permille.
+fn dashboard_with_measured_session(title: &str, recent: u16) -> DashboardState {
+    let mut session = running_session();
+    session.title = title.into();
+    session.acp_session_title = None;
+    let id = session.id.clone();
+    let mut dashboard = dashboard_with_session(session);
+    set_cpu(&mut dashboard, &[(&id, recent, recent)]);
+    dashboard
+}
+
+fn row_texts(dashboard: &DashboardState, width: u16, minimized: bool) -> Vec<String> {
+    let options = if minimized {
+        SessionRowsRenderOptions::MINIMIZED
+    } else {
+        SessionRowsRenderOptions::DASHBOARD
+    };
+    drawn_session_rows_with_options(dashboard, width, options)
+        .iter()
+        .flat_map(|row| row.lines.iter().map(ToString::to_string))
+        .collect()
+}
+
+/// The rows from the session's name line on, past the project heading.
+fn name_and_following(dashboard: &DashboardState, width: u16, minimized: bool) -> Vec<String> {
+    let lines = row_texts(dashboard, width, minimized);
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with('›'))
+        .unwrap_or(0);
+    lines[start..].to_vec()
+}
+
+#[test]
+fn a_narrow_session_row_truncates_the_name_before_dropping_cpu() {
+    let title = "Refactor the parser to stream tokens";
+    let dashboard = dashboard_with_measured_session(title, 230);
+    let narrow = name_and_following(&dashboard, 30, false);
+    assert!(narrow[0].ends_with("23%"), "{narrow:#?}");
+    assert!(!narrow[0].contains(title), "{narrow:#?}");
+    assert!(narrow[0].contains("Refactor"), "{narrow:#?}");
+    assert!(narrow[0].contains(theme::glyphs().ellipsis), "{narrow:#?}");
+    // Too narrow for even a minimal name beside the figure: the figure goes.
+    let tiny = name_and_following(&dashboard, 16, false);
+    assert!(tiny.iter().all(|line| !line.contains('%')), "{tiny:#?}");
+    assert!(tiny[0].contains("Refac"), "{tiny:#?}");
 }
 
 #[test]

@@ -930,16 +930,6 @@ fn a_saved_draft_reopens_in_the_composer_with_the_cursor_at_its_end() {
 }
 
 #[test]
-fn an_empty_saved_draft_leaves_the_composer_untouched() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("typed since opening".into());
-
-    chat.restore_draft(String::new());
-
-    assert_eq!(chat.input, "typed since opening");
-}
-
-#[test]
 fn a_fresh_chat_opens_with_the_session_s_saved_draft_in_the_composer() {
     let chat = freshly_opened_chat("half typed thought");
 

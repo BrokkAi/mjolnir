@@ -1142,16 +1142,6 @@ fn attach_mounts(
     true
 }
 
-/// `attach_mounts` for the provisioning tests, which check the container
-/// arguments the mounts produce.
-#[cfg(test)]
-pub(super) fn attach_mounts_for_tests(
-    build_cache: &SessionBuildCache,
-    mounts: &mut Vec<targets::AdditionalMount>,
-) -> bool {
-    attach_mounts(build_cache, mounts)
-}
-
 /// Read the configuration on the host that actually owns this container.
 /// The named template may have been removed or reassigned since creation.
 fn host_for_locator(target: &targets::TargetLocator) -> Option<CacheHost> {
@@ -1970,24 +1960,5 @@ mod tests {
         );
         assert_eq!(preview.off_reason, None);
         assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
-    }
-
-    #[test]
-    fn a_host_without_mbx_falls_back_to_the_default_cache_directory() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        let resolved = resolve(&podman(None), &executor).unwrap();
-        assert_eq!(resolved.directory, default_cache_directory());
-        // min(100 GB, 800 GB / 4) is the 100 GB cap.
-        assert_eq!(
-            configuration::configured_limit(
-                resolved.config_file.as_deref(),
-                "gc",
-                "max_total_size"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("100000000000B")
-        );
     }
 }

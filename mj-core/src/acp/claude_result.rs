@@ -370,6 +370,47 @@ mod tests {
         );
     }
 
+    // Hard-won: 65a7390: Claude Code left accepted prompts running for hours after the answering model cycle had finished.
+    #[test]
+    fn stop_reasons_follow_the_adapter_mapping() {
+        let mut refusal = success(Some("human"));
+        refusal["stop_reason"] = serde_json::json!("refusal");
+        refusal["is_error"] = serde_json::json!(true);
+        refusal["usage"]["output_tokens"] = serde_json::json!(0);
+        assert_eq!(
+            stop_reason(&refusal),
+            None,
+            "the adapter sends a refusal's explanation after the result; its reply ends the prompt"
+        );
+
+        let mut max_tokens = success(Some("human"));
+        max_tokens["stop_reason"] = serde_json::json!("max_tokens");
+        assert_eq!(stop_reason(&max_tokens).as_deref(), Some("MaxTokens"));
+
+        let mut interrupted = success(Some("human"));
+        interrupted["subtype"] = serde_json::json!("error_during_execution");
+        interrupted["stop_reason"] = serde_json::Value::Null;
+        interrupted["errors"] = serde_json::json!([]);
+        assert_eq!(stop_reason(&interrupted).as_deref(), Some("EndTurn"));
+
+        for subtype in [
+            "error_max_turns",
+            "error_max_budget_usd",
+            "error_max_structured_output_retries",
+        ] {
+            let mut limited = interrupted.clone();
+            limited["subtype"] = serde_json::json!(subtype);
+            assert_eq!(
+                stop_reason(&limited).as_deref(),
+                Some("MaxTurnRequests"),
+                "{subtype}"
+            );
+        }
+        let mut unknown = interrupted.clone();
+        unknown["subtype"] = serde_json::json!("error_from_the_future");
+        assert_eq!(stop_reason(&unknown), None);
+    }
+
     #[test]
     fn failures_and_interruption_reports_leave_the_prompt_to_the_adapter_reply() {
         let mut usage_limit = success(Some("human"));

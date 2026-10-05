@@ -574,6 +574,7 @@ fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
     assert!(empty.is_empty());
 }
 
+// Hard-won: #1019: SSH Podman provisioning failed under load as the host keyring quota filled without a useful warning.
 #[test]
 fn host_limits_report_pressure_when_keys_reach_the_quota() {
     let limits = parse_host_limits(b"keys.used=3300\nkeys.quota=4096\n");
@@ -1081,6 +1082,7 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 /// Releases before this one wrote Mjolnir's own refs into user repositories
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
+// Hard-won: #1065: interrupted review captures left large refs and scratch indexes in the user’s repository.
 #[test]
 fn review_leftovers_are_reported_and_left_alone() {
     let repository = tempfile::tempdir().unwrap();

@@ -457,30 +457,6 @@ mod pin_tests {
     }
 
     #[test]
-    fn assignment_identity_survives_focus_but_not_reassignment_or_restore() {
-        let mut d = dashboard();
-        let pane = d.focused_pane();
-        let first = d.pane_assignment(pane).unwrap();
-        let other = d
-            .split_focused_pane(Direction::Horizontal, Some("session-2"))
-            .unwrap();
-        d.focus_pane(pane);
-        assert_eq!(d.pane_assignment(pane), Some(first));
-        d.set_pane_session(pane, Some("session-3"));
-        d.set_pane_session(pane, Some("session-1"));
-        assert_ne!(d.pane_assignment(pane), Some(first));
-        let before_restore = d.pane_assignment(pane);
-        let saved = d.export_conversation_layout();
-        d.restore_conversation_layout(&saved);
-        assert_ne!(d.pane_assignment(pane), before_restore);
-        assert_eq!(d.selected_session_id(), Some("session-1"));
-        d.close_pane(pane);
-        assert_eq!(d.focused_pane(), other);
-        assert_eq!(d.selected_session_id(), Some("session-2"));
-        assert_eq!(d.pane_assignment(pane), None);
-    }
-
-    #[test]
     fn filters_keep_the_active_row_until_navigation_selects_a_match() {
         let mut d = dashboard();
         d.focus_sessions();

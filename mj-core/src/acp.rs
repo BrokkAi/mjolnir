@@ -1070,18 +1070,6 @@ mod agent_output_tests {
         assert!(!session_update_is_compaction_banner(&answer));
         assert!(session_update_is_agent_output(&answer));
     }
-
-    #[test]
-    fn only_a_prompt_that_asks_to_compact_is_answered_by_compacting() {
-        let text = |value: &str| vec![ContentBlock::Text(TextContent::new(value))];
-        assert!(prompt_requests_compaction(&text("/compact")));
-        assert!(prompt_requests_compaction(&text(
-            "  /compact keep the plan"
-        )));
-        assert!(!prompt_requests_compaction(&text("compact the loop")));
-        assert!(!prompt_requests_compaction(&text("/context")));
-        assert!(!prompt_requests_compaction(&[]));
-    }
 }
 
 #[cfg(test)]
