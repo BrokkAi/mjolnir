@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt as _;
 
 use super::super::{
-    ControllerRequest, ServerOptions, ServerRequests, ViewerSnapshot, router,
-    tests::sample_config_state,
+    ControllerRequest, ServerOptions, ServerRequests, ViewerOperation, ViewerOperationKind,
+    ViewerProfile, ViewerSnapshot, router, tests::sample_config_state,
 };
 
 fn error_event(seq: u64) -> crate::database::ApiEvent {
@@ -1387,6 +1387,144 @@ fn start_request(body: String) -> Request<Body> {
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap()
+}
+
+fn model_candidate(
+    profile_id: &str,
+    harness: mj_core::config::HarnessKind,
+    model: &str,
+    efforts: &[&str],
+) -> SubagentCandidate {
+    SubagentCandidate {
+        profile_id: profile_id.into(),
+        harness,
+        choices: mj_core::worker_launch::ProfileConfig {
+            model: Some(model.into()),
+            models: vec![mj_core::acp::SessionConfigChoice {
+                value: model.into(),
+                name: model.into(),
+                description: None,
+            }],
+            efforts: efforts
+                .iter()
+                .map(|effort| mj_core::acp::SessionConfigChoice {
+                    value: (*effort).into(),
+                    name: (*effort).into(),
+                    description: None,
+                })
+                .collect(),
+            observed_at: 1,
+        },
+        remaining_percent: Some(80),
+    }
+}
+
+#[tokio::test]
+async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate(
+                    "codex-1",
+                    mj_core::config::HarnessKind::Codex,
+                    "gpt-6.6",
+                    &[],
+                ),
+                model_candidate(
+                    "grok-main",
+                    mj_core::config::HarnessKind::Grok,
+                    "grok-4.6",
+                    &["high"],
+                ),
+            ],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend.clone(),
+        |snapshot| {
+            snapshot.profiles.push(ViewerProfile {
+                id: "grok-main".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                harness_kind: "grok".into(),
+                subagents: Default::default(),
+                quota: None,
+            });
+        },
+        preferences_path,
+    );
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","model":"grok-4.6","effort":"high"}"#.into(),
+    )));
+
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "grok-main"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let followups = backend.followups.lock().unwrap();
+    assert_eq!(followups.len(), 1);
+    assert_eq!(followups[0].0, "session-2");
+    assert_eq!(followups[0].1.model.as_deref(), Some("grok-4.6"));
+    assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
+}
+
+#[tokio::test]
+async fn model_first_session_start_reports_incompatible_profiles_in_the_api_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate(
+                "codex-1",
+                mj_core::config::HarnessKind::Codex,
+                "gpt-6.6",
+                &[],
+            )],
+            unavailable: vec![("claude-2".into(), "authentication expired".into())],
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences_path);
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"grok-4.6"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json_body(response).await;
+    let rendered = format!(
+        "HTTP {}\n{}\n",
+        status.as_u16(),
+        serde_json::to_string_pretty(&body).unwrap()
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "start-model-incompatible-profile",
+        &rendered,
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        actions.try_recv().is_err(),
+        "an incompatible model is refused before session creation"
+    );
 }
 
 // Hard-won: d91504f8: API-created container sessions had no CPU or memory limits.
@@ -2991,6 +3129,55 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     session.capabilities.prompt = false;
     session.incompatible_resume_targets.clear();
     session.compatible_resume_targets = vec!["podman".into(), "raw".into()];
+}
+
+#[tokio::test]
+async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
+    let (app, mut actions, snapshot_tx, _) =
+        api_app(Arc::new(FakeBackend::default()), make_stopped);
+    let mut response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(request.action, ControllerAction::Resume { .. }));
+    request
+        .reply
+        .send(ActionOutcome::Accepted { session_id: None })
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !response.is_finished(),
+        "the accepted resume must not answer while the snapshot still says suspended"
+    );
+
+    snapshot_tx.send_modify(|snapshot| {
+        let session = &mut snapshot.sessions[0];
+        session.operation = Some(ViewerOperation {
+            id: "resume-op".into(),
+            session_id: session.id.clone(),
+            kind: ViewerOperationKind::Resume,
+            started_at_epoch_seconds: 1,
+            stages: Vec::new(),
+            notice: None,
+            cancellable: true,
+        });
+    });
+    let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
+        .await
+        .expect("operation publication releases the waiting response")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = json_body(response).await;
+    assert_eq!(body["session_id"], "session-1");
+    assert_eq!(body["workspace_id"], "default");
+    assert_eq!(body["profile_id"], "codex-1");
+    assert_eq!(body["target_id"], "podman");
 }
 
 #[tokio::test]

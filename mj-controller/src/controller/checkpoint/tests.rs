@@ -777,8 +777,14 @@ fn a_suspend_whose_worker_restart_left_no_worker_checkpoints_without_the_harness
 fn a_stuck_checkpoint_barrier_is_retried_by_restarting_the_worker() {
     // Both ways the wait can end without a barrier, each wrapped the way
     // the checkpoint path wraps them, and each still asking for the retry.
+    let not_admitted =
+        CheckpointBarrierUnreachable::not_admitted("checkpoint-976f6746887c5ccd93b9d8bbe120ef06");
+    assert_eq!(
+        not_admitted.to_string(),
+        "ACP relay did not reach checkpoint barrier checkpoint-976f6746887c5ccd93b9d8bbe120ef06"
+    );
     for failure in [
-        CheckpointBarrierUnreachable::not_admitted("checkpoint-976f6746887c5ccd93b9d8bbe120ef06"),
+        not_admitted,
         CheckpointBarrierUnreachable::runtime_stopped(),
     ] {
         let error = anyhow::Error::new(failure).context("latch a session checkpoint");

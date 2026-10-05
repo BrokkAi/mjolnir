@@ -1,0 +1,26 @@
+[
+  {
+    "id": "model",
+    "name": "Model",
+    "type": "select",
+    "currentValue": "gpt-6.9-astra",
+    "options": [
+      {"value": "gpt-6.9-astra", "name": "Astra 6.9"},
+      {"value": "gpt-6.10-astra", "name": "Astra 6.10"},
+      {"value": "gpt-6.9-luna", "name": "Luna 6.9"},
+      {"value": "gpt-6.10-luna", "name": "Luna 6.10"}
+    ]
+  },
+  {
+    "id": "effort",
+    "name": "Reasoning effort",
+    "type": "select",
+    "currentValue": "medium",
+    "options": [
+      {"value": "low", "name": "Low"},
+      {"value": "medium", "name": "Medium"},
+      {"value": "high", "name": "High"},
+      {"value": "xhigh", "name": "Extra high"}
+    ]
+  }
+]

@@ -1,0 +1,4 @@
+HTTP 400
+{
+  "error": "no eligible profile offers model \"grok-4.6\". Offered: codex-1 (gpt-6.6). Could not check: claude-2 (authentication expired)."
+}

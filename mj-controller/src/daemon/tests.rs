@@ -6599,6 +6599,57 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
 }
 
 #[tokio::test]
+async fn go_startup_session_falls_back_when_the_remembered_session_is_archived() {
+    let mut archived = runtime_test_session("remembered", "workspace", SessionState::Stopped);
+    archived.archived = true;
+    let mut older = runtime_test_session("older", "workspace", SessionState::Stopped);
+    older.updated_at = "2026-09-04T00:00:00Z".into();
+    let mut newest = runtime_test_session("newest", "workspace", SessionState::Stopped);
+    newest.updated_at = "2026-09-05T00:00:00Z".into();
+    let mut child = runtime_test_session("child", "workspace", SessionState::Stopped);
+    child.updated_at = "2026-10-01T00:00:00Z".into();
+    let mut elsewhere = runtime_test_session("elsewhere", "other-workspace", SessionState::Stopped);
+    elsewhere.updated_at = "2026-10-02T00:00:00Z".into();
+    let mut state = mj_core::state::State {
+        sessions: [archived, older, newest, child.clone(), elsewhere]
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect(),
+        ..mj_core::state::State::default()
+    };
+    state
+        .subagents
+        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
+    let runtime = test_runtime_state_holding(state);
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            test_metadata(address),
+            runtime,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+        .await
+        .expect("connect to daemon protocol test server");
+
+    let selected = client
+        .go_startup_session("workspace".into(), Some("remembered".into()))
+        .await
+        .expect("query startup session")
+        .expect("eligible fallback session");
+
+    assert_eq!(selected.id, "newest");
+    drop(client);
+    assert!(server.await.expect("daemon task").is_ok());
+}
+
+#[tokio::test]
 async fn resume_candidates_larger_than_a_frame_arrive_whole() {
     let mut record = runtime_test_session("stopped", "workspace", SessionState::Stopped);
     record.acp_session_title = Some("t".repeat(500));

@@ -522,6 +522,35 @@ mod tests {
         assert_eq!(candidates[0].id, "codex3");
     }
 
+    #[test]
+    fn review_selection_uses_models_and_efforts_from_an_acp_config_fixture() {
+        // ACP v1 documents session options as id/name/type/currentValue/options.
+        let options: Vec<agent_client_protocol::schema::v1::SessionConfigOption> =
+            serde_json::from_str(include_str!(
+                "../tests/fixtures/review-acp-config-options.json"
+            ))
+            .expect("ACP v1 session config options");
+        let catalog = ReviewCapabilityChoices {
+            model_choices: mj_core::acp::session_config_choices(&options, "model"),
+            effort_choices: mj_core::acp::session_config_choices(&options, "effort"),
+            effort_capabilities_discovered: true,
+        };
+
+        let (main, specialist) = select_models(
+            ReviewProvider::Codex,
+            &ReviewConfig::default(),
+            &catalog,
+            true,
+        )
+        .expect("select advertised Codex review models");
+
+        assert_eq!(main.model.as_deref(), Some("gpt-6.10-astra"));
+        assert_eq!(main.effort.as_deref(), Some("medium"));
+        assert_eq!(specialist.model.as_deref(), Some("gpt-6.10-luna"));
+        assert_eq!(specialist.effort.as_deref(), Some("xhigh"));
+        assert!(specialist.fast_mode);
+    }
+
     fn catalog(ids: &[&str]) -> ReviewCapabilityChoices {
         ReviewCapabilityChoices {
             model_choices: ids

@@ -272,6 +272,23 @@ fn controller_fixture(directory: &Path, session_ids: &[&str]) -> Controller {
     }
 }
 
+#[tokio::test]
+async fn settings_discovery_skips_a_preferred_worker_removed_from_the_manager() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let manager = FakeManager::new(&["worker-b"]).await;
+    let controller = controller_fixture(directory.path(), &["worker-a", "worker-b"]);
+    let cancelled = AtomicBool::new(false);
+
+    let (session_id, handle) =
+        select_worker(&manager.control, &controller, Some("worker-a"), &cancelled)
+            .await
+            .expect("worker selection")
+            .expect("remaining active worker");
+
+    assert_eq!(session_id, "worker-b");
+    assert!(handle.view().connected);
+}
+
 fn start_request(
     request: RemoteSessionRequest,
 ) -> (
