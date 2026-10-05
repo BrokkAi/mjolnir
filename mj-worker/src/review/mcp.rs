@@ -139,6 +139,120 @@ fn tool_definition() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    #[cfg(unix)]
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_call_dispatches_over_the_worker_socket_and_returns_invalid_input_to_the_client() {
+        // MCP's documented JSON-RPC tools/call envelope carries one valid and one invalid call.
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().expect("temporary socket directory");
+        let socket = directory.path().join("review.sock");
+        let listener = UnixListener::bind(&socket).expect("bind worker dispatch socket");
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept valid dispatch");
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            stream
+                .read_line(&mut request)
+                .expect("read dispatch request");
+            let dispatch: LaneDispatch =
+                serde_json::from_str(request.trim()).expect("decode worker dispatch");
+            let reply = LaneDispatchReply {
+                started: vec!["reviewer-1".into()],
+                error: None,
+            };
+            let mut stream = stream.into_inner();
+            serde_json::to_writer(&mut stream, &reply).expect("write worker reply");
+            stream.write_all(b"\n").expect("terminate worker reply");
+            dispatch
+        });
+
+        let requests = concat!(
+            r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"spawn_specialist","arguments":{"reviewers":[{"agent_type":"control_flow","hypothesis":"A retry can duplicate a checkpoint operation."}]}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"spawn_specialist","arguments":{"reviewers":[]}}}"#,
+            "\n",
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        crate::mcp_stdio::serve(
+            requests.as_bytes(),
+            SharedWriter(Arc::clone(&output)),
+            crate::mcp_stdio::McpServer {
+                name: REVIEW_MCP_SERVER_NAME,
+                instructions: "test review dispatch",
+                tools: vec![tool_definition()],
+                dispatch: crate::mcp_stdio::Dispatch::Sequential,
+                progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
+                call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
+                    call_tool(&socket, params)
+                },
+            },
+        )
+        .expect("serve JSON-RPC calls");
+
+        let dispatch = worker.join().expect("worker socket handler");
+        assert_eq!(
+            dispatch,
+            LaneDispatch {
+                reviewers: vec![mj_review::lanes::ReviewSubagentRequest {
+                    agent_type: "control_flow".into(),
+                    hypothesis: "A retry can duplicate a checkpoint operation.".into(),
+                }],
+            }
+        );
+
+        let responses = String::from_utf8(output.lock().unwrap().clone())
+            .expect("JSON-RPC output is UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid JSON response"))
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0],
+            json!({
+                "jsonrpc": "2.0",
+                "id": 17,
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": "{\n  \"started\": [\n    \"reviewer-1\"\n  ],\n  \"note\": \"Reports arrive as later messages in this session. Do not poll or wait for them inside a tool call.\"\n}"
+                    }],
+                    "structuredContent": {
+                        "started": ["reviewer-1"],
+                        "note": "Reports arrive as later messages in this session. Do not poll or wait for them inside a tool call."
+                    },
+                    "isError": false
+                }
+            })
+        );
+        assert_eq!(
+            responses[1]["result"]["isError"], true,
+            "an invalid reviewer list is reported as a correctable MCP tool error"
+        );
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["error"],
+            "reviewers must contain at least one reviewer request"
+        );
+    }
 
     #[test]
     fn the_tool_schema_names_every_lane_and_demands_a_hypothesis() {
