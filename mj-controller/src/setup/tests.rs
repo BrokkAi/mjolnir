@@ -240,24 +240,71 @@ fn claude_credential_evidence_requires_a_nonempty_login_secret() {
 }
 
 #[test]
-fn github_origin_parser_accepts_standard_https_and_ssh_forms() {
-    for origin in [
-        "https://github.com/BrokkAi/hel.git",
-        "git@github.com:BrokkAi/hel.git",
-        "ssh://git@github.com/BrokkAi/hel.git",
-    ] {
-        assert_eq!(
-            github_repository_from_origin(origin),
-            Some(GithubRepository {
-                owner: "BrokkAi".into(),
-                repository: "hel".into(),
-            })
-        );
+fn golden_setup_origin_discovery() {
+    use std::fmt::Write as _;
+
+    fn append_summary(out: &mut String, repository: Option<GithubRepository>) {
+        let summary = SetupReport {
+            agents: Vec::new(),
+            repository: repository.as_ref().map(GithubRepository::source),
+        }
+        .summary();
+        if summary.is_empty() {
+            writeln!(out, "repository prompt: <none>").unwrap();
+            writeln!(out, "setup summary: <no project line>").unwrap();
+        } else {
+            writeln!(out, "repository prompt: {}", repository.unwrap().source()).unwrap();
+            writeln!(out, "setup summary: {}", summary.join(" ")).unwrap();
+        }
     }
-    assert_eq!(
+
+    let mut out = String::new();
+    for (label, origin) in [
+        ("HTTPS remote", "https://github.com/BrokkAi/hel.git"),
+        ("SSH remote", "git@github.com:BrokkAi/hel.git"),
+        ("SSH URL", "ssh://git@github.com/BrokkAi/hel.git"),
+    ] {
+        writeln!(out, "=== {label} (1 setup summary) ===").unwrap();
+        append_summary(&mut out, github_repository_from_origin(origin));
+    }
+    writeln!(out, "=== non-GitHub remote (1 setup summary) ===").unwrap();
+    append_summary(
+        &mut out,
         github_repository_from_origin("https://example.com/hel"),
-        None
     );
+
+    let executor = RuntimeProbeExecutor::new([ok(b"git@github.com:BrokkAi/hel.git\n")]);
+    let discovered = discover_github_repository(&executor, Path::new("/work/hel"));
+    let commands = executor.commands.borrow();
+    assert_eq!(commands[0].program, "git");
+    assert_eq!(
+        commands[0].args,
+        ["-C", "/work/hel", "remote", "get-url", "origin"]
+    );
+    writeln!(out, "=== shared executor success (1 setup summary) ===").unwrap();
+    writeln!(
+        out,
+        "probe: git -C <working-directory> remote get-url origin"
+    )
+    .unwrap();
+    append_summary(&mut out, discovered);
+
+    let failing = RuntimeProbeExecutor::new([failed(b"not a git repository")]);
+    writeln!(out, "=== shared executor failure (1 setup summary) ===").unwrap();
+    writeln!(out, "probe: command failed").unwrap();
+    append_summary(
+        &mut out,
+        discover_github_repository(&failing, Path::new("/work/plain")),
+    );
+    let missing = RuntimeProbeExecutor::new([]);
+    writeln!(out, "=== shared executor unavailable (1 setup summary) ===").unwrap();
+    writeln!(out, "probe: no result").unwrap();
+    append_summary(
+        &mut out,
+        discover_github_repository(&missing, Path::new("/work/plain")),
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "setup-origin-discovery", &out);
 }
 
 #[test]
@@ -386,34 +433,4 @@ fn ssh_config_parsing_returns_nothing_for_a_config_of_only_wildcards() {
         .is_empty()
     );
     assert!(ssh_config_aliases("").is_empty());
-}
-
-#[test]
-fn the_github_origin_is_discovered_through_the_shared_executor() {
-    let executor = RuntimeProbeExecutor::new([ok(b"git@github.com:BrokkAi/hel.git\n")]);
-
-    let repository = discover_github_repository(&executor, Path::new("/work/hel")).unwrap();
-
-    assert_eq!(repository.source(), "BrokkAi/hel");
-    let commands = executor.commands.borrow();
-    assert_eq!(commands[0].program, "git");
-    assert_eq!(
-        commands[0].args,
-        ["-C", "/work/hel", "remote", "get-url", "origin"]
-    );
-}
-
-#[test]
-fn no_github_origin_is_reported_when_the_probe_fails() {
-    let failing = RuntimeProbeExecutor::new([failed(b"not a git repository")]);
-    assert_eq!(
-        discover_github_repository(&failing, Path::new("/work/plain")),
-        None
-    );
-
-    let missing = RuntimeProbeExecutor::new([]);
-    assert_eq!(
-        discover_github_repository(&missing, Path::new("/work/plain")),
-        None
-    );
 }

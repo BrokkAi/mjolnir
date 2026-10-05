@@ -1,0 +1,18 @@
+=== reset and healthy usage (1 profile row) ===
+codex-1 | 5H 70% left, resets 10:00 Jun 17 | error: none
+=== expired login (1 profile row) ===
+claude2 | login expired | error: login expired
+=== other provider error (1 profile row) ===
+claude2 | unavailable | error: unavailable
+=== shared reset (1 profile row) ===
+codex-1 | 5H 70% left, resets 10:00 Jun 17 · Week 55% left | error: none
+=== exhausted weekly window (1 profile row) ===
+claude | Week 0% left, resets 03:59 Aug 14 | error: none
+=== weekly and monthly long windows (2 profile rows) ===
+grok | Week 60% left | error: none | long-window: Week
+grok | Month 60% left | error: none | long-window: Month
+=== sustainable Kimi pace (1 profile row) ===
+kimi | Week 94% left, resets 12:22 Aug 18 | error: none
+=== short-window projection (2 window rows) ===
+70% remaining | exhausts before reset: true | 5H 70% left, resets later
+80% remaining | exhausts before reset: false | no quota windows reported

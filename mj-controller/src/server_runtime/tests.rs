@@ -85,61 +85,10 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     }
 }
 
-#[test]
-fn viewer_config_options_publish_current_advertised_values() {
-    let make_options = |model, effort| {
-        vec![
-            SessionConfigOption::select(
-                "model_selector",
-                "Model",
-                model,
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new("sonnet", "Claude Sonnet"),
-                    SessionConfigSelectOption::new("opus", "Claude Opus"),
-                ]),
-            )
-            .category(SessionConfigOptionCategory::Model),
-            SessionConfigOption::select(
-                "reasoning_effort",
-                "Effort",
-                effort,
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new("high", "High"),
-                    SessionConfigSelectOption::new("max", "Maximum"),
-                ]),
-            ),
-        ]
-    };
-    let options = make_options("sonnet", "high");
-    let defaults = mj_core::acp::AcpSessionFacts::from_operational(
-        HarnessKind::Claude,
-        &BTreeMap::new(),
-        &options,
-        None,
-    );
-    let projected = crate::server::viewer_config_options(&options, &defaults);
-    assert_eq!(
-        projected
-            .iter()
-            .map(|option| (option.key.as_str(), option.current.as_deref()))
-            .collect::<Vec<_>>(),
-        [("model", Some("sonnet")), ("effort", Some("high"))]
-    );
-
-    let options = make_options("opus", "max");
-    let updated = mj_core::acp::AcpSessionFacts::from_operational(
-        HarnessKind::Claude,
-        &BTreeMap::new(),
-        &options,
-        None,
-    );
-    let projected = crate::server::viewer_config_options(&options, &updated);
-    assert_eq!(projected[0].current.as_deref(), Some("opus"));
-    assert_eq!(projected[1].current.as_deref(), Some("max"));
-}
-
 #[tokio::test]
-async fn explicit_tls_takes_precedence_over_tailscale_detection() {
+async fn golden_viewer_listener_resolution() {
+    use std::fmt::Write as _;
+
     let resolved = resolve_server_args(
         ServerArgs {
             bind: "0.0.0.0:4443".into(),
@@ -163,6 +112,36 @@ async fn explicit_tls_takes_precedence_over_tailscale_detection() {
     );
     assert!(resolved.tailscale.is_none());
     assert!(resolved.fallback_reason.is_none());
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "=== explicit TLS takes precedence (1 viewer endpoint) ==="
+    )
+    .unwrap();
+    writeln!(out, "viewer URL: {}", resolved.viewer_url).unwrap();
+    writeln!(out, "listener bind: {}", resolved.bind).unwrap();
+    writeln!(
+        out,
+        "TLS files: {}, {}",
+        resolved.tls_files.as_ref().unwrap().0.display(),
+        resolved.tls_files.as_ref().unwrap().1.display()
+    )
+    .unwrap();
+    writeln!(out, "Tailscale detection: not used").unwrap();
+    writeln!(out, "fallback: none").unwrap();
+
+    let tailscale_bind = tailscale_bind("127.0.0.1:4765".parse().unwrap());
+    assert_eq!(tailscale_bind, "0.0.0.0:4765".parse().unwrap());
+    writeln!(out, "=== Tailscale listener bind (1 endpoint) ===").unwrap();
+    writeln!(out, "listener bind: {tailscale_bind}").unwrap();
+    writeln!(out, "configured port: 4765").unwrap();
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "viewer-listener-resolution",
+        &out,
+    );
 }
 
 #[tokio::test]
@@ -283,9 +262,11 @@ fn new_preflight_rejects_a_bare_project_without_a_git_head() {
 }
 
 #[test]
-fn new_preflight_accepts_a_git_project_for_a_bare_target() {
+fn golden_phone_new_session_preflight() {
+    use std::fmt::Write as _;
+
     let directory = std::env::current_dir().expect("the test has a working directory");
-    let answer = run_new_preflight(
+    let accepted = run_new_preflight(
         bare_preflight_config(),
         "hel".into(),
         "raw".into(),
@@ -293,12 +274,23 @@ fn new_preflight_accepts_a_git_project_for_a_bare_target() {
     )
     .expect("the repository running the test has a valid Git HEAD");
 
-    assert!(answer.dirty_repositories.is_empty());
-    assert_eq!(answer.project_directory, Some(directory));
-}
+    assert!(accepted.dirty_repositories.is_empty());
+    assert_eq!(accepted.project_directory, Some(directory));
+    let mut out = String::new();
+    writeln!(
+        out,
+        "=== raw local project accepted (1 preflight review) ==="
+    )
+    .unwrap();
+    let mut stable_review = accepted;
+    stable_review.project_directory = Some(PathBuf::from("<project>"));
+    writeln!(
+        out,
+        "{}",
+        serde_json::to_string_pretty(&stable_review).unwrap()
+    )
+    .unwrap();
 
-#[test]
-fn new_preflight_requires_network_sources_for_isolated_targets() {
     let mut config = Config::default();
     config.targets.insert(
         "podman".into(),
@@ -330,7 +322,26 @@ fn new_preflight_requires_network_sources_for_isolated_targets() {
     );
     let error = run_new_preflight(config, "hel".into(), "podman".into(), None)
         .expect_err("an isolated bundle cannot use a local source");
-    assert!(error.to_string().contains("repository"));
+    let detail = error.to_string();
+    assert!(detail.contains("repository"));
+    writeln!(
+        out,
+        "=== isolated project rejected (1 preflight review) ==="
+    )
+    .unwrap();
+    writeln!(out, "result: rejected").unwrap();
+    writeln!(
+        out,
+        "reason: {}",
+        detail.replace("/definitely/not/a/repository", "<local repository>")
+    )
+    .unwrap();
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "phone-new-session-preflight",
+        &out,
+    );
 }
 
 #[test]
@@ -662,20 +673,73 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     assert!(unknown.sessions[0].activity_details.is_none());
 }
 
-/// The session actions the viewer mirrors from the terminal are gated on the
-/// same facts the terminal checks: another workspace to move to, a container
-/// target, a session that is live or holds a recovery copy, and a turn
-/// running somewhere in the sub-agent tree.
 #[test]
-fn phone_snapshot_gates_the_terminal_session_actions() {
+fn golden_phone_session_snapshot() {
+    use std::fmt::Write as _;
+
+    fn section(out: &mut String, label: &str, size: &str, value: &serde_json::Value) {
+        writeln!(out, "=== {label} ({size}) ===").unwrap();
+        writeln!(out, "{}", serde_json::to_string_pretty(value).unwrap()).unwrap();
+    }
+
+    fn session_card(session: &crate::server::ViewerSession) -> serde_json::Value {
+        let mut value = serde_json::to_value(session).unwrap();
+        // The viewer formats relative activity clocks against SystemTime; the
+        // family assertions cover the other session-card fields.
+        value["activity"] = "<relative activity clock>".into();
+        value
+    }
+
+    let mut out = String::new();
+
+    let make_options = |model, effort| {
+        vec![
+            SessionConfigOption::select(
+                "model_selector",
+                "Model",
+                model,
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("sonnet", "Claude Sonnet"),
+                    SessionConfigSelectOption::new("opus", "Claude Opus"),
+                ]),
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning_effort",
+                "Effort",
+                effort,
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("high", "High"),
+                    SessionConfigSelectOption::new("max", "Maximum"),
+                ]),
+            ),
+        ]
+    };
+    for (label, model, effort) in [
+        ("initial advertised options", "sonnet", "high"),
+        ("updated advertised options", "opus", "max"),
+    ] {
+        let options = make_options(model, effort);
+        let facts = mj_core::acp::AcpSessionFacts::from_operational(
+            HarnessKind::Claude,
+            &BTreeMap::new(),
+            &options,
+            None,
+        );
+        let projected = crate::server::viewer_config_options(&options, &facts);
+        section(
+            &mut out,
+            label,
+            "1 session card configuration",
+            &serde_json::to_value(projected).unwrap(),
+        );
+    }
+
     let mut controller = controller_with_profiles(&["codex"]);
     controller.config.targets.insert(
         "podman".into(),
-        serde_json::from_value(serde_json::json!({
-            "kind": "local-podman",
-            "image": "image",
-        }))
-        .unwrap(),
+        serde_json::from_value(serde_json::json!({"kind": "local-podman", "image": "image"}))
+            .unwrap(),
     );
     for id in ["session-1", "child-1"] {
         let mut record = phone_session(id, 0);
@@ -731,96 +795,90 @@ fn phone_snapshot_gates_the_terminal_session_actions() {
         }))
         .unwrap()
     };
-    let operational = std::collections::BTreeMap::from([
+    let operational = BTreeMap::from([
         ("session-1".to_owned(), operational_state("session-1")),
         ("child-1".to_owned(), operational_state("child-1")),
     ]);
-    let project = |controller: &Controller,
-                   workspaces: &[mj_core::workspace::WorkspaceRecord],
-                   operational: &std::collections::BTreeMap<
-        String,
-        mj_core::relay::RelayOperationalState,
-    >| {
-        viewer_snapshot(
-            controller,
-            workspaces,
-            &std::collections::BTreeMap::new(),
-            &PhoneSessionViews {
-                native_agents: &Default::default(),
-                conversations: &Default::default(),
-                queued_prompts: &Default::default(),
-                active_user_shells: &Default::default(),
-                pending_elicitations: &Default::default(),
-                prompt_images: &Default::default(),
-                operational,
-                materialized_activity: &Default::default(),
-                project_sources: &PhoneProjectSources::default(),
-                operations: &Default::default(),
-                move_recoveries: &Default::default(),
-                capacity: &[],
-                launch_failures: &[],
-                reviews: &Default::default(),
-            },
-            1,
-        )
-    };
-
-    // A live session on a container target, with another workspace to move
-    // to, offers every action but interrupt all: no turn is running.
-    let snapshot = project(&controller, &two_workspaces, &operational);
-    let capabilities = &snapshot.sessions.0["session-1"].capabilities;
-    assert!(capabilities.change_workspace);
-    assert!(capabilities.container_settings);
-    assert!(capabilities.restart);
-    assert!(!capabilities.interrupt_all);
-
-    // One workspace leaves nothing to move to.
-    let snapshot = project(&controller, &one_workspace, &operational);
-    assert!(
-        !snapshot.sessions.0["session-1"]
-            .capabilities
-            .change_workspace
+    let project =
+        |controller: &Controller,
+         workspaces: &[mj_core::workspace::WorkspaceRecord],
+         operational: &BTreeMap<String, mj_core::relay::RelayOperationalState>| {
+            viewer_snapshot(
+                controller,
+                workspaces,
+                &BTreeMap::new(),
+                &PhoneSessionViews {
+                    native_agents: &Default::default(),
+                    conversations: &Default::default(),
+                    queued_prompts: &Default::default(),
+                    active_user_shells: &Default::default(),
+                    pending_elicitations: &Default::default(),
+                    prompt_images: &Default::default(),
+                    operational,
+                    materialized_activity: &Default::default(),
+                    project_sources: &PhoneProjectSources::default(),
+                    operations: &Default::default(),
+                    move_recoveries: &Default::default(),
+                    capacity: &[],
+                    launch_failures: &[],
+                    reviews: &Default::default(),
+                },
+                1,
+            )
+        };
+    let eligible = project(&controller, &two_workspaces, &operational);
+    section(
+        &mut out,
+        "live container session with a second workspace",
+        "1 session card",
+        &session_card(&eligible.sessions.0["session-1"]),
     );
-
-    // A turn running only in the child still offers interrupt all on the
-    // parent, which is the tree it reaches.
+    let one = project(&controller, &one_workspace, &operational);
+    section(
+        &mut out,
+        "only workspace",
+        "1 session card",
+        &session_card(&one.sessions.0["session-1"]),
+    );
     let mut busy = operational.clone();
     busy.get_mut("child-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
         started_at_ms: 1_000,
     });
-    let snapshot = project(&controller, &two_workspaces, &busy);
-    assert!(snapshot.sessions.0["session-1"].capabilities.interrupt_all);
-    assert!(snapshot.sessions.0["child-1"].capabilities.interrupt_all);
-
-    // A bare target has no container settings to record.
+    let child_busy = project(&controller, &two_workspaces, &busy);
+    section(
+        &mut out,
+        "turn running in child session",
+        "2 session cards",
+        &serde_json::json!({
+            "parent": session_card(&child_busy.sessions.0["session-1"]),
+            "child": session_card(&child_busy.sessions.0["child-1"])
+        }),
+    );
     controller
         .config
         .targets
         .insert("podman".into(), TargetTemplate::LocalBare);
-    let snapshot = project(&controller, &two_workspaces, &operational);
-    assert!(
-        !snapshot.sessions.0["session-1"]
-            .capabilities
-            .container_settings
+    let bare = project(&controller, &two_workspaces, &operational);
+    section(
+        &mut out,
+        "bare target",
+        "1 session card",
+        &session_card(&bare.sessions.0["session-1"]),
     );
-
-    // A suspended session without a recovery copy has nothing to restart
-    // from.
     controller
         .state
         .sessions
         .get_mut("session-1")
         .unwrap()
         .state = SessionState::Stopped;
-    let snapshot = project(&controller, &two_workspaces, &operational);
-    assert!(!snapshot.sessions.0["session-1"].capabilities.restart);
-}
+    let stopped = project(&controller, &two_workspaces, &operational);
+    section(
+        &mut out,
+        "stopped session without recovery copy",
+        "1 session card",
+        &session_card(&stopped.sessions.0["session-1"]),
+    );
 
-/// The card's last-message clock is the newest top-level user or agent
-/// message; tool entries never move it, and entries without a recording time
-/// leave it absent.
-#[test]
-fn phone_snapshot_reports_the_last_top_level_message_time() {
     let mut controller = controller_with_profiles(&["codex"]);
     let mut record = phone_session("session-1", 0);
     record.state = SessionState::Running;
@@ -852,7 +910,7 @@ fn phone_snapshot_reports_the_last_top_level_message_time() {
             },
         )])
     };
-    let project =
+    let project_conversation =
         |conversations: &mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>| {
             viewer_snapshot(
                 &controller,
@@ -877,32 +935,90 @@ fn phone_snapshot_reports_the_last_top_level_message_time() {
                 1,
             )
         };
-
-    let snapshot = project(&conversations(vec![
+    let with_top_level = project_conversation(&conversations(vec![
         entry(1, "user", Some(1_000)),
         entry(2, "tool", Some(9_999)),
         entry(3, "agent", Some(2_000)),
     ]));
-    let session = &snapshot.sessions.0["session-1"];
-    assert_eq!(session.last_message_at_ms, Some(2_000));
-    assert!(session.conversation_available);
-
-    let snapshot = project(&conversations(vec![
+    let session = &with_top_level.sessions.0["session-1"];
+    section(
+        &mut out,
+        "last top-level message time",
+        "1 session card",
+        &session_card(session),
+    );
+    let without_times = project_conversation(&conversations(vec![
         entry(1, "user", None),
         entry(2, "agent", None),
     ]));
-    assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
-
-    let snapshot = project(&mj_core::snapshot_map::SnapshotMap::new());
-    assert_eq!(snapshot.sessions.0["session-1"].last_message_at_ms, None);
-}
-
-#[test]
-fn tailscale_listener_preserves_the_configured_port() {
-    assert_eq!(
-        tailscale_bind("127.0.0.1:4765".parse().unwrap()),
-        "0.0.0.0:4765".parse().unwrap()
+    let session = &without_times.sessions.0["session-1"];
+    section(
+        &mut out,
+        "messages without recorded times",
+        "1 session card",
+        &session_card(session),
     );
+    let no_conversation = project_conversation(&mj_core::snapshot_map::SnapshotMap::new());
+    let session = &no_conversation.sessions.0["session-1"];
+    section(
+        &mut out,
+        "conversation not available",
+        "1 session card",
+        &session_card(session),
+    );
+
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let session = phone_session(session_id, 0);
+    let mut state = State::default();
+    let mut active_actions = std::collections::BTreeSet::new();
+    let mut action_sessions = BTreeMap::new();
+    track_started_phone_session(
+        &mut state,
+        &mut active_actions,
+        &mut action_sessions,
+        7,
+        session,
+    )
+    .unwrap();
+    let mut controller = controller_with_profiles(&[]);
+    controller.state = state;
+    let started = viewer_snapshot(
+        &controller,
+        &[],
+        &BTreeMap::new(),
+        &PhoneSessionViews {
+            native_agents: &Default::default(),
+            conversations: &Default::default(),
+            queued_prompts: &Default::default(),
+            active_user_shells: &Default::default(),
+            pending_elicitations: &Default::default(),
+            prompt_images: &Default::default(),
+            operational: &Default::default(),
+            materialized_activity: &Default::default(),
+            project_sources: &PhoneProjectSources::default(),
+            operations: &Default::default(),
+            move_recoveries: &Default::default(),
+            capacity: &[],
+            launch_failures: &[],
+            reviews: &Default::default(),
+        },
+        1,
+    );
+    let row = &started.sessions.0[session_id];
+    section(
+        &mut out,
+        "phone launch before provisioning completes",
+        "1 session card and action",
+        &serde_json::json!({
+            "session": session_card(row),
+            "action": {
+                "active": active_actions.contains(session_id),
+                "session_id": action_sessions.get(&7)
+            }
+        }),
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "phone-session-snapshot", &out);
 }
 
 fn controller_with_profiles(ids: &[&str]) -> Controller {
@@ -1660,32 +1776,6 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
     assert!(!quota_refreshed(QUOTA_REFRESH_INTERVAL));
     assert!(!quota_refreshed(QUOTA_STALE_AFTER));
     assert!(quota_refreshed(QUOTA_STALE_AFTER + Duration::from_secs(1)));
-}
-
-#[test]
-fn started_phone_session_is_visible_and_mapped_before_provisioning() {
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let session = phone_session(session_id, 0);
-    let mut state = State::default();
-    let mut active_actions = std::collections::BTreeSet::new();
-    let mut action_sessions = std::collections::BTreeMap::new();
-
-    track_started_phone_session(
-        &mut state,
-        &mut active_actions,
-        &mut action_sessions,
-        7,
-        session,
-    )
-    .unwrap();
-
-    assert_eq!(state.sessions[session_id].state, SessionState::Provisioning);
-    assert_eq!(state.sessions[session_id].display_title(), "Phone launch");
-    assert!(active_actions.contains(session_id));
-    assert_eq!(
-        action_sessions.get(&7).map(String::as_str),
-        Some(session_id)
-    );
 }
 
 #[test]

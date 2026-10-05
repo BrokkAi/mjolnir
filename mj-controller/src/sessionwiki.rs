@@ -2725,25 +2725,52 @@ mod tests {
         }
     }
 
-    /// A hit is found whatever the case of the query or of the transcript, and
-    /// the reported range covers the matched text in the returned block.
     #[test]
-    fn transcript_hits_locates_case_insensitive_matches() {
-        let session = indexed(vec![
+    fn golden_wiki_resume_preview_search() {
+        use std::fmt::Write as _;
+
+        fn response(out: &mut String, label: &str, transcript: &WikiHitTranscript) {
+            writeln!(
+                out,
+                "=== {label} ({} preview blocks) ===",
+                transcript.blocks.len()
+            )
+            .unwrap();
+            writeln!(out, "{}", serde_json::to_string_pretty(transcript).unwrap()).unwrap();
+        }
+
+        let mut out = String::new();
+        let case_insensitive = indexed(vec![
             (Role::User, "Make the Tests green"),
             (Role::Assistant, "the tests are green now"),
         ]);
+        response(
+            &mut out,
+            "case-insensitive query with user and assistant hits",
+            &hit_transcript(&case_insensitive, "TESTS", 0, 4_000),
+        );
 
-        let found = hit_transcript(&session, "TESTS", 0, 4_000);
+        let tool_only_and_assistant = indexed(vec![
+            (Role::User, "make it build"),
+            (Role::Tool, "cargo build --needle"),
+            (Role::Assistant, "it builds"),
+        ]);
+        response(
+            &mut out,
+            "query found only in tool output",
+            &hit_transcript(&tool_only_and_assistant, "needle", 1, 4_000),
+        );
+        response(
+            &mut out,
+            "tool context beside an assistant hit",
+            &hit_transcript(&tool_only_and_assistant, "builds", 1, 4_000),
+        );
 
-        assert_eq!(found.blocks.len(), 2, "both messages contain the query");
-        assert_eq!(found.blocks[0].role, "user");
-        let (start, end) = found.blocks[0].hits[0];
-        assert_eq!(&found.blocks[0].text[start..end], "Tests");
-        let (start, end) = found.blocks[1].hits[0];
-        assert_eq!(&found.blocks[1].text[start..end], "tests");
-        assert!(!found.blocks[0].truncated);
-        assert_eq!(found.omitted_after, 0);
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "wiki-resume-preview-search",
+            &out,
+        );
     }
 
     /// Context messages come back around each hit, with the gap between two
@@ -2788,39 +2815,6 @@ mod tests {
         );
         assert_eq!(found.omitted_after, 1, "the last message is not shown");
         assert!(found.blocks[0].hits.is_empty(), "context has no hits");
-    }
-
-    /// A query that only occurs in tool output finds nothing, and a tool
-    /// message beside a real match still comes back as context. Tool text is
-    /// machine chatter: anchoring a passage on it opens the preview on command
-    /// output the reader never wrote, and the preview collapses tool runs, so
-    /// the match could not be shown even if it were returned.
-    #[test]
-    fn transcript_hits_never_anchor_on_tool_output() {
-        let session = indexed(vec![
-            (Role::User, "make it build"),
-            (Role::Tool, "cargo build --needle"),
-            (Role::Assistant, "it builds"),
-        ]);
-
-        let only_in_a_tool = hit_transcript(&session, "needle", 1, 4_000);
-        assert!(
-            only_in_a_tool.blocks.is_empty(),
-            "tool output must not anchor a passage, got {:?}",
-            only_in_a_tool.blocks
-        );
-
-        let beside_a_match = hit_transcript(&session, "builds", 1, 4_000);
-        let shown: Vec<(&str, bool)> = beside_a_match
-            .blocks
-            .iter()
-            .map(|block| (block.role.as_str(), !block.hits.is_empty()))
-            .collect();
-        assert_eq!(
-            shown,
-            vec![("tool", false), ("assistant", true)],
-            "a tool message is still context around a real match"
-        );
     }
 
     /// A long message is cut down to the caller's budget around its first hit,
@@ -3514,7 +3508,7 @@ mod tests {
         }
 
         #[test]
-        fn user_and_agent_messages_match_and_tool_output_does_not() {
+        fn golden_sessions_filter_search() {
             let connection = index(&[
                 ("said-by-user", &[("user", "please fix the Zebra crossing")]),
                 ("said-by-agent", &[("assistant", "the zebra is fixed")]),
@@ -3529,13 +3523,24 @@ mod tests {
                 ("gone", &[("user", "zebra")]),
             ]);
             let live = live(&["said-by-user", "said-by-agent", "only-in-tool", "both"]);
+            let found = text_matches_in(&connection, "zebra", &live).unwrap();
             assert_eq!(
-                text_matches_in(&connection, "zebra", &live).unwrap(),
+                found,
                 matches(&[
                     ("both", SessionTextMatchKind::User),
                     ("said-by-agent", SessionTextMatchKind::Agent),
                     ("said-by-user", SessionTextMatchKind::User),
                 ])
+            );
+            let rendered = format!(
+                "=== controller text search response ({} matches) ===\n{}\n",
+                found.len(),
+                serde_json::to_string_pretty(&found).unwrap()
+            );
+            mj_core::golden::assert_golden(
+                env!("CARGO_MANIFEST_DIR"),
+                "sessions-filter-search",
+                &rendered,
             );
         }
 

@@ -625,84 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn expected_continuation_is_visible_without_claiming_running_work() {
-        let activity = SessionActivity {
-            state: Some(mj_core::activity::ActivityState::Expecting { since_ms: 1_000 }),
-            ..Default::default()
-        };
-        assert!(!activity.is_idle(None));
-        assert!(!activity.is_working(None, false));
-        assert_eq!(
-            activity.details(None, None).kind,
-            SessionActivityKind::Expecting
-        );
-        assert_eq!(
-            activity.display_clock(10, None, None, true),
-            "expecting the agent to continue"
-        );
-        assert_eq!(
-            format_activity_clock(10, None, &activity),
-            "expecting the agent to continue"
-        );
-        assert_eq!(
-            format_activity_columns(10, None, None, &activity),
-            vec!["expecting the agent to continue"]
-        );
-        assert!(activity.is_working(Some(1), false));
-    }
-
-    #[test]
-    fn claude_background_agents_render_bg_until_the_live_set_is_empty() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut relay = mj_worker::relay::DurableRelay::open(
-            temp.path(),
-            "018f9dd2-a3b4-7c8d-9000-123456789abc",
-            "1.0.0",
-        )
-        .unwrap();
-        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::ClaudeTasks);
-        relay
-            .claude_background_tasks_changed(vec![mj_core::acp::ClaudeBackgroundTask {
-                task_id: "design-review".into(),
-                description: "Design simplification and cleanup review".into(),
-            }])
-            .unwrap();
-        let state = relay.operational_state();
-        let activity = SessionActivity::of(&state);
-        let now = (state.background_commands[0].started_at_ms / 1_000) as u64 + 60;
-        assert!(!activity.is_idle(None));
-        assert_eq!(format_activity_clock(now, None, &activity), "[BG 1m00s]");
-        assert_eq!(
-            format_activity_columns(now, None, None, &activity),
-            vec!["  BG 1m00s"]
-        );
-
-        relay.claude_background_tasks_changed(Vec::new()).unwrap();
-        let activity = SessionActivity::of(&relay.operational_state());
-        assert!(activity.is_idle(None));
-        assert_eq!(format_activity_clock(now, None, &activity), "[idle]");
-    }
-
-    #[test]
-    fn running_clocks_read_as_the_two_largest_units_that_fit() {
-        for (seconds, expected) in [
-            (0, "0s"),
-            (36, "36s"),
-            (59, "59s"),
-            (60, "1m00s"),
-            (2_616, "43m36s"),
-            (3_599, "59m59s"),
-            (3_600, "1h00m"),
-            (6_180, "1h43m"),
-            (86_399, "23h59m"),
-            (86_400, "1d00h"),
-            (183_600, "2d03h"),
-        ] {
-            assert_eq!(format_clock(seconds), expected, "{seconds} seconds");
-        }
-    }
-
-    #[test]
     fn a_live_sdk_step_proves_work_but_an_idle_step_clock_does_not() {
         let temp = tempfile::tempdir().unwrap();
         let relay =
@@ -723,28 +645,6 @@ mod tests {
         state.execution = mj_core::relay::RelayExecutionState::Running;
         state.current_step_started_at_ms = None;
         assert!(!SessionActivity::of(&state).is_working(None, false));
-    }
-
-    #[test]
-    fn turn_clock_formats_running_periods_and_marks_idle_sessions() {
-        assert_eq!(format_turn_clock(500, Some(375)), "2m05s");
-        assert_eq!(format_turn_clock(400_000, Some(1_000)), "4d14h");
-        assert_eq!(format_turn_clock(5_000, None), "[idle]");
-    }
-
-    #[test]
-    fn active_goal_between_turns_is_not_idle_or_computation() {
-        let activity = SessionActivity {
-            pursuing_goal: true,
-            ..Default::default()
-        };
-        assert!(!activity.is_idle(None));
-        assert!(!activity.is_working(None, false));
-        assert_eq!(
-            activity.display_clock(100, None, None, false),
-            "Pursuing goal"
-        );
-        assert_eq!(activity.details(None, None).kind, SessionActivityKind::Goal);
     }
 
     fn background(started_at_ms: i64, command: &str) -> SessionActivity {
@@ -768,66 +668,6 @@ mod tests {
             }],
             active_user_shells: Vec::new(),
         }
-    }
-
-    #[test]
-    fn a_foreground_tool_takes_precedence_over_older_background_work() {
-        let mut activity = background(17_384_000, "cargo test --old");
-        activity.foreground_tool_started_at_ms = Some(19_900_000);
-
-        assert_eq!(
-            format_activity_columns(20_000, None, None, &activity),
-            vec!["Step 1m40s".to_owned()]
-        );
-        assert_eq!(
-            format_activity_clock(20_000, None, &activity),
-            "[Step 1m40s]"
-        );
-    }
-
-    #[test]
-    fn a_session_row_reads_as_its_turn_its_background_work_or_idle() {
-        let idle = SessionActivity::default();
-        let waiting = background(17_384_000, "cargo test");
-        for (label, activity, turn_started, columns, cell) in [
-            (
-                "running",
-                &idle,
-                Some(17_384_u64),
-                vec!["Turn 43m36s".to_owned(), "Step 12s".to_owned()],
-                "43m36s",
-            ),
-            (
-                "background",
-                &waiting,
-                None,
-                vec!["  BG 43m36s".to_owned()],
-                "[BG 43m36s]",
-            ),
-            ("idle", &idle, None, vec!["[idle]".to_owned()], "[idle]"),
-        ] {
-            assert_eq!(
-                format_activity_columns(20_000, turn_started, Some(19_988_000), activity),
-                columns,
-                "{label} columns"
-            );
-            assert_eq!(
-                format_activity_clock(20_000, turn_started, activity),
-                cell,
-                "{label} cell"
-            );
-        }
-    }
-
-    #[test]
-    fn a_row_reads_its_step_as_the_whole_turn_when_no_step_is_reported() {
-        // A worker too old to time steps sends nothing, and a turn whose
-        // first update has not arrived has no step yet. Both read as the
-        // turn rather than as a step of zero.
-        assert_eq!(
-            format_activity_columns(20_000, Some(17_384), None, &SessionActivity::default()),
-            vec!["Turn 43m36s".to_owned(), "Step 43m36s".to_owned()]
-        );
     }
 
     #[test]
@@ -1068,62 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_clock_distinguishes_a_finished_turn_with_background_work() {
-        let mut activity = background(20_000, "build");
-        activity.activity_turn_started_at_ms = Some(10_000);
-        assert_eq!(
-            activity.display_clock(60, Some(10), Some(50_000), false),
-            "Working 50s"
-        );
-        assert_eq!(
-            activity.display_clock(60, Some(10), Some(50_000), true),
-            "T 50s S 10s"
-        );
-        assert_eq!(activity.display_clock(70, None, None, false), "1 task 50s");
-        assert_eq!(activity.display_clock(70, None, None, true), "BG 50s");
-        activity.activity_turn_started_at_ms = Some(65_000);
-        assert_eq!(
-            activity.display_clock(70, Some(65), None, false),
-            "Working 5s"
-        );
-        activity.background_commands.clear();
-        assert_eq!(activity.display_clock(70, None, None, false), "Idle");
-    }
-
-    #[test]
-    fn background_status_counts_tasks_and_user_shells_without_claiming_foreground_work() {
-        let mut activity = background(20_000, "build");
-        activity
-            .background_commands
-            .push(mj_core::relay::BackgroundCommand {
-                id: "second".into(),
-                started_at_ms: 30_000,
-                command: "test".into(),
-                can_stop: false,
-            });
-        assert_eq!(activity.display_clock(70, None, None, false), "2 tasks 50s");
-        activity
-            .active_user_shells
-            .push(mj_core::relay::ActiveUserShell {
-                command_id: "shell".into(),
-                command: "watch".into(),
-                created_at_ms: 40_000,
-                started_at_ms: Some(40_000),
-            });
-        assert_eq!(
-            activity.display_clock(70, None, None, false),
-            "2 tasks, 1 shell 50s"
-        );
-        activity.background_commands.clear();
-        assert_eq!(activity.display_clock(70, None, None, false), "1 shell 30s");
-        activity.foreground_tool_started_at_ms = Some(60_000);
-        assert_eq!(activity.display_clock(70, None, None, false), "Working 10s");
-        activity.foreground_tool_started_at_ms = None;
-        activity.active_user_shells.clear();
-        assert_eq!(activity.display_clock(70, None, None, false), "Idle");
-    }
-
-    #[test]
     fn activity_indicators_ignore_stale_phases_and_questions_without_work() {
         let mut activity = SessionActivity {
             pursuing_goal: Default::default(),
@@ -1141,5 +925,257 @@ mod tests {
         activity.execution = Some(mj_core::relay::RelayExecutionState::Closed);
         assert!(!activity.is_working(Some(10), false));
         assert_eq!(activity.display_clock(60, Some(10), None, false), "Closed");
+    }
+
+    #[test]
+    fn golden_cli_dashboard_session_activity() {
+        use std::fmt::Write as _;
+
+        fn row(
+            out: &mut String,
+            label: &str,
+            now: u64,
+            turn_started: Option<u64>,
+            step_started_ms: Option<u64>,
+            activity: &SessionActivity,
+        ) {
+            writeln!(out, "=== {label} (1 session row) ===").unwrap();
+            writeln!(
+                out,
+                "wide activity: {}",
+                format_activity_columns(now, turn_started, step_started_ms, activity).join("  ")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "compact activity: {}",
+                format_activity_clock(now, turn_started, activity)
+            )
+            .unwrap();
+        }
+
+        let mut out = String::new();
+
+        let expecting = SessionActivity {
+            state: Some(mj_core::activity::ActivityState::Expecting { since_ms: 1_000 }),
+            ..Default::default()
+        };
+        row(
+            &mut out,
+            "expected continuation",
+            10,
+            None,
+            None,
+            &expecting,
+        );
+        writeln!(
+            out,
+            "idle: {}; working without turn: {}; working with turn: {}; kind: {:?}",
+            expecting.is_idle(None),
+            expecting.is_working(None, false),
+            expecting.is_working(Some(1), false),
+            expecting.details(None, None).kind
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "chat title: {}",
+            expecting.display_clock(10, None, None, true)
+        )
+        .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = mj_worker::relay::DurableRelay::open(
+            temp.path(),
+            "018f9dd2-a3b4-7c8d-9000-123456789abc",
+            "1.0.0",
+        )
+        .unwrap();
+        relay.set_background_work_policy(mj_worker::relay::BackgroundWorkPolicy::ClaudeTasks);
+        relay
+            .claude_background_tasks_changed(vec![mj_core::acp::ClaudeBackgroundTask {
+                task_id: "design-review".into(),
+                description: "Design simplification and cleanup review".into(),
+            }])
+            .unwrap();
+        let state = relay.operational_state();
+        let now = (state.background_commands[0].started_at_ms / 1_000) as u64 + 60;
+        let activity = SessionActivity::of(&state);
+        row(
+            &mut out,
+            "Claude background agent active",
+            now,
+            None,
+            None,
+            &activity,
+        );
+        writeln!(out, "idle: {}", activity.is_idle(None)).unwrap();
+        relay.claude_background_tasks_changed(Vec::new()).unwrap();
+        let activity = SessionActivity::of(&relay.operational_state());
+        row(
+            &mut out,
+            "Claude background agent finished",
+            now,
+            None,
+            None,
+            &activity,
+        );
+        writeln!(out, "idle: {}", activity.is_idle(None)).unwrap();
+
+        writeln!(out, "=== elapsed clock cells (11 values) ===").unwrap();
+        for (seconds, expected) in [
+            (0, "0s"),
+            (36, "36s"),
+            (59, "59s"),
+            (60, "1m00s"),
+            (2_616, "43m36s"),
+            (3_599, "59m59s"),
+            (3_600, "1h00m"),
+            (6_180, "1h43m"),
+            (86_399, "23h59m"),
+            (86_400, "1d00h"),
+            (183_600, "2d03h"),
+        ] {
+            writeln!(out, "{seconds}s -> {}", format_clock(seconds)).unwrap();
+            assert_eq!(format_clock(seconds), expected);
+        }
+        writeln!(out, "=== turn clock cells (3 states) ===").unwrap();
+        for (now, started) in [(500, Some(375)), (400_000, Some(1_000)), (5_000, None)] {
+            writeln!(out, "{}", format_turn_clock(now, started)).unwrap();
+        }
+
+        let goal = SessionActivity {
+            pursuing_goal: true,
+            ..Default::default()
+        };
+        row(
+            &mut out,
+            "active goal between turns",
+            100,
+            None,
+            None,
+            &goal,
+        );
+        writeln!(
+            out,
+            "idle: {}; working: {}; kind: {:?}",
+            goal.is_idle(None),
+            goal.is_working(None, false),
+            goal.details(None, None).kind
+        )
+        .unwrap();
+
+        let mut foreground = background(17_384_000, "cargo test --old");
+        foreground.foreground_tool_started_at_ms = Some(19_900_000);
+        row(
+            &mut out,
+            "foreground tool over older background task",
+            20_000,
+            None,
+            None,
+            &foreground,
+        );
+
+        let idle = SessionActivity::default();
+        let waiting = background(17_384_000, "cargo test");
+        row(
+            &mut out,
+            "running turn and step",
+            20_000,
+            Some(17_384),
+            Some(19_988_000),
+            &idle,
+        );
+        row(
+            &mut out,
+            "background work",
+            20_000,
+            None,
+            Some(19_988_000),
+            &waiting,
+        );
+        row(&mut out, "idle session", 20_000, None, None, &idle);
+        row(
+            &mut out,
+            "turn with no reported step",
+            20_000,
+            Some(17_384),
+            None,
+            &idle,
+        );
+
+        let mut compact = background(20_000, "build");
+        compact.activity_turn_started_at_ms = Some(10_000);
+        writeln!(out, "=== narrow activity clock (6 states) ===").unwrap();
+        for (label, now, turn, turn_finished, include_turn_step, activity) in [
+            (
+                "turn and background",
+                60,
+                Some(10),
+                Some(50_000),
+                false,
+                compact.clone(),
+            ),
+            (
+                "turn and background with both clocks",
+                60,
+                Some(10),
+                Some(50_000),
+                true,
+                compact.clone(),
+            ),
+            ("background only", 70, None, None, false, compact.clone()),
+            (
+                "background shorthand",
+                70,
+                None,
+                None,
+                true,
+                compact.clone(),
+            ),
+            ("newer turn", 70, Some(65), None, false, compact.clone()),
+            ("idle", 70, None, None, false, SessionActivity::default()),
+        ] {
+            writeln!(
+                out,
+                "{label}: {}",
+                activity.display_clock(now, turn, turn_finished, include_turn_step)
+            )
+            .unwrap();
+        }
+
+        let mut tasks = background(20_000, "build");
+        tasks
+            .background_commands
+            .push(mj_core::relay::BackgroundCommand {
+                id: "second".into(),
+                started_at_ms: 30_000,
+                command: "test".into(),
+                can_stop: false,
+            });
+        writeln!(out, "=== background task and shell counts (5 states) ===").unwrap();
+        writeln!(out, "{}", tasks.display_clock(70, None, None, false)).unwrap();
+        tasks
+            .active_user_shells
+            .push(mj_core::relay::ActiveUserShell {
+                command_id: "shell".into(),
+                command: "watch".into(),
+                created_at_ms: 40_000,
+                started_at_ms: Some(40_000),
+            });
+        writeln!(out, "{}", tasks.display_clock(70, None, None, false)).unwrap();
+        tasks.background_commands.clear();
+        writeln!(out, "{}", tasks.display_clock(70, None, None, false)).unwrap();
+        tasks.foreground_tool_started_at_ms = Some(60_000);
+        writeln!(out, "{}", tasks.display_clock(70, None, None, false)).unwrap();
+        tasks.foreground_tool_started_at_ms = None;
+        tasks.active_user_shells.clear();
+        writeln!(out, "{}", tasks.display_clock(70, None, None, false)).unwrap();
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "cli-dashboard-session-activity",
+            &out,
+        );
     }
 }

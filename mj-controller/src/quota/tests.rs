@@ -66,129 +66,163 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
 }
 
 #[test]
-fn compact_includes_reset_and_error_states() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![QuotaWindow {
-            label: "5H".into(),
-            remaining_percent: Some(70),
+fn golden_quota_compact_row() {
+    use std::fmt::Write as _;
+
+    fn window(label: &str, remaining: u8, resets: Option<&str>, epoch: Option<i64>) -> QuotaWindow {
+        QuotaWindow {
+            label: label.into(),
+            remaining_percent: Some(remaining),
             used: None,
             limit: None,
-            resets: Some("10:00 Jun 17".into()),
-            resets_at_epoch_seconds: Some(14_400),
-        }],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    assert!(report.compact().contains("70% left"));
-    assert!(report.compact().contains("resets 10:00 Jun 17"));
-}
+            resets: resets.map(str::to_owned),
+            resets_at_epoch_seconds: epoch,
+        }
+    }
+    fn report(
+        profile_id: &str,
+        harness: HarnessKind,
+        windows: Vec<QuotaWindow>,
+        error: Option<&str>,
+    ) -> ProfileQuota {
+        ProfileQuota {
+            banked_resets: None,
+            profile_id: profile_id.into(),
+            harness,
+            windows,
+            extra: None,
+            error: error.map(str::to_owned),
+            refreshed_at_epoch_seconds: 0,
+            rate_limited_until_epoch_seconds: None,
+        }
+    }
+    fn row(report: &ProfileQuota) -> String {
+        format!(
+            "{} | {} | error: {}",
+            report.profile_id,
+            report.compact(),
+            report.error_label().unwrap_or_else(|| "none".into())
+        )
+    }
 
-#[test]
-fn compact_shows_login_expired_without_unavailable_prefix() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "claude2".into(),
-        harness: HarnessKind::Claude,
-        windows: vec![],
-        extra: None,
-        error: Some(claude_usage::LOGIN_EXPIRED.into()),
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    assert_eq!(report.compact(), claude_usage::LOGIN_EXPIRED);
-    assert_eq!(
-        report.error_label().as_deref(),
-        Some(claude_usage::LOGIN_EXPIRED)
+    let mut out = String::new();
+    let ordinary = report(
+        "codex-1",
+        HarnessKind::Codex,
+        vec![window("5H", 70, Some("10:00 Jun 17"), Some(14_400))],
+        None,
     );
-}
+    writeln!(out, "=== reset and healthy usage (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&ordinary)).unwrap();
 
-#[test]
-fn compact_shows_other_errors_as_unavailable() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "claude2".into(),
-        harness: HarnessKind::Claude,
-        windows: vec![],
-        extra: None,
-        error: Some("query Claude usage: HTTP 429".into()),
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    assert_eq!(report.compact(), "unavailable");
-    assert_eq!(report.error_label().as_deref(), Some("unavailable"));
-}
+    let expired = report(
+        "claude2",
+        HarnessKind::Claude,
+        vec![],
+        Some(claude_usage::LOGIN_EXPIRED),
+    );
+    writeln!(out, "=== expired login (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&expired)).unwrap();
 
-#[test]
-fn compact_displays_a_shared_reset_once() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(70),
-                used: None,
-                limit: None,
-                resets: Some("10:00 Jun 17".into()),
-                resets_at_epoch_seconds: Some(14_400),
-            },
+    let unavailable = report(
+        "claude2",
+        HarnessKind::Claude,
+        vec![],
+        Some("query Claude usage: HTTP 429"),
+    );
+    writeln!(out, "=== other provider error (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&unavailable)).unwrap();
+
+    let shared_reset = report(
+        "codex-1",
+        HarnessKind::Codex,
+        vec![
+            window("5H", 70, Some("10:00 Jun 17"), Some(14_400)),
+            window("Week", 55, Some("10:00 Jun 17"), Some(14_400)),
+        ],
+        None,
+    );
+    writeln!(out, "=== shared reset (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&shared_reset)).unwrap();
+
+    let exhausted = report(
+        "claude",
+        HarnessKind::Claude,
+        vec![
+            window("5H", 100, None, None),
+            window("Week", 0, Some("03:59 Aug 14"), None),
+        ],
+        None,
+    );
+    writeln!(out, "=== exhausted weekly window (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&exhausted)).unwrap();
+
+    writeln!(
+        out,
+        "=== weekly and monthly long windows (2 profile rows) ==="
+    )
+    .unwrap();
+    for label in ["Week", "Month"] {
+        let monthly = report(
+            "grok",
+            HarnessKind::Grok,
+            vec![window(label, 60, None, None)],
+            None,
+        );
+        writeln!(
+            out,
+            "{} | long-window: {}",
+            row(&monthly),
+            monthly.weekly_window().unwrap().label
+        )
+        .unwrap();
+    }
+
+    let kimi = report(
+        "kimi",
+        HarnessKind::Kimi,
+        vec![
             QuotaWindow {
                 label: "Week".into(),
-                remaining_percent: Some(55),
-                used: None,
-                limit: None,
-                resets: Some("10:00 Jun 17".into()),
-                resets_at_epoch_seconds: Some(14_400),
+                remaining_percent: Some(94),
+                used: Some(6),
+                limit: Some(100),
+                resets: Some("12:22 Aug 18".into()),
+                resets_at_epoch_seconds: Some(604_800),
             },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    assert_eq!(
-        report.compact(),
-        "5H 70% left, resets 10:00 Jun 17 · Week 55% left"
-    );
-}
-
-#[test]
-fn compact_hides_claude_short_window_when_week_is_exhausted() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "claude".into(),
-        harness: HarnessKind::Claude,
-        windows: vec![
             QuotaWindow {
                 label: "5H".into(),
-                remaining_percent: Some(100),
-                used: None,
-                limit: None,
-                resets: None,
-                resets_at_epoch_seconds: None,
-            },
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(0),
-                used: None,
-                limit: None,
-                resets: Some("03:59 Aug 14".into()),
-                resets_at_epoch_seconds: None,
+                remaining_percent: Some(97),
+                used: Some(3),
+                limit: Some(100),
+                resets: Some("10:22 Aug 13".into()),
+                resets_at_epoch_seconds: Some(18_000),
             },
         ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
+        None,
+    );
+    writeln!(out, "=== sustainable Kimi pace (1 profile row) ===").unwrap();
+    writeln!(out, "{}", row(&kimi)).unwrap();
 
-    assert_eq!(report.compact(), "Week 0% left, resets 03:59 Aug 14");
+    let burning = window("5H", 70, Some("later"), Some(14_400));
+    let sustainable = QuotaWindow {
+        remaining_percent: Some(80),
+        ..burning.clone()
+    };
+    writeln!(out, "=== short-window projection (2 window rows) ===").unwrap();
+    for sample in [&burning, &sustainable] {
+        let compact = report("codex-1", HarnessKind::Codex, vec![sample.clone()], None);
+        writeln!(
+            out,
+            "{}% remaining | exhausts before reset: {} | {}",
+            sample.remaining_percent.unwrap(),
+            projects_exhaustion(sample, 0),
+            compact.compact()
+        )
+        .unwrap();
+    }
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-compact-row", &out);
 }
 
 /// A `codex app-server` stand-in on `PATH` that logs every request line it
@@ -789,84 +823,6 @@ async fn expired_claude_credentials_report_login_expired() {
     assert!(report.windows.is_empty());
     assert_eq!(report.error.as_deref(), Some(claude_usage::LOGIN_EXPIRED));
     assert_eq!(report.compact(), claude_usage::LOGIN_EXPIRED);
-}
-
-#[test]
-fn a_monthly_window_shares_the_long_window_column_with_a_weekly_one() {
-    for label in ["Week", "Month"] {
-        let report = ProfileQuota {
-            banked_resets: None,
-            profile_id: "grok".into(),
-            harness: HarnessKind::Grok,
-            windows: vec![QuotaWindow {
-                label: label.into(),
-                remaining_percent: Some(60),
-                used: None,
-                limit: None,
-                resets: None,
-                resets_at_epoch_seconds: None,
-            }],
-            extra: None,
-            error: None,
-            refreshed_at_epoch_seconds: 0,
-            rate_limited_until_epoch_seconds: None,
-        };
-
-        assert!(report.weekly_window().is_some(), "{label}");
-        assert_eq!(report.compact(), format!("{label} 60% left"));
-    }
-}
-
-#[test]
-fn kimi_uses_percent_left_and_hides_a_short_window_on_sustainable_pace() {
-    let report = ProfileQuota {
-        banked_resets: None,
-        profile_id: "kimi".into(),
-        harness: HarnessKind::Kimi,
-        windows: vec![
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(94),
-                used: Some(6),
-                limit: Some(100),
-                resets: Some("12:22 Aug 18".into()),
-                resets_at_epoch_seconds: Some(604_800),
-            },
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(97),
-                used: Some(3),
-                limit: Some(100),
-                resets: Some("10:22 Aug 13".into()),
-                resets_at_epoch_seconds: Some(18_000),
-            },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 3_600,
-        rate_limited_until_epoch_seconds: None,
-    };
-
-    assert_eq!(report.compact(), "Week 94% left, resets 12:22 Aug 18");
-}
-
-#[test]
-fn short_window_is_shown_only_when_burn_rate_projects_early_exhaustion() {
-    let window = QuotaWindow {
-        label: "5H".into(),
-        remaining_percent: Some(70),
-        used: None,
-        limit: None,
-        resets: Some("later".into()),
-        resets_at_epoch_seconds: Some(14_400),
-    };
-    assert!(projects_exhaustion(&window, 0));
-
-    let sustainable = QuotaWindow {
-        remaining_percent: Some(80),
-        ..window
-    };
-    assert!(!projects_exhaustion(&sustainable, 0));
 }
 
 #[derive(Clone, Default)]

@@ -1,0 +1,9 @@
+=== explicit TLS takes precedence (1 viewer endpoint) ===
+viewer URL: https://0.0.0.0:4443
+listener bind: 0.0.0.0:4443
+TLS files: configured-cert.pem, configured-key.pem
+Tailscale detection: not used
+fallback: none
+=== Tailscale listener bind (1 endpoint) ===
+listener bind: 0.0.0.0:4765
+configured port: 4765
