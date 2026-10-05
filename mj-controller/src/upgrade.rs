@@ -409,6 +409,7 @@ mod tests {
         assert!(gate.active_labels().is_empty());
     }
 
+    // Hard-won: c87e5e88: upgrades waited minutes without explaining the oldest blocker.
     #[test]
     fn blockers_carry_the_age_of_each_labels_oldest_hold() {
         let gate = Arc::new(Gate::default());
@@ -441,6 +442,7 @@ mod tests {
         assert!(gate.blockers().is_empty());
     }
 
+    // Hard-won: c87e5e88: long daemon handoffs gave no explanation of what they awaited.
     #[test]
     fn a_waiting_handoff_names_its_blockers_in_the_log_and_reports_when_it_closes() {
         let log = crate::test_log::CapturedLog::default();
@@ -482,6 +484,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 4b1b60b5: new deferrable work could keep an upgrade waiting indefinitely.
     #[test]
     fn a_waiting_handoff_refuses_deferrable_work_but_admits_control_work() {
         let gate = Arc::new(Gate::default());
@@ -508,6 +511,7 @@ mod tests {
         drop(running);
     }
 
+    // Hard-won: bcbba06e: daemon restart interrupted accepted destroys and restored sessions as running.
     #[test]
     fn a_handoff_waits_for_a_destroy_until_the_bound_and_then_abandons_it_with_a_warning() {
         let log = crate::test_log::CapturedLog::default();

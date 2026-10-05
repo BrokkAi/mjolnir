@@ -617,6 +617,7 @@ mod tests {
     /// through `ViewerServer` instead of polling it in the loop's `select!`,
     /// which is what left `GET /api/v1/sessions` unanswered past the client's
     /// ten-second timeout during a remote provisioning run (issue 1061).
+    // Hard-won: #1061: a sessions API request timed out during remote provisioning.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_api_answers_while_the_control_loop_takes_a_long_turn() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
