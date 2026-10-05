@@ -1726,6 +1726,66 @@ fn dashboard_with_attention_mix() -> DashboardState {
     dashboard
 }
 
+fn append_attention_state(
+    output: &mut String,
+    label: &str,
+    dashboard: &mut DashboardState,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    use std::fmt::Write as _;
+
+    let lines = drawn(dashboard, width, height);
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+    lines
+}
+
+fn attention_values(dashboard: &DashboardState) -> String {
+    let levels = ["asks", "remote", "done", "quiet", "missing"]
+        .map(|id| format!("{id}={:?}", dashboard.attention_level(id)))
+        .join(", ");
+    let queue = dashboard
+        .attention_queue()
+        .into_iter()
+        .map(|entry| format!("{}:{:?}", entry.session_id, entry.level))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("attention levels: {levels}; queue: [{queue}]")
+}
+
+fn rendered_workspace_badge(
+    dashboard: &mut DashboardState,
+    workspace_id: &str,
+    width: u16,
+    height: u16,
+) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, dashboard))
+        .expect("draw workspace badge");
+    let area = dashboard
+        .workspace_tab_areas
+        .iter()
+        .find(|(id, _)| id == workspace_id)
+        .map(|(_, area)| *area)
+        .expect("workspace tab");
+    let buffer = terminal.backend().buffer();
+    let marker = &buffer[(area.right() - 3, area.y)];
+    let count = &buffer[(area.right() - 2, area.y)];
+    format!(
+        "workspace badge cells: {}{}; marker fg={:?}; failure color={}",
+        marker.symbol(),
+        count.symbol(),
+        marker.fg,
+        marker.fg == mj_chat::theme::palette().session_error
+    )
+}
+
 /// The Sessions order and the attention levels are derived once per change
 /// of what they come from, however often a frame reads them, and each change
 /// is reflected in the next read.
@@ -1794,66 +1854,6 @@ fn session_order_and_attention_are_derived_once_per_change_and_follow_it() {
 }
 
 #[test]
-fn attention_levels_rank_a_question_above_unread_above_idle() {
-    let dashboard = dashboard_with_attention_mix();
-    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Waiting);
-    assert_eq!(dashboard.attention_level("done"), AttentionLevel::Unread);
-    assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Idle);
-    assert_eq!(
-        dashboard.attention_level("missing"),
-        AttentionLevel::Inactive
-    );
-    let queue = dashboard
-        .attention_queue()
-        .into_iter()
-        .map(|entry| entry.session_id)
-        .collect::<Vec<_>>();
-    // Both questions lead; the unread answer follows; the idle session is
-    // not in the queue at all.
-    assert_eq!(queue.len(), 3);
-    assert!(queue[..2].contains(&"asks".to_owned()));
-    assert!(queue[..2].contains(&"remote".to_owned()));
-    assert_eq!(queue[2], "done");
-}
-
-#[test]
-fn a_failure_outranks_a_question_and_an_unreachable_worker_sits_between_them() {
-    let mut dashboard = dashboard_with_attention_mix();
-    // "asks" already has a pending question. A review that failed on the same
-    // session must win, so the row, the queue, and the badge all say failure.
-    dashboard.set_session_reviews([mj_client::review::RuntimeReviewView {
-        session_id: "asks".into(),
-        questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
-        phase: mj_core::review::driver::TurnReviewPhase::Verdict(
-            mj_core::review::verdict::ReviewVerdict::Failed {
-                reason: "the reviewer never answered".into(),
-            },
-        ),
-        roles: Vec::new(),
-        status: "the review failed".into(),
-        verdict: None,
-    }]);
-    dashboard.set_session_connectivity("remote", false);
-
-    assert_eq!(dashboard.attention_level("asks"), AttentionLevel::Failed);
-    assert_eq!(
-        dashboard.attention_level("remote"),
-        AttentionLevel::Unreachable,
-        "an unreachable worker is its own level, above a question"
-    );
-    assert!(AttentionLevel::Failed > AttentionLevel::Unreachable);
-    assert!(AttentionLevel::Unreachable > AttentionLevel::Waiting);
-
-    let queue = dashboard
-        .attention_queue()
-        .into_iter()
-        .map(|entry| entry.session_id)
-        .collect::<Vec<_>>();
-    assert_eq!(queue, vec!["asks", "remote", "done"]);
-}
-
-#[test]
 fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
     let mut dashboard = dashboard_with_attention_mix();
     let session = dashboard.state.sessions.get_mut("quiet").unwrap();
@@ -1868,44 +1868,6 @@ fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
             .map(|entry| &*entry.session_id),
         Some("quiet")
     );
-}
-
-#[test]
-fn a_badge_counts_only_sessions_at_its_displayed_attention_level() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    // Default holds one question and one unread answer.
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Waiting, 1))
-    );
-
-    dashboard.set_session_connectivity("done", false);
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Unreachable, 1))
-    );
-
-    let session = dashboard.state.sessions.get_mut("quiet").unwrap();
-    session.state = SessionState::Error;
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 1))
-    );
-
-    let badge =
-        crate::render::sessions::attention_badge(dashboard.workspace_attention_summary("default"))
-            .expect("a workspace with three flagged sessions carries a badge");
-    assert_eq!(badge.content, " \u{d7}1");
-    assert_eq!(
-        badge.style.fg,
-        Some(mj_chat::theme::palette().session_error),
-        "a failure badge is red, not the attention colour"
-    );
-
-    let quiet = dashboard_with_session(running_session());
-    assert_eq!(quiet.workspace_attention_summary("default"), None);
-    assert!(crate::render::sessions::attention_badge(None).is_none());
 }
 
 #[test]
@@ -2059,158 +2021,6 @@ fn marking_all_read_clears_the_unread_badge_but_leaves_a_question_flagged() {
     );
 }
 
-#[test]
-fn next_attention_opens_the_waiting_session_and_wraps_through_the_queue() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    // Make the local question the newest so it leads the queue.
-    dashboard
-        .session_details
-        .get_mut("asks")
-        .unwrap()
-        .last_activity_at_ms = Some(20);
-    dashboard
-        .session_details
-        .get_mut("remote")
-        .unwrap()
-        .last_activity_at_ms = Some(10);
-    dashboard.select_active_session("quiet");
-
-    assert_eq!(
-        chord(&mut dashboard, CommandId::NextAttention),
-        DashboardAction::Open {
-            session_id: "asks".into()
-        }
-    );
-    assert_eq!(dashboard.selected_session_id(), Some("asks"));
-    assert!(dashboard.prompt_has_focus());
-
-    // The next entry lives in another workspace: the dashboard records it as
-    // that workspace's selection and asks the host to switch tabs.
-    assert_eq!(
-        chord(&mut dashboard, CommandId::NextAttention),
-        DashboardAction::SelectWorkspace {
-            workspace_id: "other".into()
-        }
-    );
-    dashboard.set_active_workspace(Some("other".into()));
-    assert_eq!(dashboard.selected_session_id(), Some("remote"));
-
-    // From the last entry, previous walks back and next wraps to the front.
-    assert_eq!(
-        chord(&mut dashboard, CommandId::PreviousAttention),
-        DashboardAction::SelectWorkspace {
-            workspace_id: "default".into()
-        }
-    );
-    dashboard.set_active_workspace(Some("default".into()));
-    assert_eq!(dashboard.selected_session_id(), Some("asks"));
-    dashboard.select_active_session("done");
-    assert_eq!(
-        chord(&mut dashboard, CommandId::NextAttention),
-        DashboardAction::Open {
-            session_id: "asks".into()
-        }
-    );
-}
-
-#[test]
-fn next_attention_reports_an_empty_queue_and_unfolds_a_folded_project() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    let key = dashboard
-        .project_source(&dashboard.state.sessions["asks"])
-        .key;
-    dashboard.toggle_project(&key);
-    assert!(dashboard.collapsed_project_keys.contains(&key));
-    dashboard
-        .session_details
-        .get_mut("asks")
-        .unwrap()
-        .last_activity_at_ms = Some(20);
-    // From a session outside the queue, the walk starts at the front.
-    dashboard.select_active_session("quiet");
-    let action = chord(&mut dashboard, CommandId::NextAttention);
-    assert_eq!(
-        action,
-        DashboardAction::Open {
-            session_id: "asks".into()
-        }
-    );
-    assert!(!dashboard.collapsed_project_keys.contains(&key));
-
-    for id in ["asks", "remote"] {
-        dashboard
-            .session_details
-            .get_mut(id)
-            .unwrap()
-            .pending_elicitations
-            .clear();
-    }
-    dashboard
-        .session_details
-        .get_mut("done")
-        .unwrap()
-        .unread_agent_messages = 0;
-    assert_eq!(
-        chord(&mut dashboard, CommandId::NextAttention),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.notices.current().as_deref(),
-        Some("Nothing is waiting for you.")
-    );
-}
-
-#[test]
-fn the_footer_names_the_next_key_only_while_something_waits() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    // Wide enough for the whole chord list: a narrow row drops the hint for
-    // want of room, which says nothing about whether anything is waiting.
-    let lines = drawn(&mut dashboard, 200, 40);
-    let footer = lines.last().unwrap();
-    // The hint carries the same badge as the tabs: the most urgent glyph and
-    // how many sessions need that kind of attention.
-    assert!(footer.contains("o next (!2)"), "{footer}");
-
-    let mut quiet = dashboard_with_session(running_session());
-    let lines = drawn(&mut quiet, 200, 40);
-    assert!(
-        !lines.last().unwrap().contains("next ("),
-        "{}",
-        lines.last().unwrap()
-    );
-}
-
-#[test]
-fn workspace_tabs_and_folded_headings_carry_attention_badges() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    let lines = drawn(&mut dashboard, 120, 40);
-    let tabs = lines
-        .iter()
-        .find(|line| line.contains("Default") && line.contains("Other"))
-        .expect("workspace tab row");
-    // A tab counts only its most urgent kind of attention: the
-    // default workspace holds one question and one unread answer.
-    assert!(tabs.contains("Default !1"), "{tabs}");
-    assert!(tabs.contains("Other !1"), "{tabs}");
-
-    // Folding the project that holds the unread session puts its count on
-    // the heading; an unfolded project shows the rows instead.
-    let key = dashboard
-        .project_source(&dashboard.state.sessions["done"])
-        .key;
-    dashboard.toggle_project(&key);
-    let lines = drawn(&mut dashboard, 120, 40);
-    let heading = lines
-        .iter()
-        .find(|line| line.contains("done ✓1"))
-        .unwrap_or_else(|| panic!("folded heading with badge: {lines:#?}"));
-    assert!(heading.contains("done ✓1"));
-}
-
 // Hard-won: 1b2ef72: short names and wide graphemes clipped the workspace badge.
 #[test]
 fn short_workspace_names_keep_their_attention_badges() {
@@ -2237,50 +2047,398 @@ fn short_workspace_names_keep_their_attention_badges() {
 }
 
 #[test]
-fn priority_order_lists_waiting_first_without_project_headings() {
-    let mut dashboard = dashboard_with_attention_mix();
-    dashboard.set_active_workspace(Some("default".into()));
-    let mut config = dashboard.config.clone();
-    config.advanced.session_order = mj_core::config::SessionOrder::Priority;
-    dashboard.set_config(config);
+fn golden_attention_navigation() {
+    use std::fmt::Write as _;
 
-    let ids = dashboard
+    let mut output = String::new();
+
+    let mut ranked = dashboard_with_attention_mix();
+    ranked.set_active_workspace(Some("default".into()));
+    append_attention_state(
+        &mut output,
+        "question, unread, idle, and absent levels",
+        &mut ranked,
+        140,
+        40,
+    );
+    writeln!(output, "{}", attention_values(&ranked)).expect("write attention levels");
+
+    let mut urgent = dashboard_with_attention_mix();
+    urgent.set_active_workspace(Some("default".into()));
+    urgent.set_session_reviews([mj_client::review::RuntimeReviewView {
+        session_id: "asks".into(),
+        questions: Vec::new(),
+        tier: mj_core::review::lanes::ReviewTier::Quick,
+        phase: mj_core::review::driver::TurnReviewPhase::Verdict(
+            mj_core::review::verdict::ReviewVerdict::Failed {
+                reason: "the reviewer never answered".into(),
+            },
+        ),
+        roles: Vec::new(),
+        status: "the review failed".into(),
+        verdict: None,
+    }]);
+    urgent.set_session_connectivity("remote", false);
+    append_attention_state(
+        &mut output,
+        "failure, unreachable worker, and question",
+        &mut urgent,
+        140,
+        40,
+    );
+    writeln!(output, "{}", attention_values(&urgent)).expect("write urgent levels");
+    writeln!(
+        output,
+        "rank relation: Failed>Unreachable={}, Unreachable>Waiting={}",
+        AttentionLevel::Failed > AttentionLevel::Unreachable,
+        AttentionLevel::Unreachable > AttentionLevel::Waiting
+    )
+    .expect("write attention order");
+
+    let mut badges = dashboard_with_attention_mix();
+    badges.set_active_workspace(Some("default".into()));
+    append_attention_state(
+        &mut output,
+        "waiting badge counts only its level",
+        &mut badges,
+        120,
+        40,
+    );
+    writeln!(
+        output,
+        "workspace summary: {:?}",
+        badges.workspace_attention_summary("default")
+    )
+    .expect("write waiting summary");
+    writeln!(
+        output,
+        "{}",
+        rendered_workspace_badge(&mut badges, "default", 120, 40)
+    )
+    .expect("write waiting badge style");
+    badges.set_session_connectivity("done", false);
+    append_attention_state(
+        &mut output,
+        "unreachable badge replaces unread",
+        &mut badges,
+        120,
+        40,
+    );
+    writeln!(
+        output,
+        "workspace summary: {:?}",
+        badges.workspace_attention_summary("default")
+    )
+    .expect("write unreachable summary");
+    writeln!(
+        output,
+        "{}",
+        rendered_workspace_badge(&mut badges, "default", 120, 40)
+    )
+    .expect("write unreachable badge style");
+    badges.state.sessions.get_mut("quiet").unwrap().state = SessionState::Error;
+    append_attention_state(
+        &mut output,
+        "failure badge replaces lower levels",
+        &mut badges,
+        120,
+        40,
+    );
+    writeln!(
+        output,
+        "workspace summary: {:?}",
+        badges.workspace_attention_summary("default")
+    )
+    .expect("write failure summary");
+    writeln!(
+        output,
+        "{}",
+        rendered_workspace_badge(&mut badges, "default", 120, 40)
+    )
+    .expect("write failure badge style");
+    let mut quiet = dashboard_with_session(running_session());
+    append_attention_state(
+        &mut output,
+        "quiet workspace has no attention badge",
+        &mut quiet,
+        120,
+        40,
+    );
+    writeln!(
+        output,
+        "workspace summary: {:?}; badge: absent",
+        quiet.workspace_attention_summary("default")
+    )
+    .expect("write quiet summary");
+
+    let mut next = dashboard_with_attention_mix();
+    next.set_active_workspace(Some("default".into()));
+    next.session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    next.session_details
+        .get_mut("remote")
+        .unwrap()
+        .last_activity_at_ms = Some(10);
+    next.select_active_session("quiet");
+    let action = chord(&mut next, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "next attention opens the first waiting session",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(
+        output,
+        "action: {action:?}; selected: {:?}; prompt focused: {}",
+        next.selected_session_id(),
+        next.prompt_has_focus()
+    )
+    .expect("write first attention action");
+    let action = chord(&mut next, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "next attention reaches another workspace",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(output, "action: {action:?}").expect("write workspace action");
+    next.set_active_workspace(Some("other".into()));
+    append_attention_state(
+        &mut output,
+        "other workspace selection is applied",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(output, "selected: {:?}", next.selected_session_id())
+        .expect("write workspace selection");
+    let action = chord(&mut next, CommandId::PreviousAttention);
+    append_attention_state(
+        &mut output,
+        "previous attention returns to the default workspace",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(output, "action: {action:?}").expect("write previous action");
+    next.set_active_workspace(Some("default".into()));
+    append_attention_state(
+        &mut output,
+        "default workspace selection is restored",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(output, "selected: {:?}", next.selected_session_id())
+        .expect("write restored selection");
+    next.select_active_session("done");
+    let action = chord(&mut next, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "next attention wraps to the first waiting session",
+        &mut next,
+        140,
+        40,
+    );
+    writeln!(
+        output,
+        "action: {action:?}; selected: {:?}",
+        next.selected_session_id()
+    )
+    .expect("write wrapped action");
+
+    let mut folded = dashboard_with_attention_mix();
+    folded.set_active_workspace(Some("default".into()));
+    let before_fold = append_attention_state(
+        &mut output,
+        "project rows before folding",
+        &mut folded,
+        140,
+        40,
+    );
+    let asks_heading = point(&before_fold, "asks");
+    folded.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        asks_heading,
+    ));
+    folded.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        asks_heading,
+    ));
+    append_attention_state(&mut output, "waiting project folded", &mut folded, 140, 40);
+    folded
+        .session_details
+        .get_mut("asks")
+        .unwrap()
+        .last_activity_at_ms = Some(20);
+    folded.select_active_session("quiet");
+    let action = chord(&mut folded, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "next attention unfolds and opens the waiting project",
+        &mut folded,
+        140,
+        40,
+    );
+    writeln!(
+        output,
+        "action: {action:?}; folded projects: {:?}",
+        folded.collapsed_project_keys
+    )
+    .expect("write unfold action");
+    for id in ["asks", "remote"] {
+        folded
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    folded
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .unread_agent_messages = 0;
+    let action = chord(&mut folded, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "empty attention queue reports its notice",
+        &mut folded,
+        140,
+        40,
+    );
+    writeln!(
+        output,
+        "action: {action:?}; notice: {:?}",
+        folded.notices.current()
+    )
+    .expect("write empty queue");
+
+    let mut footer = dashboard_with_attention_mix();
+    footer.set_active_workspace(Some("default".into()));
+    let lines = append_attention_state(
+        &mut output,
+        "footer advertises next attention while waiting",
+        &mut footer,
+        200,
+        40,
+    );
+    writeln!(output, "footer: {}", lines.last().unwrap()).expect("write waiting footer");
+    let mut quiet_footer = dashboard_with_session(running_session());
+    let lines = append_attention_state(
+        &mut output,
+        "footer omits next attention while quiet",
+        &mut quiet_footer,
+        200,
+        40,
+    );
+    writeln!(output, "footer: {}", lines.last().unwrap()).expect("write quiet footer");
+
+    let mut tabs = dashboard_with_attention_mix();
+    tabs.set_active_workspace(Some("default".into()));
+    let first = append_attention_state(
+        &mut output,
+        "workspace tabs show their urgent badges",
+        &mut tabs,
+        120,
+        40,
+    );
+    let tab_row = first
+        .iter()
+        .find(|line| line.contains("Default") && line.contains("Other"))
+        .expect("workspace tabs");
+    writeln!(output, "workspace tabs: {tab_row}").expect("write tab badges");
+    let done_heading = point(&first, "done");
+    tabs.handle_mouse(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        done_heading,
+    ));
+    tabs.handle_mouse(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        done_heading,
+    ));
+    let folded_lines = append_attention_state(
+        &mut output,
+        "folded project heading carries unread badge",
+        &mut tabs,
+        120,
+        40,
+    );
+    let heading = folded_lines
+        .iter()
+        .find(|line| line.contains("done ✓1"))
+        .expect("unread badge on folded heading");
+    writeln!(output, "folded heading: {heading}").expect("write folded heading");
+
+    let mut priority = dashboard_with_attention_mix();
+    priority.set_active_workspace(Some("default".into()));
+    let mut config = priority.config.clone();
+    config.advanced.session_order = mj_core::config::SessionOrder::Priority;
+    priority.set_config(config);
+    append_attention_state(
+        &mut output,
+        "priority order lists attention before idle",
+        &mut priority,
+        140,
+        40,
+    );
+    let ids = priority
         .ordered_sessions()
         .into_iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(ids, ["asks", "done", "quiet"]);
-    assert!(
-        dashboard
-            .sessions_rows()
-            .iter()
-            .all(|row| matches!(row, SessionsRow::Session { .. })),
-        "priority order has no project headings"
+    let no_headings = priority
+        .sessions_rows()
+        .iter()
+        .all(|row| matches!(row, SessionsRow::Session { .. }));
+    writeln!(
+        output,
+        "priority session ids: {ids:?}; project headings: {}",
+        !no_headings
+    )
+    .expect("write priority order");
+    priority.focus_sessions();
+    priority.handle_key(key(KeyCode::Char('1')));
+    append_attention_state(
+        &mut output,
+        "priority order reveals all rows",
+        &mut priority,
+        140,
+        40,
     );
-    dashboard.focus_sessions();
-    dashboard.handle_key(key(KeyCode::Char('1')));
-    assert!(dashboard.collapsed_project_keys.is_empty());
-    assert!(
-        dashboard
-            .notices
-            .current()
-            .as_deref()
-            .is_some_and(|notice| notice.contains("priority order"))
-    );
-
-    // Answering the question drops the session below the unread one.
-    dashboard
+    writeln!(
+        output,
+        "notice: {:?}; collapsed projects: {:?}",
+        priority.notices.current(),
+        priority.collapsed_project_keys
+    )
+    .expect("write priority view");
+    priority
         .session_details
         .get_mut("asks")
         .unwrap()
         .pending_elicitations
         .clear();
-    let ids = dashboard
+    let ids = priority
         .ordered_sessions()
         .into_iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(ids[0], "done");
+    append_attention_state(
+        &mut output,
+        "answering the question lowers it below unread",
+        &mut priority,
+        140,
+        40,
+    );
+    writeln!(output, "priority session ids after answer: {ids:?}")
+        .expect("write updated priority order");
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "attention-navigation", &output);
 }
 
 /// RCL-2 (2026-09-29): with the Sessions pane minimized, the title still says
