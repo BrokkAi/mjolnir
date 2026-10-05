@@ -514,6 +514,69 @@ mod tests {
     }
 
     #[test]
+    fn provider_breakdowns_partition_counters_without_double_counting_or_guessing() -> Result<()> {
+        use mj_core::usage::ProviderTurnUsage;
+        let mut usage = completed("one", 1, 100).usage.unwrap();
+        let mut first = usage.clone();
+        first.input_tokens = 30;
+        first.output_tokens = 4;
+        first.total_tokens = 34;
+        let mut second = first.clone();
+        second.input_tokens = 60;
+        second.output_tokens = 6;
+        second.total_tokens = 66;
+        usage.provider_details = Some(Box::new(ProviderTurnUsage {
+            model_usage: BTreeMap::from([("a".into(), first), ("b".into(), second)]),
+            ..Default::default()
+        }));
+        let selected = UsageSelection {
+            model: Some("a".into()),
+            effort: Some("high".into()),
+        };
+        let mut groups = BTreeMap::new();
+        attribute(&usage, selected.clone(), &mut groups)?;
+        assert_eq!(groups[&selected]["input_tokens"].tokens, 30);
+        assert_eq!(
+            groups[&UsageSelection {
+                model: Some("b".into()),
+                effort: None
+            }]["input_tokens"]
+                .tokens,
+            60
+        );
+        assert_eq!(
+            groups[&UsageSelection::default()]["input_tokens"].tokens,
+            10
+        );
+        for (counter, total) in counters(&usage) {
+            assert_eq!(
+                groups
+                    .values()
+                    .filter_map(|v| v.get(&counter))
+                    .map(|v| v.tokens)
+                    .sum::<u64>(),
+                total
+            );
+        }
+        usage
+            .provider_details
+            .as_mut()
+            .unwrap()
+            .model_usage
+            .get_mut("b")
+            .unwrap()
+            .scope = UsageScope::LastRequest;
+        groups.clear();
+        attribute(&usage, selected, &mut groups)?;
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[&UsageSelection::default()]["input_tokens"].tokens,
+            100
+        );
+        Ok(())
+    }
+
+    #[test]
     fn usage_survives_reopening_and_replay_with_honest_coverage() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("usage.sqlite");

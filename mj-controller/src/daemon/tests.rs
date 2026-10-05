@@ -44,6 +44,34 @@ fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
 }
 
 #[test]
+fn graceful_close_retires_worker_polling_only_during_target_teardown() {
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Suspend,
+        Some(SessionState::Running)
+    ));
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Suspend,
+        Some(SessionState::Checkpointing)
+    ));
+    assert!(!lifecycle_owns_worker_target(
+        LifecycleKind::Suspend,
+        Some(SessionState::Closing)
+    ));
+    assert!(lifecycle_owns_worker_target(
+        LifecycleKind::Suspend,
+        Some(SessionState::Destroying)
+    ));
+    assert!(lifecycle_owns_worker_target(
+        LifecycleKind::ForceStop,
+        Some(SessionState::Running)
+    ));
+    assert!(lifecycle_owns_worker_target(
+        LifecycleKind::ForceDestroy,
+        Some(SessionState::Running)
+    ));
+}
+
+#[test]
 fn restart_keeps_relay_ownership_through_checkpoint_and_can_recover_closing_state() {
     assert!(!lifecycle_owns_worker_target(
         LifecycleKind::Restart,
@@ -493,6 +521,40 @@ async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     let before = state.revisions().borrow().to_owned();
     state.publish_quotas(snapshot);
     assert_eq!(*state.revisions().borrow(), before);
+}
+
+#[tokio::test]
+async fn workspace_deletion_guard_ignores_global_client_presence() {
+    let state = test_runtime_state();
+    state.attachments().insert(
+        "client-a".into(),
+        Attachment {
+            pid: std::process::id(),
+        },
+    );
+    assert!(!state.workspace_has_active_resume("workspace-a"));
+
+    let (_completed, result) = tokio::sync::watch::channel(None);
+    state.owner().lifecycle.insert(
+        "session-a".into(),
+        ActiveLifecycle {
+            upgrade_work: Arc::new(Mutex::new(None)),
+            phase: LifecyclePhase::Executing,
+            operation_id: "resume-operation".into(),
+            create_control: None,
+            kind: LifecycleKind::Resume,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            started_at_epoch_seconds: 1,
+            active_stages: BTreeMap::new(),
+            resume_workspace_id: Some("workspace-a".into()),
+            resume_destination: None,
+            notice: None,
+            request_key: None,
+            _move_guard: None,
+            result,
+        },
+    );
+    assert!(state.workspace_has_active_resume("workspace-a"));
 }
 
 // Hard-won: e23e4b1e: an unrelated session lifecycle blocked checkpoint export.
@@ -1245,6 +1307,13 @@ async fn daemon_stops_serving_data_actions_once_shutdown_begins() {
 
     drop(stream);
     server.await.unwrap();
+}
+
+/// The forced exit is the daemon's own bound, so it has to fire inside the
+/// window a client waiting on a stop is prepared to wait.
+#[test]
+fn shutdown_force_exit_finishes_before_the_stop_deadline() {
+    assert!(SHUTDOWN_FORCE_EXIT_TIMEOUT < STOP_TIMEOUT);
 }
 
 #[tokio::test]
