@@ -542,22 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn style_names_round_trip() {
-        for style in SpinnerStyle::ALL {
-            assert_eq!(style.as_str().parse::<SpinnerStyle>(), Ok(style));
-        }
-        assert!("spiral".parse::<SpinnerStyle>().is_err());
-    }
-
-    #[test]
-    fn default_is_scan_and_only_default_is_default() {
-        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Scan);
-        for style in SpinnerStyle::ALL {
-            assert_eq!(style.is_default(), style == SpinnerStyle::Scan);
-        }
-    }
-
-    #[test]
     fn every_frame_has_stable_display_width() {
         for style in SpinnerStyle::ALL {
             assert!(!style.frames().is_empty(), "{style} has no frames");

@@ -237,6 +237,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 4e98115d: chat dialogs shipped without the two-cell screen margin.
     #[test]
     fn every_centering_helper_keeps_the_screen_margin() {
         assert_keeps_margin(centered_rect(82, 30, SCREEN), SCREEN);

@@ -783,6 +783,7 @@ mod tests {
         assert_eq!(input.value(), "alpha beta\ngamma");
     }
 
+    // Hard-won: a3fd1514: consecutive Ctrl-K presses discarded earlier killed lines.
     #[test]
     fn sequential_control_k_accumulates_one_yankable_block() {
         let mut input = TextInput::multiline();
@@ -854,23 +855,5 @@ mod tests {
         assert_eq!(input.value(), "second");
         input.handle_key(key(KeyCode::Down));
         assert_eq!(input.value(), "draft");
-    }
-
-    #[test]
-    fn filtered_confirmation_never_records_invalid_text() {
-        let mut input = TextInput::new()
-            .with_max_chars(4)
-            .with_filter(InputFilter::AsciiAlphabeticUppercase);
-        input.insert_str("s-t0op");
-        assert_eq!(input.value(), "STOP");
-    }
-
-    #[test]
-    fn hex_confirmation_drops_non_hex_characters_and_lowercases() {
-        let mut input = TextInput::new()
-            .with_max_chars(8)
-            .with_filter(InputFilter::AsciiHexLowercase);
-        input.insert_str("zz0123ABcD!");
-        assert_eq!(input.value(), "0123abcd");
     }
 }

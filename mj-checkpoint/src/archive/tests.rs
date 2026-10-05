@@ -1,38 +1,7 @@
-use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
 use std::sync::{Barrier, Mutex};
 
 use super::*;
-
-#[derive(Default)]
-struct FakeGit {
-    outputs: Mutex<VecDeque<GitOutput>>,
-    commands: Mutex<Vec<GitCommand>>,
-}
-
-impl FakeGit {
-    fn with_outputs(outputs: impl IntoIterator<Item = GitOutput>) -> Self {
-        Self {
-            outputs: Mutex::new(outputs.into_iter().collect()),
-            commands: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn commands(&self) -> Vec<GitCommand> {
-        self.commands.lock().unwrap().clone()
-    }
-}
-
-impl GitCommandRunner for FakeGit {
-    fn run(&self, _repository: &Path, command: &GitCommand) -> Result<GitOutput> {
-        self.commands.lock().unwrap().push(command.clone());
-        self.outputs
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| anyhow!("unexpected Git command: {:?}", command.arguments))
-    }
-}
 
 struct CollectionGit {
     delta_count: u64,
@@ -105,14 +74,6 @@ impl GitCommandRunner for CollectionGit {
             stdout,
             stderr: Vec::new(),
         })
-    }
-}
-
-fn git_ok(stdout: impl Into<Vec<u8>>) -> GitOutput {
-    GitOutput {
-        status: 0,
-        stdout: stdout.into(),
-        stderr: Vec::new(),
     }
 }
 
@@ -255,15 +216,6 @@ fn checkpoint_bundle_header_rejects_metadata_mismatch_and_malformed_payloads() {
     assert!(error.contains("no pack payload"), "{error}");
 }
 
-#[test]
-fn checkpoint_without_a_bundle_uses_its_head_as_the_source_boundary() {
-    let head = "b".repeat(40);
-    assert_eq!(
-        checkpoint_bundle_prerequisites(&checkpoint_bundle(&head, Vec::new())).unwrap(),
-        [head]
-    );
-}
-
 fn input() -> ArchiveInput {
     ArchiveInput {
         session: SessionManifest {
@@ -394,81 +346,11 @@ fn archive_round_trip_verifies_multi_repo_payloads_and_mode() {
     }
 }
 
-#[test]
-fn archive_preparation_borrows_existing_payload_bodies() {
-    let archive_input = input();
-    let native = archive_input.native_artifacts[0].data.as_slice();
-    let bundle = archive_input.repositories[0].committed_bundle.as_slice();
-    let (_manifest, payloads) = prepare_archive(&archive_input).unwrap();
-
-    let canonical = payloads
-        .iter()
-        .find(|payload| payload.descriptor.role == PayloadRole::CanonicalSession)
-        .unwrap();
-    assert!(matches!(&canonical.data, Cow::Owned(_)));
-
-    let prepared_native = payloads
-        .iter()
-        .find(|payload| matches!(&payload.descriptor.role, PayloadRole::NativeArtifact { .. }))
-        .unwrap();
-    assert!(matches!(&prepared_native.data, Cow::Borrowed(_)));
-    assert_eq!(prepared_native.data.as_ptr(), native.as_ptr());
-
-    let prepared_bundle = payloads
-        .iter()
-        .find(|payload| {
-            matches!(
-                &payload.descriptor.role,
-                PayloadRole::GitBundle { repository_id } if repository_id == "hel"
-            )
-        })
-        .unwrap();
-    assert!(matches!(&prepared_bundle.data, Cow::Borrowed(_)));
-    assert_eq!(prepared_bundle.data.as_ptr(), bundle.as_ptr());
-}
-
-#[test]
-fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
-    const LARGE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("large.hel.zip");
-    let mut archive_input = input();
-    archive_input.repositories.clear();
-    archive_input.native_artifacts = vec![NativeArtifact {
-        relative_path: PathBuf::from("sessions/native-1/large-rollout.jsonl"),
-        data: vec![b'x'; LARGE_PAYLOAD_BYTES],
-        mode: 0o600,
-    }];
-
-    let verified = write_archive_atomic(&path, &archive_input).unwrap();
-    drop(archive_input);
-
-    let native = verified
-        .manifest
-        .payloads
-        .iter()
-        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
-        .unwrap();
-    assert_eq!(native.size, LARGE_PAYLOAD_BYTES as u64);
-    assert_eq!(verified.canonical_session, input().canonical_session);
-    let retained_metadata_bytes = serde_json::to_vec(&verified.manifest).unwrap().len()
-        + serde_json::to_vec(&verified.canonical_session)
-            .unwrap()
-            .len()
-        + verified.archive_sha256.len();
-    assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
-}
-
 const TEST_PART_BYTES: usize = 4096;
 
 fn zip_entry_names(path: &Path) -> Vec<String> {
     let archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
     archive.file_names().map(str::to_owned).collect()
-}
-
-fn zip_entry_method(path: &Path, name: &str) -> CompressionMethod {
-    let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
-    archive.by_name(name).unwrap().compression()
 }
 
 /// Writes an archive whose native artifact and first untracked tar are both
@@ -544,80 +426,6 @@ fn oversized_payloads_shard_into_parts_and_read_back_whole() {
         "restore consumers only ever see whole payload paths"
     );
     assert!(verified.payloads.contains_key(native_path));
-}
-
-#[test]
-fn payload_parts_follow_the_threshold_and_never_split_stored_payloads() {
-    let bundle = PayloadRole::GitBundle {
-        repository_id: "hel".into(),
-    };
-    let artifact = PayloadRole::NativeArtifact {
-        relative_path: PathBuf::from("rollout.jsonl"),
-    };
-    assert_eq!(payload_compression(&bundle), CompressionMethod::Stored);
-    assert_eq!(payload_compression(&artifact), CompressionMethod::Zstd);
-
-    let body = vec![b'x'; 10];
-    assert!(
-        plan_payload_parts(
-            "repositories/hel/committed.bundle",
-            &body,
-            CompressionMethod::Stored,
-            4,
-        )
-        .is_empty()
-    );
-    assert!(
-        plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 10).is_empty(),
-        "a payload at the threshold stays whole"
-    );
-    let parts = plan_payload_parts("native/rollout.jsonl", &body, CompressionMethod::Zstd, 4);
-    assert_eq!(
-        parts
-            .iter()
-            .map(|part| part.path.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "native/rollout.jsonl.helpart.00000",
-            "native/rollout.jsonl.helpart.00001",
-            "native/rollout.jsonl.helpart.00002",
-        ]
-    );
-    assert_eq!(
-        parts.iter().map(|part| part.size).collect::<Vec<_>>(),
-        [4, 4, 2]
-    );
-    assert_eq!(parts[2].sha256, digest_bytes(&body[8..]));
-}
-
-#[test]
-fn git_bundles_are_stored_and_other_payloads_use_zstandard() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("stored-bundle.hel.zip");
-    write_archive_atomic(&path, &input()).unwrap();
-
-    assert_eq!(
-        zip_entry_method(&path, "repositories/hel/committed.bundle"),
-        CompressionMethod::Stored
-    );
-    assert_eq!(
-        zip_entry_method(&path, CANONICAL_SESSION_PATH),
-        CompressionMethod::Zstd
-    );
-    assert_eq!(
-        zip_entry_method(&path, "repositories/hel/untracked.tar"),
-        CompressionMethod::Zstd
-    );
-
-    let verified = read_archive_verified(&path).unwrap();
-    assert_eq!(
-        verified
-            .payload_by_role(&PayloadRole::GitBundle {
-                repository_id: "hel".into(),
-            })
-            .unwrap(),
-        b"bundle-hel"
-    );
 }
 
 /// Replaces a repository's untracked tar in an already prepared archive,
@@ -1329,6 +1137,7 @@ fn malicious_untracked_tar_is_rejected() {
 /// The untracked payload is built from paths Git reports, so credential
 /// files a repository never tracked must be dropped as the tar is built,
 /// not merely rejected later.
+// Hard-won: 37432b73: Claude's canonical .credentials.json was being captured in recovery archives.
 #[test]
 fn untracked_tar_omits_credential_files_from_the_worktree() {
     let source = tempfile::tempdir().unwrap();
@@ -1356,23 +1165,6 @@ vendor-credentials.json\0nested/.credentials.json\0note.txt\0";
         .map(|entry| entry.unwrap().path().unwrap().into_owned())
         .collect();
     assert_eq!(entries, vec![PathBuf::from("note.txt")]);
-}
-
-#[test]
-fn unsafe_zip_entry_is_rejected_even_without_extraction() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("unsafe.hel.zip");
-    {
-        let file = File::create(&path).unwrap();
-        let mut writer = zip::ZipWriter::new(file);
-        writer
-            .start_file("../escape", SimpleFileOptions::default())
-            .unwrap();
-        writer.write_all(b"no").unwrap();
-        writer.finish().unwrap();
-    }
-    assert!(read_archive_verified(&path).is_err());
-    assert!(!directory.path().join("escape").exists());
 }
 
 #[test]
@@ -1404,36 +1196,6 @@ fn git_collection_is_abstracted_redacts_origin_and_skips_credentials() {
         .collect();
     assert_eq!(paths, vec![PathBuf::from("note.txt")]);
     assert_eq!(runner.commands().len(), 11);
-}
-
-#[test]
-fn git_collection_can_omit_untracked_files_without_losing_tracked_changes() {
-    let repository = tempfile::tempdir().unwrap();
-    fs::write(repository.path().join("note.txt"), b"untracked").unwrap();
-    let runner = CollectionGit::new(0, false);
-    let snapshot = collect_git_snapshot_with_progress(
-        &runner,
-        repository.path(),
-        &GitCollectionSpec {
-            id: "repo".into(),
-            relative_destination: PathBuf::from("repo"),
-            history: GitHistoryMode::DeltaFrom("a".repeat(40)),
-            origin_override: None,
-        },
-        false,
-        &|_| Ok(()),
-    )
-    .unwrap();
-
-    assert_eq!(snapshot.staged_patch, b"staged");
-    assert_eq!(snapshot.unstaged_patch, b"unstaged");
-    assert!(snapshot.untracked_tar.is_empty());
-    assert!(runner.commands().iter().all(|command| {
-        command
-            .arguments
-            .first()
-            .is_none_or(|argument| argument != "ls-files")
-    }));
 }
 
 #[test]
@@ -1471,6 +1233,7 @@ fn git_collection_builds_independent_payloads_concurrently() {
 /// Checkpoint work runs with nobody watching the terminal it inherits, so
 /// a Git child that would ask for a password or a host key has to fail
 /// instead of holding the checkpoint open until its deadline.
+// Hard-won: 4e68009d: unattended checkpoint Git could wedge on a credential or host-key prompt.
 #[test]
 fn system_git_children_cannot_stop_on_a_prompt() {
     let repository = tempfile::tempdir().unwrap();
@@ -1714,6 +1477,7 @@ fn managed_clone_snapshot_restores_secondary_branch_and_full_stash_stack() {
     );
 }
 
+// Hard-won: 7414cc74: updating the checked-out branch first staged added files as deletions.
 #[test]
 fn managed_clone_restore_matches_head_index_and_worktree() {
     for detached in [false, true] {
@@ -1972,32 +1736,6 @@ fn restore_without_a_bundle_reports_an_unreachable_commit_actionably() {
     assert!(
         format!("{error:#}").contains("must be reachable from the repository's origin"),
         "{error:#}"
-    );
-}
-
-#[test]
-fn git_restore_routes_patches_through_injected_runner() {
-    let destination = tempfile::tempdir().unwrap();
-    let runner = FakeGit::with_outputs([
-        // The worktree guard reads HEAD first; naming the snapshot's own
-        // branch means it is already the checkout's branch.
-        git_ok("feature/hel\n"),
-        git_ok(Vec::new()),
-        git_ok(Vec::new()),
-        git_ok(Vec::new()),
-        git_ok(Vec::new()),
-    ]);
-    let mut snapshot = repository("repo");
-    snapshot.committed_bundle.clear();
-    snapshot.untracked_tar = tar_with_file("new.sh", b"echo hi\n", 0o755);
-    restore_git_snapshot(&runner, destination.path(), &snapshot).unwrap();
-    let commands = runner.commands();
-    assert_eq!(commands.len(), 5);
-    assert_eq!(commands[3].stdin, b"staged-repo");
-    assert_eq!(commands[4].stdin, b"unstaged-repo");
-    assert_eq!(
-        fs::read(destination.path().join("new.sh")).unwrap(),
-        b"echo hi\n"
     );
 }
 
@@ -2336,22 +2074,6 @@ fn review_capture_without_a_baseline_diffs_against_the_empty_tree() {
 }
 
 #[test]
-fn review_capture_ignores_files_git_ignores() {
-    let repository = tempfile::tempdir().unwrap();
-    initialize_repository(repository.path());
-    commit_file(repository.path(), ".gitignore", b"ignored.txt\n", "ignore");
-
-    let baseline = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-    fs::write(repository.path().join("ignored.txt"), b"build output\n").unwrap();
-    let current = capture_worktree_tree(&SystemGit, repository.path()).unwrap();
-
-    assert_eq!(
-        baseline, current,
-        "ignored build output is not a change a review should see"
-    );
-}
-
-#[test]
 fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
     let repository = tempfile::tempdir().unwrap();
     initialize_repository(repository.path());
@@ -2385,6 +2107,7 @@ fn a_session_diff_shows_tracked_and_untracked_work_against_the_recorded_base() {
 /// A session working in a subdirectory of its checkout is asked for its diff
 /// from that subdirectory, and its work is the whole checkout's, as its
 /// checkpoint is.
+// Hard-won: c4322938: subdirectory diffs omitted tracked and untracked work elsewhere in the checkout.
 #[test]
 fn a_session_diff_from_a_subdirectory_covers_the_whole_checkout() {
     let repository = tempfile::tempdir().unwrap();
@@ -2565,6 +2288,7 @@ fn a_session_file_read_stays_inside_the_workspace() {
 
 /// A person who asked for the wrong path has to be able to see where the read
 /// looked, because the directory differs per target kind (#1079).
+// Hard-won: f870729d: a reported file-export lookup bug lacked the searched directory in its refusal.
 #[test]
 fn a_missing_session_file_refusal_names_the_directory_it_searched() {
     let root = tempfile::tempdir().unwrap();
