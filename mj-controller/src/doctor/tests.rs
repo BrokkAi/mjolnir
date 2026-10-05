@@ -386,6 +386,7 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
         "{}",
         checks[0].detail
     );
+    assert!(all_ready(&checks));
 
     let configured = config_with([(
         "docker",
@@ -399,6 +400,22 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
         CheckStatus::Fixable,
         "a target the user configured is still a fault to fix"
     );
+    assert!(checks[0].remediation.is_some());
+    assert!(!all_ready(&checks));
+
+    let available = FakeExecutor::new([
+        Ok(output(b"29.0.1 linux\n")),
+        Ok(output(b"image metadata\n")),
+        Ok(output(b"image metadata\n")),
+    ]);
+    let checks = docker_checks(Ok(&configured), &available, false);
+    assert!(
+        checks
+            .iter()
+            .all(|check| check.status == CheckStatus::Ready),
+        "{checks:?}"
+    );
+    assert!(all_ready(&checks));
 }
 
 /// Launch finding R3-3: a Setup save once wrote the built-in `[targets.docker]`
@@ -535,6 +552,7 @@ fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
     let limits = parse_host_limits(b"keys.used=10\nkeys.quota=4096\nmaxstartups.unreadable=1\n");
 
     assert!(limits.max_startups_unreadable);
+    assert!(!limits.keyring_is_under_pressure());
     let sentence = limits.max_startups_sentence();
     assert!(sentence.contains("unreadable drop-in"), "{sentence}");
     assert!(!sentence.contains("10:30"), "{sentence}");
@@ -546,8 +564,26 @@ fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
         "sshd MaxStartups is not set in sshd_config, so sshd's default applies."
     );
 
+    let explicit = parse_host_limits(b"maxstartups=10:30:60\n");
+    assert_eq!(
+        explicit.max_startups_sentence(),
+        "sshd MaxStartups is 10:30:60."
+    );
+
     let empty = parse_host_limits(b"");
     assert!(empty.is_empty());
+}
+
+#[test]
+fn host_limits_report_pressure_when_keys_reach_the_quota() {
+    let limits = parse_host_limits(b"keys.used=3300\nkeys.quota=4096\n");
+
+    assert!(limits.keyring_is_under_pressure());
+    assert!(
+        limits
+            .keyring_sentence("dev@example.test")
+            .contains("3300 of its 4096")
+    );
 }
 
 #[test]
@@ -585,6 +621,98 @@ fn ssh_bare_config() -> Config {
             workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
         },
     )])
+}
+
+fn ssh_podman_probe_executor(linger: (i32, &str, &str)) -> FakeExecutor {
+    let probes = crate::targets::ssh_podman_probe_fixture(&[
+        ("version", 0, "podman version 5.4.2\n", ""),
+        (
+            "uid_map",
+            0,
+            "         0       1000          1\n         1     100000      65536\n",
+            "",
+        ),
+        ("linger", linger.0, linger.1, linger.2),
+    ]);
+    FakeExecutor::new([Ok(output(b"")), Ok(output(probes))])
+}
+
+/// Known enabled, known disabled and unverified user lingering are distinct
+/// durability states for a remote Podman worker.
+#[test]
+fn ssh_podman_check_explains_when_durability_cannot_be_verified() {
+    let ssh = RuntimeSshTarget::from(&ssh_connection());
+
+    let ready_executor = ssh_podman_probe_executor((0, "yes\n", ""));
+    let (ready, _) = ssh_podman_check("remote", &ssh, "ubuntu:24.04", &ready_executor, false);
+    assert_eq!(ready.id, "runtime.ssh-podman.remote");
+    assert_eq!(ready.title, "Remote Podman for target remote");
+    assert_eq!(ready.status, CheckStatus::Ready);
+    assert!(ready.detail.contains("Remote rootless Podman 5.4.2"));
+    assert!(ready.detail.contains("dev@example.test"));
+    let commands = ready_executor.commands.borrow();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].args.last().unwrap(), "'true'");
+    for command in commands.iter().skip(1) {
+        assert_eq!(command.program, "ssh");
+        assert!(command.args.contains(&"dev@example.test".to_owned()));
+    }
+    assert!(
+        commands[1]
+            .args
+            .last()
+            .unwrap()
+            .contains("loginctl show-user")
+    );
+
+    let disabled_executor = ssh_podman_probe_executor((0, "no\n", ""));
+    let (disabled, _) = ssh_podman_check("remote", &ssh, "ubuntu:24.04", &disabled_executor, false);
+    assert_eq!(disabled.status, CheckStatus::Warning);
+    assert!(all_ready(std::slice::from_ref(&disabled)));
+    assert!(disabled.detail.contains("Podman 5.4.2 is available"));
+    assert!(disabled.detail.contains("last SSH connection closes"));
+    assert!(
+        disabled
+            .remediation
+            .as_deref()
+            .unwrap()
+            .contains("sudo loginctl enable-linger")
+    );
+
+    let unknown_executor = ssh_podman_probe_executor((127, "", "sh: loginctl: not found\n"));
+    let (unknown, _) = ssh_podman_check("remote", &ssh, "ubuntu:24.04", &unknown_executor, false);
+    assert_eq!(unknown.status, CheckStatus::Warning);
+    assert!(all_ready(std::slice::from_ref(&unknown)));
+    assert!(unknown.detail.contains("durability check is unavailable"));
+    assert!(unknown.detail.contains("may not use systemd"));
+    assert!(unknown.detail.contains("cannot verify"));
+    let remediation = unknown.remediation.as_deref().unwrap();
+    assert!(remediation.contains("service manager"));
+    assert!(!remediation.contains("sudo loginctl enable-linger"));
+}
+
+/// Permission denied on the SSH connection probe stops dependent Podman
+/// probes and reports the shared SSH remediation.
+#[test]
+fn ssh_podman_check_reports_the_shared_ssh_remediation_before_probing_podman() {
+    let executor = FakeExecutor::new([Ok(failed(
+        b"dev@example.test: Permission denied (publickey).",
+    ))]);
+
+    let (check, _) = ssh_podman_check(
+        "remote",
+        &RuntimeSshTarget::from(&ssh_connection()),
+        "ubuntu:24.04",
+        &executor,
+        false,
+    );
+
+    assert_eq!(check.status, CheckStatus::Fixable);
+    assert_eq!(
+        check.remediation.as_deref(),
+        Some("Install your public key on the host with `ssh-copy-id dev@example.test`.")
+    );
+    assert_eq!(executor.commands.borrow().len(), 1);
 }
 
 /// precision-3260 had 0 B free for its user while `df` showed ~23 GB "free"
@@ -671,6 +799,123 @@ fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
     );
 }
 
+/// A host-key mismatch offers key installation only with a fingerprint check.
+#[test]
+fn ssh_bare_check_host_key_failure_recommends_keyscan_with_a_fingerprint_caution() {
+    let executor = FakeExecutor::new([Ok(failed(
+        b"Host key verification failed.\nNo ECDSA host key is known for example.test",
+    ))]);
+
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
+
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("ssh-keyscan -H example.test >> ~/.ssh/known_hosts"),
+        "{remediation}"
+    );
+    assert!(
+        remediation.contains("Verify the fingerprint"),
+        "{remediation}"
+    );
+}
+
+/// An unrecognized SSH result stays visible instead of being misreported as
+/// a known reachability or installation problem.
+#[test]
+fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
+    let executor = FakeExecutor::new([Ok(failed(
+        b"kex_exchange_identification: read: Connection reset by peer",
+    ))]);
+
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
+
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("Connection reset by peer"),
+        "{remediation}"
+    );
+    assert!(
+        remediation.contains("Run `ssh dev@example.test true` by hand"),
+        "{remediation}"
+    );
+}
+
+/// An untyped launch failure must not turn into incorrect OpenSSH install
+/// advice.
+#[test]
+fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
+    let executor = FakeExecutor::new([Err(anyhow!(
+        "operation cancelled while verify SSH connectivity"
+    ))]);
+
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
+
+    assert_eq!(checks[0].status, CheckStatus::Fixable);
+    let remediation = checks[0].remediation.as_deref().unwrap();
+    assert!(
+        remediation.contains("Run `ssh dev@example.test true` by hand"),
+        "{remediation}"
+    );
+    assert!(!remediation.contains("openssh-client"), "{remediation}");
+}
+
+/// Image checks must stop when the host's Podman preflight is unsupported.
+#[test]
+fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
+    let executor = FakeExecutor::new([Ok(output(b"")), Ok(output(b"podman version 3.4.7\n"))]);
+    let config = config_with([(
+        "podman",
+        TargetTemplate::LocalPodman {
+            container: container("ubuntu:24.04"),
+        },
+    )]);
+
+    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].id, "runtime.podman");
+
+    let mut responses = vec![
+        Ok(output(b"podman version 5.4.2\n")),
+        Ok(output(
+            b"         0       1000          1\n         1     100000      65536\n",
+        )),
+    ];
+    responses.extend([Ok(output(b"")), Ok(failed(b"")), Ok(output(b""))]);
+    let executor = FakeExecutor::new(responses);
+    let config = config_with([
+        (
+            "alpha",
+            TargetTemplate::LocalPodman {
+                container: container("ubuntu:24.04"),
+            },
+        ),
+        (
+            "beta",
+            TargetTemplate::LocalPodman {
+                container: container("ghcr.io/example/dev:1"),
+            },
+        ),
+    ]);
+    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "runtime.podman",
+            "runtime.podman.image.alpha",
+            "runtime.podman.image.beta",
+            "runtime.podman.image.podman"
+        ]
+    );
+    assert_eq!(checks[1].status, CheckStatus::Ready);
+    assert_eq!(checks[2].status, CheckStatus::Fixable);
+    assert_eq!(checks[3].status, CheckStatus::Ready);
+}
+
 /// With no target blocks in config.toml, the dashboard still offers the
 /// built-in `podman` target, and doctor's engine and image checks cover it;
 /// the worker-binary checks said "No container target is configured" and the
@@ -703,6 +948,24 @@ fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
         container_worker_architectures(Ok(&offered)),
         [normalized_worker_architecture(std::env::consts::ARCH)]
     );
+
+    let configured = config_with([(
+        "pd",
+        TargetTemplate::LocalPodman {
+            container: container("example.test/own:latest"),
+        },
+    )]);
+    let engines = [DoctorCheck::unsupported(
+        "runtime.podman",
+        "Rootless Podman",
+        "Podman is not installed.",
+    )];
+    let offered = offered_targets(&configured, &engines);
+    let ids = worker_binary_checks(Ok(&offered))
+        .into_iter()
+        .map(|check| check.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["worker.pd"]);
 }
 
 /// Settings opens with `prefix+s`; F7 is not bound, so no fix may send the

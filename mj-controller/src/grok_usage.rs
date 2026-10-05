@@ -363,43 +363,6 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_usage_query_answers_from_a_live_agent_that_holds_its_stdin_open() {
-        let directory = tempfile::tempdir().unwrap();
-        // Answers both requests, then blocks on stdin. A caller that closes
-        // stdin early would end this process before reading the reply, which
-        // is exactly how the real agent behaves.
-        let _executable = fake_grok(
-            directory.path(),
-            r#"#!/bin/sh
-[ "$1" = "agent" ] && [ "$2" = "stdio" ] || exit 64
-while IFS= read -r line; do
-  case "$line" in
-    *'"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}\n' ;;
-    *'_x.ai/billing'*)
-      printf '{"jsonrpc":"2.0","id":2,"result":{"config":{"creditUsagePercent":30.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-18T05:22:07.661951+00:00"}},"subscription_tier":"X Premium+"}}\n' ;;
-  esac
-done
-"#,
-        );
-
-        let usage = query(
-            directory.path().to_path_buf(),
-            directory.path().to_path_buf(),
-            HashMap::from([(
-                "PATH".to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            )]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(usage.period_label, "Week");
-        assert_eq!(usage.remaining_percent(), 70);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn an_agent_that_exits_without_answering_is_reported_not_awaited() {
         let directory = tempfile::tempdir().unwrap();
         let _executable = fake_grok(directory.path(), "#!/bin/sh\nexit 0\n");

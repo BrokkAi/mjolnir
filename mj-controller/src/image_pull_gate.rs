@@ -277,6 +277,21 @@ mod tests {
         drop(held);
     }
 
+    /// The same image on the same host is one download; a different host or a
+    /// different image is not.
+    #[test]
+    fn the_pull_lock_is_shared_per_host_and_image() {
+        let first = image_pull_mutex(&ImageHost::LocalPodman, "ghcr.io/example/dev:latest");
+        let again = image_pull_mutex(&ImageHost::LocalPodman, "ghcr.io/example/dev:latest");
+        assert!(Arc::ptr_eq(&first, &again));
+
+        let other_image = image_pull_mutex(&ImageHost::LocalPodman, "ghcr.io/example/other:latest");
+        assert!(!Arc::ptr_eq(&first, &other_image));
+
+        let other_host = image_pull_mutex(&ImageHost::LocalDocker, "ghcr.io/example/dev:latest");
+        assert!(!Arc::ptr_eq(&first, &other_host));
+    }
+
     /// `mj doctor --smoke` runs its smoke test in its own process while the daemon may
     /// be downloading the same image. The file lock makes it wait, as a
     /// thread of the daemon would: two locks with the same file stand for the
