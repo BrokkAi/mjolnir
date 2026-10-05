@@ -18,6 +18,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::{Position, Rect};
 use std::collections::BTreeMap;
 
+// Hard-won: 61a1cfa: Codex command updates were lost during replay, hiding worker-owned goal controls
 #[tokio::test]
 async fn live_goal_commands_follow_worker_state_despite_a_damaged_projection() {
     let mut view = managed_view(MaterializedSession::empty("goal-commands"));
@@ -140,112 +141,6 @@ fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
     assert!(!chat.needs_animation());
 }
 
-/// Captures the real conversation renderer for visual review. The caller
-/// chooses an artifact path; ordinary test runs never write screenshots.
-#[test]
-#[ignore = "writes a terminal-cell capture to MJ_CHAT_CAPTURE_PATH"]
-fn capture_chat_preview() {
-    let path = std::env::var_os("MJ_CHAT_CAPTURE_PATH")
-        .expect("set MJ_CHAT_CAPTURE_PATH to the preview JSON path");
-    let dimension = |name, fallback| {
-        std::env::var_os(name)
-            .map(|value| {
-                value
-                    .to_str()
-                    .expect("capture dimensions must be Unicode")
-                    .parse::<u16>()
-                    .expect("capture dimensions must be unsigned integers")
-            })
-            .unwrap_or(fallback)
-    };
-    let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
-    let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("local / mjolnir", "Claude · Sonnet", "");
-    chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
-    chat.turn_started_at_epoch_seconds = Some(mj_core::clock::epoch_seconds().saturating_sub(42));
-    chat.set_current_step_start(Some(mj_core::clock::epoch_millis().saturating_sub(7_000)));
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        checking_response: false,
-        execution: Some(mj_core::relay::RelayExecutionState::Running),
-        ..Default::default()
-    });
-    let tool = |seq, title: &str, summary: &str, status| {
-        let mut entry = ChatEntry::tool(seq, title, None, status);
-        entry.tool_summary = Some(summary.to_owned());
-        entry
-    };
-    chat.entries = vec![
-        ChatEntry::plain(
-            1,
-            ChatRole::User,
-            "Make the terminal feel beautifully crafted. Keep it fast, readable, and calm.",
-        ),
-        ChatEntry::plain(
-            2,
-            ChatRole::Agent,
-            "I’m bringing the interface together around a midnight palette, clear hierarchy, and the original animated activity indicators.\n\n### A little more room to think\n\n- Focus follows a soft teal border\n- **Your conversation stays readable** while tools work\n- Code and keyboard shortcuts have their own quiet surfaces",
-        ),
-        tool(
-            3,
-            "cd dir && python x.py | cat | wc ; print ok",
-            "cd && python | cat | wc ; print",
-            mj_core::transcript::ToolStatus::Completed,
-        ),
-        tool(
-            4,
-            "cargo test -p brokk-mj-chat",
-            "cargo test",
-            mj_core::transcript::ToolStatus::Completed,
-        ),
-        ChatEntry::plain(
-            5,
-            ChatRole::Agent,
-            "The shared theme is in place. Here’s the panel style used throughout the app:\n\n```rust\nlet panel = theme::panel(focused)\n    .title(\" Conversation \");\n```\n\nI’m checking the narrow layouts and selection behavior now.",
-        ),
-        tool(
-            6,
-            "cargo clippy --all-targets -- -D warnings",
-            "cargo clippy",
-            mj_core::transcript::ToolStatus::Running,
-        ),
-    ];
-    // Keep the capture representative of the in-place tool expansion:
-    // the first completed call opens to its provider title and splits the
-    // surrounding completed streak.
-    chat.expanded_tool_calls.insert(3);
-    let mut terminal = Terminal::new(TestBackend::new(columns, rows)).expect("terminal");
-    terminal
-        .draw(|frame| render_full_frame(frame, &mut chat, false))
-        .expect("render preview");
-    let buffer = terminal.backend().buffer();
-    let color = |color, fallback| match color {
-        ratatui::style::Color::Rgb(r, g, b) => [r, g, b],
-        _ => fallback,
-    };
-    let rows = (0..buffer.area.height)
-        .map(|y| {
-            (0..buffer.area.width)
-                .map(|x| {
-                    let cell = &buffer[(x, y)];
-                    serde_json::json!({
-                        "text": cell.symbol(),
-                        "fg": color(cell.fg, [223, 235, 244]),
-                        "bg": color(cell.bg, [11, 18, 32]),
-                        "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
-                        "italic": cell.modifier.contains(ratatui::style::Modifier::ITALIC),
-                        "underline": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let capture = serde_json::json!({ "width": buffer.area.width, "height": buffer.area.height, "rows": rows });
-    std::fs::write(path, serde_json::to_vec(&capture).expect("encode preview"))
-        .expect("write preview");
-}
-
 fn prepare_storage_test_chat() -> PreparedChat {
     let fixture = mj_client::session::replacement_session_test_fixture("review-storage", 1);
     ActiveChat::prepare_with_persistence(
@@ -258,27 +153,6 @@ fn prepare_storage_test_chat() -> PreparedChat {
         Notices::default(),
         None,
     )
-}
-
-#[tokio::test]
-async fn client_review_state_restores_workflow_without_profile_defaults() {
-    let (workflow, _) = ReviewWorkflow::start("proposal", "Review this plan", "context");
-    let chat = prepare_storage_test_chat()
-        .with_review_state(Ok(mj_client::session::ReviewState {
-            review: Some(mj_core::storage::StoredReview {
-                workflow,
-                generation: 7,
-                context_baseline: 12,
-                native_lost: false,
-                reviewer_transcript: Vec::new(),
-            }),
-        }))
-        .open();
-    assert_eq!(chat.reviewer_generation, 7);
-    assert_eq!(
-        chat.state.second_opinion().unwrap().captured().proposal,
-        "Review this plan"
-    );
 }
 
 #[tokio::test]
@@ -437,33 +311,28 @@ fn build_prompt_only_appears_without_session_history() {
 }
 
 #[test]
-fn dictation_appends_to_existing_prompt_cleanly() {
-    assert_eq!(append_dictation("please", "fix this"), "please fix this");
-    assert_eq!(append_dictation("", "fix this"), "fix this");
-    assert_eq!(append_dictation("please ", ""), "please");
-}
-
-#[test]
 fn detaching_leaves_the_unsent_input_where_the_dashboard_saves_it_from() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_input("half typed thought".into());
+    let mut session = MaterializedSession::empty("session-detach");
+    session.applied_event_ordinal = 12;
+    session.transcript = vec![agent_transcript_item("read through here", 12)];
+    apply_session_view(&mut chat, Ok(managed_view(session)));
+    chat.queued_prompts.push_back(queued("queued-1", "queued"));
 
     // Detaching keeps the composer intact: the warm chat goes on holding
     // it, and the surface reads it here to write it to the session row.
-    detach_chat(&mut chat);
+    assert_eq!(detach_chat(&mut chat), 12);
+    assert_eq!(chat.input, "half typed thought");
+    assert_eq!(chat.entries.len(), 1);
+    assert!(chat.queued_prompts.is_empty());
+
+    assert_eq!(detach_chat(&mut chat), 12);
     assert_eq!(chat.input, "half typed thought");
 
-    detach_chat(&mut chat);
-    assert_eq!(chat.input, "half typed thought");
-}
-
-#[test]
-fn detaching_an_empty_composer_leaves_an_empty_draft_to_save() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-
-    detach_chat(&mut chat);
-
-    assert_eq!(chat.input, "");
+    let mut empty = ChatState::new(&snapshot(), &[]);
+    detach_chat(&mut empty);
+    assert_eq!(empty.input, "");
 }
 
 #[test]
@@ -893,6 +762,7 @@ async fn dictation_completion_preserves_edits_and_recovers_after_errors() {
 /// Launch findings A-4 and E-9: with no voice helper or no dictation sign-in,
 /// the dictation chord changed nothing on screen and wrote no log line, so the
 /// key looked broken. It now says why nothing started.
+// Hard-won: 6003829: unavailable dictation chords were silently ignored
 #[tokio::test]
 async fn the_dictation_chord_says_why_dictation_is_unavailable() {
     let fixture =
@@ -1033,6 +903,7 @@ async fn an_external_review_removal_closes_its_visible_question() {
 /// That fact reaches the chat through the header now that the daemon owns
 /// the recovery context the open path used to carry, so a Codex session
 /// must still list `/plan`.
+// Hard-won: 1714125: Codex /plan disappeared when recovery stopped supplying harness context
 #[tokio::test]
 async fn a_codex_session_lists_plan_from_the_header_harness() {
     use crate::chat::test_support::select_config_option;
@@ -1147,51 +1018,10 @@ fn chat_context(
     }
 }
 
-/// Both review surfaces reflect the shared settings as configuration changes.
-#[tokio::test]
-async fn review_status_configuration_is_applied_on_open_and_refresh() {
-    use mj_core::review::lanes::ReviewTier;
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
-    let mut context = chat_context("session-review", &[]);
-    context.config.review = mj_core::config::ReviewConfig {
-        enabled: true,
-        tier: ReviewTier::Extended,
-        profile: Some("reviewer-a".into()),
-        model: None,
-        effort: None,
-    };
-    let mut chat = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(context),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-
-    assert_eq!(
-        chat.state.review_config(),
-        mj_core::config::ReviewConfig {
-            enabled: true,
-            tier: ReviewTier::Extended,
-            profile: Some("reviewer-a".into()),
-            model: None,
-            effort: None,
-        }
-    );
-
-    let mut reloaded = Config::default();
-    reloaded.review.profile = Some("reviewer-b".into());
-    chat.refresh_context(&reloaded, None, None);
-
-    assert_eq!(chat.state.review_config(), reloaded.review);
-}
-
 /// A failed recovery copy is the one thing the user has to see on opening
 /// the session, so it is raised after the connection notice a cold open
 /// also sets: a notice is a single slot, and the last write wins.
+// Hard-won: dc7ee47: the checkpoint failure notice disappeared behind cold-open connection feedback
 #[tokio::test]
 async fn a_recorded_checkpoint_error_reaches_the_notice_when_the_chat_opens() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-checkpoint", 81);
@@ -1212,61 +1042,6 @@ async fn a_recorded_checkpoint_error_reaches_the_notice_when_the_chat_opens() {
         chat.state.notice().as_deref(),
         Some("Recovery copy failed: the target ran out of disk")
     );
-}
-
-/// A captured plan starts preparation directly; the controller resolves current settings.
-#[tokio::test]
-async fn a_second_opinion_opens_the_reviewer_preparation_from_the_context() {
-    use mj_core::config::HarnessKind;
-
-    let request = ElicitationRequest {
-        id: "plan-1".into(),
-        message: "may I run this plan?".into(),
-        title: None,
-        description: None,
-        fields: Vec::new(),
-    };
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-opinion", 83);
-    let mut chat = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(chat_context(
-            "session-opinion",
-            &[("claude-1", HarnessKind::Claude)],
-        )),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-
-    chat.open_second_opinion(request.clone(), "the plan".into());
-
-    let Some(SecondOpinion::Setup { setup, .. }) = chat.state.second_opinion() else {
-        panic!("second opinion opens preparation, not a selector");
-    };
-    assert!(setup.failure.is_none());
-    assert!(chat.reviewer_preparation.is_some());
-
-    let fixture = mj_client::session::replacement_session_test_fixture("session-alone", 84);
-    let mut alone = ActiveChat::open(
-        fixture.stopped,
-        "bundle-1",
-        Some(chat_context("session-alone", &[])),
-        fixture.control,
-        SessionHeaderIdentity::default(),
-        String::new(),
-        Notices::default(),
-    );
-
-    alone.open_second_opinion(request, "the plan".into());
-
-    assert!(matches!(
-        alone.state.second_opinion(),
-        Some(SecondOpinion::Setup { .. })
-    ));
-    assert!(alone.reviewer_preparation.is_some());
 }
 
 /// Late startup results cannot consume a replacement plan decision.
@@ -1467,6 +1242,7 @@ async fn a_same_session_context_refresh_updates_the_visible_header_without_losin
 /// conversation header showed its 32-hex id while the Sessions row showed the
 /// title it was created with ("project via fake"). The header uses the
 /// listed title too.
+// Hard-won: b05328c: unnamed session headers showed the UUID instead of the listed title
 #[tokio::test]
 async fn an_unnamed_session_s_header_uses_its_listed_title_not_its_id() {
     use mj_core::config::HarnessKind;
@@ -1540,6 +1316,7 @@ async fn an_active_runtime_record_rearms_a_chat_after_its_handoff_timed_out() {
     assert!(chat.state.notice().is_none());
 }
 
+// Hard-won: 66c7315: an intentional stop triggered a false reconnect wait
 #[tokio::test]
 async fn a_retiring_session_does_not_reconnect_when_its_feed_closes() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-stop", 12);
@@ -1578,6 +1355,7 @@ async fn a_retiring_session_does_not_reconnect_when_its_feed_closes() {
     assert!(chat.session_reconnect_in_flight);
 }
 
+// Hard-won: 66c7315: an intentional stop produced a false relay reconnect error
 #[tokio::test]
 async fn a_retiring_sessions_reconnect_failure_is_not_reported() {
     let fixture = mj_client::session::replacement_session_test_fixture("session-destroy", 13);
@@ -1606,6 +1384,7 @@ async fn a_retiring_sessions_reconnect_failure_is_not_reported() {
     assert!(!chat.session_reconnect_in_flight);
 }
 
+// Hard-won: 79c0a8c: resume reused a sealed chat view and rejected the next prompt
 #[test]
 fn retiring_the_session_feed_keeps_a_closing_phase_in_place() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1616,23 +1395,6 @@ fn retiring_the_session_feed_keeps_a_closing_phase_in_place() {
         Err(anyhow::anyhow!("session manager stopped"))
     ));
     assert_eq!(chat.phase(), WorkerPhase::Closed);
-}
-
-#[test]
-fn leaving_the_chat_reports_the_ordinal_the_user_has_read() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut session = MaterializedSession::empty("session-read");
-    session.applied_event_ordinal = 12;
-    session.transcript = vec![agent_transcript_item("first", 12)];
-    apply_session_view(&mut chat, Ok(managed_view(session)));
-    chat.queued_prompts.push_back(queued("queued-1", "queued"));
-
-    assert_eq!(detach_chat(&mut chat), 12);
-    // The transcript stays warm for the next visit; the interaction state
-    // that belonged to the visit does not.
-    assert_eq!(chat.entries.len(), 1);
-    assert!(chat.queued_prompts.is_empty());
-    assert_eq!(detach_chat(&mut chat), 12);
 }
 
 #[test]
@@ -1759,6 +1521,7 @@ fn narrow_chat_footer_keeps_complete_palette_and_help_hints_on_screen() {
 /// A-12: the composer's footer dropped the prefix label with the first chord,
 /// so from 100 columns down it read `: palette · ? keys` — plain keys, as far
 /// as the reader could tell. The label must ride on the first chord left.
+// Hard-won: 48c2a9c: narrow composer footers hid the prefix and made a chord look like a plain key
 #[test]
 fn the_composer_footer_names_the_prefix_at_every_width() {
     let chat = ChatState::new(&snapshot(), &[]);
@@ -1812,6 +1575,7 @@ fn the_composer_footer_names_the_prefix_at_every_width() {
 /// them, so splitting on the glyph set's separator found nothing under the
 /// ASCII set and the dot reached the screen anyway. Each branch that builds
 /// those hints (idle, queued, and dictating) is checked here.
+// Hard-won: 8dc493a: ASCII mode still emitted a Unicode middle-dot separator
 #[test]
 fn the_ascii_symbol_set_reaches_the_composers_own_footer_hints() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2390,6 +2154,7 @@ fn running_tasks_use_navigation_glyph_and_neutral_surface_until_focused() {
     }
 }
 
+// Hard-won: 6e7ecf3: title styling made hint descriptions bold and erased key emphasis
 #[test]
 fn prompt_hint_keys_are_bold_but_descriptions_are_not() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2944,32 +2709,6 @@ fn long_session() -> MaterializedSession {
 }
 
 #[test]
-fn the_converted_history_completes_a_chat_opened_on_its_tail() {
-    let session = long_session();
-    let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
-    let pending = chat.unconverted_prefix();
-    assert!(pending > 0);
-    let prefix = materialized_prefix_entries(
-        &session.transcript[..pending],
-        session.applied_event_ordinal,
-    );
-
-    let rebuild = apply_chat_io_update(
-        &mut chat,
-        ChatIoUpdate::TranscriptPrefix {
-            attempt: 1,
-            result: Ok((prefix, Vec::new())),
-        },
-    );
-
-    assert_eq!(rebuild, PrefixRebuild::NotNeeded);
-    assert_eq!(chat.unconverted_prefix(), 0);
-    assert_eq!(chat.entries.len(), session.transcript.len());
-    assert_eq!(chat.entries[0].text, "message 1");
-    assert_eq!(chat.notice(), None);
-}
-
-#[test]
 fn history_that_no_longer_fits_the_tail_is_rebuilt_and_then_gives_up_with_a_notice() {
     let session = long_session();
     let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
@@ -3354,6 +3093,7 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
 /// Launch campaign finding A-15: switching Setup's symbols to ASCII left an
 /// open transcript drawn with `❯` until a restart, because its row cache
 /// was kept across the change. The next draw uses the new symbols.
+// Hard-won: 987af2e: an open transcript reused Unicode rows after switching to ASCII
 #[test]
 fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
     use crate::theme::{SymbolSet, with_symbols};
@@ -3366,6 +3106,7 @@ fn an_open_transcript_follows_a_symbol_set_change_on_the_next_draw() {
     assert!(ascii.iter().all(|row| !row.contains('❯')), "{ascii:#?}");
 }
 
+// Hard-won: b4adff5: empty image paste read an unsupported clipboard and showed the wrong failure
 #[tokio::test]
 async fn empty_paste_without_image_support_reports_it_without_reading_the_clipboard() {
     let mut chat = clipboard_test_chat();

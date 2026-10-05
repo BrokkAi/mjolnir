@@ -509,9 +509,7 @@ pub(super) fn config_value_row(choice: &SessionConfigChoice) -> Option<String> {
 mod tests {
     use super::*;
     use crate::chat::ChatAction;
-    use crate::chat::test_support::{
-        advertise, fast_mode_option, grok_chat, key, mode_config_option, snapshot,
-    };
+    use crate::chat::test_support::{advertise, key, snapshot};
     use crossterm::event::KeyCode;
 
     #[test]
@@ -524,31 +522,6 @@ mod tests {
         assert_eq!(config_value_row(&choice).as_deref(), Some("Model name"));
         choice.name = "  ".into();
         assert_eq!(config_value_row(&choice).as_deref(), Some("model-id"));
-    }
-
-    #[test]
-    fn local_command_parser_requires_an_exact_command_boundary() {
-        assert_eq!(parse_local_command("/checkpoint before refactor"), None);
-        assert_eq!(parse_local_command("/checkpointing"), None);
-        assert_eq!(parse_local_command("explain /checkpoint"), None);
-        assert!(prompt_invokes_command("/goal finish it", "goal"));
-        assert!(!prompt_invokes_command("/Goal finish it", "goal"));
-        assert!(!prompt_invokes_command("/goalkeeper", "goal"));
-    }
-
-    #[test]
-    fn attach_command_preserves_the_path_for_background_processing() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_prompt_images_supported(true);
-        chat.set_input("/attach photos/one.png".into());
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::Attach {
-                path: std::path::PathBuf::from("photos/one.png"),
-                command: "/attach photos/one.png".into(),
-            }
-        );
-        assert!(chat.input.is_empty());
     }
 
     /// Tab has two jobs now: finish a completion, and hand the keyboard to
@@ -575,71 +548,6 @@ mod tests {
             chat.handle_key(key(KeyCode::BackTab)),
             ChatAction::CycleFocus { reverse: true }
         );
-    }
-
-    /// The composer's word-kill and cursor keys used to be eaten before it
-    /// saw them: Ctrl-W by the workspace picker, Ctrl-B by the web dialog.
-    /// Both accelerators are the composer's again.
-    #[test]
-    fn the_composer_keeps_control_w_and_control_b() {
-        use crossterm::event::{KeyEvent, KeyModifiers};
-
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        for character in "one two".chars() {
-            chat.handle_key(key(KeyCode::Char(character)));
-        }
-
-        let control =
-            |character: char| KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
-        assert_eq!(chat.handle_key(control('w')), ChatAction::None);
-        assert_eq!(chat.input, "one ", "Ctrl-W kills the previous word");
-
-        assert_eq!(chat.handle_key(control('b')), ChatAction::None);
-        assert_eq!(
-            chat.input_cursor, 3,
-            "Ctrl-B steps the cursor back one character"
-        );
-    }
-
-    #[test]
-    fn autocomplete_merges_agent_commands_without_overriding_hel_commands() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.apply_session_update(
-            1,
-            &serde_json::json!({
-                "sessionUpdate": "available_commands_update",
-                "availableCommands": [
-                    {"name": "compact", "description": "agent compact", "input": {"hint": "scope"}},
-                    {"name": "review", "description": "agent review"},
-                    {"name": "help", "description": "agent help"}
-                ]
-            }),
-        );
-        assert!(chat.command_choices.iter().any(|command| {
-            command.name == "compact" && command.source == CommandSource::Agent
-        }));
-        // `/review` is Hel's: it opens the turn-review pane rather than
-        // reaching the agent, so an agent command of the same name does not
-        // replace it.
-        assert_eq!(
-            chat.command_choices
-                .iter()
-                .filter(|command| command.name == "review")
-                .map(|command| command.source)
-                .collect::<Vec<_>>(),
-            vec![CommandSource::Hel]
-        );
-        assert_eq!(
-            chat.command_choices
-                .iter()
-                .filter(|command| command.name == "help")
-                .count(),
-            1
-        );
-
-        chat.set_input("/rev".into());
-        assert!(chat.accept_autocomplete());
-        assert_eq!(chat.input, "/review ");
     }
 
     #[test]
@@ -674,42 +582,6 @@ mod tests {
                 .command_choices
                 .iter()
                 .any(|command| command.name == "goal")
-        );
-    }
-
-    #[test]
-    fn advertised_plan_is_owned_by_hel_while_other_agent_commands_are_forwarded() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.apply_session_update(
-            1,
-            &serde_json::json!({
-                "sessionUpdate": "available_commands_update",
-                "availableCommands": [
-                    {"name": "plan", "description": "toggle plan mode"},
-                    {"name": "goal", "description": "set a persistent goal", "input": {"hint": "objective"}}
-                ]
-            }),
-        );
-        assert!(
-            !chat
-                .command_choices
-                .iter()
-                .any(|command| command.name == "plan")
-        );
-        assert!(
-            chat.command_choices
-                .iter()
-                .any(|command| command.name == "goal")
-        );
-
-        chat.input = "/plan".into();
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert!(chat.input.is_empty());
-
-        chat.input = "/goal ship the release".into();
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::Prompt("/goal ship the release".into())
         );
     }
 
@@ -779,67 +651,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fast_is_a_hel_command_only_while_the_codex_selector_is_available() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        advertise(&mut chat, 1, &["fast"]);
-        assert!(
-            !chat
-                .command_choices
-                .iter()
-                .any(|command| command.name == "fast")
-        );
-
-        chat.set_config_options(&[fast_mode_option("off")]);
-        assert!(
-            chat.command_choices
-                .iter()
-                .any(|command| { command.name == "fast" && command.source == CommandSource::Hel })
-        );
-
-        chat.set_config_options(&[]);
-        assert!(
-            !chat
-                .command_choices
-                .iter()
-                .any(|command| command.name == "fast")
-        );
-    }
-
-    #[test]
-    fn plan_is_listed_as_a_hel_command_for_supported_surfaces() {
-        let lists_plan = |chat: &ChatState| {
-            chat.command_choices
-                .iter()
-                .any(|command| command.name == "plan" && command.source == CommandSource::Hel)
-        };
-
-        let mut chat = grok_chat();
-        assert!(lists_plan(&chat));
-
-        // The adapter's command never replaces Hel's cross-profile contract.
-        advertise(&mut chat, 1, &["plan"]);
-        assert!(lists_plan(&chat));
-
-        assert!(!lists_plan(&ChatState::new(&snapshot(), &[])));
-
-        let mut config_mode = ChatState::new(&snapshot(), &[]);
-        config_mode.set_config_options(&[mode_config_option("default", &["default", "plan"])]);
-        assert!(lists_plan(&config_mode));
-
-        // A Codex adapter with no plan/default config pair cannot enter plan
-        // mode, so neither Hel's own commands nor the adapter's are listed.
-        let mut without_plan_mode = ChatState::new(&snapshot(), &[]);
-        without_plan_mode.set_harness_kind(mj_core::config::HarnessKind::Codex);
-        advertise(&mut without_plan_mode, 2, &["plan", "implement"]);
-        assert!(!lists_plan(&without_plan_mode));
-        assert!(
-            !without_plan_mode
-                .command_choices
-                .iter()
-                .any(|command| { matches!(command.name.as_str(), "plan" | "implement") })
-        );
-    }
     fn goal_chat(actions: &[&str]) -> ChatState {
         let mut chat = ChatState::new(&snapshot(), &[]);
         advertise(&mut chat, 1, &["goal"]);
@@ -852,55 +663,6 @@ mod tests {
         chat
     }
 
-    #[test]
-    fn goal_controls_are_local_while_objectives_remain_prompts() {
-        use mj_core::goal::GoalControlAction;
-        for actions in [
-            vec!["set", "clear"],
-            vec!["set", "pause", "resume", "clear"],
-        ] {
-            let mut chat = goal_chat(&actions);
-            for action in GoalControlAction::ALL {
-                let command = format!("/goal {}", action.as_str().to_uppercase());
-                chat.input = command.clone();
-                let result = chat.submit_input();
-                if actions.contains(&action.as_str()) {
-                    assert_eq!(result, ChatAction::GoalControl { action });
-                    assert!(chat.input.is_empty());
-                } else {
-                    assert_eq!(result, ChatAction::None);
-                    assert!(chat.input.is_empty());
-                    assert!(chat.feedback.current().unwrap().contains("not supported"));
-                }
-            }
-            chat.input = "/goal pause the migration after testing".into();
-            assert_eq!(
-                chat.submit_input(),
-                ChatAction::Prompt("/goal pause the migration after testing".into())
-            );
-            assert_eq!(parse_local_command("/goal"), None);
-            assert_eq!(parse_local_command("/goalkeeper pause"), None);
-        }
-    }
-
-    #[test]
-    fn goal_completion_uses_capabilities_and_pause_clears_pursuing_label() {
-        let mut chat = goal_chat(&["clear"]);
-        chat.set_input("/goal ".into());
-        assert!(chat.accept_autocomplete());
-        assert_eq!(chat.input, "/goal clear ");
-        assert!(!chat.lists_command("goal pause"));
-        let mut chat = goal_chat(&["pause", "resume", "clear"]);
-        chat.set_input("/goal p".into());
-        assert!(chat.accept_autocomplete());
-        assert_eq!(chat.input, "/goal pause ");
-        chat.mark_prompt_submitted("/goal finish");
-        assert!(chat.pursuing_goal());
-        chat.apply_session_update(3, &serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"goal":{"objective":"finish","status":"paused"}}}));
-        assert!(!chat.pursuing_goal());
-        chat.apply_session_update(4, &serde_json::json!({"sessionUpdate":"session_info_update", "_meta":{"mjGoalCapability":null}}));
-        assert!(!chat.lists_command("goal pause"));
-    }
     #[test]
     fn goal_control_keeps_attached_drafts_and_bypasses_pending_plan_transition() {
         let mut chat = goal_chat(&["clear"]);

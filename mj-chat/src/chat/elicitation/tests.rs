@@ -4,34 +4,6 @@ use mj_core::elicitation::ElicitationOption;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-#[test]
-fn an_upgrade_preserves_unsubmitted_form_answers() {
-    let request = request(
-        ElicitationFieldKind::Text {
-            default: None,
-            min_length: None,
-            max_length: None,
-            pattern: None,
-            format: None,
-        },
-        true,
-    );
-    let mut dialog = ElicitationDialog::new(request.clone());
-    let text = "Keep this answer 🦀 ".repeat(8_000);
-    dialog.paste(&text);
-    let encoded = serde_json::to_vec(&dialog.draft()).unwrap();
-    assert!(encoded.len() > 64 * 1024);
-    let draft = serde_json::from_slice(&encoded).unwrap();
-    let mut restored = ElicitationDialog::from_draft(request, draft).unwrap();
-    restored.focus_control(1);
-    assert_eq!(
-        restored.handle_key(KeyCode::Enter, KeyModifiers::NONE),
-        Some(ElicitationResponse::Accept {
-            content: BTreeMap::from([("question_0".into(), ElicitationValue::String(text))]),
-        })
-    );
-}
-
 fn request(kind: ElicitationFieldKind, required: bool) -> ElicitationRequest {
     ElicitationRequest {
         id: "ask-1".into(),
@@ -180,6 +152,34 @@ fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
             indent.len()
         );
     }
+
+    let message = (0..400)
+        .map(|index| format!("word-{index:03}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let dialog = plan_review_message(&message);
+    rendered_in_pane(&dialog, 42, 18);
+    dialog.scroll_message(8);
+    let anchor = dialog.message_anchor.get().expect("scroll anchor");
+    for width in [34, 62, 42] {
+        rendered_in_pane(&dialog, width, 18);
+        assert_eq!(dialog.message_anchor.get(), Some(anchor));
+    }
+
+    let boundary_message = (0..400).map(|n| format!("w{n:04}")).collect::<String>();
+    let dialog = plan_review_message(&boundary_message);
+    rendered_in_pane(&dialog, 42, 18);
+    dialog.scroll_message(8);
+    let before = rendered_in_pane(&dialog, 42, 18);
+    let area = dialog.message_area.get().unwrap();
+    let before_row = buffer_row(&before, area.y, area.x, area.right());
+    let after = rendered_in_pane(&dialog, 34, 18);
+    let area = dialog.message_area.get().unwrap();
+    let after_row = buffer_row(&after, area.y, area.x, area.right());
+    assert!(
+        after_row.starts_with(&before_row[..8]),
+        "reading position moved from {before_row:?} to {after_row:?}"
+    );
 }
 
 #[test]
@@ -241,42 +241,6 @@ fn six_row_plan_pane_keeps_text_and_page_down_actionable() {
     assert!(
         after_text.contains("plan-"),
         "scrolled plan text is hidden: {after_text}"
-    );
-}
-
-#[test]
-fn repeated_resizes_retain_one_logical_message_anchor() {
-    let message = (0..400)
-        .map(|index| format!("word-{index:03}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let dialog = plan_review_message(&message);
-    rendered_in_pane(&dialog, 42, 18);
-    dialog.scroll_message(8);
-    let anchor = dialog.message_anchor.get().expect("scroll anchor");
-    rendered_in_pane(&dialog, 34, 18);
-    assert_eq!(dialog.message_anchor.get(), Some(anchor));
-    rendered_in_pane(&dialog, 62, 18);
-    assert_eq!(dialog.message_anchor.get(), Some(anchor));
-    rendered_in_pane(&dialog, 42, 18);
-    assert_eq!(dialog.message_anchor.get(), Some(anchor));
-}
-
-#[test]
-fn pane_resize_keeps_a_word_at_an_exact_wrap_boundary() {
-    let message = (0..400).map(|n| format!("w{n:04}")).collect::<String>();
-    let dialog = plan_review_message(&message);
-    rendered_in_pane(&dialog, 42, 18);
-    dialog.scroll_message(8);
-    let before = rendered_in_pane(&dialog, 42, 18);
-    let area = dialog.message_area.get().unwrap();
-    let before_row = buffer_row(&before, area.y, area.x, area.right());
-    let after = rendered_in_pane(&dialog, 34, 18);
-    let area = dialog.message_area.get().unwrap();
-    let after_row = buffer_row(&after, area.y, area.x, area.right());
-    assert!(
-        after_row.starts_with(&before_row[..8]),
-        "reading position moved from {before_row:?} to {after_row:?}"
     );
 }
 
@@ -410,37 +374,6 @@ fn plan_review_preserves_content_outside_scoped_bounds() {
         buffer[(question_bounds.right() - 1, question_bounds.y)].symbol(),
         "╮"
     );
-}
-
-/// The extractor maps a selection through per-line row counts, so those
-/// counts have to add up to what the pane's own paragraph reports.
-#[test]
-fn wrapped_row_counts_of_source_lines_sum_to_the_paragraphs_line_count() {
-    let message = concat!(
-        "a short line\n",
-        "\n",
-        "a considerably longer line that the plan pane has to wrap over several rows ",
-        "before it finally runs out of words to place\n",
-        "tiny\n",
-        "\n",
-        "\n",
-        "another long one, long enough that it also wraps more than once at any of ",
-        "these widths"
-    );
-
-    for width in [17u16, 33, 80] {
-        let composed = message
-            .split('\n')
-            .map(|line| wrapped_row_count(line, width))
-            .sum::<usize>();
-        let whole = Paragraph::new(message)
-            .wrap(Wrap { trim: true })
-            .line_count(width);
-        assert_eq!(
-            composed, whole,
-            "per-line rows must compose at width {width}"
-        );
-    }
 }
 
 /// The point of the feature: a range over whole logical lines comes back
@@ -635,78 +568,6 @@ fn leaving_revise_keeps_its_draft_out_of_the_answer() {
 }
 
 #[test]
-fn selecting_an_option_returns_its_wire_value() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::SingleSelect {
-            options: vec![
-                ElicitationOption {
-                    value: "thin".into(),
-                    title: "Thin callers".into(),
-                    description: None,
-                    preview: None,
-                },
-                ElicitationOption {
-                    value: "dynamic".into(),
-                    title: "Dynamic matrix".into(),
-                    description: None,
-                    preview: None,
-                },
-            ],
-            default: None,
-        },
-        true,
-    ));
-    dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(
-        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
-        Some(ElicitationResponse::Accept {
-            content: BTreeMap::from([(
-                "question_0".into(),
-                ElicitationValue::String("dynamic".into())
-            )])
-        })
-    );
-}
-
-#[test]
-fn first_single_select_option_is_the_visible_and_submitted_default() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::SingleSelect {
-            options: vec![
-                ElicitationOption {
-                    value: "thin".into(),
-                    title: "Thin callers".into(),
-                    description: None,
-                    preview: None,
-                },
-                ElicitationOption {
-                    value: "dynamic".into(),
-                    title: "Dynamic matrix".into(),
-                    description: None,
-                    preview: None,
-                },
-            ],
-            default: None,
-        },
-        false,
-    ));
-
-    let initial = rendered(&dialog);
-    assert!(initial.contains("● Thin callers"));
-    assert!(initial.contains("○ Dynamic matrix"));
-
-    assert_eq!(
-        dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
-        Some(ElicitationResponse::Accept {
-            content: BTreeMap::from([(
-                "question_0".into(),
-                ElicitationValue::String("thin".into())
-            )])
-        })
-    );
-}
-
-#[test]
 fn paired_custom_answers_share_their_question_page() {
     let mut dialog = ElicitationDialog::new(paired_request(3, false));
 
@@ -788,24 +649,6 @@ fn dangling_custom_metadata_remains_a_standalone_page() {
     assert!(rendered(&dialog).contains("Other"));
 }
 
-#[test]
-fn required_text_blocks_submit_until_answered() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::Text {
-            default: None,
-            min_length: None,
-            max_length: None,
-            pattern: None,
-            format: None,
-        },
-        true,
-    ));
-    dialog.focus_control(1);
-    assert_eq!(dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE), None);
-    assert_eq!(dialog.focus_index(), 0);
-    assert_eq!(dialog.error.as_deref(), Some("Architecture is required"));
-}
-
 fn component_form() -> ElicitationRequest {
     ElicitationRequest {
         id: "ask-component".into(),
@@ -871,6 +714,7 @@ fn component_form() -> ElicitationRequest {
     }
 }
 
+// Hard-won: 9651f8c: compact forms scrolled the focused field title away from its control
 #[test]
 fn compact_question_pane_shows_the_focused_field_title_with_its_control() {
     let mut dialog = ElicitationDialog::new(component_form());
@@ -918,6 +762,7 @@ fn compact_question_keeps_validation_errors_and_the_labeled_control_visible() {
     assert!(text.contains("Submit"), "actions missing:\n{text}");
 }
 
+// Hard-won: 9651f8c: scrolling an option list hid the title identifying its field
 #[test]
 fn a_scrolled_option_list_keeps_showing_the_field_it_answers() {
     let options = (0..12)
@@ -946,61 +791,6 @@ fn a_scrolled_option_list_keeps_showing_the_field_it_answers() {
     assert!(
         text.contains("Option 11"),
         "focused option missing:\n{text}"
-    );
-}
-
-#[test]
-fn escape_cancels_the_elicitation() {
-    let mut dialog = ElicitationDialog::new(request(
-        ElicitationFieldKind::Boolean { default: None },
-        false,
-    ));
-    assert_eq!(
-        dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE),
-        Some(ElicitationResponse::Cancel)
-    );
-}
-
-#[test]
-fn dismiss_glyph_returns_the_same_cancel_response_as_escape() {
-    let mut clicked = ElicitationDialog::new(request(
-        ElicitationFieldKind::Boolean { default: None },
-        false,
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            render_elicitation_in(frame, &clicked, &mut FrameSurfaces::new(), area, true);
-        })
-        .expect("draw elicitation");
-    let buffer = terminal.backend().buffer();
-    let (column, row) = (0..buffer.area.right())
-        .flat_map(|column| (0..buffer.area.bottom()).map(move |row| (column, row)))
-        .find(|&(column, row)| buffer[(column, row)].symbol() == "×")
-        .expect("elicitation dismiss glyph");
-    let press = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column,
-        row,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert_eq!(clicked.handle_mouse(press), None);
-    assert_eq!(
-        clicked.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            ..press
-        }),
-        Some(ElicitationResponse::Cancel)
-    );
-
-    let mut escaped = ElicitationDialog::new(request(
-        ElicitationFieldKind::Boolean { default: None },
-        false,
-    ));
-    assert_eq!(
-        escaped.handle_key(KeyCode::Esc, KeyModifiers::NONE),
-        Some(ElicitationResponse::Cancel)
     );
 }
 

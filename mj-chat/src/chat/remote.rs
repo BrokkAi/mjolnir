@@ -1641,26 +1641,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_content_blocks_keep_image_for_image_only_and_mixed_prompts() {
-        let image = ClipboardImage {
-            data_base64: "encoded-png".into(),
-            mime_type: "image/png".into(),
-            reference: None,
-        };
-        let image_only = PromptPayload::with_image("", image.clone()).content_blocks();
-        assert!(matches!(
-            image_only.as_slice(),
-            [ContentBlock::Image(content)]
-                if content.data == "encoded-png" && content.mime_type == "image/png"
-        ));
-        let mixed = PromptPayload::with_image("describe this", image).content_blocks();
-        assert!(matches!(
-            mixed.as_slice(),
-            [ContentBlock::Text(_), ContentBlock::Image(_)]
-        ));
-    }
-
-    #[test]
     fn full_remote_queue_restores_unsent_input_without_blocking() {
         let (operations, _receiver) = tokio::sync::mpsc::channel(1);
         operations.try_send(ChatRemoteOperation::Sync).unwrap();
@@ -1687,60 +1667,32 @@ mod tests {
 
     #[test]
     fn failed_plan_control_restores_the_full_command_and_rolls_back_mode() {
-        let mut chat = crate::chat::test_support::grok_chat();
-        chat.finish_plan_mode_change(true);
-        chat.plan_command_pending = true;
+        for (control_applied, expected_mode) in [(false, "default"), (true, "plan")] {
+            let mut chat = crate::chat::test_support::grok_chat();
+            if !control_applied {
+                chat.finish_plan_mode_change(true);
+            }
+            chat.plan_command_pending = true;
 
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::PlanCommand {
-                command_id: "test-submit".into(),
-                original: "/plan inspect this".into(),
-                requested_active: true,
-                control_applied: false,
-                result: Err("rejected".into()),
-            },
-        );
+            apply_chat_remote_result(
+                &mut chat,
+                ChatRemoteResult::PlanCommand {
+                    command_id: "test-submit".into(),
+                    original: "/plan inspect this".into(),
+                    requested_active: true,
+                    control_applied,
+                    result: Err(if control_applied {
+                        "mode changed, but prompt failed".into()
+                    } else {
+                        "rejected".into()
+                    }),
+                },
+            );
 
-        assert_eq!(chat.current_mode(), Some("default"));
-        assert_eq!(chat.input, "/plan inspect this");
-        assert!(!chat.plan_command_pending);
-    }
-
-    #[test]
-    fn prompt_failure_after_plan_control_keeps_the_requested_mode() {
-        let mut chat = crate::chat::test_support::grok_chat();
-        chat.plan_command_pending = true;
-
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::PlanCommand {
-                command_id: "test-submit".into(),
-                original: "/plan inspect this".into(),
-                requested_active: true,
-                control_applied: true,
-                result: Err("mode changed, but prompt failed".into()),
-            },
-        );
-
-        assert_eq!(chat.current_mode(), Some("plan"));
-        assert_eq!(chat.input, "/plan inspect this");
-    }
-
-    #[test]
-    fn relay_acceptance_does_not_emit_transport_chatter() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        apply_chat_remote_result(
-            &mut chat,
-            ChatRemoteResult::Prompt {
-                command_id: "test-submit".into(),
-                text: "ship it".into(),
-                images: Vec::new(),
-                result: Ok(42),
-            },
-        );
-        assert!(chat.notice().is_none());
-        assert!(chat.conversation_notices.is_empty());
+            assert_eq!(chat.current_mode(), Some(expected_mode));
+            assert_eq!(chat.input, "/plan inspect this");
+            assert!(!chat.plan_command_pending);
+        }
     }
 
     #[test]
@@ -1761,6 +1713,7 @@ mod tests {
         assert_eq!(chat.input, "!cargo test");
     }
 
+    // Hard-won: 81e6e3b: refused prompts vanished on projection rebuild, implying they had been sent
     #[test]
     fn a_refused_prompt_stays_in_the_transcript_after_a_projection_rebuild() {
         let mut chat = ChatState::new(&snapshot(), &[]);

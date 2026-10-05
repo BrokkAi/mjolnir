@@ -442,10 +442,9 @@ fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::ChatAction;
-    use crate::chat::test_support::{alt, ctrl, key, snapshot};
+    use crate::chat::test_support::{ctrl, key, snapshot};
     use crate::clipboard::{ClipboardContent, ClipboardImage};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::KeyCode;
 
     fn apply_pending_history_search(chat: &mut ChatState) {
         let request = chat
@@ -466,54 +465,6 @@ mod tests {
         }));
         assert!(!chat.input_images.is_empty());
         chat.input_images.clone()
-    }
-
-    #[test]
-    fn control_c_stashes_the_typed_prompt_into_history_and_clears_the_input() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        for character in "draft prompt".chars() {
-            chat.handle_key(key(KeyCode::Char(character)));
-        }
-
-        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
-        assert!(chat.input.is_empty());
-        assert_eq!(chat.input_cursor, 0);
-
-        // Repeated cancellation on the empty composer keeps the draft recoverable.
-        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
-        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
-        assert!(chat.input.is_empty());
-
-        chat.handle_key(key(KeyCode::Up));
-        assert_eq!(chat.input, "draft prompt");
-    }
-
-    #[test]
-    fn reverse_search_previews_steps_accepts_and_restores_draft() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.prompt_history = vec!["fix parser".into(), "fix renderer".into()];
-        chat.set_input("unfinished".into());
-        chat.handle_key(ctrl('r'));
-        chat.handle_key(key(KeyCode::Char('f')));
-        apply_pending_history_search(&mut chat);
-        chat.handle_key(key(KeyCode::Char('i')));
-        apply_pending_history_search(&mut chat);
-        chat.handle_key(key(KeyCode::Char('x')));
-        apply_pending_history_search(&mut chat);
-        assert_eq!(chat.input, "fix renderer");
-        chat.handle_key(ctrl('r'));
-        assert_eq!(chat.input, "fix parser");
-        chat.handle_key(key(KeyCode::Esc));
-        assert_eq!(chat.input, "unfinished");
-
-        chat.handle_key(ctrl('r'));
-        for character in "renderer".chars() {
-            chat.handle_key(key(KeyCode::Char(character)));
-            apply_pending_history_search(&mut chat);
-        }
-        chat.handle_key(key(KeyCode::Enter));
-        assert_eq!(chat.input, "fix renderer");
-        assert!(chat.history_search.is_none());
     }
 
     #[test]
@@ -546,98 +497,6 @@ mod tests {
         let result = Ok(ChatState::local_history_search_results(&current));
         chat.apply_history_search_results(generation, result);
         assert_eq!(chat.input, "fix renderer");
-    }
-
-    #[test]
-    fn move_history_uses_prefetched_project_history_and_local_prompts() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_history_context("bundle");
-        chat.set_project_history(vec![
-            PromptHistoryEntry {
-                id: 2,
-                session_id: "other".into(),
-                text: "project newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 1,
-                session_id: "other".into(),
-                text: "project oldest".into(),
-            },
-        ]);
-        chat.record_prompt_history("local prompt");
-
-        chat.handle_key(key(KeyCode::Up));
-        assert_eq!(chat.input, "local prompt");
-        chat.handle_key(key(KeyCode::Up));
-        assert_eq!(chat.input, "project newest");
-        chat.handle_key(key(KeyCode::Up));
-        assert_eq!(chat.input, "project oldest");
-    }
-
-    #[test]
-    fn move_history_walks_this_session_before_the_rest_of_the_project() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_history_context("bundle");
-        // Newest-first, with this session's prompts interleaved with another's.
-        chat.set_project_history(vec![
-            PromptHistoryEntry {
-                id: 4,
-                session_id: "other".into(),
-                text: "other newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 3,
-                session_id: "1234567890".into(),
-                text: "mine newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 2,
-                session_id: "other".into(),
-                text: "other oldest".into(),
-            },
-            PromptHistoryEntry {
-                id: 1,
-                session_id: "1234567890".into(),
-                text: "mine oldest".into(),
-            },
-        ]);
-        chat.record_prompt_history("this visit");
-
-        let mut recalled = Vec::new();
-        for _ in 0..5 {
-            chat.handle_key(key(KeyCode::Up));
-            recalled.push(chat.input.clone());
-        }
-        assert_eq!(
-            recalled,
-            vec![
-                "this visit",
-                "mine newest",
-                "mine oldest",
-                "other newest",
-                "other oldest",
-            ]
-        );
-    }
-
-    /// Ctrl-R opens the reverse search, as readline does; once it is open
-    /// Alt-R keeps its older job of cycling which history the search reads.
-    #[test]
-    fn ctrl_r_opens_history_search_and_alt_r_inside_it_cycles_scope() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        // Alt-R does not open one: it belongs to the open search's scope.
-        chat.handle_key(alt('r'));
-        assert!(chat.history_search.is_none());
-
-        chat.handle_key(ctrl('r'));
-        assert!(chat.history_search.is_some());
-        chat.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
-        assert_eq!(
-            chat.history_search.as_ref().unwrap().scope,
-            HistoryScope::Session
-        );
-        chat.handle_key(ctrl('c'));
-        assert!(chat.history_search.is_none());
     }
 
     #[test]

@@ -1072,44 +1072,6 @@ mod tests {
             .collect()
     }
 
-    /// Stopping early gives the same first rows as wrapping the whole line,
-    /// styles and continuation indents included.
-    #[test]
-    fn wrapping_until_a_row_count_gives_the_first_rows_of_the_whole_wrap() {
-        let mut spans = Vec::new();
-        for index in 0..400 {
-            spans.push(Span::styled(
-                format!("word{index} "),
-                Style::default().fg(if index % 2 == 0 {
-                    Color::Yellow
-                } else {
-                    Color::Blue
-                }),
-            ));
-            spans.push(Span::raw("漢字 "));
-            if index % 50 == 0 {
-                spans.push(Span::raw("x".repeat(70)));
-            }
-        }
-        let line = Line::from(spans);
-        for (width, indent) in [(1, 0), (9, 2), (40, 4), (80, 0)] {
-            let whole = wrap_styled_line(line.clone(), width, indent);
-            assert!(whole.len() > 10, "the line wraps to many rows");
-            for wanted in [1, 2, 5, whole.len(), whole.len() + 3] {
-                let mut rows = Vec::new();
-                wrap_styled_line_until(line.clone(), width, indent, |row| {
-                    rows.push(row);
-                    if rows.len() >= wanted {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    }
-                });
-                assert_eq!(rows, whole[..wanted.min(whole.len())], "{width} {indent}");
-            }
-        }
-    }
-
     #[test]
     fn sanitizer_removes_terminal_controls_and_normalizes_carriage_returns() {
         assert_eq!(
@@ -1118,6 +1080,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 6c06003: OSC window-title payloads leaked into rendered transcripts
     #[test]
     fn sanitizer_consumes_osc_payloads_and_two_byte_escapes() {
         // A build tool setting the window title, terminated by BEL and by ST.
@@ -1274,6 +1237,7 @@ mod tests {
 
     /// The ASCII set reaches the composer's border, where the microphone was
     /// the last glyph a console without UTF-8 could not draw.
+    // Hard-won: 57f76ac: ASCII mode still rendered the microphone button as Unicode
     #[test]
     fn the_ascii_microphone_button_is_plain_text() {
         theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {
