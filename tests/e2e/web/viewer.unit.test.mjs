@@ -1001,3 +1001,121 @@ test('a failed Move offers Retry exactly when the daemon kept what a retry resto
   assert.equal(cancelled.retry, true);
   assert.equal(cancelled.resume, true);
 });
+
+// Hard-won: 529323e1: Offline and reconnecting changes were announced twice by the banner and hidden announcer.
+test('the offline state is announced by one live region with one message', () => {
+  const start = viewerSource.indexOf("const CONNECTION_BANNER_TEXT");
+  const end = viewerSource.indexOf("function reconnect()");
+  const banner = { textContent: 'Offline. Showing the last state received.' };
+  const announcer = { textContent: '' };
+  const context = vm.createContext({
+    document: { body: { dataset: {} }, querySelector: () => banner },
+    announce: message => { announcer.textContent = message; },
+  });
+  vm.runInContext(`let connection = 'online'; ${viewerSource.slice(start, end)}; this.setConnection = setConnection;`, context);
+  context.setConnection('reconnecting');
+  assert.equal(banner.textContent, 'Reconnecting… Showing the last state received.');
+  assert.equal(announcer.textContent, '', 'the hidden announcer must stay silent');
+  context.setConnection('offline');
+  assert.equal(banner.textContent, 'Offline. Showing the last state received.');
+  assert.equal(announcer.textContent, '');
+  context.setConnection('online');
+  assert.equal(announcer.textContent, 'Connected.');
+});
+
+test('remote tracking is repaired only after confirmation and preflight then continues', async () => {
+  const repair = {
+    path: '/project', branch: 'main', missing_remote: 'upstream', replacement_remote: 'origin',
+    fetch_url: 'https://example.com/repo.git', push_urls: ['ssh://git@example.com/repo.git'],
+  };
+  for (const approve of [false, true]) {
+    const requests = [];
+    const context = vm.createContext({
+      newDraft: { profileId: 'codex', bundleId: 'project', targetId: 'docker' },
+      pendingNewPreflight: null, pendingNewPreflightController: null, AbortController,
+      targetIsBare: () => false, selectedWorkspaceId: () => 'workspace', renderNewForm() {},
+      request: async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return requests.length === 1 ? { remote_repairs: [repair] } : {
+          remote_repositories: [{ id: 'project' }], local_changes_excluded: true,
+        };
+      },
+      confirm: text => {
+        assert.match(text, /upstream/);
+        assert.match(text, /origin/);
+        assert.match(text, /ssh:\/\/git@example.com\/repo.git/);
+        return approve;
+      },
+    });
+    vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
+    assert.equal(await vm.runInContext('preflightNew()', context), approve);
+    assert.deepEqual(requests[0].remote_repairs, []);
+    assert.equal(requests.length, approve ? 2 : 1);
+    if (approve) {
+      assert.deepEqual(requests[1].remote_repairs, [repair]);
+      assert.equal(context.newDraft.preflighted, true);
+    } else {
+      assert.notEqual(context.newDraft.preflighted, true);
+    }
+  }
+});
+
+test('commit refuses unready, pending, or failed preflight even when called directly', async () => {
+  for (const state of ['unready', 'pending', 'failed']) {
+    const draft = { preflighted: state !== 'unready', preflightError: state === 'failed' ? 'failed' : '' };
+    const context = vm.createContext({
+      newDraft: draft,
+      pendingNewPreflight: state === 'pending' ? draft : null,
+      request: () => assert.fail('unready draft cannot launch'),
+    });
+    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
+    await vm.runInContext('commitNew()', context);
+  }
+});
+
+test('the create payload uses the selected profile sub-agent policy', async () => {
+  const posted = [];
+  const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
+    snapshot: { targets: [], profiles: [
+      { id: 'other', harness_kind: 'claude', subagents: { mode: 'native' } },
+      { id: profileId, harness_kind: harnessKind, subagents },
+    ] },
+    newDraft: {
+      workspaceId: 'test',
+      preflighted: true,
+      profileId,
+      bundleId: 'bundle',
+      targetId: 'container',
+      projectDirectory: '',
+      title: '',
+      worktreeOptions: { available: false, default_create: false },
+      createManagedWorktree: false,
+      // Old drafts must not override the policy saved on the selected profile.
+      subagents: { mode: 'none' },
+    },
+    pendingNewPreflight: null,
+    targetResourceKind: () => 'fixed',
+    targetIsBare: () => false,
+    renderNewForm: () => {},
+    refresh: async () => {},
+    navigate: () => {},
+    newError: makeNode(),
+    request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
+  });
+
+  for (const [kind, choice, expected] of [
+    ['claude', { mode: 'single_model', model: 'sonnet', effort: 'high' }, { mode: 'single_model', model: 'sonnet', effort: 'high' }],
+    ['claude', { mode: 'native' }, { mode: 'native' }],
+    ['codex', { mode: 'single_model', model: 'gpt', effort: null }, { mode: 'single_model', model: 'gpt', effort: null }],
+    ['grok', { mode: 'native' }, { mode: 'native' }],
+    ['kimi', undefined, { mode: 'native' }],
+  ]) {
+    const context = makeContext('profile', kind, choice);
+    context.newDraft.committing = false;
+    vm.runInContext(sourceBetween('function profileSubagents(', '\nfunction targetIsBare('), context);
+    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
+    await vm.runInContext('commitNew()', context);
+    assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);
+    assert.equal(Object.hasOwn(posted.at(-1), 'resource_allocation'), false);
+  }
+});

@@ -1111,3 +1111,51 @@ fn repository_origin_completes_local_paths() {
     };
     assert_eq!(dialog.replacement, "/srv/bifrost/");
 }
+
+// Hard-won: bda82985: Notice rows shifted when an age exceeded the fixed eight-cell column.
+#[test]
+fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
+    let ages = super::render::notice_log_ages(&[44, 77, 3_700]);
+    let widths = ages
+        .iter()
+        .map(|age| age.chars().count())
+        .collect::<Vec<_>>();
+    assert!(widths.iter().all(|&width| width == widths[0]), "{ages:?}");
+    assert!(ages.iter().all(|age| age.ends_with("ago ")), "{ages:?}");
+    assert!(ages[0].trim_start().starts_with("44s"), "{ages:?}");
+}
+
+#[test]
+fn launch_failure_survives_notices_and_retries_original_settings_once() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let retry = DashboardAction::CreateSession {
+        subagents: None,
+        create_managed_worktree: None,
+        workspace_id: "original-workspace".into(),
+        profile_id: "codex".into(),
+        bundle_id: "project".into(),
+        project_directory: None,
+        target_template_id: "docker".into(),
+        additional_mounts: Vec::new(),
+        resource_allocation: None,
+    };
+    dashboard.show_launch_failure("upload failed", Some(retry.clone()));
+    dashboard.set_notice("Quota refreshed");
+    let mut terminal = Terminal::new(TestBackend::new(90, 25)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Launch failed"));
+    assert!(text.contains("upload failed"));
+    assert!(text.contains("Retry launch"));
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
+    assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
+}

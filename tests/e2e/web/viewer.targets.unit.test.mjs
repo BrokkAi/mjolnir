@@ -84,3 +84,16 @@ test('a host that did not answer is listed with a status and stays selectable', 
   assert.equal(options[1].description, 'local-podman');
   assert.ok(options.every(option => !option.disabled));
 });
+
+test('resume shows the status beside the target and keeps it selectable', () => {
+  const context = rendering();
+  context.session = { id: 's1', compatible_resume_targets: ['docker', 'macbook', 'podman'] };
+  const items = vm.runInContext('resumeTargetItems(session)', context);
+  assert.deepEqual(items.map(item => [item.id, item.status]), [['macbook', 'did not answer its last check'], ['podman', '']]);
+  context.items = items;
+  const field = vm.runInContext('resumeChoiceField("Target", "resume-target-s1", items, "podman", () => {})', context);
+  const select = field.children.find(child => child.tag === 'select');
+  const options = select.children.filter(child => child.tag === 'option' && child.value);
+  assert.deepEqual(options.map(option => option.textContent), ['macbook (did not answer its last check)', 'podman']);
+  assert.ok(options.every(option => !option.disabled));
+});
