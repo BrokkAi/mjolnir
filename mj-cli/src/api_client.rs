@@ -450,10 +450,14 @@ impl ApiClient {
         after_seq: Option<u64>,
         limit: Option<usize>,
         role: Option<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> Result<TranscriptResponse> {
         let mut query = Vec::new();
         if let Some(role) = role {
             query.push(format!("role={}", role.as_str()));
+        }
+        if finished_only {
+            query.push("finished_only=true".into());
         }
         if let Some(after_seq) = after_seq {
             query.push(format!("after_seq={after_seq}"));

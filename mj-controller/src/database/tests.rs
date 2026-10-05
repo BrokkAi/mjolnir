@@ -4684,9 +4684,10 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     })
     .unwrap();
 
-    let page = load_materialized_transcript_filtered_from(&database, "session-1", 0, 10, None)
-        .unwrap()
-        .unwrap();
+    let page =
+        load_materialized_transcript_filtered_from(&database, "session-1", 0, 10, None, false)
+            .unwrap()
+            .unwrap();
     assert_eq!(
         page.items
             .iter()
@@ -4697,9 +4698,10 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     );
     assert_eq!(page.latest_seq, 3);
 
-    let resumed = load_materialized_transcript_filtered_from(&database, "session-1", 2, 10, None)
-        .unwrap()
-        .unwrap();
+    let resumed =
+        load_materialized_transcript_filtered_from(&database, "session-1", 2, 10, None, false)
+            .unwrap()
+            .unwrap();
     assert_eq!(resumed.items.len(), 1);
     assert_eq!(resumed.items[0].stable_id, "item-1");
     let TranscriptBody::Agent { chunks, .. } = &resumed.items[0].body else {
@@ -4711,7 +4713,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     );
 
     assert!(
-        load_materialized_transcript_filtered_from(&database, "unknown", 0, 10, None)
+        load_materialized_transcript_filtered_from(&database, "unknown", 0, 10, None, false)
             .unwrap()
             .is_none(),
         "a session with no projection row has no transcript to page"
@@ -4792,6 +4794,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         0,
         1,
         Some(TranscriptRole::Agent),
+        false,
     )
     .unwrap()
     .unwrap();
@@ -4803,6 +4806,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         first.next_after_seq,
         1,
         Some(TranscriptRole::Agent),
+        false,
     )
     .unwrap()
     .unwrap();
@@ -4813,6 +4817,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         4,
         1,
         Some(TranscriptRole::Agent),
+        false,
     )
     .unwrap()
     .unwrap();
@@ -4823,11 +4828,142 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         0,
         1,
         Some(TranscriptRole::Tool),
+        false,
     )
     .unwrap()
     .unwrap();
     assert!(empty.items.is_empty());
     assert_eq!(empty.next_after_seq, 6);
+}
+
+#[test]
+fn finished_transcript_cursor_stops_before_open_agent_and_releases_it_once_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hel.sqlite3");
+    save_session_to(&path, &session("session-1", "project-1")).unwrap();
+
+    let mut hidden_user = agent_message_mutation(1);
+    let TranscriptMutation::Upsert(item) = &mut hidden_user.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "user-1".into();
+    item.latest_content_event_ordinal = None;
+    item.body = TranscriptBody::User {
+        content: vec![serde_json::json!({"type": "text", "text": "go"})],
+    };
+
+    let mut open_agent = agent_message_mutation(2);
+    let TranscriptMutation::Upsert(item) = &mut open_agent.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "agent-1".into();
+    let TranscriptBody::Agent { streaming, .. } = &mut item.body else {
+        unreachable!();
+    };
+    *streaming = true;
+
+    apply_projection_page_to(&path, "session-1", |page| {
+        page.apply(
+            1,
+            RELAY_EVENT_GENESIS_DIGEST,
+            &event_digest(1),
+            &hidden_user,
+        )?;
+        page.apply(2, &event_digest(1), &event_digest(2), &open_agent)
+    })
+    .unwrap();
+
+    let blocked = load_materialized_transcript_filtered_from(&path, "session-1", 0, 10, None, true)
+        .unwrap()
+        .unwrap();
+    assert!(blocked.items.is_empty());
+    assert_eq!(blocked.latest_seq, 2);
+    assert_eq!(
+        blocked.next_after_seq, 1,
+        "the cursor crosses the hidden user row but stops before the open agent"
+    );
+
+    let mut closed_agent = agent_message_mutation(3);
+    let TranscriptMutation::Upsert(item) = &mut closed_agent.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "agent-1".into();
+    item.position = 2;
+    item.created_at_ms = 1_002;
+    apply_projection_page_to(&path, "session-1", |page| {
+        page.apply(3, &event_digest(2), &event_digest(3), &closed_agent)
+    })
+    .unwrap();
+
+    let released = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        blocked.next_after_seq,
+        10,
+        None,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(released.items.len(), 1);
+    assert_eq!(released.items[0].stable_id, "agent-1");
+    assert_eq!(released.items[0].seq(), 3);
+    assert_eq!(released.next_after_seq, 3);
+
+    let resumed = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        released.next_after_seq,
+        10,
+        None,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(resumed.items.is_empty());
+    assert_eq!(resumed.next_after_seq, 3);
+}
+
+#[test]
+fn finished_transcript_cursor_advances_across_non_agent_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hel.sqlite3");
+    save_session_to(&path, &session("session-1", "project-1")).unwrap();
+
+    apply_projection_page_to(&path, "session-1", |page| {
+        for ordinal in 1..=3 {
+            let mut mutation = agent_message_mutation(ordinal);
+            let TranscriptMutation::Upsert(item) = &mut mutation.transcript[0] else {
+                unreachable!();
+            };
+            item.stable_id = format!("user-{ordinal}");
+            item.latest_content_event_ordinal = None;
+            item.body = TranscriptBody::User {
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": format!("message {ordinal}")
+                })],
+            };
+            let prior = if ordinal == 1 {
+                RELAY_EVENT_GENESIS_DIGEST.into()
+            } else {
+                event_digest(ordinal - 1)
+            };
+            page.apply(ordinal, &prior, &event_digest(ordinal), &mutation)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let page = load_materialized_transcript_filtered_from(&path, "session-1", 0, 1, None, true)
+        .unwrap()
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.latest_seq, 3);
+    assert_eq!(
+        page.next_after_seq, 3,
+        "non-agent rows do not consume the finished-message page limit or stall the cursor"
+    );
 }
 
 /// A parent, a child, and the relation between them, written the way the

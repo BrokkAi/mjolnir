@@ -510,6 +510,7 @@ struct FakeBackend {
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
     transcript_limits: Mutex<Vec<usize>>,
+    transcript_filters: Mutex<Vec<(Option<mj_core::transcript::TranscriptRole>, bool)>>,
     history: Option<mj_core::storage::TranscriptHistoryPage>,
     history_cursors: Mutex<Vec<Option<mj_core::storage::TranscriptCursor>>>,
     /// Export answers. `None` stands for a refusal, which is what an
@@ -749,10 +750,15 @@ impl SubagentBackend for FakeBackend {
         _session_id: String,
         _after_seq: u64,
         limit: usize,
-        _role: Option<mj_core::transcript::TranscriptRole>,
+        role: Option<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
         Box::pin(async move {
             self.transcript_limits.lock().unwrap().push(limit);
+            self.transcript_filters
+                .lock()
+                .unwrap()
+                .push((role, finished_only));
             Ok(self.transcript.lock().unwrap().clone())
         })
     }
@@ -2586,6 +2592,55 @@ async fn the_transcript_clamps_its_limit_and_reads_items_as_text() {
         [MAX_TRANSCRIPT_LIMIT],
         "an oversized limit is clamped rather than refused"
     );
+    assert_eq!(
+        backend.transcript_filters.lock().unwrap().as_slice(),
+        [(None, false)],
+        "the default API request still includes every role"
+    );
+}
+
+#[tokio::test]
+async fn finished_transcript_mode_implies_agent_role_and_rejects_other_roles() {
+    let backend = Arc::new(FakeBackend {
+        transcript: Mutex::new(Some(TranscriptPage {
+            next_after_seq: 0,
+            items: Vec::new(),
+            latest_seq: 0,
+            execution: MaterializedExecutionState::Idle,
+        })),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
+
+    let response = app
+        .clone()
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?finished_only=true",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        backend.transcript_filters.lock().unwrap().as_slice(),
+        [(Some(mj_core::transcript::TranscriptRole::Agent), true)]
+    );
+
+    let response = app
+        .oneshot(
+            bearer(Request::get(
+                "/api/v1/sessions/session-1/transcript?finished_only=true&role=thought",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(backend.transcript_filters.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

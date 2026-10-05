@@ -359,12 +359,22 @@ pub(super) async fn transcript(
         .limit
         .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
         .clamp(1, MAX_TRANSCRIPT_LIMIT);
+    let role = match (query.finished_only, query.role) {
+        (true, Some(role)) if role != mj_core::transcript::TranscriptRole::Agent => {
+            return Err(ApiFailure::bad_request(
+                "finished_only can only be combined with role=agent",
+            ));
+        }
+        (true, _) => Some(mj_core::transcript::TranscriptRole::Agent),
+        (false, role) => role,
+    };
     let page = backend
         .transcript(
             session_id.clone(),
             query.after_seq.unwrap_or(0),
             limit,
-            query.role,
+            role,
+            query.finished_only,
         )
         .await?
         .ok_or_else(|| ApiFailure::not_found("no transcript is recorded for that session"))?;

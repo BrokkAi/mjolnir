@@ -187,6 +187,7 @@ pub trait SubagentBackend: Send + Sync {
         after_seq: u64,
         limit: usize,
         role: Option<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>>;
 
     fn usage(

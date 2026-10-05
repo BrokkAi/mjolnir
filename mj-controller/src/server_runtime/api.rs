@@ -2592,6 +2592,7 @@ impl SubagentBackend for ApiBackend {
         after_seq: u64,
         limit: usize,
         role: Option<mj_core::transcript::TranscriptRole>,
+        finished_only: bool,
     ) -> BoxFuture<'_, Result<Option<TranscriptPage>>> {
         Box::pin(async move {
             blocking("load transcript page", move || {
@@ -2600,6 +2601,7 @@ impl SubagentBackend for ApiBackend {
                     after_seq,
                     limit,
                     role,
+                    finished_only,
                 )
             })
             .await

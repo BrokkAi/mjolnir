@@ -557,8 +557,16 @@ pub fn load_materialized_transcript_filtered(
     after_seq: u64,
     limit: usize,
     role: Option<mj_core::transcript::TranscriptRole>,
+    finished_only: bool,
 ) -> Result<Option<TranscriptPage>> {
-    load_materialized_transcript_filtered_from(&database_path(), session_id, after_seq, limit, role)
+    load_materialized_transcript_filtered_from(
+        &database_path(),
+        session_id,
+        after_seq,
+        limit,
+        role,
+        finished_only,
+    )
 }
 
 pub(super) fn load_materialized_transcript_filtered_from(
@@ -567,19 +575,43 @@ pub(super) fn load_materialized_transcript_filtered_from(
     after_seq: u64,
     limit: usize,
     role: Option<mj_core::transcript::TranscriptRole>,
+    finished_only: bool,
 ) -> Result<Option<TranscriptPage>> {
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
-    let role = role.map(|r| r.storage_kind());
+    let role = if finished_only {
+        Some("agent")
+    } else {
+        role.map(|r| r.storage_kind())
+    };
+    let open_agent_seq = if finished_only {
+        connection.query_row(
+            "SELECT MIN(COALESCE(latest_content_event_ordinal, position))
+                 FROM materialized_transcript_items
+                 WHERE session_id = ?1
+                   AND COALESCE(latest_content_event_ordinal, position) > ?2
+                   AND json_extract(body_json, '$.kind') = 'agent'
+                   AND json_extract(body_json, '$.streaming') = 1",
+            params![session_id, after_seq],
+            |row| row.get::<_, Option<u64>>(0),
+        )?
+    } else {
+        None
+    };
     let mut statement = connection.prepare(
         "WITH matches AS (
              SELECT *, COALESCE(latest_content_event_ordinal, position) AS seq
              FROM materialized_transcript_items WHERE session_id = ?1
              AND COALESCE(latest_content_event_ordinal, position) > ?2
              AND (?4 IS NULL OR json_extract(body_json, '$.kind') = ?4)
+             AND (?5 = 0 OR (
+                 json_extract(body_json, '$.kind') = 'agent'
+                 AND json_extract(body_json, '$.streaming') = 0
+                 AND (?6 IS NULL OR COALESCE(latest_content_event_ordinal, position) < ?6)
+             ))
          ), boundary AS (SELECT MAX(seq) AS seq FROM (SELECT seq FROM matches ORDER BY seq LIMIT ?3))
          SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                 last_changed_at_ms, body_json
@@ -588,7 +620,14 @@ pub(super) fn load_materialized_transcript_filtered_from(
     )?;
     let rows = statement
         .query_map(
-            params![session_id, after_seq, limit.clamp(1, 1000) as i64, role],
+            params![
+                session_id,
+                after_seq,
+                limit.clamp(1, 1000) as i64,
+                role,
+                i64::from(finished_only),
+                open_agent_seq,
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -631,13 +670,39 @@ pub(super) fn load_materialized_transcript_filtered_from(
         |row| row.get::<_, u64>(0),
     )?;
     let last_seq = items.last().map_or(after_seq, |item| item.seq());
-    let more: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM materialized_transcript_items WHERE session_id = ?1 AND COALESCE(latest_content_event_ordinal, position) > ?2 AND (?3 IS NULL OR json_extract(body_json, '$.kind') = ?3))", params![session_id, last_seq, role], |r| r.get(0))?;
+    let more: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM materialized_transcript_items
+             WHERE session_id = ?1
+               AND COALESCE(latest_content_event_ordinal, position) > ?2
+               AND (?3 IS NULL OR json_extract(body_json, '$.kind') = ?3)
+               AND (?4 = 0 OR (
+                   json_extract(body_json, '$.kind') = 'agent'
+                   AND json_extract(body_json, '$.streaming') = 0
+                   AND (?5 IS NULL OR COALESCE(latest_content_event_ordinal, position) < ?5)
+               ))
+         )",
+        params![
+            session_id,
+            last_seq,
+            role,
+            i64::from(finished_only),
+            open_agent_seq
+        ],
+        |row| row.get(0),
+    )?;
+    let next_after_seq = if more {
+        last_seq
+    } else if finished_only {
+        open_agent_seq.map_or_else(
+            || latest_seq.max(after_seq),
+            |open_seq| open_seq.saturating_sub(1).max(after_seq),
+        )
+    } else {
+        latest_seq.max(after_seq)
+    };
     Ok(Some(TranscriptPage {
-        next_after_seq: if more {
-            last_seq
-        } else {
-            latest_seq.max(after_seq)
-        },
+        next_after_seq,
         items,
         latest_seq,
         execution: fields.execution,

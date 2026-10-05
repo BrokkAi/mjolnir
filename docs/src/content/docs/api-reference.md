@@ -1018,6 +1018,24 @@ limit is soft when several items share an event sequence: all tied items travel
 together so paging cannot skip them. Streaming updates are still returned when
 their sequence advances.
 
+Add `finished_only=true` to request only agent items whose `body.streaming` is
+`false`; this opt-in does not change the default response. It implies
+`role=agent`, so omitting `role` or specifying `role=agent` works, while any
+other role returns `400 Bad Request`. In this mode, `next_after_seq` is an
+exclusive resume cursor for the finished prefix: it never passes the sequence
+of the earliest currently open agent item. When the page limit is reached
+before that barrier, the cursor is the last returned sequence; otherwise it
+advances through filtered non-agent rows to just before the barrier, or to
+`latest_seq` when no agent item is open. Pass that exact cursor on the next
+poll; the open item remains eligible and is returned when its stream closes.
+`latest_seq` remains the newest sequence across all roles and is not a resume
+cursor for this mode.
+
+Closed means `body.streaming` was `false` in the projection read. ACP can still
+append late chunks to the same `stable_id` afterward, advancing that item's
+sequence. A consumer that deduplicates only by `stable_id` may ignore that late
+revision; finished-only polling does not promise delivery of post-close chunks.
+
 ```sh
 mj usage --session SESSION --json
 mj transcript --session SESSION --role agent --limit 20 --json
