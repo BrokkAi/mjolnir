@@ -11,7 +11,7 @@ use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
 use mj_review::delta::{captured_trees, has_changes};
 use mj_review::{LANE_DIFF_LIMIT, bound_review_section};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,16 +39,27 @@ pub fn capture_repository_deltas(
             .filter(|tree| tree_exists(git, root, tree))
             .cloned()
             .or_else(|| pinned_review_baseline(git, root));
-        // Capture only what this turn could have changed. The tracked changes
-        // come straight from `git status`; an untracked path counts when it is
-        // new since the session started, or when its size or modification time
-        // moved. Everything else is carried over from the baseline tree
-        // without being read.
+        // Capture tracked changes and untracked paths that are new or changed
+        // since the session started. A completed review can put untracked files
+        // in its baseline tree, so carry forward those that still exist too;
+        // otherwise they would look deleted because this capture starts from
+        // HEAD. Untracked files from session start that never entered a
+        // baseline remain out of the capture.
         let state = read_workspace_state(git, root)?;
         let empty = Vec::new();
         let start = untracked_at_start.get(root).unwrap_or(&empty);
         let mut changed = state.dirty_tracked.clone();
         changed.extend(changed_untracked(start, &state.untracked));
+        if let Some(baseline) = &baseline {
+            let baseline_paths = tree_paths(git, root, baseline)?;
+            changed.extend(
+                state
+                    .untracked
+                    .iter()
+                    .filter(|entry| baseline_paths.contains(&entry.path))
+                    .map(|entry| entry.path.clone()),
+            );
+        }
         // The capture starts from HEAD, not from the baseline tree, so a turn
         // that committed its work is still visible: HEAD has moved, and the
         // diff against the baseline shows the commit. Starting from the
@@ -81,6 +92,42 @@ pub fn capture_repository_deltas(
         });
     }
     Ok(deltas)
+}
+
+/// Paths already represented in a review baseline tree.
+fn tree_paths(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+) -> Result<BTreeSet<PathBuf>> {
+    let output = git
+        .run(
+            repository,
+            &mj_checkpoint::archive::GitCommand {
+                arguments: vec![
+                    "ls-tree".into(),
+                    "-r".into(),
+                    "--name-only".into(),
+                    "-z".into(),
+                    tree.into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )
+        .with_context(|| format!("list paths in review baseline {tree}"))?;
+    anyhow::ensure!(
+        output.status == 0,
+        "listing paths in review baseline {tree} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect())
 }
 
 /// Reads `git diff --numstat -z -M` output: `added\tdeleted\tpath\0` per file,
@@ -676,6 +723,68 @@ mod capture_tests {
             !deltas[0].patch.contains("already.txt"),
             "{}",
             deltas[0].patch
+        );
+    }
+
+    #[test]
+    fn a_review_carries_unchanged_untracked_files_from_its_baseline() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "first version\n").unwrap();
+        std::fs::write(temp.path().join("b.py"), "unchanged\n").unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+        assert!(first[0].patch.contains("a.py"), "{}", first[0].patch);
+        assert!(first[0].patch.contains("b.py"), "{}", first[0].patch);
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let second_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "a revised version\n").unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+
+        assert!(second[0].patch.contains("a revised version"));
+        assert!(!second[0].patch.contains("b.py"), "{}", second[0].patch);
+        assert_eq!(
+            second[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.py"]
+        );
+    }
+
+    #[test]
+    fn a_review_reports_an_untracked_file_removed_since_its_baseline() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "unchanged\n").unwrap();
+        std::fs::write(temp.path().join("b.py"), "to be removed\n").unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let second_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+
+        std::fs::remove_file(temp.path().join("b.py")).unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+
+        assert!(second[0].patch.contains("b.py"), "{}", second[0].patch);
+        assert!(!second[0].patch.contains("a.py"), "{}", second[0].patch);
+        assert_eq!(
+            second[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.py"]
         );
     }
 }
