@@ -556,6 +556,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 741163fe: container workspace cleanup lost the cache mount policy and left stale build state
     #[test]
     fn a_container_workspace_is_cleaned_as_written_with_the_shared_cache_policy() {
         let sandbox = Sandbox::new(true);

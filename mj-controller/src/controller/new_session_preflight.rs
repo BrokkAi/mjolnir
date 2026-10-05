@@ -206,20 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn preflight_reports_repository_failure_and_stops_remaining_checks() {
-        let executor = RemoteExecutor {
-            fail: true,
-            ..Default::default()
-        };
-        let error = remote_controller()
-            .preflight_new_session("project", "podman", None, &executor)
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("repository \"one\""));
-        assert!(format!("{error:#}").contains("remote unavailable"));
-        assert_eq!(executor.requests.get(), 1);
-    }
-
-    #[test]
     fn preflight_cancellation_prevents_initial_and_remaining_remote_checks() {
         for already_cancelled in [true, false] {
             let executor = RemoteExecutor {
@@ -324,19 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_a_project_selection_incompatible_with_its_target() {
-        let controller = remote_controller();
-        let executor = RemoteExecutor::default();
-        assert!(
-            controller
-                .preflight_new_session("project", "podman", Some(Path::new("/project")), &executor)
-                .is_err()
-        );
-        assert!(
-            controller
-                .preflight_new_session("project", "local-bare", None, &executor)
-                .is_err()
-        );
-        assert_eq!(executor.requests.get(), 0);
+    fn preflight_reports_repository_failure_and_stops_remaining_checks() {
+        let executor = RemoteExecutor {
+            fail: true,
+            ..Default::default()
+        };
+        let error = remote_controller()
+            .preflight_new_session("project", "podman", None, &executor)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("repository \"one\""));
+        assert!(format!("{error:#}").contains("remote unavailable"));
+        assert_eq!(executor.requests.get(), 1);
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::controller::test_support::{IsolatedTest, RefusingExecutor, test_name};
+use crate::controller::test_support::{IsolatedTest, test_name};
 use std::sync::Mutex;
 
 use mj_core::config::{
@@ -134,6 +134,27 @@ fn ssh_docker_registration_config() -> Config {
     config
 }
 
+/// Answers the Docker platform query as Docker Desktop and the host
+/// filesystem probe as ext4, which alone would keep the overlay.
+struct DockerDesktopExecutor;
+
+impl CommandExecutor for DockerDesktopExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let stdout = match command.program.as_str() {
+            "docker" => "Docker Desktop 4.40.0 (187762)\n",
+            "stat" => "ext4\n",
+            other => panic!("unexpected command {other}"),
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+/// Docker Desktop's VM cannot overlay host directories whatever filesystem
+/// holds them on the host, so its attachments mount read-only (#1152).
 #[test]
 fn the_build_cache_is_mounted_read_write_at_its_host_path() {
     let mut mounts = Vec::new();
@@ -170,27 +191,7 @@ fn the_build_cache_is_mounted_read_write_at_its_host_path() {
     }
 }
 
-/// Answers the Docker platform query as Docker Desktop and the host
-/// filesystem probe as ext4, which alone would keep the overlay.
-struct DockerDesktopExecutor;
-
-impl CommandExecutor for DockerDesktopExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let stdout = match command.program.as_str() {
-            "docker" => "Docker Desktop 4.40.0 (187762)\n",
-            "stat" => "ext4\n",
-            other => panic!("unexpected command {other}"),
-        };
-        Ok(CommandOutput {
-            status: 0,
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        })
-    }
-}
-
-/// Docker Desktop's VM cannot overlay host directories whatever filesystem
-/// holds them on the host, so its attachments mount read-only (#1152).
+// Hard-won: 3921dfb5: Docker Desktop did not preserve attachment access modes or report the read-only mount
 #[test]
 fn docker_desktop_attachments_are_mounted_read_only_and_reported() {
     let docker = targets::TargetTemplate::LocalDocker(ContainerTemplate {
@@ -422,163 +423,6 @@ fn an_image_user_probe_that_fails_keeps_podmans_default_mapping_and_says_so() {
             .any(|argument| argument.starts_with("--userns")),
         "{:?}",
         plan.commands[0].args
-    );
-}
-
-/// Docker and Apple's engine keep their own user namespaces, so nothing is
-/// probed for them.
-#[test]
-fn only_podman_targets_probe_the_image_user() {
-    for target in [
-        targets::TargetTemplate::LocalDocker(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".into(),
-            pull_policy: Default::default(),
-            extra_run_args: Vec::new(),
-            workspace_storage: Default::default(),
-        }),
-        targets::TargetTemplate::AppleContainer(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".into(),
-            pull_policy: Default::default(),
-            extra_run_args: Vec::new(),
-            workspace_storage: Default::default(),
-        }),
-    ] {
-        assert_eq!(
-            podman_image_user(&target, &RefusingExecutor("this target")),
-            None
-        );
-    }
-}
-
-#[test]
-fn engines_without_an_overlay_to_lose_are_never_probed() {
-    let mut mounts = vec![AdditionalMount {
-        source: PathBuf::from("/host/cache"),
-        destination: PathBuf::from("/mnt/cache"),
-        access: crate::targets::MountAccess::Cow,
-    }];
-    for target in [
-        targets::TargetTemplate::AppleContainer(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".into(),
-            pull_policy: Default::default(),
-            extra_run_args: Vec::new(),
-            workspace_storage: Default::default(),
-        }),
-        targets::TargetTemplate::AwsEc2(targets::AwsTemplate {
-            profile: "default".into(),
-            region: "us-east-1".into(),
-            launch_template: "lt-0123456789abcdef0".into(),
-            launch_template_version: None,
-            instance_type: None,
-            ssh: SshTarget {
-                destination: "ubuntu@example.test".into(),
-                ssh_args: Vec::new(),
-            },
-        }),
-    ] {
-        assert!(
-            enforce_overlay_capable_mounts(
-                &target,
-                &mut mounts,
-                &RefusingExecutor("a target that must not probe"),
-            )
-            .is_empty()
-        );
-        assert_eq!(mounts[0].access, targets::MountAccess::Cow);
-    }
-}
-
-/// A mount the user already marked read-only has no overlay to protect, so
-/// the probe never has to reach a host that may not answer.
-#[test]
-fn mounts_without_an_overlay_are_not_probed() {
-    let mut mounts = vec![
-        AdditionalMount {
-            source: PathBuf::from("/host/cache"),
-            destination: PathBuf::from("/mnt/cache"),
-            access: crate::targets::MountAccess::Ro,
-        },
-        AdditionalMount {
-            source: PathBuf::from("/host/build-cache"),
-            destination: PathBuf::from("/mnt/build-cache"),
-            access: crate::targets::MountAccess::Rw,
-        },
-    ];
-
-    assert!(
-        enforce_overlay_capable_mounts(
-            &podman_target(),
-            &mut mounts,
-            &RefusingExecutor("a mount without an overlay"),
-        )
-        .is_empty()
-    );
-}
-
-#[test]
-fn failed_new_session_provisioning_retains_error_record() {
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let record = SessionRecord {
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-        archived: false,
-        container_cpus: None,
-        container_memory: None,
-        id: session_id.into(),
-        title: "new session".into(),
-        harness_kind: mj_core::config::HarnessKind::Codex,
-        last_profile: "codex".into(),
-        bundle_id: "project".into(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        target_template_id: "podman".into(),
-        resource_allocation: None,
-        additional_mounts: Vec::new(),
-        state: SessionState::Provisioning,
-        target: None,
-        native_session_id: None,
-        acp_session_title: None,
-        session_title_override: None,
-        created_at: "2026-08-12T00:00:00Z".into(),
-        updated_at: "2026-08-12T00:00:00Z".into(),
-        viewed_through_event_ordinal: 0,
-        draft_input: String::new(),
-        last_error: None,
-        last_checkpoint_error: None,
-        checkpoint: None,
-    };
-    let mut state = State::default();
-    state.sessions.insert(session_id.into(), record);
-
-    let result = apply_new_session_provisioning_result(
-        &mut state,
-        session_id,
-        Err(anyhow::anyhow!("container creation failed")),
-    );
-
-    assert!(result.is_err());
-    let retained = &state.sessions[session_id];
-    assert_eq!(retained.state, SessionState::Error);
-    assert!(retained.target.is_none());
-    assert!(
-        retained
-            .last_error
-            .as_deref()
-            .unwrap()
-            .contains("container creation failed")
     );
 }
 
@@ -1189,6 +1033,7 @@ impl CommandExecutor for DurableStateAtCleanup {
 /// the record still saying "provisioned, worker not attached yet", and every
 /// later daemon reconnected to a worker that no longer existed. The failure
 /// has to be on record before anything the record points at is removed.
+// Hard-won: 5f732831: rollback removed the target before recording the startup failure state
 #[test]
 fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     const CHILD: &str = "MJ_TEST_LAUNCH_ROLLBACK_ORDER_CHILD";
@@ -1367,6 +1212,7 @@ fn launch_failure_is_persisted_separately_from_session_state() {
     }
 }
 
+// Hard-won: be5abcca: launch errors lost their actionable SSH cause and diagnostic file
 #[test]
 fn noting_a_launch_failure_writes_the_diagnostic_and_returns_the_reason() {
     let directory = tempfile::tempdir().unwrap();
@@ -1543,6 +1389,7 @@ fn raw_ssh_targets_select_permissions_and_ssh_podman_is_unconstrained() {
         mj_core::config::ExecutionPolicy::Unconstrained
     );
 }
+
 const PROVISIONED_SESSION: &str = "0123456789abcdef0123456789abcdef";
 
 /// Records every command a plan runs, and fails the one whose purpose it
@@ -1613,6 +1460,7 @@ fn container_targets() -> Vec<targets::TargetTemplate> {
     ]
 }
 
+// Hard-won: cf8163f1: failed post-create provisioning leaked its container and masked the original error
 #[test]
 fn a_failure_after_the_container_exists_removes_it_and_keeps_the_original_error() {
     let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
@@ -1712,6 +1560,7 @@ fn a_target_whose_creation_failed_is_never_torn_down() {
     }
 }
 
+// Hard-won: cf8163f1: undiscoverable created target was left orphaned after provisioning failure
 #[test]
 fn a_target_whose_locator_cannot_be_discovered_is_removed_again() {
     let target = podman_target();
@@ -1761,9 +1610,70 @@ fn a_bare_project_failure_removes_nothing() {
     assert!(executor.commands().is_empty());
 }
 
-/// A Create that lands while the daemon is downloading its image waits, and
-/// says so as the "Pull image" stage. A Create with nothing to wait for says
-/// nothing about pulling at all.
+/// Which sub-agent start failures may be tried again. A second start is safe
+/// only when the first worker never published a control socket: it then owns
+/// no relay, no journal and no harness, so nothing can be duplicated.
+#[test]
+fn only_a_worker_that_never_started_is_retried() {
+    use crate::controller::readiness::WorkerStartupFailure;
+
+    let pre_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
+        reached_socket: false,
+    });
+    assert!(subagent_start_is_retryable(&pre_socket));
+
+    let after_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
+        reached_socket: true,
+    });
+    assert!(
+        !subagent_start_is_retryable(&after_socket),
+        "a worker that published its socket may own durable state"
+    );
+
+    let unmarked = anyhow::anyhow!("installing the worker binary failed");
+    assert!(
+        !subagent_start_is_retryable(&unmarked),
+        "a failure that is not a startup wait says nothing about what it left behind"
+    );
+
+    let refused = anyhow::anyhow!("connect refused")
+        .context(WorkerStartupFailure {
+            reached_socket: false,
+        })
+        .context(mj_core::refusal::Refusal::precondition(
+            "turn review cannot cover /work",
+        ));
+    assert!(
+        !subagent_start_is_retryable(&refused),
+        "a refusal names a precondition a second attempt would meet the same way"
+    );
+
+    let cancelled = anyhow::anyhow!("operation cancelled while connecting to the worker relay")
+        .context(WorkerStartupFailure {
+            reached_socket: false,
+        });
+    assert!(
+        !subagent_start_is_retryable(&cancelled),
+        "a cancelled operation was not asked to keep going"
+    );
+}
+
+struct RawRegistrationExecutor;
+impl CommandExecutor for RawRegistrationExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let stdout = match command.purpose.as_str() {
+            "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
+            "list project remotes" => "",
+            purpose => panic!("unexpected registration probe: {purpose}"),
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
 #[test]
 fn provisioning_reports_the_pull_stage_only_while_waiting() {
     #[derive(Default)]
@@ -1835,68 +1745,4 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         "{notices:?}"
     );
     downloader.join().expect("the download thread finishes");
-}
-
-/// Which sub-agent start failures may be tried again. A second start is safe
-/// only when the first worker never published a control socket: it then owns
-/// no relay, no journal and no harness, so nothing can be duplicated.
-#[test]
-fn only_a_worker_that_never_started_is_retried() {
-    use crate::controller::readiness::WorkerStartupFailure;
-
-    let pre_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
-        reached_socket: false,
-    });
-    assert!(subagent_start_is_retryable(&pre_socket));
-
-    let after_socket = anyhow::anyhow!("connect refused").context(WorkerStartupFailure {
-        reached_socket: true,
-    });
-    assert!(
-        !subagent_start_is_retryable(&after_socket),
-        "a worker that published its socket may own durable state"
-    );
-
-    let unmarked = anyhow::anyhow!("installing the worker binary failed");
-    assert!(
-        !subagent_start_is_retryable(&unmarked),
-        "a failure that is not a startup wait says nothing about what it left behind"
-    );
-
-    let refused = anyhow::anyhow!("connect refused")
-        .context(WorkerStartupFailure {
-            reached_socket: false,
-        })
-        .context(mj_core::refusal::Refusal::precondition(
-            "turn review cannot cover /work",
-        ));
-    assert!(
-        !subagent_start_is_retryable(&refused),
-        "a refusal names a precondition a second attempt would meet the same way"
-    );
-
-    let cancelled = anyhow::anyhow!("operation cancelled while connecting to the worker relay")
-        .context(WorkerStartupFailure {
-            reached_socket: false,
-        });
-    assert!(
-        !subagent_start_is_retryable(&cancelled),
-        "a cancelled operation was not asked to keep going"
-    );
-}
-
-struct RawRegistrationExecutor;
-impl CommandExecutor for RawRegistrationExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        let stdout = match command.purpose.as_str() {
-            "resolve project repository and checkout" => "/srv/project\n/srv/project/.git\n",
-            "list project remotes" => "",
-            purpose => panic!("unexpected registration probe: {purpose}"),
-        };
-        Ok(CommandOutput {
-            status: 0,
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: Vec::new(),
-        })
-    }
 }

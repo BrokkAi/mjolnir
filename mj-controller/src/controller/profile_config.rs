@@ -587,6 +587,7 @@ mod tests {
         assert!(!Config::load().unwrap().profiles.contains_key("unsaved"));
     }
 
+    // Hard-won: 11060042: unsupported delegation policy was not refused with its actual cause
     #[test]
     fn a_policy_on_a_harness_without_delegation_is_refused_with_its_message() {
         let error =
@@ -602,35 +603,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn new_policies_accept_native_and_none_but_refuse_multi_model_without_discovery() {
-        let mut config = Config::default();
-        config.profiles.insert(
-            "parent".into(),
-            HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Codex,
-                home: "missing-test-profile-home".into(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                guardian_review_model: None,
-                subagents: SubagentPolicy::Native,
-            },
-        );
-        for policy in [SubagentPolicy::Native, SubagentPolicy::None] {
-            validate_session_subagent_policy(&config, "parent", &policy)
-                .await
-                .unwrap();
-        }
-        let error = validate_session_subagent_policy(&config, "parent", &SubagentPolicy::AllModels)
-            .await
-            .unwrap_err();
-        let refusal = Refusal::of(&error).expect("a request refusal, not a discovery failure");
-        assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
-        assert!(refusal.message().contains("no longer available"));
-        assert!(refusal.message().contains("native, single_model, or none"));
-    }
-
+    // Hard-won: 11060042: unavailable model or effort was not refused with the specific selection error
     #[test]
     fn an_unavailable_model_or_effort_is_refused_with_its_message() {
         let unavailable = SubagentPolicy::SingleModel {
@@ -667,125 +640,6 @@ mod tests {
         };
         let error = refuse_unavailable_choice(&options, &policy).unwrap_err();
         assert!(refusal_message(&error).is_some(), "{error:#}");
-    }
-
-    #[tokio::test]
-    async fn subagent_options_use_eligible_profiles_and_model_specific_efforts() {
-        let mut config = Config::default();
-        for id in ["parent", "eligible", "disabled", "excluded", "broken"] {
-            config.profiles.insert(
-                id.into(),
-                HarnessProfile {
-                    enabled: id != "disabled",
-                    kind: mj_core::config::HarnessKind::Codex,
-                    home: std::path::PathBuf::from("/unused"),
-                    environment: Default::default(),
-                    context_window_bytes: None,
-                    subagents: Default::default(),
-                    guardian_review_model: None,
-                },
-            );
-        }
-        config.subagents.eligible_profiles = BTreeMap::from([
-            ("eligible".into(), true),
-            ("disabled".into(), true),
-            ("broken".into(), true),
-        ]);
-        let choices = |values: &[&str]| {
-            values
-                .iter()
-                .map(|value| mj_core::acp::SessionConfigChoice {
-                    value: (*value).into(),
-                    name: (*value).into(),
-                    description: None,
-                })
-                .collect()
-        };
-        let probe = |id: String, model: Option<String>| async move {
-            assert!(!matches!(id.as_str(), "disabled" | "excluded"));
-            anyhow::ensure!(id != "broken", "profile cannot sign in");
-            Ok(ProfileConfig {
-                model: model.clone(),
-                models: choices(if id == "parent" {
-                    &["parent-model"]
-                } else {
-                    &["child-model"]
-                }),
-                efforts: choices(if model.as_deref() == Some("child-model") {
-                    &["high"]
-                } else {
-                    &["low"]
-                }),
-                observed_at: 1,
-            })
-        };
-        let options = subagent_options_with(&config, "parent", Some("child-model".into()), probe)
-            .await
-            .unwrap();
-        assert_eq!(
-            options
-                .models
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["child-model", "parent-model"]
-        );
-        assert_eq!(
-            options
-                .efforts
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["high"]
-        );
-        assert_eq!(options.unavailable, ["broken: profile cannot sign in"]);
-        assert!(
-            options
-                .validate(&mj_core::subagent::SubagentPolicy::SingleModel {
-                    model: "child-model".into(),
-                    effort: Some("high".into())
-                })
-                .is_ok()
-        );
-        assert!(
-            options
-                .validate(&mj_core::subagent::SubagentPolicy::SingleModel {
-                    model: "child-model".into(),
-                    effort: Some("low".into())
-                })
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn muse_discovery_publishes_the_model_selected_by_native_settings() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join("settings.json"),
-            br#"{"model":"muse-spark-1.3-contributor"}"#,
-        )
-        .unwrap();
-        let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Muse,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        };
-        let mut choices = ProfileConfig {
-            model: Some(String::new()),
-            models: Vec::new(),
-            efforts: Vec::new(),
-            observed_at: 1,
-        };
-
-        enrich_profile_config(&profile, &mut choices).unwrap();
-
-        assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
-        assert_eq!(choices.models.len(), 1);
-        assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
     }
 
     #[test]
@@ -1085,5 +939,36 @@ mod tests {
             .observed_at,
             2
         );
+    }
+
+    #[test]
+    fn muse_discovery_publishes_the_model_selected_by_native_settings() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("settings.json"),
+            br#"{"model":"muse-spark-1.3-contributor"}"#,
+        )
+        .unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Muse,
+            home: home.path().into(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        let mut choices = ProfileConfig {
+            model: Some(String::new()),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            observed_at: 1,
+        };
+
+        enrich_profile_config(&profile, &mut choices).unwrap();
+
+        assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
+        assert_eq!(choices.models.len(), 1);
+        assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
     }
 }

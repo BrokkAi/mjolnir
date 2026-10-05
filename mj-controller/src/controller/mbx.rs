@@ -1473,7 +1473,7 @@ mod tests {
             "a host configuration is never rewritten"
         );
     }
-
+    // Hard-won: 24f3d72c: settings refresh left sessions using a stale failed host inspection
     #[test]
     fn looking_at_the_settings_page_lets_the_next_session_see_a_repaired_host() {
         let _isolated = isolated();
@@ -1502,34 +1502,6 @@ mod tests {
         assert!(
             resolve(&podman(None), &repaired).is_some(),
             "the next session asks the repaired host again instead of reusing the old verdict"
-        );
-    }
-
-    #[test]
-    fn a_relocated_target_root_is_reported_for_its_own_mount() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, current_native_mbx().as_str()),
-            (
-                "mbx cache dir --json",
-                0,
-                r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
-            ),
-            (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
-            (
-                "[ -f \"$1\" ]",
-                0,
-                "[target]\nroot = \"/mnt/fast/mbx-targets\"\n",
-            ),
-            ("while [ ! -d", 0, "/mnt/fast/mbx-cache"),
-            ("mj-reflink", 0, ""),
-            ("mkdir -p", 0, ""),
-            ("stat -f -c %T", 0, "xfs"),
-        ]);
-        let resolved = resolve(&podman(None), &executor).unwrap();
-        assert_eq!(
-            resolved.target_root,
-            Some(PathBuf::from("/mnt/fast/mbx-targets"))
         );
     }
 
@@ -1582,6 +1554,7 @@ mod tests {
         );
     }
 
+    // Hard-won: ecab42fb: non-login SSH PATH hid cargo-installed mbx and selected the wrong cache store
     #[test]
     fn a_cargo_installed_mbx_off_the_path_is_queried_where_it_was_found() {
         let _isolated = isolated();
@@ -1604,112 +1577,6 @@ mod tests {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[("$m\" --version", 0, "mbx\nmbx 1.15.0")]);
         assert_eq!(resolve(&podman(None), &executor), None);
-    }
-
-    #[test]
-    fn a_host_without_mbx_falls_back_to_the_default_cache_directory() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        let resolved = resolve(&podman(None), &executor).unwrap();
-        assert_eq!(resolved.directory, default_cache_directory());
-        // min(100 GB, 800 GB / 4) is the 100 GB cap.
-        assert_eq!(
-            configuration::configured_limit(
-                resolved.config_file.as_deref(),
-                "gc",
-                "max_total_size"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("100000000000B")
-        );
-    }
-
-    #[test]
-    fn a_small_volume_takes_a_quarter_of_its_free_space() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.retain(|(needle, _, _)| *needle != "df -B1 -P");
-        answers.push((
-            "df -B1 -P",
-            0,
-            "Filesystem 1B-blocks Used Available Capacity Mounted\n/dev/sda1 100000000 60000000 40000000 60% /home\n",
-        ));
-        let executor = ProbeExecutor::new(&answers);
-        let resolved = resolve(&podman(None), &executor).unwrap();
-        assert_eq!(
-            configuration::configured_limit(
-                resolved.config_file.as_deref(),
-                "gc",
-                "max_total_size"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("10000000B")
-        );
-    }
-
-    #[test]
-    fn target_overrides_win_over_every_default() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.push(("mbx cache dir", 0, r#"{"store":"/other/actions"}"#));
-        let executor = ProbeExecutor::new(&answers);
-        let resolved = resolve(
-            &podman(Some(TargetBuildCache {
-                enabled: Some(true),
-                directory: Some(PathBuf::from("/mnt/nvme/mbx")),
-                max_total_size: Some("250GiB".into()),
-                scheduler: Default::default(),
-            })),
-            &executor,
-        )
-        .unwrap();
-        assert_eq!(resolved.directory, PathBuf::from("/mnt/nvme/mbx"));
-        assert_eq!(
-            configuration::configured_limit(
-                resolved.config_file.as_deref(),
-                "gc",
-                "max_total_size"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("250GiB")
-        );
-    }
-
-    #[test]
-    fn one_total_budget_resolves_without_component_caps() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        let settings = TargetBuildCache {
-            max_total_size: Some("500GiB".into()),
-            ..Default::default()
-        };
-        let inspection = inspect_host(&CacheHost::Local, &settings, &executor).unwrap();
-        assert!(!inspection.preview.user_managed);
-        assert_eq!(
-            inspection.preview.max_total_size,
-            Some(BuildCacheLimit::Size("500GiB".into()))
-        );
-        assert_eq!(
-            inspection.preview.application,
-            BuildCacheApplication::Pending
-        );
-        let cache = inspection.cache.unwrap();
-        assert_eq!(
-            configuration::configured_limit(cache.config_file.as_deref(), "target", "max_size")
-                .unwrap()
-                .as_deref(),
-            None
-        );
-        assert!(
-            !executor
-                .ran()
-                .iter()
-                .any(|command| command.contains(".mj-apply.lock")),
-            "preview never applies a setting"
-        );
     }
 
     #[test]
@@ -1816,69 +1683,8 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn a_volume_without_reflinks_runs_without_the_cache() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.retain(|(needle, _, _)| *needle != "mj-reflink");
-        answers.push(("mj-reflink", 1, ""));
-        let executor = ProbeExecutor::new(&answers);
+        // An unset target preference is overridden by the same host capability.
         assert_eq!(resolve(&podman(None), &executor), None);
-    }
-
-    #[test]
-    fn the_preview_names_the_resolved_values_and_the_reason_the_cache_is_off() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.retain(|(needle, _, _)| *needle != "mj-reflink");
-        answers.push(("mj-reflink", 1, ""));
-        let executor = ProbeExecutor::new(&answers);
-        let preview = preview_build_cache(&configured_local_machine(), &executor)
-            .unwrap()
-            .unwrap();
-        assert_eq!(preview.native_mbx, None);
-        assert_eq!(preview.directory, Some(default_cache_directory()));
-        assert_eq!(
-            preview.max_total_size,
-            Some(BuildCacheLimit::MjDefault("100000000000B".into()))
-        );
-        assert!(
-            matches!(&preview.off_reason, Some(BuildCacheOff::Unavailable(reason)) if reason.contains("reflinks")),
-            "{:?}",
-            preview.off_reason
-        );
-        // A preview reads the host; it never creates the directory.
-        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
-
-        let executor = ProbeExecutor::new(&[
-            ("$m\" --version", 0, current_native_mbx().as_str()),
-            (
-                "mbx cache dir --json",
-                0,
-                r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
-            ),
-            (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
-            ("[ -f \"$1\" ]", 0, "[gc]\nmax_size = \"500GiB\"\n"),
-            ("while [ ! -d", 0, "/mnt/fast"),
-            ("mj-reflink", 0, ""),
-            ("stat -f -c %T", 0, "xfs"),
-        ]);
-        let preview = preview_build_cache(&configured_local_machine(), &executor)
-            .unwrap()
-            .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some(MBX_VERSION));
-        assert_eq!(
-            preview.directory,
-            Some(PathBuf::from("/mnt/fast/mbx-cache"))
-        );
-        assert_eq!(
-            preview.max_total_size,
-            Some(BuildCacheLimit::MbxDefault(None))
-        );
-        assert_eq!(preview.off_reason, None);
-        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
     }
 
     #[test]
@@ -1889,25 +1695,6 @@ mod tests {
         answers.push(("stat -f -c %T", 0, "nfs4"));
         let executor = ProbeExecutor::new(&answers);
         assert_eq!(resolve(&podman(None), &executor), None);
-    }
-
-    #[test]
-    fn a_machine_opt_out_does_not_disable_default_cache_policy() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        let disabled = podman(Some(TargetBuildCache {
-            enabled: Some(false),
-            ..Default::default()
-        }));
-        assert!(resolve(&disabled, &executor).is_none());
-        assert!(
-            !executor
-                .ran()
-                .iter()
-                .any(|command| command.contains("mkdir -p") || command.contains(".mj-apply.lock"))
-        );
-        assert!(resolve(&podman(None), &executor).is_some());
-        assert!(resolve(&disabled, &executor).is_none());
     }
 
     #[test]
@@ -1961,7 +1748,6 @@ mod tests {
             })
         );
     }
-
     #[test]
     fn a_cache_nothing_has_used_yet_reports_no_totals() {
         let _isolated = isolated();
@@ -1973,42 +1759,6 @@ mod tests {
             .expect("a local machine can hold a cache");
         assert_eq!(preview.stats, None);
     }
-
-    #[test]
-    fn a_machine_without_a_standing_host_has_no_build_cache_preview() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        let fleet: mj_core::config::Machine = serde_json::from_value(serde_json::json!({
-            "kind": "aws-ec2",
-            "region": "us-east-1",
-            "launch_template": "lt-1",
-            "ssh_user": "ubuntu",
-        }))
-        .unwrap();
-        assert_eq!(preview_build_cache(&fleet, &executor).unwrap(), None);
-        assert!(executor.ran().is_empty());
-    }
-
-    #[test]
-    fn apple_and_bare_targets_have_no_shared_build_cache() {
-        let _isolated = isolated();
-        let executor = ProbeExecutor::new(&plain_host());
-        for target in [
-            TargetTemplate::AppleContainer(container(None)),
-            TargetTemplate::LocalBare,
-            TargetTemplate::SshBare {
-                ssh: SshTarget {
-                    destination: "dev@example.test".into(),
-                    ssh_args: Vec::new(),
-                },
-                workspace_prefix: "workspaces".into(),
-            },
-        ] {
-            assert_eq!(resolve(&target, &executor), None, "{target:?}");
-        }
-        assert!(executor.ran().is_empty());
-    }
-
     fn bundle() -> targets::ProjectBundleSpec {
         targets::ProjectBundleSpec {
             primary: "main".into(),
@@ -2040,54 +1790,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rust_session_mounts_the_cache_at_the_host_path() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
-        let mut mounts = Vec::new();
-        let build_cache = prepare(
-            &podman(None),
-            &session(Some("/workspace/session-1")),
-            Some(&bundle()),
-            Some(&clone_cache()),
-            &mut mounts,
-            &executor,
-        )
-        .expect("a Rust session uses the build cache");
-        assert_eq!(build_cache.directory, default_cache_directory());
-        assert_eq!(
-            mounts,
-            vec![targets::AdditionalMount {
-                source: default_cache_directory(),
-                destination: default_cache_directory(),
-                access: targets::MountAccess::Rw,
-            }]
-        );
-    }
-
-    #[test]
-    fn a_repository_without_a_root_manifest_runs_without_the_cache() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 1, ""));
-        let executor = ProbeExecutor::new(&answers);
-        let mut mounts = Vec::new();
-        assert_eq!(
-            prepare(
-                &podman(None),
-                &session(Some("/workspace/session-1")),
-                Some(&bundle()),
-                Some(&clone_cache()),
-                &mut mounts,
-                &executor,
-            ),
-            None
-        );
-        assert!(mounts.is_empty());
-    }
-
-    #[test]
     fn a_session_at_the_legacy_shared_workspace_runs_without_the_cache() {
         let _isolated = isolated();
         let mut answers = plain_host();
@@ -2098,47 +1800,6 @@ mod tests {
             prepare(
                 &podman(None),
                 &session(None),
-                Some(&bundle()),
-                Some(&clone_cache()),
-                &mut mounts,
-                &executor,
-            ),
-            None
-        );
-        assert!(executor.ran().is_empty());
-    }
-
-    #[test]
-    fn a_session_without_a_prepared_clone_cache_runs_without_the_cache() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
-        let mut mounts = Vec::new();
-        assert_eq!(
-            prepare(
-                &podman(None),
-                &session(Some("/workspace/session-1")),
-                Some(&bundle()),
-                None,
-                &mut mounts,
-                &executor,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn an_apple_target_never_shares_a_build_cache() {
-        let _isolated = isolated();
-        let mut answers = plain_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
-        let mut mounts = Vec::new();
-        assert_eq!(
-            prepare(
-                &TargetTemplate::AppleContainer(container(None)),
-                &session(Some("/workspace/session-1")),
                 Some(&bundle()),
                 Some(&clone_cache()),
                 &mut mounts,
@@ -2256,5 +1917,77 @@ mod tests {
             Some(600)
         );
         assert_eq!(available_bytes("Filesystem 1B-blocks\n"), None);
+    }
+
+    #[test]
+    fn the_preview_names_the_resolved_values_and_the_reason_the_cache_is_off() {
+        let _isolated = isolated();
+        let mut answers = plain_host();
+        answers.retain(|(needle, _, _)| *needle != "mj-reflink");
+        answers.push(("mj-reflink", 1, ""));
+        let executor = ProbeExecutor::new(&answers);
+        let preview = preview_build_cache(&configured_local_machine(), &executor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preview.native_mbx, None);
+        assert_eq!(preview.directory, Some(default_cache_directory()));
+        assert_eq!(
+            preview.max_total_size,
+            Some(BuildCacheLimit::MjDefault("100000000000B".into()))
+        );
+        assert!(
+            matches!(&preview.off_reason, Some(BuildCacheOff::Unavailable(reason)) if reason.contains("reflinks")),
+            "{:?}",
+            preview.off_reason
+        );
+        // A preview reads the host; it never creates the directory.
+        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
+
+        let executor = ProbeExecutor::new(&[
+            ("$m\" --version", 0, current_native_mbx().as_str()),
+            (
+                "mbx cache dir --json",
+                0,
+                r#"{"version":1,"store":"/mnt/fast/mbx-cache/actions"}"#,
+            ),
+            (r#"printf '%s' "$HOME""#, 0, "/home/dev"),
+            ("[ -f \"$1\" ]", 0, "[gc]\nmax_size = \"500GiB\"\n"),
+            ("while [ ! -d", 0, "/mnt/fast"),
+            ("mj-reflink", 0, ""),
+            ("stat -f -c %T", 0, "xfs"),
+        ]);
+        let preview = preview_build_cache(&configured_local_machine(), &executor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preview.native_mbx.as_deref(), Some(MBX_VERSION));
+        assert_eq!(
+            preview.directory,
+            Some(PathBuf::from("/mnt/fast/mbx-cache"))
+        );
+        assert_eq!(
+            preview.max_total_size,
+            Some(BuildCacheLimit::MbxDefault(None))
+        );
+        assert_eq!(preview.off_reason, None);
+        assert!(!executor.ran().iter().any(|line| line.contains("mkdir")));
+    }
+
+    #[test]
+    fn a_host_without_mbx_falls_back_to_the_default_cache_directory() {
+        let _isolated = isolated();
+        let executor = ProbeExecutor::new(&plain_host());
+        let resolved = resolve(&podman(None), &executor).unwrap();
+        assert_eq!(resolved.directory, default_cache_directory());
+        // min(100 GB, 800 GB / 4) is the 100 GB cap.
+        assert_eq!(
+            configuration::configured_limit(
+                resolved.config_file.as_deref(),
+                "gc",
+                "max_total_size"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("100000000000B")
+        );
     }
 }

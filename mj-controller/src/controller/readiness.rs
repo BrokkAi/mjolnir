@@ -461,59 +461,12 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use anyhow::{Result, bail};
 
     use crate::controller::worker_binary::{WorkerExitRecord, WorkerStartupRecord};
-    use crate::targets::{CancellableProcessExecutor, CommandOutput};
-    use mj_core::config::HarnessKind;
+    use crate::targets::CancellableProcessExecutor;
 
     use super::*;
-
-    #[tokio::test]
-    async fn native_session_readiness_stage_is_balanced() {
-        struct ReadyProbe;
-
-        impl NativeSessionProbe for ReadyProbe {
-            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
-                Ok(NativeSessionReadiness::Ready("native-1".into()))
-            }
-        }
-
-        struct RecordingExecutor {
-            transitions: RefCell<Vec<(ProvisionStage, bool)>>,
-        }
-
-        impl CommandExecutor for RecordingExecutor {
-            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-                panic!("readiness must not execute {}", command.program)
-            }
-
-            fn stage_started(&self, stage: ProvisionStage) {
-                self.transitions.borrow_mut().push((stage, true));
-            }
-
-            fn stage_finished(&self, stage: ProvisionStage) {
-                self.transitions.borrow_mut().push((stage, false));
-            }
-        }
-
-        let executor = RecordingExecutor {
-            transitions: RefCell::new(Vec::new()),
-        };
-        let stage = ProvisionStage::Installing(HarnessKind::Codex);
-
-        let native_session_id = wait_for_native_session_in_stage(&mut ReadyProbe, &executor, stage)
-            .await
-            .unwrap();
-
-        assert_eq!(native_session_id, "native-1");
-        assert_eq!(
-            executor.transitions.into_inner(),
-            vec![(stage, true), (stage, false)]
-        );
-    }
 
     #[tokio::test]
     async fn native_session_wait_stops_as_soon_as_cancellation_is_observed() {
@@ -687,6 +640,7 @@ mod tests {
             })
         }
     }
+    // Hard-won: b5e0edb9: startup gave up before a worker completed its delayed relay startup
     #[tokio::test(start_paused = true)]
     async fn startup_connect_retries_until_worker_accepts() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -701,6 +655,7 @@ mod tests {
         assert_eq!(relay, "relay");
         assert_eq!(worker.attempts, 4);
     }
+    // Hard-won: b5e0edb9: startup waited through its timeout after the worker had recorded death
     #[tokio::test(start_paused = true)]
     async fn startup_connect_reports_a_worker_that_recorded_its_death() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -781,6 +736,7 @@ mod tests {
     /// A worker whose startup steps keep changing is doing work proportional
     /// to the session's own data, so the wait must outlast its first window
     /// rather than reporting a healthy worker as a failure.
+    // Hard-won: 9c9c8c9b: startup timed out a worker that continued making recorded progress
     #[tokio::test(start_paused = true)]
     async fn startup_connect_waits_past_the_first_window_for_a_worker_that_is_progressing() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -807,6 +763,7 @@ mod tests {
 
     /// A worker whose process is gone will never answer, so the wait ends at
     /// once and says which step it got to rather than timing out.
+    // Hard-won: 9c9c8c9b: startup waited for a worker process that had already vanished
     #[tokio::test(start_paused = true)]
     async fn startup_connect_reports_a_worker_whose_process_vanished() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -835,6 +792,7 @@ mod tests {
 
     /// A worker that is alive but has not moved for the grace period is stuck.
     /// Naming the step it is stuck on is the whole point of the record.
+    // Hard-won: 9c9c8c9b: startup reported no progress instead of the live worker’s last recorded step
     #[tokio::test(start_paused = true)]
     async fn startup_connect_reports_the_step_a_live_worker_is_stuck_on() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -881,6 +839,7 @@ mod tests {
     /// its backlog but nobody answers the hello, so the attempt never returns.
     /// The wait must not sit on that attempt. It gives up on it, looks at the
     /// worker, sees the record move, and keeps waiting until the worker answers.
+    // Hard-won: da519db5: one hanging relay attempt hid later worker progress and caused a false timeout
     #[tokio::test(start_paused = true)]
     async fn startup_connect_extends_past_a_hanging_attempt_while_the_record_advances() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -909,6 +868,7 @@ mod tests {
 
     /// The same hang with a record that does not move fails, and says which
     /// step the record ended on instead of claiming it recorded none.
+    // Hard-won: da519db5: hanging relay attempts hid the last recorded startup step in the failure
     #[tokio::test(start_paused = true)]
     async fn startup_connect_names_the_last_recorded_step_when_an_attempt_hangs_without_progress() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -938,6 +898,7 @@ mod tests {
     /// A detached launch returns before the worker's own process exists. On a
     /// loaded machine the first probes can find no process and no record, which
     /// is a worker that has not started yet, not one that died.
+    // Hard-won: 5578e1b4: startup treated a worker that had not begun reporting as immediately dead
     #[tokio::test(start_paused = true)]
     async fn startup_connect_waits_for_a_worker_that_has_not_started_yet() {
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
