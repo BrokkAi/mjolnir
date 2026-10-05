@@ -36,7 +36,7 @@ pub const INSTANCE_TAG: &str = "dev.mj.instance";
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
 /// The launch phase a command belongs to, reported as launch progress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
@@ -48,6 +48,11 @@ pub enum ProvisionStage {
     Restoring,
     Starting,
     Installing(HarnessKind),
+    PreparingHarness {
+        harness: HarnessKind,
+        step: String,
+        since_ms: i64,
+    },
     Compacting,
     RecoveryCopy,
     Verifying,
@@ -59,7 +64,7 @@ pub enum ProvisionStage {
 }
 
 impl ProvisionStage {
-    pub fn label(self) -> String {
+    pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
             Self::Provisioning => "Provision".into(),
@@ -69,6 +74,9 @@ impl ProvisionStage {
             Self::Restoring => "Restore".into(),
             Self::Starting => "Start".into(),
             Self::Installing(harness) => format!("Installing {}", harness.display_name()),
+            Self::PreparingHarness { harness, step, .. } => {
+                format!("Preparing {}: {step}", harness.display_name())
+            }
             Self::Compacting => "Compact".into(),
             Self::RecoveryCopy => "Recovery copy".into(),
             Self::Verifying => "Verify".into(),
@@ -77,6 +85,17 @@ impl ProvisionStage {
             Self::RemovingContainer => "Remove container".into(),
             Self::RemovingStorage => "Remove container storage".into(),
             Self::CleaningCache => "Clean cache".into(),
+        }
+    }
+
+    /// The worker owns the start time for harness preparation. Other stages
+    /// start when the controller observes them.
+    pub fn started_at_epoch_seconds(&self) -> Option<u64> {
+        match self {
+            Self::PreparingHarness { since_ms, .. } => {
+                Some(u64::try_from((*since_ms).max(0) / 1_000).unwrap_or_default())
+            }
+            _ => None,
         }
     }
 }
@@ -587,14 +606,14 @@ pub struct ProvisionStageGuard<'a, E: CommandExecutor + ?Sized> {
 
 impl<'a, E: CommandExecutor + ?Sized> ProvisionStageGuard<'a, E> {
     pub fn new(executor: &'a E, stage: ProvisionStage) -> Self {
-        executor.stage_started(stage);
+        executor.stage_started(stage.clone());
         Self { executor, stage }
     }
 }
 
 impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
     fn drop(&mut self) {
-        self.executor.stage_finished(self.stage);
+        self.executor.stage_finished(self.stage.clone());
     }
 }
 

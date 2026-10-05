@@ -907,8 +907,13 @@ impl Controller {
                     connect_started_worker(reconnect, session_id, executor, backend, worker_root)
                         .await?
                 };
-                let native_session_id =
-                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let native_session_id = wait_for_native_session_in_stage(
+                    &mut relay,
+                    executor,
+                    readiness_stage,
+                    profile.kind,
+                )
+                .await?;
                 let owner = crate::worker_lifecycle::require(session_id)?;
                 crate::database::finish_worker_restart(session_id, owner.operation_id())?;
                 Ok(Some(native_session_id))
@@ -1503,8 +1508,8 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
     pub(crate) fn new(inner: &'a E, stage: ProvisionStage) -> Self {
         Self {
             inner,
-            stage,
-            _guard: ProvisionStageGuard::new(inner, stage),
+            stage: stage.clone(),
+            _guard: ProvisionStageGuard::new(inner, stage.clone()),
         }
     }
 
@@ -1512,7 +1517,7 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
         if command.stage.is_some() {
             return command.clone();
         }
-        command.clone().stage(self.stage)
+        command.clone().stage(self.stage.clone())
     }
 }
 

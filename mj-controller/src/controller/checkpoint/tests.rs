@@ -321,6 +321,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             active_agent_terminals: Vec::new(),
             checkpoint_barrier: Some("checkpoint-1".into()),
             checkpoint_ready: None,
+            harness_preparation: None,
             last_acp_activity_at_ms: None,
             current_step_started_at_ms: None,
             foreground_tool_started_at_ms: None,
@@ -2250,7 +2251,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         }
 
         fn stage_started(&self, stage: ProvisionStage) {
-            self.active_stages.lock().unwrap().push(stage);
+            self.active_stages.lock().unwrap().push(stage.clone());
             self.stage_events.lock().unwrap().push((stage, true));
         }
 
@@ -2542,7 +2543,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
         executor
             .stage_events()
             .into_iter()
-            .filter(|(stage, _)| *stage == ProvisionStage::RecoveryCopy)
+            .filter(|(stage, _)| stage == &ProvisionStage::RecoveryCopy)
             .collect::<Vec<_>>(),
         vec![
             (ProvisionStage::RecoveryCopy, true),

@@ -1053,6 +1053,20 @@ impl DurableRelay {
             self.checkpoint_only,
             "worker is not in checkpoint-only mode"
         );
+        self.dispatch_relay_local_lifecycle()
+    }
+
+    /// Advance checkpoint and close commands while harness preparation owns no
+    /// ACP process. Pending prompts and other ACP commands stay queued.
+    pub fn dispatch_preparation_lifecycle(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.checkpoint_only,
+            "checkpoint-only workers use dispatch_checkpoint_only"
+        );
+        self.dispatch_relay_local_lifecycle()
+    }
+
+    fn dispatch_relay_local_lifecycle(&mut self) -> Result<()> {
         let mut commands: Vec<_> = self
             .snapshot
             .dispatches

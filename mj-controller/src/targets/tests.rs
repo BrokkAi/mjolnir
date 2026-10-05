@@ -4299,7 +4299,7 @@ impl CommandExecutor for StageRecordingExecutor {
     }
 
     fn stage_started(&self, stage: ProvisionStage) {
-        self.active.borrow_mut().insert(stage);
+        self.active.borrow_mut().insert(stage.clone());
         self.events.borrow_mut().push((stage, true));
     }
 

@@ -88,19 +88,40 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
 }
 
 async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
-    match tokio::time::timeout(
-        crate::test_support::IO_TIMEOUT,
-        unix::run_daemon(root.to_owned(), config),
-    )
-    .await
-    {
-        Ok(result) => {
-            result.expect_err("the fixture cannot start an ACP supervisor");
+    let daemon = tokio::spawn(unix::run_daemon(root.to_owned(), config));
+    let observed = tokio::time::timeout(crate::test_support::IO_TIMEOUT, async {
+        loop {
+            if daemon.is_finished() {
+                break false;
+            }
+            let failure_recorded = std::fs::read(root.join(WORKER_STARTUP_FILE))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|record| record["failure"].is_object());
+            if failure_recorded {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    match observed {
+        Ok(true) => {
+            daemon.abort();
+            assert!(daemon.await.unwrap_err().is_cancelled());
+        }
+        Ok(false) => {
+            daemon
+                .await
+                .expect("worker task panicked")
+                .expect_err("the fixture cannot start an ACP supervisor");
         }
         Err(_) => {
+            daemon.abort();
+            let _ = daemon.await;
             let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
                 .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
-            panic!("fixture worker did not finish its launch; startup record: {startup}");
+            panic!("fixture worker did not report its launch failure; startup record: {startup}");
         }
     }
 }
@@ -6771,14 +6792,39 @@ fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
     temp
 }
 
-async fn control_socket_appears(root: &Path, within: std::time::Duration) -> bool {
-    tokio::time::timeout(within, async {
-        while !root.join("control.sock").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+async fn worker_status(root: &Path) -> Result<mj_core::relay::RelayOperationalState, String> {
+    let stream = tokio::net::UnixStream::connect(root.join("control.sock"))
+        .await
+        .map_err(|error| format!("connect: {error}"))?;
+    let (read, mut write) = stream.into_split();
+    let request = RelayRequestEnvelope {
+        request_id: "startup-status".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Status,
+    };
+    let mut bytes = serde_json::to_vec(&request).map_err(|error| format!("encode: {error}"))?;
+    bytes.push(b'\n');
+    write
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("write: {error}"))?;
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        reader.read_line(&mut line),
+    )
     .await
-    .is_ok()
+    .map_err(|_| "timed out waiting for Status".to_owned())?
+    .map_err(|error| format!("read: {error}"))?;
+    let response: RelayResponseEnvelope =
+        serde_json::from_str(&line).map_err(|error| format!("decode: {error}; line={line:?}"))?;
+    match response.body {
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(state),
+        } => Ok(state),
+        body => Err(format!("Status returned {body:?}")),
+    }
 }
 
 /// Whether the worker's startup record already names `step`.
@@ -6806,9 +6852,8 @@ fn startup_step_recorded(root: &Path, step: &str) -> bool {
 /// socket, and a sub-agent child paid that cost for a review it is never given.
 #[tokio::test]
 async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot_be_staged() {
-    // The socket is published only once the harness is started (#1192), so the
-    // wait covers a harness start on a slow runner; a capture would take a
-    // minute, so a socket inside half of that still proves no capture ran.
+    // A capture would take a minute, so the startup record can prove the
+    // worker published its relay before doing any working-tree capture.
     let workspace = repository_whose_staging_blocks(60);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6847,13 +6892,10 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     let _ = daemon.await;
 }
 
-/// #1192: a socket that exists must be a worker that answers. The daemon reads
-/// a bound socket as "connect now", and a connection to a socket nobody accepts
-/// on waits in the kernel backlog, so a slow harness preparation looked like a
-/// worker that never replied. While the harness is still being prepared there
-/// must be no socket, so a connect fails at once instead of hanging.
+/// #1192: the worker answers the daemon during harness preparation, and the
+/// status response names the step currently owned by the preparation task.
 #[tokio::test]
-async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
+async fn the_control_socket_answers_while_the_harness_is_prepared() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6861,7 +6903,7 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     // Selecting a built-in Codex bridge probes its version before ACP starts.
     let slow_harness = temp.path().join("codex-acp");
     std::fs::write(&slow_harness, format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 1; echo '@brokkai/codex-acp {}'; exit 0; fi\nexit 1\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 3; echo '@brokkai/codex-acp {}'; exit 0; fi\nexit 1\n",
         mj_core::harness_runtime::CODEX_ACP_VERSION
     )).unwrap();
     std::fs::set_permissions(&slow_harness, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -6876,7 +6918,6 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
-    let socket = root.join("control.sock");
     let steps = || -> Vec<String> {
         std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
             .ok()
@@ -6887,52 +6928,43 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
             .filter_map(|step| step["step"].as_str().map(str::to_owned))
             .collect()
     };
-    let mut preparing_without_socket = false;
-    let recorded = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let prepared_status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let recorded = steps();
             let preparing = recorded.iter().any(|step| step == "harness-resolve")
                 && !recorded.iter().any(|step| step == "bridge-start");
-            match mj_core::local_sockets::connect_unix_stream(&socket) {
-                Ok(_stream) => {
-                    assert!(
-                        !preparing,
-                        "a connect succeeded while the harness was still being prepared"
-                    );
-                    break recorded;
-                }
-                Err(_) => preparing_without_socket |= preparing,
+            if preparing && let Ok(status) = worker_status(&root).await {
+                break Some((recorded, status));
             }
             if daemon.is_finished() {
-                break recorded;
+                break None;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the worker neither served nor stopped");
+    .expect("the worker neither served nor stopped")
+    .expect("worker stopped before serving during harness preparation");
+    let (recorded, status) = prepared_status;
+    assert!(matches!(
+        status.harness_preparation,
+        Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
+            if step == "harness-resolve"
+    ));
+    let position = |name: &str| recorded.iter().position(|step| step == name);
     assert!(
-        preparing_without_socket,
-        "the test never observed the harness-preparation window"
+        position("serving").is_some_and(|serving| {
+            position("harness-resolve").is_some_and(|resolving| serving < resolving)
+        }),
+        "worker did not publish before harness preparation: {recorded:?}"
     );
-    // The socket, when it appears, comes after the steps that need a harness.
-    let all = steps();
-    let position = |name: &str| all.iter().position(|step| step == name);
-    if let Some(bound) = position("bind-socket") {
-        let started = position("bridge-start").expect("bind-socket without bridge-start");
-        assert!(started < bound, "steps: {all:?}");
-        assert!(position("serving").is_some_and(|serving| serving > bound));
-    }
-    drop(recorded);
     daemon.abort();
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }
 
-/// The same working tree, with review configured, still blocks before the
-/// socket. This is the half the capture redesign has to make cheap; it is
-/// asserted here so the gate above cannot be mistaken for the whole fix.
+/// Review capture still precedes bridge start, while the relay remains live.
 #[tokio::test]
-async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
+async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
     let workspace = repository_whose_staging_blocks(10);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6943,12 +6975,40 @@ async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
     config.review_capture = true;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (status, last_error) = async {
+        let mut last_error = "startup step not reached".to_owned();
+        loop {
+            if startup_step_recorded(&root, "review-baseline") {
+                match worker_status(&root).await {
+                    Ok(status) => break (Some(status), last_error),
+                    Err(error) => last_error = error,
+                }
+            }
+            if daemon.is_finished() || tokio::time::Instant::now() >= deadline {
+                break (None, last_error);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    .await;
+    let status = status.unwrap_or_else(|| {
+        let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
+            .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
+        panic!(
+            "worker did not answer Status during review baseline preparation: {last_error}; startup record: {startup}"
+        )
+    });
     assert!(
-        !control_socket_appears(&root, std::time::Duration::from_secs(2)).await,
-        "the capture is what delays the socket, so this half must still block"
+        matches!(
+            status.harness_preparation,
+            Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
+                if step == "review-baseline"
+        ),
+        "unexpected worker preparation state after Status succeeded: {status:?}; last request error: {last_error}"
     );
     daemon.abort();
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }
 
 /// A command sender whose prompt loop is gone, for tests that record runtime

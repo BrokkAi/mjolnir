@@ -742,6 +742,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: Some(true),
+        harness_preparation: None,
         agent_capabilities: None,
         agent_info: None,
         runtime: None,

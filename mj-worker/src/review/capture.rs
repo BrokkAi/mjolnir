@@ -827,12 +827,23 @@ pub const WORKSPACE_STATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// deadline it becomes a refusal the user can act on.
 pub struct BoundedGit {
     timeout: Duration,
+    executor: mj_core::targets::CancellableProcessExecutor,
 }
 
 impl BoundedGit {
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            executor: mj_core::targets::CancellableProcessExecutor::new(std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )),
+        }
+    }
+
+    #[must_use]
+    pub fn cancellation_guard(&self) -> mj_core::targets::ProcessCancellationGuard {
+        self.executor.cancel_on_drop()
     }
 }
 
@@ -860,10 +871,19 @@ impl GitCommandRunner for BoundedGit {
                 value.to_string_lossy().into_owned(),
             );
         }
-        let output = mj_core::targets::CommandExecutor::execute(
-            &mj_core::targets::BoundedProcessExecutor::new(self.timeout),
-            &spec,
-        )?;
+        let executor = self.executor.clone().with_deadline(self.timeout);
+        let output =
+            mj_core::targets::CommandExecutor::execute(&executor, &spec).map_err(|error| {
+                if executor.is_cancelled() && !self.executor.is_cancelled() {
+                    anyhow::Error::new(mj_core::targets::CommandTimedOut {
+                        program: spec.program.clone(),
+                        purpose: spec.purpose.clone(),
+                        timeout: self.timeout,
+                    })
+                } else {
+                    error
+                }
+            })?;
         Ok(mj_checkpoint::archive::GitOutput {
             status: output.status,
             stdout: output.stdout,

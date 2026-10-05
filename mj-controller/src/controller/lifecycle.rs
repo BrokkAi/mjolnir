@@ -678,6 +678,27 @@ impl Controller {
         )
     }
 
+    /// Persist a worker-reported harness failure from an async lifecycle
+    /// method that only has a shared controller reference. The revision check
+    /// still belongs to the controller loaded from the current store.
+    pub(crate) async fn persist_harness_preparation_failure(
+        &self,
+        session_id: &str,
+        cause: &str,
+        observed_updated_at: &str,
+    ) -> Result<()> {
+        let session_id = session_id.to_owned();
+        let cause = cause.to_owned();
+        let observed_updated_at = observed_updated_at.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut controller = Controller::load()?;
+            controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+        })
+        .await
+        .context("record harness preparation failure task panicked")??;
+        Ok(())
+    }
+
     fn fail_unready_session_with(
         &mut self,
         session_id: &str,

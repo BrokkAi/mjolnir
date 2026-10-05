@@ -69,6 +69,37 @@ pub fn record_startup_step(root: &Path, step: &str) {
     }
 }
 
+/// Record the preparation error alongside the last startup breadcrumb. The
+/// worker stays alive after this point, so its exit record cannot carry the
+/// failure that the daemon needs to explain a failed launch.
+pub fn record_startup_failure(root: &Path, step: &str, error: &str) {
+    if !root.is_dir() {
+        return;
+    }
+    let path = root.join(WORKER_STARTUP_FILE);
+    let mut record = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let bounded_error: String = error.chars().take(8_192).collect();
+    record["failure"] = serde_json::json!({
+        "step": step,
+        "error": bounded_error,
+        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    match serde_json::to_vec_pretty(&record) {
+        Ok(bytes) => {
+            if let Err(write_error) = mj_core::config::atomic_write(&path, &bytes) {
+                eprintln!("Mjolnir: could not record startup failure at {step}: {write_error}");
+            }
+        }
+        Err(write_error) => {
+            eprintln!("Mjolnir: could not serialize startup failure at {step}: {write_error}");
+        }
+    }
+}
+
 // The launch descriptions and MCP shapes both sides of the relay share live in
 // the foundation. The runtime and its submodules keep naming them here.
 use mj_core::worker_launch::WorkerLaunchConfig;

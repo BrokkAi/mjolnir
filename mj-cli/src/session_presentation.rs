@@ -96,7 +96,7 @@ pub(crate) fn apply_lifecycle_display(
     }
     dashboard.replace_session_operation_stages(
         &lifecycle.session_id,
-        lifecycle.active_stages.iter().copied(),
+        lifecycle.active_stages.iter().cloned(),
     );
     if let Some((profile_id, target_id)) = lifecycle.resume_destination.as_ref() {
         dashboard.set_resume_destination(
@@ -255,6 +255,7 @@ mod tests {
             replaced_unused_native_session_id: None,
             checkpoint_only: false,
             acp_ready: None,
+            harness_preparation: None,
             agent_capabilities: None,
             agent_info: None,
             runtime: None,

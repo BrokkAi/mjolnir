@@ -67,10 +67,19 @@ pub(crate) async fn handle_request(
 /// server connects, hands over the lanes it wants, and reads the answer. The
 /// socket lives inside the worker root, so nothing outside this container can
 /// reach it, and it is removed when the worker stops.
+#[cfg(test)]
 pub(crate) fn serve_review_dispatch(
     root: &std::path::Path,
     reviewer: Arc<ReviewerSidecar>,
-) -> Result<SocketGuard> {
+) -> Result<ReviewDispatchGuard> {
+    serve_review_dispatch_on(&tokio::runtime::Handle::current(), root, reviewer)
+}
+
+pub(crate) fn serve_review_dispatch_on(
+    runtime: &tokio::runtime::Handle,
+    root: &std::path::Path,
+    reviewer: Arc<ReviewerSidecar>,
+) -> Result<ReviewDispatchGuard> {
     let directory = root.join(crate::worker_runtime::REVIEWER_DIR);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("create the reviewer directory {}", directory.display()))?;
@@ -92,13 +101,14 @@ pub(crate) fn serve_review_dispatch(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
-    tokio::spawn(async move {
+    let nested_runtime = runtime.clone();
+    let task = runtime.spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
             let reviewer = reviewer.clone();
-            tokio::spawn(async move {
+            nested_runtime.spawn(async move {
                 if let Err(error) = serve_one_review_dispatch(stream, reviewer).await {
                     // Reported rather than dropped: a supervisor whose
                     // dispatch was lost would wait for lanes that never run.
@@ -110,7 +120,22 @@ pub(crate) fn serve_review_dispatch(
             });
         }
     });
-    Ok(SocketGuard(path))
+    Ok(ReviewDispatchGuard {
+        task,
+        socket: Some(SocketGuard(path)),
+    })
+}
+
+pub(crate) struct ReviewDispatchGuard {
+    task: tokio::task::JoinHandle<()>,
+    socket: Option<SocketGuard>,
+}
+
+impl Drop for ReviewDispatchGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.socket.take();
+    }
 }
 
 pub(crate) async fn serve_one_review_dispatch(

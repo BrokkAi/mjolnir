@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::session_manager::{SessionManagerControl, StandaloneSession};
 use crate::targets::{self, CommandExecutor, CommandSpec};
+use mj_core::config::HarnessKind;
 use mj_core::relay::RelayExecutionState;
 
 use super::Controller;
@@ -291,7 +292,7 @@ impl Controller {
                     }
                 };
                 connection.set_project_memory_target(project_memory);
-                wait_for_native_session(&mut connection, executor).await?;
+                wait_for_native_session(&mut connection, executor, harness).await?;
                 wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor).await?;
                 crate::database::finish_worker_restart(session_id, &operation_id)?;
                 lease.finish_replacement(connection);
@@ -379,6 +380,12 @@ impl Controller {
                 messages,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
+            let session = self.state.sessions.get(session_id);
+            let harness = session
+                .map(|session| session.harness_kind)
+                .or_else(|| launch.map(|launch| launch.harness))
+                .unwrap_or(HarnessKind::Codex);
+            let observed_updated_at = session.map(|session| session.updated_at.clone());
             let target = self
                 .state
                 .sessions
@@ -475,7 +482,7 @@ impl Controller {
             connection.set_project_memory_target(project_memory);
             // A worker answered, so a failure from here on only means "no worker"
             // when the transport to it died again.
-            async {
+            let readiness = async {
                 let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
                 if let Some(launch) = launch {
                     anyhow::ensure!(
@@ -488,7 +495,7 @@ impl Controller {
                 if checkpoint_only {
                     return Ok(());
                 }
-                wait_for_native_session(&mut connection, executor)
+                wait_for_native_session(&mut connection, executor, harness)
                     .await
                     .context(messages.native_session)?;
                 wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor)
@@ -496,7 +503,21 @@ impl Controller {
                     .context("wait for ACP to go idle after worker restart")
             }
             .await
-            .map_err(mark_if_transport_died)?;
+            .map_err(mark_if_transport_died);
+            if let Err(error) = readiness {
+                if let (Some(failure), Some(observed_updated_at)) = (
+                    error.downcast_ref::<super::readiness::HarnessPreparationFailure>(),
+                    observed_updated_at.as_deref(),
+                ) {
+                    self.persist_harness_preparation_failure(
+                        session_id,
+                        &failure.to_string(),
+                        observed_updated_at,
+                    )
+                    .await?;
+                }
+                return Err(error);
+            }
             if target.is_some() {
                 crate::database::finish_worker_restart(session_id, owner.operation_id())?;
             }

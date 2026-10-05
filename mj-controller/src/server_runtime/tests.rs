@@ -543,6 +543,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: None,
+        harness_preparation: None,
         agent_capabilities: None,
         agent_info: None,
         runtime: None,

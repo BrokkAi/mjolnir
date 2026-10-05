@@ -286,6 +286,21 @@ impl Controller {
                             "could not stop the worker of a sub-agent whose restart failed"
                         );
                     }
+                    if let Some(failure) = error
+                        .downcast_ref::<crate::controller::HarnessPreparationFailure>()
+                    {
+                        let mut record = session.clone();
+                        record.state = SessionState::Error;
+                        record.last_error = Some(failure.to_string());
+                        record.updated_at = super::now();
+                        if let Err(record_error) =
+                            crate::database::save_lifecycle_session(&record)
+                        {
+                            return Err(error.context(format!(
+                                "also failed to record the sub-agent harness preparation failure: {record_error:#}"
+                            )));
+                        }
+                    }
                     return Err(explain_process_exhaustion(error, &backend, session_id));
                 }
             };

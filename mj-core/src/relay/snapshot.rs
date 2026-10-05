@@ -439,6 +439,30 @@ pub struct HarnessTurn {
     pub started_at_ms: i64,
 }
 
+/// How far the current worker process has got in preparing its harness.
+///
+/// The worker serves its relay before this work starts, so a client can tell
+/// a worker that is still preparing from one that is not answering. The
+/// worker is the only owner of this fact; it belongs to one worker process
+/// and is never carried across a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum HarnessPreparation {
+    /// Preparation is running `step` (a `worker-startup.json` step name),
+    /// which began at `since_ms`.
+    Preparing { step: String, since_ms: i64 },
+    /// The harness bridge was started. `acp_ready` then reports whether its
+    /// session is open.
+    Started,
+    /// Preparation stopped at `step`. The worker keeps serving its relay, so
+    /// the session can still be checkpointed and closed.
+    Failed {
+        step: String,
+        error: String,
+        at_ms: i64,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserShellStatus {
@@ -634,6 +658,10 @@ pub struct RelayOperationalState {
     /// session. Older workers omit this field and are treated as ready.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_ready: Option<bool>,
+    /// Where this worker process is in preparing its harness. Older workers
+    /// omit it; they accept connections only after preparation finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_preparation: Option<HarnessPreparation>,
     /// This process serves recovered state without running a harness.
     #[serde(default)]
     pub checkpoint_only: bool,
@@ -1439,6 +1467,7 @@ impl RelaySnapshot {
             // snapshots must never carry it across a restart.
             checkpoint_only: false,
             acp_ready: None,
+            harness_preparation: None,
             agent_capabilities: self.agent_capabilities.clone(),
             agent_info: self.agent_info.clone(),
             runtime: self.runtime.clone(),

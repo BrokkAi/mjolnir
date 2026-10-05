@@ -845,7 +845,7 @@ fn start_begins_at_the_worker_launch_not_at_the_transfers_before_it() {
         .commands
         .borrow()
         .iter()
-        .map(|command| (command.purpose.clone(), command.stage))
+        .map(|command| (command.purpose.clone(), command.stage.clone()))
         .collect::<Vec<_>>();
     assert_eq!(
         stages,

@@ -276,7 +276,13 @@ impl Controller {
         let mut relay = StandaloneSession::connect_command(spec, session_id)
             .await
             .context("orphan relay did not complete the v1 handshake")?;
-        let native_session_id = wait_for_native_session(&mut relay, executor).await?;
+        let harness = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown adopted session {session_id}"))?
+            .harness_kind;
+        let native_session_id = wait_for_native_session(&mut relay, executor, harness).await?;
         self.mark_worker_connected(session_id, Some(native_session_id))?;
         if let Some(title) = relay
             .snapshot()

@@ -588,7 +588,7 @@ pub(super) async fn run_daemon_runtime(
                         refresh_runtime_controller(&state).await;
                     }
                     while let Some(result) = worker_upgrades.try_result() {
-                        report_worker_upgrade(&state, &result);
+                        report_worker_upgrade(&state, &result).await;
                     }
                 }
                 _ = background_policy_tick.tick() => {

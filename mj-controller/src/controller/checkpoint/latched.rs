@@ -265,13 +265,26 @@ impl Controller {
             // Startup gets its own cancellable budget; its timeout must not
             // enter the wedged-checkpoint worker-restart path below.
             let checkpoint_only = snapshot.operational.checkpoint_only;
-            if !checkpoint_only {
-                wait_for_native_session_in_stage(
+            if !checkpoint_only
+                && let Err(error) = wait_for_native_session_in_stage(
                     relay.connection_mut(),
                     executor,
                     targets::ProvisionStage::Starting,
+                    session.harness_kind,
                 )
-                .await?;
+                .await
+                {
+                    if let Some(failure) =
+                        error.downcast_ref::<crate::controller::HarnessPreparationFailure>()
+                    {
+                        self.persist_harness_preparation_failure(
+                            session_id,
+                            &failure.to_string(),
+                            &session.updated_at,
+                        )
+                        .await?;
+                    }
+                    return Err(error);
             }
             if exclusivity == LatchExclusivity::HoldThroughClose {
                 let snapshot = relay.connection_mut().sync().await?;

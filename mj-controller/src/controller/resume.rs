@@ -828,8 +828,13 @@ impl Controller {
                         .await
                         .context("tell the resumed session which sub-agents its suspend stopped")?;
                 }
-                let native_session_id =
-                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let native_session_id = wait_for_native_session_in_stage(
+                    &mut relay,
+                    executor,
+                    readiness_stage,
+                    profile.kind,
+                )
+                .await?;
                 let owner = crate::worker_lifecycle::require(session_id)?;
                 crate::database::finish_worker_restart(session_id, owner.operation_id())?;
                 Ok::<_, anyhow::Error>((relay, native_session_id))

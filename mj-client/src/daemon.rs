@@ -2395,7 +2395,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Settings can warm draft profile capabilities through the daemon-owned catalog.
 // Runtime deltas carry transcript item changes, and a client fetches a
 // session's tail from the daemon at its cursor instead of reading SQLite.
-pub const PROTOCOL_VERSION: u32 = 54;
+// Lifecycle stages can name the harness preparation step a worker reports.
+pub const PROTOCOL_VERSION: u32 = 55;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

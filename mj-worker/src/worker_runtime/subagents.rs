@@ -1042,9 +1042,10 @@ struct SocketReply {
 }
 
 pub(super) fn serve(
+    runtime: &tokio::runtime::Handle,
     root: &Path,
     relay: Arc<Mutex<crate::relay::DurableRelay>>,
-) -> Result<(SubagentEndpoint, super::unix::SocketGuard)> {
+) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
     endpoint.relay = Some(relay);
     let path = root.join(SUBAGENT_SOCKET);
@@ -1061,7 +1062,7 @@ pub(super) fn serve(
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     let service = endpoint.clone();
-    tokio::spawn(async move {
+    let task = runtime.spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
@@ -1089,7 +1090,25 @@ pub(super) fn serve(
             }
         }
     });
-    Ok((endpoint, super::unix::SocketGuard(path)))
+    Ok((
+        endpoint,
+        SubagentSocketGuard {
+            task,
+            socket: Some(super::unix::SocketGuard(path)),
+        },
+    ))
+}
+
+pub(super) struct SubagentSocketGuard {
+    task: tokio::task::JoinHandle<()>,
+    socket: Option<super::unix::SocketGuard>,
+}
+
+impl Drop for SubagentSocketGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.socket.take();
+    }
 }
 
 /// How long this worker waits for the daemon before answering by itself. Only
