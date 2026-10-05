@@ -170,15 +170,19 @@ fn bare_ssh_target_completes_over_ssh() {
 }
 
 #[test]
-fn local_bare_and_ec2_targets_complete_on_the_controller() {
+fn golden_path_completion() {
+    let mut output = String::new();
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("projects")).unwrap();
-    let prefix = format!("{}/pro", directory.path().display());
-    let expected = vec![format!("{}/projects/", directory.path().display())];
+    let root = directory.path().to_string_lossy().into_owned();
+    let prefix = format!("{root}/pro");
 
-    for target in [
-        r#"{"kind":"local-bare"}"#,
-        r#"{"kind":"aws-ec2","region":"us-east-1","launch_template":"lt-1","ssh_user":"ubuntu"}"#,
+    for (label, target) in [
+        ("local-bare", r#"{"kind":"local-bare"}"#),
+        (
+            "ec2",
+            r#"{"kind":"aws-ec2","region":"us-east-1","launch_template":"lt-1","ssh_user":"ubuntu"}"#,
+        ),
     ] {
         let controller = completion_controller("host", target);
         let completion = controller
@@ -189,8 +193,15 @@ fn local_bare_and_ec2_targets_complete_on_the_controller() {
                 &UnusedExecutor,
             )
             .unwrap();
-        assert_eq!(completion.candidates, expected, "{target}");
+        let response = serde_json::to_string_pretty(&completion)
+            .unwrap()
+            .replace(&root, "/fixture");
+        output.push_str(&format!(
+            "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
+        ));
     }
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "path-completion", &output);
 }
 
 #[test]

@@ -1,0 +1,18 @@
+=== POST /api/paths/complete: local-bare (JSON) ===
+{
+  "candidates": [
+    "/fixture/projects/"
+  ],
+  "insert": "/fixture/projects/",
+  "truncated": false
+}
+
+=== POST /api/paths/complete: ec2 (JSON) ===
+{
+  "candidates": [
+    "/fixture/projects/"
+  ],
+  "insert": "/fixture/projects/",
+  "truncated": false
+}
+

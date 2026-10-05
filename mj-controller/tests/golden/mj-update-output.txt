@@ -1,0 +1,6 @@
+=== Homebrew update notice (stdout) ===
+mj 2.5.0 is available through Homebrew; current version is 2.4.0. Run: brew upgrade --formula brokkai/tap/mjolnir
+
+=== Cargo update notice (stdout) ===
+mj 2.5.0 is available through crates.io; current version is 2.4.0. Run: cargo install --locked brokk-mjolnir
+

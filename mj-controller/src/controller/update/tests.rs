@@ -61,31 +61,24 @@ fn prompt_eof_declines_but_enter_accepts() {
 }
 
 #[test]
-fn managed_update_notice_names_channel_version_and_command() {
-    assert_eq!(
-        managed_update_notice(
-            &Version::parse("2.5.0").expect("version"),
-            &InstallMethod::Homebrew,
-            "2.4.0",
-        )
-        .as_deref(),
-        Some(
-            "mj 2.5.0 is available through Homebrew; current version is 2.4.0. Run: brew upgrade --formula brokkai/tap/mjolnir"
-        )
-    );
-    assert_eq!(
-        managed_update_notice(
-            &Version::parse("2.5.0").expect("version"),
-            &InstallMethod::Cargo {
-                voice_worker: false
+fn golden_mj_update_output() {
+    let version = Version::parse("2.5.0").expect("version");
+    let mut output = String::new();
+    for (label, method) in [
+        ("Homebrew", InstallMethod::Homebrew),
+        (
+            "Cargo",
+            InstallMethod::Cargo {
+                voice_worker: false,
             },
-            "2.4.0",
-        )
-        .as_deref(),
-        Some(
-            "mj 2.5.0 is available through crates.io; current version is 2.4.0. Run: cargo install --locked brokk-mjolnir"
-        )
-    );
+        ),
+    ] {
+        let notice = managed_update_notice(&version, &method, "2.4.0").expect("update notice");
+        output.push_str(&format!(
+            "=== {label} update notice (stdout) ===\n{notice}\n\n"
+        ));
+    }
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mj-update-output", &output);
 }
 
 #[test]

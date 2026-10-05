@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -22,6 +23,73 @@ use crate::test_support::*;
 
 use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
+
+#[derive(Default)]
+struct GoldenCapture {
+    label: Option<String>,
+    last_action: Option<String>,
+    output: String,
+}
+
+thread_local! {
+    static GOLDEN_CAPTURE: RefCell<GoldenCapture> = RefCell::default();
+}
+
+fn capture_scenario(label: &str, run: impl FnOnce()) {
+    GOLDEN_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        capture.label = Some(label.to_owned());
+        capture.last_action = None;
+    });
+    run();
+    GOLDEN_CAPTURE.with(|capture| capture.borrow_mut().label = None);
+}
+
+fn capture_action(action: &DashboardAction) {
+    GOLDEN_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        if capture.label.is_none() {
+            return;
+        }
+        let action = format!("{action:?}");
+        if capture.last_action.as_deref() == Some(&action) {
+            return;
+        }
+        capture.output.push_str(&format!("action: {action}\n"));
+        capture.last_action = Some(action);
+    });
+}
+
+fn capture_detail(label: &str, value: &str) {
+    GOLDEN_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        if capture.label.is_some() {
+            capture.output.push_str(&format!("{label}: {value}\n"));
+        }
+    });
+}
+
+fn capture_render(width: u16, height: u16, lines: &[String]) {
+    GOLDEN_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        if let Some(label) = capture.label.clone() {
+            capture.output.push_str(&format!(
+                "=== {label} ({width}x{height}) ===\n{}\n",
+                lines.join("\n")
+            ));
+        }
+    });
+}
+
+fn captured_drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> Vec<String> {
+    let lines = crate::test_support::drawn(dashboard, width, height);
+    capture_render(width, height, &lines);
+    lines
+}
+
+fn take_golden_output() -> String {
+    GOLDEN_CAPTURE.with(|capture| std::mem::take(&mut capture.borrow_mut().output))
+}
 
 // Hard-won: 93d7fde8: New review could not finish because only disabled Create started preflight
 #[test]
@@ -265,6 +333,7 @@ fn take_project_request(dashboard: &mut DashboardState) -> (String, ProjectDisco
         panic!("expected a pending project discovery request");
     };
     assert_eq!(dashboard.take_project_discovery(), None);
+    capture_detail("project request", &format!("{request:?}"));
     (context, request)
 }
 
@@ -292,7 +361,10 @@ fn draw_project_picker(
 ) -> Vec<String> {
     dashboard.reset_component_geometry();
     terminal.draw(|frame| render(frame, dashboard)).unwrap();
-    buffer_lines(terminal.backend().buffer())
+    let lines = buffer_lines(terminal.backend().buffer());
+    let area = terminal.backend().buffer().area;
+    capture_render(area.width, area.height, &lines);
+    lines
 }
 
 fn click_project_text(
@@ -322,6 +394,7 @@ fn click_project_text(
             row,
             modifiers: KeyModifiers::NONE,
         });
+        capture_action(&next);
         if next != DashboardAction::None {
             assert_eq!(action, DashboardAction::None, "one click submits only once");
             action = next;
@@ -331,7 +404,6 @@ fn click_project_text(
     action
 }
 
-#[test]
 fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
     let mut dashboard = dashboard_at_project_picker();
     let wizard = project_wizard(&dashboard);
@@ -341,10 +413,11 @@ fn project_picker_skips_empty_saved_projects_and_offers_github_from_recent() {
         Some(WizardControl::ProjectGithub)
     );
     assert!(!wizard.project_picker.multiple);
-    assert_eq!(
-        dashboard.take_project_discovery(),
-        Some(DashboardAction::LoadMountHistory)
-    );
+    let discovery = dashboard.take_project_discovery();
+    if let Some(action) = discovery.as_ref() {
+        capture_action(action);
+    }
+    assert_eq!(discovery, Some(DashboardAction::LoadMountHistory));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     let text = draw_project_picker(&mut dashboard, &mut terminal).join("\n");
     assert!(text.contains("Choose a project"), "{text}");
@@ -495,7 +568,6 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
     );
 }
 
-#[test]
 fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() {
     let mut dashboard = dashboard_at_saved_projects(State::default());
     select_saved_project(&mut dashboard, "bifrost2");
@@ -537,6 +609,7 @@ fn saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove() 
     assert_eq!(project_wizard(&dashboard).step, WizardStep::NewBundle);
     activate_project_control(&mut dashboard, WizardControl::Back);
     assert_eq!(project_wizard(&dashboard).step, WizardStep::Bundle);
+    draw_project_picker(&mut dashboard, &mut terminal);
 }
 
 #[test]
@@ -587,7 +660,6 @@ fn removing_a_saved_project_refuses_one_a_session_uses_and_keeps_a_valid_selecti
     );
 }
 
-#[test]
 fn project_picker_url_enter_creates_one_repository_and_advances_to_review() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
@@ -606,6 +678,7 @@ fn project_picker_url_enter_creates_one_repository_and_advances_to_review() {
     let created = config();
     let id = created.bundles.keys().next().unwrap().clone();
     dashboard.apply_created_bundle(created, &id);
+    captured_drawn(&mut dashboard, 100, 30);
     let wizard = project_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Review);
     assert!(!wizard.bundle_creation_in_flight);
@@ -702,7 +775,6 @@ fn project_picker_turning_multiple_off_keeps_chosen_member_and_rejects_pending_r
     );
 }
 
-#[test]
 fn project_picker_multiple_sources_wait_for_submit_and_remove_selected() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
@@ -721,6 +793,7 @@ fn project_picker_multiple_sources_wait_for_submit_and_remove_selected() {
         project_wizard(&dashboard).new_bundle_repositories,
         ["owner/main", "owner/remove", "owner/shared"]
     );
+    captured_drawn(&mut dashboard, 100, 30);
     assert!(project_wizard(&dashboard).new_bundle_source.is_empty());
     focus_project_control(&mut dashboard, WizardControl::NewBundleRepositories);
     ready_key(&mut dashboard, key(KeyCode::Up));
@@ -729,6 +802,7 @@ fn project_picker_multiple_sources_wait_for_submit_and_remove_selected() {
         project_wizard(&dashboard).new_bundle_repositories,
         ["owner/main", "owner/shared"]
     );
+    captured_drawn(&mut dashboard, 100, 30);
     assert_eq!(
         activate_project_control(&mut dashboard, WizardControl::Next),
         DashboardAction::CreateBundle {
@@ -739,6 +813,7 @@ fn project_picker_multiple_sources_wait_for_submit_and_remove_selected() {
         ready_key(&mut dashboard, key(KeyCode::Enter)),
         DashboardAction::None
     );
+    capture_detail("selection", "keyboard-selected owner/app is submitted");
 }
 
 #[test]
@@ -782,7 +857,6 @@ fn project_picker_recent_deduplicates_launch_directory_and_uses_only_local_histo
     );
 }
 
-#[test]
 fn project_picker_github_search_chooses_the_keyboard_selected_result() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectGithub);
@@ -857,7 +931,6 @@ fn project_picker_github_result_does_not_overwrite_query_or_steal_edit_focus() {
     );
 }
 
-#[test]
 fn project_picker_folders_navigate_up_home_and_choose_current_repository() {
     let mut dashboard = dashboard_at_project_picker();
     activate_project_control(&mut dashboard, WizardControl::ProjectFolders);
@@ -1026,7 +1099,6 @@ fn project_picker_folder_filter_retry_and_open_repository_preserve_navigation() 
     );
 }
 
-#[test]
 fn project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary() {
     let mut dashboard = dashboard_at_project_picker();
     focus_project_control(&mut dashboard, WizardControl::ProjectMultiple);
@@ -1062,8 +1134,10 @@ fn project_picker_multiple_discovery_selection_toggles_members_and_can_change_pr
         project_wizard(&dashboard).new_bundle_repositories,
         ["owner/app"]
     );
+    captured_drawn(&mut dashboard, 100, 30);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     activate_project_control(&mut dashboard, WizardControl::ProjectMakePrimary);
+    captured_drawn(&mut dashboard, 100, 30);
     assert_eq!(
         activate_project_control(&mut dashboard, WizardControl::Next),
         DashboardAction::CreateBundle {
@@ -1200,7 +1274,6 @@ fn project_picker_retry_preserves_query_and_multiple_repository_selection() {
     );
 }
 
-#[test]
 fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
@@ -1249,7 +1322,6 @@ fn project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminal
     }
 }
 
-#[test]
 fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
@@ -1281,7 +1353,6 @@ fn project_picker_folder_choices_and_filter_remain_visible_on_small_terminals() 
     }
 }
 
-#[test]
 fn project_picker_results_remain_visible_with_multiple_selected_repositories() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
@@ -1328,7 +1399,6 @@ fn project_picker_results_remain_visible_with_multiple_selected_repositories() {
     }
 }
 
-#[test]
 fn project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions() {
     for (width, height) in [(80, 24), (60, 20)] {
         let mut dashboard = dashboard_at_project_picker();
@@ -1582,7 +1652,6 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
 
 /// The profile step reads as a table: the marker, profile, harness, and quota
 /// columns start at the same cell on the heading and on every row.
-#[test]
 fn new_session_profile_step_aligns_its_columns() {
     let mut config = config();
     config.profiles.insert(
@@ -1604,6 +1673,7 @@ fn new_session_profile_step_aligns_its_columns() {
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let lines = buffer_lines(terminal.backend().buffer());
+    capture_render(120, 30, &lines);
     let row = |needle: &str| {
         lines
             .iter()
@@ -1643,7 +1713,6 @@ fn new_session_profile_step_aligns_its_columns() {
 
 /// The profile step reports quota as two percentages remaining, one per
 /// window, in their own columns and with no reset countdown.
-#[test]
 fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.quotas = BTreeMap::from([(
@@ -1677,7 +1746,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         },
     )]);
     dashboard.begin_new();
-    let lines = drawn(&mut dashboard, 120, 30);
+    let lines = captured_drawn(&mut dashboard, 120, 30);
 
     let heading_index = lines
         .iter()
@@ -1926,7 +1995,6 @@ fn failed_submit_preflight_reopens_the_invalid_mount() {
     ));
 }
 
-#[test]
 fn directory_completion_lists_every_candidate_and_selects_with_keys() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
@@ -1956,7 +2024,7 @@ fn directory_completion_lists_every_candidate_and_selects_with_keys() {
     };
     // The popup scrolls, so every candidate the host sent is kept.
     assert_eq!(wizard.mounts.source.completions().len(), candidates.len());
-    let rendered = drawn(&mut dashboard, 100, 30).join("\n");
+    let rendered = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(rendered.contains(" matches "), "{rendered}");
     assert!(rendered.contains("/opt/directory-0/"), "{rendered}");
 
@@ -1968,7 +2036,7 @@ fn directory_completion_lists_every_candidate_and_selects_with_keys() {
     assert_eq!(wizard.mounts.source, "/opt/directory-1/");
     assert!(!wizard.mounts.source.is_completing());
 
-    let rendered = drawn(&mut dashboard, 100, 30).join("\n");
+    let rendered = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(rendered.contains("Add directory"));
     assert!(rendered.contains("Cancel"));
 }
@@ -2678,7 +2746,6 @@ fn resume_starts_a_new_check_once_the_first_fails_or_the_wizard_closes() {
     );
 }
 
-#[test]
 fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.config.profiles.insert(
@@ -2699,6 +2766,7 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
         .draw(|frame| render(frame, &mut dashboard))
         .expect("draw resume profile step");
     let lines = buffer_lines(terminal.backend().buffer());
+    capture_render(120, 24, &lines);
     let row = |needle: &str| {
         lines
             .iter()
@@ -3253,6 +3321,7 @@ fn ready_open_new_wizard(dashboard: &mut DashboardState) -> DashboardAction {
 fn ready_key(dashboard: &mut DashboardState, event: crossterm::event::KeyEvent) -> DashboardAction {
     complete_ready_targets(dashboard);
     let action = dashboard.handle_key(event);
+    capture_action(&action);
     complete_ready_targets(dashboard);
     action
 }
@@ -3584,7 +3653,6 @@ fn new_wizard(dashboard: &DashboardState) -> &NewWizard {
 /// target step offers, so the wizard chooses it and goes from the profile
 /// step to the project step. The titles count three steps, Back skips the
 /// hidden step, and the review names the target.
-#[test]
 fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     // The last session ran on podman, so the draft starts there.
     let session = stopped_session();
@@ -3600,7 +3668,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
         "podman"
     );
     answer_target_checks(&mut dashboard, &["podman", "docker"]);
-    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("New session · 1/3 profile"), "{profile}");
 
     dashboard.handle_key(key(KeyCode::Enter));
@@ -3611,7 +3679,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
         nth_key(&dashboard.config.targets, wizard.target),
         "localhost"
     );
-    let project = drawn(&mut dashboard, 140, 40).join("\n");
+    let project = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(
         project.contains("New session · 2/3 local project"),
         "{project}"
@@ -3623,8 +3691,10 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     dashboard.handle_key(key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
     dashboard.handle_paste("/work/project");
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    capture_action(&action);
     assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
+        action,
         DashboardAction::ValidateProjectDirectory {
             target_template_id: "localhost".into(),
             directory: "/work/project".into(),
@@ -3632,7 +3702,7 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
     );
     dashboard.apply_project_directory_validation("/work/project", Ok(()));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
-    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(review.contains("New session · 3/3 review"), "{review}");
     assert!(review.contains("Target: localhost"), "{review}");
 
@@ -3644,7 +3714,6 @@ fn new_session_skips_the_target_step_when_only_one_target_is_offered() {
 
 /// A second target the step could offer keeps the step: one that is ready,
 /// and one whose availability check has not answered yet.
-#[test]
 fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
     for podman_ready in [true, false] {
         let mut dashboard = DashboardState::new(
@@ -3667,7 +3736,7 @@ fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
                 Err("docker is not installed".into()),
             );
         }
-        let profile = drawn(&mut dashboard, 140, 40).join("\n");
+        let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
         assert!(profile.contains("New session · 1/4 profile"), "{profile}");
 
         dashboard.handle_key(key(KeyCode::Enter));
@@ -3678,14 +3747,13 @@ fn new_session_shows_the_target_step_when_a_second_target_may_be_chosen() {
             "podman ready: {podman_ready}"
         );
         assert!(!wizard.target_step_skipped);
-        let target = drawn(&mut dashboard, 140, 40).join("\n");
+        let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
         assert!(target.contains("New session · 2/4 target"), "{target}");
     }
 }
 
 /// A container target is sized on the target step, so even as the only
 /// target its step is shown.
-#[test]
 fn a_lone_container_target_keeps_its_step_for_sizing() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     open_new_session_wizard(&mut dashboard);
@@ -3694,7 +3762,7 @@ fn a_lone_container_target_keeps_its_step_for_sizing() {
     dashboard.handle_key(key(KeyCode::Enter));
 
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(target.contains("New session · 2/4 target"), "{target}");
 }
 
@@ -3717,15 +3785,13 @@ fn dashboard_with_raw_ssh_session(state: SessionState) -> DashboardState {
 /// A session that opens a directory on an SSH host can only resume on a bare
 /// target there. Every other target is ready, but it cannot use them, so the
 /// wizard chooses the SSH target without showing the step.
-#[test]
 fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
     let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Stopped);
-    assert_eq!(
-        dashboard.begin_resume_for("session-1"),
-        DashboardAction::None
-    );
+    let action = dashboard.begin_resume_for("session-1");
+    capture_action(&action);
+    assert_eq!(action, DashboardAction::None);
     answer_target_checks(&mut dashboard, &[]);
-    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("Resume · 1/2 profile"), "{profile}");
 
     dashboard.handle_key(key(KeyCode::Enter));
@@ -3733,7 +3799,7 @@ fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
     assert_eq!(wizard.step, WizardStep::Review);
     assert!(wizard.target_step_skipped);
     assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "machine");
-    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(review.contains("Resume · 2/2 review"), "{review}");
     assert!(review.contains("Target: machine"), "{review}");
 
@@ -3742,9 +3808,9 @@ fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
 
     dashboard.handle_key(key(KeyCode::Enter));
     assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
-    let DashboardAction::PreflightResumeRepositories { launch } =
-        dashboard.handle_key(key(KeyCode::Enter))
-    else {
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    capture_action(&action);
+    let DashboardAction::PreflightResumeRepositories { launch } = action else {
         panic!("Resume on the review starts the resume");
     };
     assert!(matches!(
@@ -3755,19 +3821,17 @@ fn resume_skips_the_target_step_when_only_one_target_suits_the_session() {
 
 /// A checkout on this machine can resume in place or move into a container,
 /// so a ready podman is a second choice and the step is shown.
-#[test]
 fn resume_shows_the_target_step_when_two_targets_suit_the_session() {
     let mut session = stopped_session();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/work/project".into());
     let mut dashboard = dashboard_with_session(session);
     *dashboard.config = standard_local_targets_config();
-    assert_eq!(
-        dashboard.begin_resume_for("session-1"),
-        DashboardAction::None
-    );
+    let action = dashboard.begin_resume_for("session-1");
+    capture_action(&action);
+    assert_eq!(action, DashboardAction::None);
     answer_target_checks(&mut dashboard, &["docker"]);
-    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("Resume · 1/3 profile"), "{profile}");
 
     dashboard.handle_key(key(KeyCode::Enter));
@@ -3775,23 +3839,25 @@ fn resume_shows_the_target_step_when_two_targets_suit_the_session() {
     let wizard = resume_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
     assert!(!wizard.target_step_skipped);
-    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(target.contains("Resume · 2/3 new target"), "{target}");
 }
 
 /// Move uses the resume wizard's rule: a live session on an SSH host can only
 /// move to a bare target there, so the step is skipped and the move is
 /// prepared for that target at once.
-#[test]
 fn move_skips_the_target_step_when_only_one_target_suits_the_session() {
     let mut dashboard = dashboard_with_raw_ssh_session(SessionState::Running);
     dashboard.focus_sessions();
-    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    let action = dashboard.begin_move();
+    capture_action(&action);
+    assert_eq!(action, DashboardAction::None);
     answer_target_checks(&mut dashboard, &[]);
-    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("Move · 1/2 profile"), "{profile}");
 
     let preparation = dashboard.handle_key(key(KeyCode::Enter));
+    capture_action(&preparation);
     assert!(
         matches!(
             &preparation,
@@ -3806,7 +3872,7 @@ fn move_skips_the_target_step_when_only_one_target_suits_the_session() {
     let wizard = resume_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Review);
     assert!(wizard.target_step_skipped);
-    let review = drawn(&mut dashboard, 140, 40).join("\n");
+    let review = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(review.contains("Move · 2/2 confirm"), "{review}");
     assert!(review.contains("Target: machine"), "{review}");
 
@@ -3821,7 +3887,6 @@ fn move_skips_the_target_step_when_only_one_target_suits_the_session() {
 
 /// A live checkout on this machine can also move into a ready podman, so the
 /// Move wizard shows its target step.
-#[test]
 fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     let mut session = running_session();
     session.target_template_id = "localhost".into();
@@ -3829,9 +3894,11 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     let mut dashboard = dashboard_with_session(session);
     *dashboard.config = standard_local_targets_config();
     dashboard.focus_sessions();
-    assert_eq!(dashboard.begin_move(), DashboardAction::None);
+    let action = dashboard.begin_move();
+    capture_action(&action);
+    assert_eq!(action, DashboardAction::None);
     answer_target_checks(&mut dashboard, &["docker"]);
-    let profile = drawn(&mut dashboard, 140, 40).join("\n");
+    let profile = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(profile.contains("Move · 1/3 profile"), "{profile}");
 
     assert_eq!(
@@ -3842,7 +3909,7 @@ fn move_shows_the_target_step_when_two_targets_suit_the_session() {
     let wizard = resume_wizard(&dashboard);
     assert_eq!(wizard.step, WizardStep::Target);
     assert!(!wizard.target_step_skipped);
-    let target = drawn(&mut dashboard, 140, 40).join("\n");
+    let target = captured_drawn(&mut dashboard, 140, 40).join("\n");
     assert!(target.contains("Move · 2/3 new target"), "{target}");
 }
 
@@ -3911,7 +3978,7 @@ fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
         }
         answer_checks_without_docker(&mut dashboard);
         dashboard.handle_key(key(KeyCode::Enter));
-        let text = drawn(&mut dashboard, 160, 40).join("\n");
+        let text = captured_drawn(&mut dashboard, 160, 40).join("\n");
         assert!(text.contains("target"), "{flow}: {text}");
         assert!(text.contains("podman"), "{flow}: {text}");
         assert!(
@@ -3931,7 +3998,6 @@ fn target_steps_omit_a_missing_runtime_and_keep_an_unresponsive_host() {
 
 /// Moving the selection lands on the next listed target, not the next config
 /// entry, because the hidden target shifts the rows.
-#[test]
 fn selecting_a_row_skips_the_hidden_target() {
     let mut dashboard = DashboardState::new(
         standard_local_targets_config(),
@@ -3956,9 +4022,14 @@ fn selecting_a_row_skips_the_hidden_target() {
         panic!("expected the new-session wizard");
     };
     wizard.target = localhost;
-    drawn(&mut dashboard, 160, 40);
+    captured_drawn(&mut dashboard, 160, 40);
     dashboard.handle_key(key(KeyCode::Down));
     assert_eq!(new_wizard(&dashboard).target, podman);
+    capture_detail(
+        "selection",
+        "podman (the next visible row; docker is hidden)",
+    );
+    captured_drawn(&mut dashboard, 160, 40);
 }
 
 fn ctrl_space() -> KeyEvent {
@@ -4145,7 +4216,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
         "typing must continue at the end of what is drawn"
     );
 
-    let lines = drawn(&mut dashboard, 140, 40);
+    let lines = captured_drawn(&mut dashboard, 140, 40);
     let field = row_of(&lines, "New session · 2/3 local project") + 4;
     assert!(
         lines[field].contains("/work/remembered"),
@@ -4174,7 +4245,7 @@ fn the_project_step_draws_its_recent_list_and_error_above_the_buttons() {
         Err("project directory does not exist or is not a directory".into()),
     );
 
-    let lines = drawn(&mut dashboard, 140, 40);
+    let lines = captured_drawn(&mut dashboard, 140, 40);
     assert_dialog_spacing(&lines, "New session", "Cancel");
     let buttons = row_of(&lines, "Cancel");
     for label in [
@@ -4189,7 +4260,6 @@ fn the_project_step_draws_its_recent_list_and_error_above_the_buttons() {
     }
 }
 
-#[test]
 fn clicking_a_recent_project_fills_the_field_and_enter_validates_it() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -4197,7 +4267,7 @@ fn clicking_a_recent_project_fills_the_field_and_enter_validates_it() {
     if let Mode::New(wizard) = &mut dashboard.mode {
         wizard.project_directory_error = Some("previous path was invalid".into());
     }
-    let lines = drawn(&mut dashboard, 140, 40);
+    let lines = captured_drawn(&mut dashboard, 140, 40);
     let row = row_of(&lines, "/work/older");
     let column = lines[row].find("/work/older").unwrap();
     let column = lines[row][..column].chars().count() as u16;
@@ -4214,7 +4284,7 @@ fn clicking_a_recent_project_fills_the_field_and_enter_validates_it() {
             }),
             DashboardAction::None
         );
-        drawn(&mut dashboard, 140, 40);
+        captured_drawn(&mut dashboard, 140, 40);
     }
     let Mode::New(wizard) = &dashboard.mode else {
         panic!("clicking a recent directory stays on the project step")
@@ -4261,7 +4331,7 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
         },
     );
 
-    let lines = drawn(&mut dashboard, 140, 40);
+    let lines = captured_drawn(&mut dashboard, 140, 40);
     let field = row_of(&lines, "New session · 2/3 local project") + 4;
     let buttons = row_of(&lines, "Cancel");
     assert!(
@@ -4325,7 +4395,7 @@ fn the_review_compute_row_does_not_start_with_a_separator() {
         )),
     );
 
-    let lines = drawn(&mut dashboard, 120, 40);
+    let lines = captured_drawn(&mut dashboard, 120, 40);
     let compute = &lines[row_of(&lines, "Compute:")];
     assert!(
         compute.contains("Compute: fixed/default resources"),
@@ -4339,7 +4409,7 @@ fn the_review_compute_row_does_not_start_with_a_separator() {
         cpus: 2,
         memory_bytes: 4 * 1024 * 1024 * 1024,
     });
-    let lines = drawn(&mut dashboard, 120, 40);
+    let lines = captured_drawn(&mut dashboard, 120, 40);
     let compute = &lines[row_of(&lines, "Compute:")];
     assert!(compute.contains("Compute: 2 CPU / "), "{compute:?}");
 }
@@ -4525,7 +4595,6 @@ fn large_move_opens_separate_file_page_with_directory_and_file_sizes() {
 
 /// #1175: the target step is a table like the profile step, and the resize
 /// keys are offered only for a target that is sized.
-#[test]
 fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
     let mut configuration = config();
     configuration
@@ -4549,7 +4618,9 @@ fn target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets() {
         wizard.target = target;
         let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
         terminal.draw(|frame| render(frame, dashboard)).unwrap();
-        buffer_lines(terminal.backend().buffer()).join("\n")
+        let lines = buffer_lines(terminal.backend().buffer());
+        capture_render(140, 32, &lines);
+        lines.join("\n")
     };
 
     let raw = draw(&mut dashboard, bare);
@@ -4576,7 +4647,6 @@ fn replace_resource_text(dashboard: &mut DashboardState, text: &str) {
     }
 }
 
-#[test]
 fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals() {
     use crossterm::event::{MouseButton, MouseEventKind};
     for (width, height) in [(140, 40), (80, 24), (60, 20)] {
@@ -4589,6 +4659,11 @@ fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals
             .unwrap();
         let buffer = terminal.backend().buffer();
         let lines = buffer_lines(buffer);
+        capture_render(width, height, &lines);
+        capture_detail(
+            "cell style",
+            "CPU and MEM (GiB) inputs are underlined before focus",
+        );
         let y = row_of(&lines, "MEM (GiB)") as u16 + 1;
         let (cpu_x, _) = point(&lines, "CPU");
         let (memory_x, _) = point(&lines, "MEM (GiB)");
@@ -4609,6 +4684,7 @@ fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals
             assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
         }
         replace_resource_text(&mut dashboard, "12.5");
+        captured_drawn(&mut dashboard, width, height);
         assert_eq!(
             new_wizard(&dashboard).resource_allocation,
             Some(SessionResourceAllocation::Container {
@@ -4638,7 +4714,7 @@ fn ec2_dropdown_selects_instances_preserves_refresh_and_rejects_removed_selectio
     ready_open_new_wizard(&mut dashboard);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    let loading = drawn(&mut dashboard, 80, 24).join("\n");
+    let loading = captured_drawn(&mut dashboard, 80, 24).join("\n");
     assert!(loading.contains("Loading instance types"), "{loading}");
     let options = [8, 16]
         .into_iter()
@@ -4655,7 +4731,7 @@ fn ec2_dropdown_selects_instances_preserves_refresh_and_rejects_removed_selectio
         Some(WizardControl::ResourceInstance)
     );
     ready_key(&mut dashboard, key(KeyCode::Enter));
-    let popup = drawn(&mut dashboard, 80, 24).join("\n");
+    let popup = captured_drawn(&mut dashboard, 80, 24).join("\n");
     assert!(popup.contains("Instance types"), "{popup}");
     ready_key(&mut dashboard, key(KeyCode::Down));
     ready_key(&mut dashboard, key(KeyCode::Enter));
@@ -4821,12 +4897,11 @@ fn single_raw_config() -> Config {
     configuration
 }
 
-#[test]
 fn single_profile_and_raw_target_create_from_project_without_confirm() {
     let mut dashboard = DashboardState::new(single_raw_config(), State::default(), BTreeMap::new());
     dashboard.begin_new();
     assert_eq!(new_wizard(&dashboard).step, WizardStep::ProjectDirectory);
-    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(screen.contains("1/1"), "{screen}");
     assert!(screen.contains("Create"), "{screen}");
     assert!(!screen.contains("Back"), "{screen}");
@@ -4850,12 +4925,14 @@ fn single_profile_and_raw_target_create_from_project_without_confirm() {
     );
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Launching);
     assert!(
-        !drawn(&mut dashboard, 100, 30)
+        !captured_drawn(&mut dashboard, 100, 30)
             .join("\n")
             .contains("Confirm")
     );
+    let action = dashboard.take_prerequisite_check();
+    capture_detail("action", "CreateSession with managed worktree enabled");
     assert!(matches!(
-        dashboard.take_prerequisite_check(),
+        action,
         Some(DashboardAction::CreateSession {
             create_managed_worktree: Some(true),
             ..
@@ -4865,23 +4942,23 @@ fn single_profile_and_raw_target_create_from_project_without_confirm() {
     assert!(dashboard.take_prerequisite_check().is_none());
 }
 
-#[test]
 fn single_profile_keeps_container_sizing_and_confirm() {
     let mut configuration = config();
     configuration.profiles.retain(|id, _| id == "claude-1");
     let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
     ready_open_new_wizard(&mut dashboard);
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-    let screen = drawn(&mut dashboard, 120, 30).join("\n");
+    let screen = captured_drawn(&mut dashboard, 120, 30).join("\n");
     assert!(screen.contains("1/3"), "{screen}");
     assert!(!screen.contains("Back"), "{screen}");
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Bundle);
+    captured_drawn(&mut dashboard, 120, 30);
     ready_key(&mut dashboard, key(KeyCode::Enter));
     assert_eq!(new_wizard(&dashboard).step, WizardStep::Review);
+    captured_drawn(&mut dashboard, 120, 30);
 }
 
-#[test]
 fn single_profile_raw_resume_starts_checks_without_confirm() {
     let mut dashboard = dashboard_with_session(stopped_session());
     *dashboard.config = single_raw_config();
@@ -4890,6 +4967,7 @@ fn single_profile_raw_resume_starts_checks_without_confirm() {
     session.target_template_id = "local".into();
 
     let action = dashboard.begin_resume_for("session-1");
+    capture_detail("action", "PreflightResumeRepositories");
     assert!(
         matches!(action, DashboardAction::PreflightResumeRepositories { .. }),
         "{action:?}"
@@ -4898,7 +4976,7 @@ fn single_profile_raw_resume_starts_checks_without_confirm() {
     assert!(dashboard.resume_preflight_in_flight());
     assert!(dashboard.take_prerequisite_check().is_none());
     assert!(
-        !drawn(&mut dashboard, 100, 30)
+        !captured_drawn(&mut dashboard, 100, 30)
             .join("\n")
             .contains("Confirm")
     );
@@ -4952,7 +5030,7 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
                 ..
             })
         ));
-        drawn(&mut dashboard, 100, 30);
+        captured_drawn(&mut dashboard, 100, 30);
         assert!(matches!(
             ready_key(&mut dashboard, key(KeyCode::Enter)),
             DashboardAction::MoveSession {
@@ -4983,9 +5061,9 @@ fn raw_resume_fast_path_failure_waits_for_explicit_retry() {
         DashboardAction::PreflightResumeRepositories { .. }
     ));
     let first_generation = dashboard.session_preflight_generation();
-    drawn(&mut dashboard, 100, 30);
+    captured_drawn(&mut dashboard, 100, 30);
     dashboard.fail_resume_preflight("network unavailable".into());
-    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(screen.contains("network unavailable"), "{screen}");
     assert!(screen.contains("Retry"), "{screen}");
     assert!(!screen.contains("confirm"), "{screen}");
@@ -5030,7 +5108,7 @@ fn raw_move_keeps_file_selection_and_returns_to_review_after_it() {
     assert!(dashboard.apply_move_preparation(request, preparation.clone()));
     assert_eq!(resume_wizard(&dashboard).step, WizardStep::MoveFiles);
     assert!(dashboard.take_prerequisite_check().is_none());
-    let screen = drawn(&mut dashboard, 100, 30).join("\n");
+    let screen = captured_drawn(&mut dashboard, 100, 30).join("\n");
     assert!(screen.contains("× Move"), "{screen}");
     assert!(screen.contains("Back"), "{screen}");
     let DashboardAction::MoveSession {
@@ -5083,14 +5161,14 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             panic!("move");
         };
         wizard.form.get_mut().focus(WizardControl::Subagents);
-        let lines = drawn(&mut dashboard, width, height);
+        let lines = captured_drawn(&mut dashboard, width, height);
         let (label_x, y) = point(&lines, "Subagents");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
         ] {
             dashboard.handle_mouse(mouse_at(kind, (label_x + 12, y)));
-            drawn(&mut dashboard, width, height);
+            captured_drawn(&mut dashboard, width, height);
         }
         assert!(
             resume_wizard(&dashboard)
@@ -5100,7 +5178,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             "{width}: {lines:#?}"
         );
         dashboard.handle_key(key(KeyCode::Up));
-        drawn(&mut dashboard, width, height);
+        captured_drawn(&mut dashboard, width, height);
         dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
@@ -5110,23 +5188,23 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             resume_wizard(&dashboard).preparation.is_some(),
             "dismissing preview keeps preparation"
         );
-        let lines = drawn(&mut dashboard, width, height);
+        let lines = captured_drawn(&mut dashboard, width, height);
         let (label_x, y) = point(&lines, "Subagents");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
         ] {
             dashboard.handle_mouse(mouse_at(kind, (label_x + 12, y)));
-            drawn(&mut dashboard, width, height);
+            captured_drawn(&mut dashboard, width, height);
         }
-        let lines = drawn(&mut dashboard, width, height);
+        let lines = captured_drawn(&mut dashboard, width, height);
         let (x, y) = point(&lines, "None");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
         ] {
             dashboard.handle_mouse(mouse_at(kind, (x + 1, y)));
-            drawn(&mut dashboard, width, height);
+            captured_drawn(&mut dashboard, width, height);
         }
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
@@ -5147,4 +5225,172 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             })
         ));
     }
+}
+
+#[test]
+fn golden_project_picker() {
+    for (label, run) in [
+        (
+            "project_picker_skips_empty_saved_projects_and_offers_github_from_recent",
+            project_picker_skips_empty_saved_projects_and_offers_github_from_recent as fn(),
+        ),
+        (
+            "saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove",
+            saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove,
+        ),
+        (
+            "project_picker_url_enter_creates_one_repository_and_advances_to_review",
+            project_picker_url_enter_creates_one_repository_and_advances_to_review,
+        ),
+        (
+            "project_picker_multiple_sources_wait_for_submit_and_remove_selected",
+            project_picker_multiple_sources_wait_for_submit_and_remove_selected,
+        ),
+        (
+            "project_picker_github_search_chooses_the_keyboard_selected_result",
+            project_picker_github_search_chooses_the_keyboard_selected_result,
+        ),
+        (
+            "project_picker_folders_navigate_up_home_and_choose_current_repository",
+            project_picker_folders_navigate_up_home_and_choose_current_repository,
+        ),
+        (
+            "project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary",
+            project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary,
+        ),
+        (
+            "project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals",
+            project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals,
+        ),
+        (
+            "project_picker_folder_choices_and_filter_remain_visible_on_small_terminals",
+            project_picker_folder_choices_and_filter_remain_visible_on_small_terminals,
+        ),
+        (
+            "project_picker_results_remain_visible_with_multiple_selected_repositories",
+            project_picker_results_remain_visible_with_multiple_selected_repositories,
+        ),
+        (
+            "project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions",
+            project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions,
+        ),
+        (
+            "directory_completion_lists_every_candidate_and_selects_with_keys",
+            directory_completion_lists_every_candidate_and_selects_with_keys,
+        ),
+        (
+            "clicking_a_recent_project_fills_the_field_and_enter_validates_it",
+            clicking_a_recent_project_fills_the_field_and_enter_validates_it,
+        ),
+    ] {
+        capture_scenario(label, run);
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "project-picker",
+        &take_golden_output(),
+    );
+}
+
+#[test]
+fn golden_profile_picker_table() {
+    for (label, run) in [
+        (
+            "new_session_profile_step_aligns_its_columns",
+            new_session_profile_step_aligns_its_columns as fn(),
+        ),
+        (
+            "new_session_profile_step_shows_weekly_and_five_hour_percentages",
+            new_session_profile_step_shows_weekly_and_five_hour_percentages,
+        ),
+        (
+            "resume_profile_step_aligns_its_columns_and_explains_the_marker",
+            resume_profile_step_aligns_its_columns_and_explains_the_marker,
+        ),
+    ] {
+        capture_scenario(label, run);
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "profile-picker-table",
+        &take_golden_output(),
+    );
+}
+
+#[test]
+fn golden_wizard_target_step() {
+    for (label, run) in [
+        (
+            "new_session_skips_the_target_step_when_only_one_target_is_offered",
+            new_session_skips_the_target_step_when_only_one_target_is_offered as fn(),
+        ),
+        (
+            "new_session_shows_the_target_step_when_a_second_target_may_be_chosen",
+            new_session_shows_the_target_step_when_a_second_target_may_be_chosen,
+        ),
+        (
+            "a_lone_container_target_keeps_its_step_for_sizing",
+            a_lone_container_target_keeps_its_step_for_sizing,
+        ),
+        (
+            "resume_skips_the_target_step_when_only_one_target_suits_the_session",
+            resume_skips_the_target_step_when_only_one_target_suits_the_session,
+        ),
+        (
+            "resume_shows_the_target_step_when_two_targets_suit_the_session",
+            resume_shows_the_target_step_when_two_targets_suit_the_session,
+        ),
+        (
+            "move_skips_the_target_step_when_only_one_target_suits_the_session",
+            move_skips_the_target_step_when_only_one_target_suits_the_session,
+        ),
+        (
+            "move_shows_the_target_step_when_two_targets_suit_the_session",
+            move_shows_the_target_step_when_two_targets_suit_the_session,
+        ),
+        (
+            "selecting_a_row_skips_the_hidden_target",
+            selecting_a_row_skips_the_hidden_target,
+        ),
+        (
+            "target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets",
+            target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets,
+        ),
+        (
+            "container_fields_are_underlined_before_focus_and_clickable_on_small_terminals",
+            container_fields_are_underlined_before_focus_and_clickable_on_small_terminals,
+        ),
+    ] {
+        capture_scenario(label, run);
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "wizard-target-step",
+        &take_golden_output(),
+    );
+}
+
+#[test]
+fn golden_single_choice_fast_paths() {
+    for (label, run) in [
+        (
+            "single_profile_and_raw_target_create_from_project_without_confirm",
+            single_profile_and_raw_target_create_from_project_without_confirm as fn(),
+        ),
+        (
+            "single_profile_keeps_container_sizing_and_confirm",
+            single_profile_keeps_container_sizing_and_confirm,
+        ),
+        (
+            "single_profile_raw_resume_starts_checks_without_confirm",
+            single_profile_raw_resume_starts_checks_without_confirm,
+        ),
+    ] {
+        capture_scenario(label, run);
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "single-choice-fast-paths",
+        &take_golden_output(),
+    );
 }
