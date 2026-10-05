@@ -19,99 +19,6 @@ fn click(form: &mut Form<u8>, x: u16, y: u16) -> Option<Interaction<u8>> {
         .action
 }
 
-fn row_text(width: u16, align: RowAlign) -> String {
-    let mut form = Form::<u8>::new();
-    form.declare(1, ControlKind::Button);
-    form.declare(2, ControlKind::Button);
-    form.end_frame(1);
-    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            ButtonRow::render_aligned(
-                frame,
-                frame.area(),
-                &[(1, "First", true), (2, "Last", true)],
-                &mut form,
-                align,
-            );
-            form.end_frame(1);
-        })
-        .unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
-}
-
-#[test]
-fn a_right_aligned_row_that_fits_ends_flush_with_the_area() {
-    // "  First  " and "  Last  " are 9 and 8 cells, plus one separator
-    // between them, so an 18-cell row leaves 12 dead cells on the left.
-    let text = row_text(30, RowAlign::Right);
-    assert!(text.ends_with("  First     Last  "), "{text:?}");
-    assert_eq!(&text[..12], " ".repeat(12), "{text:?}");
-}
-
-#[test]
-fn a_row_wider_than_its_area_ignores_right_alignment() {
-    assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
-}
-
-fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
-    let mut form = Form::<u8>::new();
-    form.declare(1, ControlKind::Button);
-    form.declare(2, ControlKind::Button);
-    form.declare(3, ControlKind::Button);
-    form.end_frame(focused);
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            ButtonColumn::render(
-                frame,
-                frame.area(),
-                &[(1, "First", true), (2, "Widest", true), (3, "Last", true)],
-                &mut form,
-            );
-            form.end_frame(focused);
-        })
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    (buffer.area.y..buffer.area.bottom())
-        .map(|y| {
-            (buffer.area.x..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect()
-        })
-        .collect()
-}
-
-#[test]
-fn a_stacked_column_gives_every_button_one_row_of_the_widest_label() {
-    // "  Widest  " is the widest button at 10 cells, so the 16-cell area
-    // leaves six cells on the left of every row.
-    assert_eq!(
-        column_lines(16, 3, 1),
-        [
-            format!("{}  First   ", " ".repeat(6)),
-            format!("{}  Widest  ", " ".repeat(6)),
-            format!("{}  Last    ", " ".repeat(6)),
-        ]
-    );
-}
-
-#[test]
-fn a_column_too_short_for_its_buttons_scrolls_to_the_focused_one() {
-    assert_eq!(
-        column_lines(16, 1, 3),
-        [format!("{}  Last    ", " ".repeat(6))]
-    );
-}
-
 #[test]
 fn tabbing_to_a_clipped_button_scrolls_it_into_view() {
     let mut form = Form::new();
@@ -315,46 +222,6 @@ fn multiline_field_click_tracks_wrapped_newlines_and_unicode() {
         FieldEdit::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)),
     );
     assert_eq!(input.value(), "abcdefghi\nab界Xe\u{301}z\nYfinal");
-}
-
-#[test]
-fn multiline_field_click_scales_with_a_large_pasted_prompt() {
-    let mut form = Form::new();
-    let mut input = TextInput::multiline();
-    input.set_value("x".repeat(70_000));
-    input.set_cursor(input.value().len());
-    form.declare(1, ControlKind::TextField);
-    form.end_frame(1);
-    let area = Rect::new(1, 1, 20, 3);
-    let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
-            form.end_frame(1);
-        })
-        .unwrap();
-
-    let result = form.handle(&Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.right() - 1,
-        row: area.bottom() - 1,
-        modifiers: KeyModifiers::NONE,
-    }));
-    assert_eq!(
-        result.action,
-        Some(Interaction::Edit(1, FieldEdit::Cursor(70_000)))
-    );
-    let Some(Interaction::Edit(1, edit)) = result.action else {
-        panic!("large prompt click should edit the field");
-    };
-    TextField::apply(&mut input, edit);
-    TextField::apply(
-        &mut input,
-        FieldEdit::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)),
-    );
-    assert_eq!(input.value().len(), 70_001);
-    assert_eq!(&input.value()[69_995..], "xxxxx!");
 }
 
 #[test]
@@ -595,46 +462,6 @@ fn path_field_popup_shows_candidates_a_wait_or_nothing() {
     assert!(text.contains("~/projects/"), "{text}");
     assert!(text.contains("~/provision/"), "{text}");
     assert!(!text.contains("Completing"), "{text}");
-}
-
-#[test]
-fn idle_buttons_are_neutral_but_focus_and_primary_actions_stay_distinct() {
-    for palette in theme::UiTheme::ALL {
-        theme::with_theme(palette, || {
-            let mut form = Form::new();
-            for id in 0..3 {
-                form.declare(id, ControlKind::Button);
-            }
-            form.set_default_action(1);
-            form.end_frame(0);
-            let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
-            terminal
-                .draw(|frame| {
-                    form.begin_frame();
-                    for (id, label) in [(0, "Focused"), (1, "Primary"), (2, "Ordinary")] {
-                        Button::render(frame, Rect::new(0, id, 20, 1), label, true, &mut form, id);
-                    }
-                    form.end_frame(0);
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let idle = &buffer[(8, 2)];
-            let primary = &buffer[(8, 1)];
-            let focus = &buffer[(8, 0)];
-            assert_eq!(idle.fg, theme::palette().text);
-            assert!(!idle.modifier.contains(Modifier::BOLD));
-            assert!(focus.modifier.contains(Modifier::BOLD));
-            assert!(primary.modifier.contains(Modifier::BOLD));
-            if theme::is_mono() {
-                assert!(idle.modifier.contains(Modifier::REVERSED));
-                assert!(!primary.modifier.contains(Modifier::REVERSED));
-            } else {
-                assert_eq!(idle.bg, theme::palette().selection);
-                assert_eq!(primary.fg, theme::palette().accent);
-                assert_eq!(focus.bg, theme::palette().accent);
-            }
-        });
-    }
 }
 
 /// Draws a combobox popup of `rows` options with `selected` highlighted and

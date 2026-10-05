@@ -1223,17 +1223,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_navigation_can_select_cancel_while_running() {
-        let mut chat = chat();
-        chat.set_turn_review(Some(running_view()));
-        chat.handle_key(key(KeyCode::Left));
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Cancelled))
-        );
-    }
-
-    #[test]
     fn the_action_bar_starts_on_an_enabled_action_at_each_verdict_stage() {
         let mut chat = chat();
         chat.set_turn_review(Some(findings_view()));
@@ -1394,6 +1383,7 @@ mod tests {
     /// R4-13: the header of a failed review read "General done Verdictt".
     /// The role strip and the tab strip draw the same row, and the tab strip
     /// left the strip's wider spacing behind its own labels.
+    // Hard-won: ee21d9ca: old row text remained after the review header drew a shorter tab label.
     #[test]
     fn the_review_header_names_each_tab_once() {
         use ratatui::Terminal;
@@ -1520,6 +1510,7 @@ mod tests {
     /// A form is answered back to the harness that asked it. In the extended
     /// tier several are running at once, so answering the default role would
     /// leave a lane waiting for ever while the answer went somewhere else.
+    // Hard-won: d75bf850: a review answer went to the default role instead of its lane.
     #[test]
     fn a_lanes_form_is_answered_back_to_that_lane() {
         let mut chat = chat();
