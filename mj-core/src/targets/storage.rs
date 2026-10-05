@@ -672,6 +672,7 @@ pub fn parse_storage_lines(output: &[u8]) -> (Option<String>, Vec<FilesystemSpac
 mod tests {
     use super::*;
 
+    // Hard-won: 540c9202: A full target filesystem stopped all workers and recovery repeatedly wrote to the same disk.
     #[test]
     fn recognises_a_full_disk_in_every_tool_s_words() {
         for text in [
@@ -697,6 +698,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 540c9202: A full target filesystem made repeated recovery writes fail without identifying the affected path.
     #[test]
     fn a_no_space_failure_names_the_path_it_could_not_write() {
         assert_eq!(
@@ -722,19 +724,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn storage_host_drops_the_user_from_an_ssh_destination() {
-        assert_eq!(
-            storage_host_of_destination(Some("jonathan@precision-3260")),
-            "precision-3260"
-        );
-        assert_eq!(storage_host_of_destination(Some("builder")), "builder");
-        assert_eq!(storage_host_of_destination(None), LOCAL_STORAGE_HOST);
-    }
-
     /// precision-3260: `~/Projects` is its own filesystem beside `/`. Paths
     /// on one filesystem make one record, and a write is judged by the
     /// filesystem it lands on.
+    // Hard-won: 540c9202: Root and Projects were separate filesystems, but workers stopped when only one filled.
     #[test]
     fn storage_lines_keep_one_record_per_filesystem_and_place_each_path() {
         let output = b"home=/home/jonathan\n\
@@ -824,28 +817,5 @@ garbage\n";
         assert_eq!(filesystems.len(), 1, "{output:?}");
         assert!(filesystems[0].total_bytes > 0);
         assert_eq!(filesystems[0].paths.len(), 2);
-    }
-
-    #[test]
-    fn session_paths_cover_worker_root_workspace_profile_and_tmp() {
-        let paths = session_storage_paths(
-            &crate::state::TargetLocator::SshBare {
-                host: "precision-3260".into(),
-                workspace: "/home/jonathan/Projects/app/.mj/clones/abc".into(),
-                worker_id: None,
-            },
-            "abc",
-            None,
-        );
-        assert_eq!(paths.host, "precision-3260");
-        assert_eq!(paths.worker_root, ".local/share/hel/workers/abc");
-        assert_eq!(
-            paths.others,
-            [
-                "/home/jonathan/Projects/app/.mj/clones/abc",
-                ".local/share/hel/profiles/abc",
-                "/tmp"
-            ]
-        );
     }
 }

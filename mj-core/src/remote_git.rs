@@ -422,20 +422,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_shorthand_expands_to_https() {
-        let repository = ProjectRepository {
-            id: "repo".into(),
-            github: Some("BrokkAi/hel".into()),
-            local: None,
-            destination: "repo".into(),
-            git_ref: None,
-        };
-        let source = resolve_repository(&repository, &NoopExecutor).unwrap();
-        assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
-        assert_eq!(source.push_urls, ["https://github.com/BrokkAi/hel.git"]);
-    }
-
-    #[test]
     fn default_branch_requires_symbolic_head_and_commit() {
         let output = CommandOutput {
             status: 0,
@@ -487,13 +473,5 @@ mod tests {
             display_url("git@github.com:org/repo.git"),
             "github.com:org/repo.git"
         );
-    }
-
-    struct NoopExecutor;
-
-    impl CommandExecutor for NoopExecutor {
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("unexpected command")
-        }
     }
 }

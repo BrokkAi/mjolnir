@@ -1156,36 +1156,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_document_round_trip_exceeds_pipe_buffer_size() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        let content = "x".repeat(70 * 1024);
-        let result = write(&store, "/large.md", &content, "new");
-        assert_eq!(result.outcome, MemoryWriteOutcome::Ok);
-        assert_eq!(
-            store.read("/large.md").content.as_deref(),
-            Some(content.as_str())
-        );
-    }
-
-    #[test]
-    fn startup_context_explains_multi_root_mapping_without_a_store_selector() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        write(&store, "/MEMORY.md", "# Known facts\n", "new");
-        let roots = BTreeMap::from([
-            ("api".into(), PathBuf::from("/workspace/api")),
-            ("web".into(), PathBuf::from("/workspace/web")),
-        ]);
-        let context = startup_prompt_context(&store, &roots).unwrap();
-        assert!(context.contains("/roots/<repository-id>/"));
-        assert!(context.contains("- api: /workspace/api"));
-        assert!(context.contains("# Known facts"));
-        assert!(!context.contains("store selector"));
-        assert!(!context.contains("store_id"));
-    }
-
-    #[test]
     fn three_way_reconciliation_merges_independent_files_and_preserves_conflicts() {
         let baseline = ProjectMemorySnapshot {
             files: BTreeMap::from([

@@ -101,6 +101,7 @@ mod tests {
     use super::*;
     use anyhow::{Context, anyhow};
 
+    // Hard-won: 796d055c: HTTP callers received a generic 500 instead of the refusal reason.
     #[test]
     fn a_refusal_survives_added_context() {
         let error = Err::<(), _>(anyhow!("relay path /home/someone/profile is missing"))
@@ -110,6 +111,11 @@ mod tests {
         let refusal = Refusal::of(&error).expect("the refusal is still on the chain");
         assert_eq!(refusal.message(), "create a workspace first");
         assert_eq!(refusal.kind(), RefusalKind::Precondition);
+
+        let source = anyhow::Error::new(Refusal::unusable("no target named laptop is configured"))
+            .context("refresh capacity");
+        let source_refusal = Refusal::of(&source).expect("the refusal is found in an error source");
+        assert_eq!(source_refusal.kind(), RefusalKind::Unusable);
     }
 
     #[test]
@@ -117,13 +123,5 @@ mod tests {
         let error = anyhow!("ssh host build-07 refused the connection")
             .context("provision the session target");
         assert_eq!(Refusal::of(&error), None);
-    }
-
-    #[test]
-    fn a_bailed_refusal_is_found_too() {
-        let error = anyhow::Error::new(Refusal::unusable("no target named laptop is configured"))
-            .context("refresh capacity");
-        let refusal = Refusal::of(&error).expect("the refusal is on the chain");
-        assert_eq!(refusal.kind(), RefusalKind::Unusable);
     }
 }

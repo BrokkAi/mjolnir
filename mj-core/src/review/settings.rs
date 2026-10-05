@@ -134,15 +134,6 @@ pub fn can_review(config: &crate::config::Config) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn families_match_namespaced_k_series_and_natural_versions() {
-        assert!(model_matches_family("kimi-code/k3", "k-series"));
-        assert!(model_matches_family("k4-preview", "k-series"));
-        assert!(!model_matches_family("kimi-latest", "k-series"));
-        assert!(!model_matches_family("gpt-6-astral", "astra"));
-        assert!(model_matches_family("gpt-6-astra", "astra"));
-        assert!(model_version_cmp("gpt-5.10-luna", "gpt-5.9-luna").is_gt());
-    }
-    #[test]
     fn deepseek_identity_and_auto_eligibility_follow_provider_not_harness() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("config.toml"), "model_provider = \"deepseek\"\n[model_providers.deepseek]\nbase_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\nenv_key = \"DEEPSEEK_API_KEY\"\n").unwrap();

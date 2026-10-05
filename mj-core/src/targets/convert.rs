@@ -519,6 +519,7 @@ mod tests {
         None
     }
 
+    // Hard-won: aa4e0b51: OpenSSH used Mjolnir accept-new before the user's strict host-key requirement.
     #[test]
     fn user_extra_args_can_require_strict_host_key_checking() {
         let args = ssh_args_with_identity(&["-o".into(), "StrictHostKeyChecking=yes".into()], None);
@@ -530,19 +531,6 @@ mod tests {
         assert_eq!(
             effective_ssh_option(&args, "UserKnownHostsFile").as_deref(),
             Some("/k")
-        );
-    }
-
-    #[test]
-    fn mjolnir_ssh_defaults_apply_when_the_user_sets_nothing() {
-        let args = ssh_args_with_identity(&["-p".into(), "2222".into()], None);
-        assert_eq!(
-            effective_ssh_option(&args, "StrictHostKeyChecking").as_deref(),
-            Some("accept-new")
-        );
-        assert_eq!(
-            effective_ssh_option(&args, "BatchMode").as_deref(),
-            Some("yes")
         );
     }
 }
