@@ -160,6 +160,7 @@ fn assert_upgraded(path: &std::path::Path) {
 /// through `/proc/self/exe` so that it runs the client's own inode, and now
 /// carries `mj` as its program name.
 #[cfg(target_os = "linux")]
+// Hard-won: 3374ef7ddf: Launch finding R13-9 found `/proc/self/exe daemon-run` made the daemon impossible to find as `mj`; the test checks its published process argv.
 #[test]
 fn the_daemon_is_listed_as_mj_daemon_run() {
     let storage = upgrade_storage();
@@ -482,6 +483,7 @@ fn a_different_same_version_build_cannot_replace_an_incompatible_store_owner() {
 /// each replaced the other). Concurrent older clients all use the daemon and
 /// say why, and an explicit restart from the older build refuses the
 /// downgrade.
+// Hard-won: d7250ce227: Finding U-1 found alternating same-release clients replacing each other indefinitely; this checks an older or unordered build leaves the newer daemon running.
 #[test]
 fn older_same_release_clients_keep_a_newer_or_unordered_daemon() {
     for (daemon_build, expected) in [
@@ -612,6 +614,7 @@ fn a_newer_compatible_daemon_and_store_are_reused_without_downgrading() {
     );
 }
 
+// Hard-won: 2a577807ef: An auto-upgraded daemon exited on a newer store while the CLI waited on absent metadata and blamed `daemon.json`; this checks the daemon’s actual startup error reaches the client.
 #[test]
 fn client_reports_the_daemon_startup_failure_instead_of_a_missing_endpoint() {
     let root = tempfile::tempdir().unwrap();
@@ -695,6 +698,7 @@ image = "ubuntu:24.04"
 /// (1.6 s) only to refuse, while `mj acp` refused without starting one. With
 /// no daemon running it now refuses at once, still says the instance has no
 /// workspace yet, and leaves no daemon behind.
+// Hard-won: af2007c7b0: Launch finding R2-14 found `mj new` start a daemon only to reject a missing workspace; this checks refusal happens before daemon startup.
 #[test]
 fn new_without_a_workspace_refuses_without_starting_a_daemon() {
     let storage = upgrade_storage();
@@ -725,6 +729,7 @@ fn new_without_a_workspace_refuses_without_starting_a_daemon() {
 /// Launch finding R5-9: `mj new --workspace nosuch` started a stopped daemon
 /// (3.4 s) only to refuse the name. Like a missing `--workspace` (R2-14), the
 /// refusal now comes from the store, and no daemon is left behind.
+// Hard-won: 28f472889b: Launch finding R5-9 found `mj new` start a daemon before refusing an unknown workspace; this checks early refusal and no daemon metadata.
 #[test]
 fn new_with_an_unknown_workspace_refuses_without_starting_a_daemon() {
     let storage = upgrade_storage();
@@ -762,6 +767,7 @@ fn new_with_an_unknown_workspace_refuses_without_starting_a_daemon() {
 /// Launch finding R5-9: with a daemon running, `mj acp --workspace nosuch`
 /// served, found its input closed, and exited 0 without a word. It now checks
 /// the name against the running daemon first and exits 1 with the refusal.
+// Hard-won: 28f472889b: Launch finding R5-9 found ACP accept/serve an unknown workspace until session creation; this checks the running-daemon path refuses at startup.
 #[test]
 fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
     let storage = upgrade_storage();
@@ -840,6 +846,7 @@ fn acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running() {
 /// startup of a newer build waited minutes for it. A sync is safe to stop and
 /// every daemon runs one at startup, so the handoff must go ahead while one is
 /// parked mid-pass, and the old daemon must exit without finishing it.
+// Hard-won: c87e5e887f: A live handoff took over 23 seconds because SessionWiki sync held admission; this checks the deferrable sync no longer delays handoff.
 #[test]
 fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
     use std::time::{Duration, Instant, SystemTime};
@@ -917,6 +924,7 @@ fn a_handoff_does_not_wait_for_a_sessionwiki_sync_in_flight() {
 /// While a handoff waits, the client replacing the daemon and a client queued
 /// behind it both say what the old daemon is still finishing, with its age,
 /// instead of a line that names nothing.
+// Hard-won: c87e5e887f: The same handoff stall hid its blocker from clients; this checks each waiting client reports the outstanding SessionWiki sync.
 #[test]
 fn every_client_waiting_on_a_handoff_names_what_it_waits_for() {
     use std::time::{Duration, Instant};
