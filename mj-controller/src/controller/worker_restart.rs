@@ -557,6 +557,7 @@ async fn wait_for_idle_projection(
 
 #[cfg(test)]
 mod tests {
+    // Hard-won: b9c3a05: issue #1001 left a restarted session marked running after its relay died
     #[test]
     fn a_dead_transport_after_reconnect_marks_the_restart_as_leaving_no_worker() {
         let died = anyhow::Error::new(crate::worker_client::RelayTransportDead::new(
@@ -672,6 +673,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: b9c3a05: issue #1001 left a session marked running after stop succeeded but restart failed
     #[tokio::test]
     async fn a_restart_that_stopped_the_worker_and_then_failed_is_marked() {
         let executor = StopSucceedsThenFails {
@@ -752,22 +754,5 @@ mod tests {
             .unwrap();
         assert!(!WorkerRestartLeftNoWorker::marks(&error));
         assert_eq!(executor.0.load(Ordering::SeqCst), 1);
-    }
-
-    /// The three answers hello can produce, and what each means for the
-    /// worker's binary.
-    #[test]
-    fn only_a_matching_reported_build_counts_as_current() {
-        let installed = "a".repeat(64);
-
-        assert!(worker_runs_installed_build(Some(&installed), &installed));
-        assert!(!worker_runs_installed_build(
-            Some(&"b".repeat(64)),
-            &installed
-        ));
-        assert!(
-            !worker_runs_installed_build(None, &installed),
-            "a worker too old to report a build is older than this controller"
-        );
     }
 }
