@@ -661,21 +661,6 @@ pub(crate) fn thought(position: u64, text: impl Into<String>) -> Arc<TranscriptI
     )
 }
 
-pub(crate) fn session_restart(position: u64) -> Arc<TranscriptItem> {
-    let mut item = transcript_item(
-        position,
-        TranscriptBody::System {
-            text: mj_core::transcript::SESSION_RESTART_TEXT.into(),
-        },
-    );
-    Arc::make_mut(&mut item).stable_id = format!(
-        "{}{}",
-        mj_core::transcript::SESSION_RESTART_ITEM_PREFIX,
-        position
-    );
-    item
-}
-
 pub(crate) fn work_interruption(position: u64) -> Arc<TranscriptItem> {
     let mut item = transcript_item(
         position,
