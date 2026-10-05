@@ -46,8 +46,8 @@ const INHERITED_GIT_SETTINGS: &[&str] = &[
 /// same time.
 ///
 /// Starting a child means starting a harness, and a harness start inside a
-/// container is expensive: the reviewer sidecar already caps its own
-/// specialist lanes at three for the same reason. Measured on a local Podman
+/// container is expensive, especially while its reviewer is active. Measured
+/// on a local Podman
 /// target, ten children started one after another each reached their harness
 /// in about seven seconds, while four started at once left two or three of
 /// them past the 300-second harness-startup wait. Admitting two at a time

@@ -1214,14 +1214,22 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     record.review = Some(mj_core::config::SessionReview::On {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
-        tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+        tier: Some("extended".into()),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    assert_eq!(loaded.sessions["session-1"].review, record.review);
+    assert_eq!(
+        loaded.sessions["session-1"].review,
+        Some(mj_core::config::SessionReview::On {
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        }),
+        "writes omit the legacy tier while preserving the review choice"
+    );
 }
 
 // Hard-won: d92ab7ce: the lifecycle UPDATE omitted build_cache_json and live sessions reloaded without their mounted cache

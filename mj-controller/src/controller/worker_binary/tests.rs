@@ -3565,7 +3565,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -3695,7 +3694,6 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         target_environment: Default::default(),
         seed_image_environment: true,
         harness: HarnessKind::Codex,
@@ -3789,7 +3787,6 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -3868,6 +3865,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
 }
 
 // Hard-won: 5461a2c: recovery kept relaunching an incompatible remote worker that could not start
+
 #[test]
 fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
     let directory = tempfile::tempdir().unwrap();

@@ -130,26 +130,14 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
     let armed = match (review.enabled, review.reviewer_profile()) {
-        (true, Some(profile)) => format!(
-            "Reviewing every completed turn with [review] profile {profile:?} ({} tier)",
-            review.tier.label()
-        ),
-        (true, None) => {
-            format!(
-                "Reviewing every completed turn with Auto ({} tier)",
-                review.tier.label()
-            )
+        (true, Some(profile)) => {
+            format!("Reviewing every completed turn with [review] profile {profile:?}")
         }
-        (false, Some(profile)) => format!(
-            "Automatic review is off; /review reviews one turn with {profile:?} ({} tier)",
-            review.tier.label()
-        ),
-        (false, None) => {
-            format!(
-                "Automatic review is off; /review uses Auto ({} tier)",
-                review.tier.label()
-            )
+        (true, None) => "Reviewing every completed turn with Auto".to_owned(),
+        (false, Some(profile)) => {
+            format!("Automatic review is off; /review reviews one turn with {profile:?}")
         }
+        (false, None) => "Automatic review is off; /review uses Auto".to_owned(),
     };
     let armed = match &review.model {
         Some(model) => format!("{armed}, model {model:?}"),
@@ -1330,12 +1318,8 @@ impl ChatState {
     ///
     /// The primary's own dialog wins the screen: an answer the planning
     /// harness is blocked on matters more than one its reviewer is.
-    /// Puts a reviewing harness's form on screen, remembering which role asked.
-    ///
-    /// The answer has to go back to that role: in the extended tier several
-    /// harnesses run at once, and answering the wrong one leaves the asker
-    /// waiting for ever. `None` is the plan reviewer, which is the only
-    /// harness the second-opinion split has.
+    /// Puts the reviewer's form on screen, remembering its role when present.
+    /// Turn review has one reviewer role; `None` identifies the plan reviewer.
     pub(super) fn show_review_role_elicitation(
         &mut self,
         role: Option<String>,

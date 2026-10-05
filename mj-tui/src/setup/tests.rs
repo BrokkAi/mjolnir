@@ -1746,7 +1746,6 @@ fn review_changes_stay_in_setup_draft_until_save_and_cancel_discards_them() {
     choose(&mut dashboard, "review");
     dashboard.handle_key(key(KeyCode::Char(' ')));
     dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
     dashboard.handle_key(key(KeyCode::Enter));
     dashboard.handle_key(key(KeyCode::Down));
     dashboard.handle_key(key(KeyCode::Enter));
@@ -2687,7 +2686,7 @@ fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
             .expect("a Code Review row")
     };
     let before = row(&mut dashboard);
-    assert!(before.contains("Quick · Auto · picks by quota"), "{before}");
+    assert!(before.contains("Auto · picks by quota"), "{before}");
     assert!(!before.contains("no reviewer"), "{before}");
     choose(&mut dashboard, "review");
     dashboard.handle_key(key(KeyCode::Esc));

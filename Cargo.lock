@@ -792,6 +792,7 @@ name = "brokk-mj-review"
 version = "2.28.0"
 dependencies = [
  "brokk-mj-core",
+ "serde",
  "serde_json",
 ]
 

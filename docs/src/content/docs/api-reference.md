@@ -709,7 +709,6 @@ it, or `"review": null` when none is open:
 {
   "session_id": "0123abcd…",
   "review": {
-    "tier": "quick",
     "status": "sending findings to the primary agent…",
     "roles": [{ "label": "reviewer", "state": "findings" }],
     "verdict": {

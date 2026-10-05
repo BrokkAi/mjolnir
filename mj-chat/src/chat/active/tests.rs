@@ -884,6 +884,54 @@ fn chat_context(
     }
 }
 
+/// Both review surfaces reflect the shared settings as configuration changes.
+#[tokio::test]
+async fn review_status_configuration_is_applied_on_open_and_refresh() {
+    let fixture = mj_client::session::replacement_session_test_fixture("session-review", 88);
+    let mut context = chat_context("session-review", &[]);
+    context.config.review = mj_core::config::ReviewConfig {
+        enabled: true,
+        tier: Some("extended".into()),
+        profile: Some("reviewer-a".into()),
+        model: None,
+        effort: None,
+    };
+    let mut chat = ActiveChat::open(
+        fixture.stopped,
+        "bundle-1",
+        Some(context),
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+
+    assert_eq!(
+        chat.state.review_config(),
+        mj_core::config::ReviewConfig {
+            enabled: true,
+            tier: Some("extended".into()),
+            profile: Some("reviewer-a".into()),
+            model: None,
+            effort: None,
+        }
+    );
+    let title = prompt_title_parts(&chat.state);
+    assert!(title.iter().any(|part| part == "review"), "{title:?}");
+    assert!(
+        title
+            .iter()
+            .all(|part| part != "quick" && part != "extended"),
+        "{title:?}"
+    );
+
+    let mut reloaded = Config::default();
+    reloaded.review.profile = Some("reviewer-b".into());
+    chat.refresh_context(&reloaded, None, None);
+
+    assert_eq!(chat.state.review_config(), reloaded.review);
+}
+
 /// A failed recovery copy is the one thing the user has to see on opening
 /// the session, so it is raised after the connection notice a cold open
 /// also sets: a notice is a single slot, and the last write wins.
@@ -946,7 +994,6 @@ async fn second_opinion_ignores_stale_preparation_and_uses_resolved_settings() {
         },
         automatic: true,
         same_provider: true,
-        ..Default::default()
     };
     chat.apply_reviewer_prepared(1, Ok(resolved.clone()));
     assert!(matches!(

@@ -122,7 +122,6 @@ impl HostState {
                 }
                 let seed = seed_from_session(
                     &pending.prepared.materialized,
-                    pending.prepared.tier,
                     &pending.prepared.state,
                     if pending.manual {
                         "manual"

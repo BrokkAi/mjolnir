@@ -1854,6 +1854,7 @@ fn session_order_and_attention_are_derived_once_per_change_and_follow_it() {
 }
 
 #[test]
+
 fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
     let mut dashboard = dashboard_with_attention_mix();
     let session = dashboard.state.sessions.get_mut("quiet").unwrap();
@@ -2068,7 +2069,6 @@ fn golden_attention_navigation() {
     urgent.set_session_reviews([mj_client::review::RuntimeReviewView {
         session_id: "asks".into(),
         questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::Verdict(
             mj_core::review::verdict::ReviewVerdict::Failed {
                 reason: "the reviewer never answered".into(),

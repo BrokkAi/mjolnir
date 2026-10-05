@@ -276,5 +276,4 @@ mod tests {
         // A second daemon start finds the links in place and changes nothing.
         assert!(link_profile_homes_of_earlier_sessions(&state).is_empty());
     }
-
 }

@@ -756,7 +756,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
 
     let review = ReviewConfig {
         enabled: true,
-        tier: crate::review::lanes::ReviewTier::Extended,
+        tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
         effort: Some("high".into()),
@@ -1487,8 +1487,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             tier: None,
         }
     );
-    // A choice stored before tiers could be set per session reads back
-    // unchanged; a tier is stored only when one was chosen.
+    // Existing records may include a deprecated tier and remain readable.
     assert_eq!(
         serde_json::from_str::<SessionReview>(
             r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
@@ -1503,16 +1502,35 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     let extended = SessionReview::On {
         model: None,
         effort: None,
-        tier: Some(crate::review::lanes::ReviewTier::Extended),
+        tier: Some("extended".into()),
     };
     assert_eq!(
         serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"on","tier":"extended"}"#
+        r#"{"mode":"on"}"#
     );
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
         extended
     );
+}
+
+#[test]
+fn deprecated_review_tier_is_accepted_but_omitted_from_serialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\n"
+        ),
+    )
+    .unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.review.tier.as_deref(), Some("extended"));
+
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    assert!(!serialized.contains("tier"), "{serialized}");
 }
 
 #[test]

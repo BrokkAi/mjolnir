@@ -99,14 +99,12 @@ pub(super) enum ReviewStep {
         role: String,
         result: Result<Vec<RelayEvent>, String>,
     },
-    Dispatches(Result<Vec<mj_core::review::lanes::ReviewSubagentRequest>, String>),
 }
 
 /// Everything one blocking preparation gathered before a review can start.
 pub(super) struct Prepared {
     pub(super) state: TurnReviewState,
     pub(super) reviewer: ReviewerIdentity,
-    pub(super) tier: ReviewTier,
     /// Read from the live actor after the admission hold is installed and a
     /// reviewer status command drains every actor command ahead of it.
     pub(super) materialized: Box<MaterializedSession>,

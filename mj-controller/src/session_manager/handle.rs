@@ -277,9 +277,8 @@ impl ManagedSessionHandle {
         self.reviewer_as(None, action).await
     }
 
-    /// Drive one reviewing role. `None` is the default role, which is the one
-    /// plan review uses; a turn review in the extended tier names its
-    /// supervisor, its intent analyst, and each specialist lane.
+    /// Drive one isolated reviewer role. `None` selects the default role
+    /// shared by plan and turn review; settings discovery uses a named role.
     pub async fn reviewer_as(
         &self,
         role: Option<String>,

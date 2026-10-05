@@ -1429,9 +1429,6 @@ pub(super) async fn drive_reviewer(
             client.advance_review_baseline(role, trees).await?;
             ReviewerOutcome::BaselineAdvanced
         }
-        ReviewerAction::TakeLaneDispatches => ReviewerOutcome::LaneDispatches {
-            requests: client.take_lane_dispatches().await?,
-        },
     })
 }
 

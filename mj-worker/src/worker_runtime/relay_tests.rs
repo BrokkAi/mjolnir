@@ -65,7 +65,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         handback_tool: false,
         initial_model: None,
         review_capture: true,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,

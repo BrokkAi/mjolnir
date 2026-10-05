@@ -4,7 +4,6 @@ warning Host limits for target remote-podman: The login user on dev@docker.examp
   remediation: Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on dev@docker.example.test, and close finished sessions promptly.
 warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable
   remediation: Read them by hand on dev@docker.example.test: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`.
-ready Bifrost for turn review: `/usr/local/bin/bifrost` is Bifrost 0.12.0; turn review needs 0.12.0 or later.
 ready Sub-agent policy: Claude and Codex sessions may opt in, up to 3 sub-agents at once per session. A session's sub-agents may use its own profile and: disabled-reviewer.
 warning Sub-agent profile disabled-reviewer: Profile "disabled-reviewer" is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use.
   remediation: Re-enable profile "disabled-reviewer", or remove it from [subagents.eligible_profiles].

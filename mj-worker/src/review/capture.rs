@@ -10,7 +10,7 @@ use mj_core::relay::{FileLineChange, RepoDelta};
 use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
 use mj_review::delta::{captured_trees, has_changes};
-use mj_review::{LANE_DIFF_LIMIT, bound_review_section};
+use mj_review::{REVIEW_CAPTURE_DIFF_LIMIT, bound_review_section};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -85,7 +85,7 @@ pub fn capture_repository_deltas(
             root: root.clone(),
             baseline_tree: baseline,
             current_tree: current,
-            patch: bound_review_section(&patch, LANE_DIFF_LIMIT, "workspace diff"),
+            patch: bound_review_section(&patch, REVIEW_CAPTURE_DIFF_LIMIT, "workspace diff"),
             diffstat: summary.diffstat(),
             changed_lines: summary.changed_line_count(),
             files,

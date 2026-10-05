@@ -15,12 +15,10 @@ use mj_chat::components::{
 use mj_chat::theme;
 use mj_core::acp::SessionConfigChoice;
 use mj_core::config::{Config, ReviewConfig, SpinnerStyle};
-use mj_core::review::lanes::ReviewTier;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::widgets::dismissible_modal_title;
 use crate::{DashboardAction, DashboardState, Mode};
@@ -53,7 +51,6 @@ pub(crate) type ReviewSettingsCacheKey = (String, Option<String>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewSettingsFocus {
     Enabled,
-    Tier,
     Profile,
     Model,
     Effort,
@@ -235,12 +232,6 @@ impl ReviewSettingsDialog {
             self.effort_capabilities_discovered,
         );
         vec![
-            (
-                Tier,
-                "Tier",
-                vec!["Quick".into(), "Extended".into()],
-                usize::from(self.review.tier == ReviewTier::Extended),
-            ),
             (
                 Profile,
                 "Profile",
@@ -589,17 +580,6 @@ impl ReviewSettingsDialog {
                 self.review.enabled = !self.review.enabled;
                 DashboardAction::None
             }
-            Some(Interaction::ComboBoxCommit(Tier, index)) => {
-                let tier = if index == 0 {
-                    ReviewTier::Quick
-                } else {
-                    ReviewTier::Extended
-                };
-                if self.review.tier != tier {
-                    self.review.tier = tier;
-                }
-                DashboardAction::None
-            }
             Some(Interaction::ComboBoxCommit(Profile, index)) => {
                 let profile = self.profiles.get(index).cloned().flatten();
                 if self.review.profile == profile {
@@ -634,7 +614,7 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            Some(Interaction::Activate(id @ (Tier | Profile | Model | Effort))) => {
+            Some(Interaction::Activate(id @ (Profile | Model | Effort))) => {
                 if let Some((_, _, _, selected)) = self
                     .selectors()
                     .into_iter()
@@ -644,9 +624,7 @@ impl ReviewSettingsDialog {
                 }
                 DashboardAction::None
             }
-            Some(Interaction::ComboBoxDismiss(Tier | Profile | Model | Effort)) => {
-                DashboardAction::None
-            }
+            Some(Interaction::ComboBoxDismiss(Profile | Model | Effort)) => DashboardAction::None,
             Some(Interaction::Activate(Refresh)) => {
                 if let Some(profile) = self.review.profile.as_deref() {
                     dashboard.clear_review_settings_choices(profile);
@@ -849,7 +827,6 @@ pub(crate) fn render_review_settings(
             "Healthy quota before reserve/unknown; exhausted profiles are skipped.",
             "Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.",
             "Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.",
-            "Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.",
             "These settings also choose the plan second-opinion reviewer.",
         ] {
             notes.push(Line::raw(line));
@@ -880,23 +857,11 @@ pub(crate) fn render_review_settings(
             ));
         }
     }
-    let description = Paragraph::new(match dialog.review.tier {
-        ReviewTier::Quick => {
-            "One general reviewer; the agent checks its findings as it fixes them."
-        }
-        ReviewTier::Extended => "A supervisor selects specialist reviewers for deeper coverage.",
-    })
-    .style(Style::default().fg(theme::palette().muted))
-    .wrap(Wrap { trim: true });
-    let description_width = popup.width.saturating_sub(12);
-    let description_height =
-        u16::try_from(description.line_count(description_width.max(1))).unwrap_or(u16::MAX);
     let focus_row = match dialog.focused() {
         Enabled => 0,
-        Tier => 1,
-        Profile => 2 + description_height,
-        Model => 3 + description_height,
-        Effort => 4 + description_height,
+        Profile => 1,
+        Model => 2,
+        Effort => 3,
         _ => 0,
     };
     let mut form = dialog.form.borrow_mut();
@@ -918,9 +883,7 @@ pub(crate) fn render_review_settings(
     );
     let viewport = FormViewport::new(
         body,
-        (notes.len() as u16)
-            .saturating_add(6)
-            .saturating_add(description_height),
+        (notes.len() as u16).saturating_add(6),
         dialog.scroll.get(),
         Some(focus_row),
     );
@@ -937,7 +900,7 @@ pub(crate) fn render_review_settings(
     );
     let mut expanded_combo = None;
     for (index, (id, label, values, selected)) in dialog.selectors().iter().enumerate() {
-        let area = row(index as u16 + 1 + if index > 0 { description_height } else { 0 });
+        let area = row(index as u16 + 1);
         let label_width = 10.min(area.width);
         let loading = dialog.probing && dialog.choices_loading && (*id == Model || *id == Effort);
         frame.render_widget(
@@ -975,19 +938,8 @@ pub(crate) fn render_review_settings(
             expanded_combo = Some((*id, field, value, options, selected));
         }
     }
-    let help_area = viewport.row(2, description_height);
-    let indent = 10.min(help_area.width);
-    frame.render_widget(
-        description.scroll((viewport.offset().saturating_sub(2), 0)),
-        Rect::new(
-            help_area.x + indent,
-            help_area.y,
-            help_area.width - indent,
-            help_area.height,
-        ),
-    );
     for (index, line) in notes.into_iter().enumerate() {
-        frame.render_widget(line, row(index as u16 + 6 + description_height));
+        frame.render_widget(line, row(index as u16 + 6));
     }
     let footer = Rect::new(
         inner.x,

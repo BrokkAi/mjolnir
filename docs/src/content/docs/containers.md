@@ -83,9 +83,9 @@ a native `mj-worker` for local bare sessions.
 ## Get the agent-dev image
 
 Mjolnir ships a reference container image with everything a session needs
-pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, and
-the Codex and Claude ACP bridges, Muse Code with `muse-acp`, and Bifrost for
-turn review. Kimi and Grok install on demand. It also carries Playwright's Chromium system
+pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, the
+Codex and Claude ACP bridges, and Muse Code with `muse-acp`. Kimi and Grok
+install on demand. It also carries Playwright's Chromium system
 libraries and the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools

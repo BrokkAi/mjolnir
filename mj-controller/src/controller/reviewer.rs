@@ -19,8 +19,7 @@ use super::worker_binary::{
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use mj_core::worker_launch::{
-    REVIEWER_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
-    reviewer_staging_profile_home,
+    ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig, reviewer_staging_profile_home,
 };
 
 /// Build the capability used by client-side chat views to stage reviewers.
@@ -72,35 +71,6 @@ impl Controller {
             profile_id,
             generation,
             &[],
-            &ProcessExecutor,
-        )
-    }
-
-    /// Stage a reviewer that also gets `mcp_servers`, which is how a turn
-    /// review attaches its analyzer tools.
-    ///
-    /// `dispatch_tool` adds the review supervisor's own tool, which is this
-    /// worker's binary in another mode. Only the controller knows where that
-    /// binary and its socket sit on the target, so it is built here rather
-    /// than by the caller.
-    pub fn stage_reviewer_profile_with_mcp(
-        &self,
-        session_id: &str,
-        profile_id: &str,
-        generation: u64,
-        mcp_servers: &[ReviewMcpServer],
-        dispatch_tool: bool,
-    ) -> Result<ReviewerLaunchConfig> {
-        let mut servers = mcp_servers.to_vec();
-        if dispatch_tool {
-            let (_, worker_root) = self.worker_placement(session_id)?;
-            servers.push(review_dispatch_server(&worker_root));
-        }
-        self.stage_reviewer_profile_controlled(
-            session_id,
-            profile_id,
-            generation,
-            &servers,
             &ProcessExecutor,
         )
     }
@@ -274,27 +244,6 @@ fn configure_staged_review_mcp(
     body.push(b'\n');
     mj_core::config::atomic_write(&path, &body)
         .with_context(|| format!("write staged reviewer configuration {}", path.display()))
-}
-
-/// The review supervisor's dispatch tool, as it runs inside the container:
-/// this worker's own binary in `review-mcp` mode, talking to the socket the
-/// worker serves in its reviewer directory.
-fn review_dispatch_server(worker_root: &str) -> ReviewMcpServer {
-    let socket = format!(
-        "{worker_root}/{}/{}",
-        REVIEWER_DIR,
-        mj_core::review::mcp::REVIEW_DISPATCH_SOCKET
-    );
-    ReviewMcpServer {
-        name: mj_core::review::mcp::REVIEW_MCP_SERVER_NAME.to_owned(),
-        command: Path::new(worker_root).join("hel"),
-        args: vec![
-            "worker".to_owned(),
-            "review-mcp".to_owned(),
-            "--socket".to_owned(),
-            socket,
-        ],
-    }
 }
 
 /// Where one immutable reviewer profile snapshot lives on the target.
@@ -734,29 +683,63 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_staging_preserves_owned_approval_for_both_mcp_delivery_paths() {
+
+    fn local_container_targets_stage_the_reviewer_through_their_engine() {
         let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let mut servers =
-            mj_review::bifrost::review_mcp_servers(&[directory.path().to_owned()], "review");
-        servers.push(review_dispatch_server("/worker"));
-        for profile in ["codex", "claude"] {
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        for (locator, engine) in [
+            (
+                mj_core::state::TargetLocator::LocalPodman {
+                    borrowed_from: None,
+                    container_id: container_id.clone(),
+                    workspace_storage: Default::default(),
+                },
+                "podman",
+            ),
+            (
+                mj_core::state::TargetLocator::LocalDocker {
+                    borrowed_from: None,
+                    container_id: container_id.clone(),
+                },
+                "docker",
+            ),
+        ] {
+            let (controller, session_id) = fixture(directory.path(), locator);
             let executor = RecordingExecutor::new();
-            let config = controller
-                .stage_reviewer_profile_controlled(&session_id, profile, 1, &servers, &executor)
+
+            controller
+                .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
                 .unwrap();
-            assert_eq!(config.mcp_servers, servers);
-            assert!(!config.mcp_servers[0].is_review_dispatch(Path::new("/worker/hel")));
-            assert!(config.mcp_servers[1].is_review_dispatch(Path::new("/worker/hel")));
+
+            let script = executor.script();
+            assert!(
+                script
+                    .iter()
+                    .all(|line| line.starts_with(&format!("{engine} "))),
+                "a container target is reached only through its engine: {script:?}"
+            );
+            let home = script
+                .iter()
+                .find_map(|line| {
+                    line.split(' ')
+                        .find(|word| word.contains("/reviewer/profile"))
+                })
+                .expect("the reviewer profile is placed")
+                .to_owned();
+            assert!(
+                home.contains(&format!("/{session_id}")),
+                "the reviewer lives under this session's worker root: {home}"
+            );
+            // Nothing here provisions a target, a checkout, or another session.
+            assert!(
+                !script.iter().any(|line| {
+                    line.contains("run") || line.contains("git") || line.contains("create")
+                }),
+                "staging a reviewer provisions nothing: {script:?}"
+            );
         }
     }
 
-    // Hard-won: c5deb2a59c0c: an unconstrained Muse reviewer could bypass Guardian approvals on the host.
     #[test]
     fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
         let directory = tempfile::tempdir().unwrap();

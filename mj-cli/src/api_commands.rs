@@ -154,10 +154,9 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Review every turn of this session at this tier, even when `[review]`
-    /// is off: `quick` (one reviewer and a validator) or `extended` (a
-    /// supervisor that can dispatch specialist lanes).
-    #[arg(long, value_parser = ["quick", "extended"])]
+    /// Deprecated compatibility option. Either accepted value enables review;
+    /// the value is ignored.
+    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
     /// Do not review this session's turns automatically, even when `[review]`
     /// is on. `/review` still reviews on request.
@@ -886,8 +885,8 @@ fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> 
 
 /// A session's own turn-review choice from the `--review-*` flags `mj new`
 /// and `mj import` share: off, on with what was named, or `None` to follow
-/// `[review]` when nothing was named. Clap has already limited `tier` to
-/// `quick` and `extended`.
+/// `[review]` when nothing was named. Clap accepts the deprecated tier value
+/// for compatibility; naming it still opts the session into automatic review.
 pub(crate) fn session_review(
     off: bool,
     model: Option<&str>,
@@ -898,14 +897,10 @@ pub(crate) fn session_review(
     if off {
         return Some(SessionReview::Off);
     }
-    let tier = tier.map(|tier| match tier {
-        "extended" => mj_core::review::lanes::ReviewTier::Extended,
-        _ => mj_core::review::lanes::ReviewTier::Quick,
-    });
     (model.is_some() || effort.is_some() || tier.is_some()).then(|| SessionReview::On {
         model: model.map(str::to_owned),
         effort: effort.map(str::to_owned),
-        tier,
+        tier: None,
     })
 }
 
@@ -1833,13 +1828,13 @@ async fn resolve_review(client: &ApiClient, args: &SessionArgs, resolution: &str
     Ok(())
 }
 
-/// A review as plain lines: its tier and status, one line per role, then the
-/// verdict and its text.
+/// A review as plain lines: its status, one line per role, then the verdict
+/// and its text.
 fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec<String> {
     let Some(review) = review else {
         return vec!["no review is open".to_owned()];
     };
-    let mut lines = vec![format!("{} review: {}", review.tier, review.status)];
+    let mut lines = vec![format!("review: {}", review.status)];
     for role in &review.roles {
         lines.push(format!("  {}: {}", role.label, role.state));
     }
@@ -2070,6 +2065,44 @@ mod tests {
     use clap::Parser as _;
 
     #[test]
+
+    fn review_parses_start_and_status_with_a_session() {
+        for (verb, json) in [("start", false), ("status", true)] {
+            let mut argv = vec!["mj", "review", verb, "--session", "s1"];
+            if json {
+                argv.push("--json");
+            }
+            let cli = Cli::try_parse_from(argv).expect("review parses");
+            let Some(Command::Review(args)) = cli.command else {
+                panic!("expected the review command");
+            };
+            let (ReviewCommand::Start(session)
+            | ReviewCommand::Status(session)
+            | ReviewCommand::Forward(session)
+            | ReviewCommand::Dismiss(session)
+            | ReviewCommand::Cancel(session)) = args.command;
+            assert_eq!(session.session, "s1");
+            assert_eq!(session.json, json);
+        }
+        for verb in ["forward", "dismiss", "cancel"] {
+            let cli = Cli::try_parse_from(["mj", "review", verb, "--session", "s1"])
+                .expect("review resolutions parse");
+            let Some(Command::Review(args)) = cli.command else {
+                panic!("expected the review command");
+            };
+            let resolved = match args.command {
+                ReviewCommand::Forward(_) => "forward",
+                ReviewCommand::Dismiss(_) => "dismiss",
+                ReviewCommand::Cancel(_) => "cancel",
+                _ => panic!("{verb} parsed as another review command"),
+            };
+            assert_eq!(resolved, verb);
+        }
+        assert!(Cli::try_parse_from(["mj", "review", "start"]).is_err());
+    }
+
+    #[test]
+
     fn stop_task_requires_a_session_and_exactly_one_task_selection() {
         for argv in [
             vec!["mj", "stop-task", "--session", "s1"],
@@ -2366,6 +2399,127 @@ mod tests {
         assert_eq!(events.session.as_deref(), Some("s1"));
         assert_eq!(events.workspace_id.as_deref(), Some("w1"));
         assert_eq!(events.after_seq, Some(9));
+    }
+
+    #[test]
+    fn new_review_flags_choose_the_sessions_own_review() {
+        use mj_core::config::SessionReview;
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(Command::New(args)) => new_session_review(&args),
+                _ => panic!("expected the new command"),
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["--no-review"]).unwrap(), Some(SessionReview::Off));
+        assert_eq!(
+            parse(&["--review-model", "gpt-6-astra"]).unwrap(),
+            Some(SessionReview::On {
+                model: Some("gpt-6-astra".into()),
+                effort: None,
+                tier: None,
+            })
+        );
+        assert_eq!(
+            parse(&["--review-effort", "high"]).unwrap(),
+            Some(SessionReview::On {
+                model: None,
+                effort: Some("high".into()),
+                tier: None,
+            })
+        );
+        assert_eq!(
+            parse(&["--review-tier", "extended", "--review-model", "gpt-6-luna"]).unwrap(),
+            Some(SessionReview::On {
+                model: Some("gpt-6-luna".into()),
+                effort: None,
+                tier: None,
+            })
+        );
+        assert_eq!(
+            parse(&["--review-tier", "quick"]).unwrap(),
+            Some(SessionReview::On {
+                model: None,
+                effort: None,
+                tier: None,
+            })
+        );
+        let help = Cli::try_parse_from(["mj", "new", "--help"])
+            .expect_err("help exits parsing")
+            .to_string();
+        assert!(
+            !help.contains("--review-tier"),
+            "deprecated option is hidden"
+        );
+        assert!(
+            parse(&["--review-tier", "thorough"]).is_err(),
+            "the deprecated flag still accepts only quick and extended"
+        );
+        assert!(parse(&["--no-review", "--review-tier", "quick"]).is_err());
+        let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
+            .expect_err("off and a reviewer model contradict each other");
+        assert!(error.to_string().contains("--review-model"), "{error}");
+    }
+
+    #[test]
+    fn new_subagent_policy_rejects_legacy_flags_and_requires_fixed_model() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "mj",
+                "new",
+                "--profile",
+                "codex",
+                "--target",
+                "raw",
+                "--project-directory",
+                "/srv/project",
+            ];
+            argv.extend_from_slice(extra);
+            let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
+            let Some(Command::New(args)) = cli.command else {
+                panic!("new command");
+            };
+            new_subagent_policy(&args)
+        };
+        use mj_core::subagent::SubagentPolicy;
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(
+            parse(&["--subagents", "native"]).unwrap(),
+            Some(SubagentPolicy::Native)
+        );
+        assert_eq!(
+            parse(&["--subagents", "none"]).unwrap(),
+            Some(SubagentPolicy::None)
+        );
+        assert_eq!(
+            parse(&[
+                "--subagents",
+                "single-model",
+                "--subagent-model",
+                "model",
+                "--subagent-effort",
+                "high"
+            ])
+            .unwrap(),
+            Some(SubagentPolicy::SingleModel {
+                model: "model".into(),
+                effort: Some("high".into())
+            })
+        );
+        for args in [
+            &["--mj-subagents"][..],
+            &["--native-subagents"],
+            &["--subagents", "all-models"],
+            &["--subagents", "single-model"],
+            &["--subagents", "native", "--subagent-model", "model"],
+            &["--subagents", "native", "--subagent-effort", "high"],
+            &["--subagents", "none", "--subagent-model", "model"],
+            &["--subagents", "none", "--subagent-effort", "high"],
+        ] {
+            assert!(parse(args).is_err());
+        }
     }
 
     /// A turn the worker failed for going quiet has to say why, where a script

@@ -3,6 +3,7 @@ use crate::session_manager::{
     RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests, spawn_remote_session_manager,
 };
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
+use std::path::PathBuf;
 
 use mj_core::relay::{
     RELAY_EVENT_FORMAT_V1, RelayCommandOutcome, RelayOperationalState, relay_event_digest,
@@ -59,7 +60,7 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
         ..TurnReviewState::default()
     };
 
-    let seed = seed_from_session(&session, ReviewTier::Extended, &state, "manual");
+    let seed = seed_from_session(&session, &state, "manual");
     assert_eq!(seed.task, "also finish the parser error path");
     assert_eq!(
         seed.user_messages
@@ -83,7 +84,7 @@ fn seed_uses_the_latest_real_prompt_and_keeps_history_for_intent() {
     // A corrective-only pass still has no new user prompt, but retains the
     // latest real prompt as its current outer task.
     state.reviewed_through_ordinal = 5;
-    let corrective = seed_from_session(&session, ReviewTier::Extended, &state, "manual");
+    let corrective = seed_from_session(&session, &state, "manual");
     assert_eq!(corrective.task, "also finish the parser error path");
     assert_eq!(corrective.user_messages.len(), 3);
 }
@@ -250,9 +251,6 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
             repositories: Vec::new(),
         }),
         ReviewerAction::AdvanceBaseline { .. } => Ok(ReviewerOutcome::BaselineAdvanced),
-        ReviewerAction::TakeLaneDispatches => Ok(ReviewerOutcome::LaneDispatches {
-            requests: Vec::new(),
-        }),
         ReviewerAction::Attach { .. } => Ok(ReviewerOutcome::Attached(Box::new(
             crate::worker_client::RelayAttachment {
                 state: operational(),
@@ -327,7 +325,7 @@ fn view_of(
 /// reviewable. Staging answers with a launch config rather than copying a
 /// profile onto a target, so a whole review runs without one.
 struct FakeEnvironment {
-    staged: Mutex<Vec<(String, u64, bool)>>,
+    staged: Mutex<Vec<(String, u64)>>,
     /// The review bookkeeping, in memory rather than in the developer's
     /// own database.
     state: Mutex<TurnReviewState>,
@@ -428,7 +426,7 @@ impl FakeEnvironment {
             .clone()
     }
 
-    fn staged_roles(&self) -> Vec<(String, u64, bool)> {
+    fn staged_roles(&self) -> Vec<(String, u64)> {
         self.staged
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -502,13 +500,11 @@ impl ReviewEnvironment for FakeEnvironment {
         _session_id: &str,
         profile: &str,
         generation: u64,
-        mcp_servers: &[mj_core::worker_launch::ReviewMcpServer],
-        dispatch_tool: bool,
     ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String> {
         self.staged
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((profile.to_owned(), generation, dispatch_tool));
+            .push((profile.to_owned(), generation));
         Ok(mj_core::worker_launch::ReviewerLaunchConfig {
             profile_id: profile.to_owned(),
             harness: mj_core::config::HarnessKind::Claude,
@@ -521,7 +517,7 @@ impl ReviewEnvironment for FakeEnvironment {
             effort: None,
             fast_mode: None,
             generation,
-            mcp_servers: mcp_servers.to_vec(),
+            mcp_servers: Vec::new(),
         })
     }
 
@@ -717,7 +713,7 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
     let profile = profile.map(str::to_owned);
     Arc::new(move |_| ReviewConfig {
         enabled: true,
-        tier: ReviewTier::Quick,
+        tier: None,
         profile: profile.clone(),
         model: None,
         effort: None,
@@ -1127,7 +1123,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
         enabled: false,
-        tier: ReviewTier::Quick,
+        tier: None,
         profile: Some("reviewer".to_owned()),
         model: None,
         effort: None,
@@ -1791,9 +1787,15 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     let RelayCommand::Prompt { prompt } = command else {
         panic!("a reviewing role is prompted");
     };
+    let prompt = format!("{prompt:?}");
     assert!(
-        format!("{prompt:?}").contains("+one"),
-        "the reviewer is given the captured change"
+        prompt.contains("git -C /workspace/app diff --no-ext-diff base new"),
+        "the reviewer is given the captured tree diff command"
+    );
+    assert!(prompt.contains("1 file changed, 1 insertion(+)"));
+    assert!(
+        !prompt.contains("+one"),
+        "the captured patch body is not embedded in the prompt"
     );
     let _ = reply.send(Ok(ReviewerOutcome::Accepted { ordinal: 1 }));
 
@@ -1836,7 +1838,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
     let answer = agent_event(
         1,
         mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
-        "No findings.",
+        r#"{"findings":[],"overall_explanation":"No issues found."}"#,
     );
     let completion = completion_event(2, &answer.digest, &command_id);
     let through_digest = completion.digest.clone();
@@ -1870,13 +1872,11 @@ async fn a_clean_reviewer_report_resolves_the_review() {
         "closing removes the view and wakes surfaces"
     );
 
-    // The reviewer ran under the configured profile, and only the
-    // supervisor is ever given the tool that launches specialists.
+    // The reviewer ran under the configured profile.
     let staged = environment.staged_roles();
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].0, "reviewer");
     assert_ne!(staged[0].1, 0, "fresh reviewer generation");
-    assert!(!staged[0].2);
     // A resolved review records what it reviewed through, so the next one
     // measures from here.
     let recorded = environment.state();
@@ -1914,9 +1914,9 @@ fn elicitation_event(ordinal: u64, previous_digest: &str, id: &str, message: &st
     event
 }
 
-/// Opens a quick review of a one-line change and answers every step up to
+/// Opens a review of a one-line change and answers every step up to
 /// the reviewer's first journal poll, which is returned for the test.
-async fn open_a_quick_review_to_its_first_poll(
+async fn open_a_review_to_its_first_poll(
     manager: &mut FakeManager,
     host: &TurnReviewHost,
 ) -> oneshot::Sender<Result<ReviewerOutcome, String>> {
@@ -1972,7 +1972,7 @@ async fn a_reviewers_question_is_published_with_its_review() {
         armed(Some("reviewer")),
         environment.clone(),
     );
-    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let reply = open_a_review_to_its_first_poll(&mut manager, &host).await;
     let message = "claude-fable-5-1 declined this request (cyber). Retry with claude-opus-4-8?";
     let asked = elicitation_event(
         1,
@@ -2220,7 +2220,7 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
         armed(Some("reviewer")),
         environment.clone(),
     );
-    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    let _poll = open_a_review_to_its_first_poll(&mut manager, &old).await;
     old.shutdown().await.unwrap();
 
     let new = TurnReviewHost::spawn_in(
@@ -2240,11 +2240,16 @@ async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
     );
     for role in [
         mj_core::review::driver::REVIEWER_ROLE,
-        // An older worker may still run the removed quick-tier validator or
-        // the removed extended-tier intent analyst.
+        // An older worker may still run roles removed from the turn review.
         "validator",
         "intent",
-        mj_core::review::driver::SUPERVISOR_ROLE,
+        "supervisor",
+        "control_flow",
+        "duplication",
+        "error_handling",
+        "dead_code",
+        "tests",
+        "contracts",
     ] {
         assert!(
             paused.iter().any(|paused| paused == role),
@@ -2303,7 +2308,7 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
         armed(Some("reviewer")),
         environment.clone(),
     );
-    let reply = open_a_quick_review_to_its_first_poll(&mut manager, &host).await;
+    let reply = open_a_review_to_its_first_poll(&mut manager, &host).await;
     let asked = elicitation_event(
         1,
         mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
@@ -2365,7 +2370,7 @@ async fn a_review_the_worker_still_holds_continues_after_a_restart() {
         environment.clone(),
     );
     // The review prompts its reviewer, which the worker keeps running.
-    let _poll = open_a_quick_review_to_its_first_poll(&mut manager, &old).await;
+    let _poll = open_a_review_to_its_first_poll(&mut manager, &old).await;
     let command_id = format!("{}reviewer-1", mj_core::review::driver::COMMAND_ID_PREFIX);
     old.shutdown().await.unwrap();
 
@@ -2380,7 +2385,7 @@ async fn a_review_the_worker_still_holds_continues_after_a_restart() {
     let answer = agent_event(
         1,
         mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
-        "No findings.",
+        r#"{"findings":[],"overall_explanation":"No issues found."}"#,
     );
     let completion = completion_event(2, &answer.digest, &command_id);
     let journal = vec![answer, completion];
@@ -2545,7 +2550,7 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
     );
     assert!(
         prompt.contains("not independently verified"),
-        "a quick review's findings reach the primary as one reviewer's, unverified: {prompt}"
+        "the review's findings reach the primary as one reviewer's, unverified: {prompt}"
     );
     assert!(
         host.resolve(session, Resolution::Forwarded).await.is_err(),

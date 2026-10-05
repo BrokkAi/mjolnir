@@ -2174,7 +2174,6 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
                 role: "reviewer".into(),
                 request: question.clone(),
             }],
-            tier: mj_core::review::lanes::ReviewTier::Quick,
             phase: TurnReviewPhase::Running { roles: Vec::new() },
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),

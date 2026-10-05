@@ -684,7 +684,7 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
     let (mut config, state) = sample_config_state();
     config.review = mj_core::config::ReviewConfig {
         enabled: true,
-        tier: mj_core::review::lanes::ReviewTier::Extended,
+        tier: Some("extended".into()),
         profile: Some("reviewer-1".into()),
         model: Some("private-review-model".into()),
         effort: Some("private-review-effort".into()),
@@ -696,7 +696,6 @@ fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
         value.get("review_config"),
         Some(&serde_json::json!({
             "enabled": true,
-            "tier": "extended",
             "profile": "reviewer-1",
         }))
     );
@@ -763,6 +762,32 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
         vec!["/srv/builder"]
     );
     assert!(target("podman").recent_project_directories.is_empty());
+}
+
+#[test]
+fn public_snapshot_exposes_only_review_status_configuration() {
+    let (mut config, state) = sample_config_state();
+    config.review = mj_core::config::ReviewConfig {
+        enabled: true,
+        tier: Some("extended".into()),
+        profile: Some("reviewer-1".into()),
+        model: Some("private-review-model".into()),
+        effort: Some("private-review-effort".into()),
+    };
+
+    let value =
+        serde_json::to_value(ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
+
+    assert_eq!(
+        value.get("review_config"),
+        Some(&serde_json::json!({
+            "enabled": true,
+            "profile": "reviewer-1",
+        }))
+    );
+    let json = value.to_string();
+    assert!(!json.contains("private-review-model"));
+    assert!(!json.contains("private-review-effort"));
 }
 
 fn sample_elicitation() -> ElicitationRequest {
@@ -2685,8 +2710,57 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 }
 
-// A review the daemon is running reaches the phone whole: its tier, what
-// each reviewing agent is doing, and the findings to answer.
+/// A review reaches the phone with the single reviewer status and findings.
+#[test]
+fn a_running_review_projects_to_the_phone() {
+    use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
+    use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
+
+    let review = RuntimeReviewView {
+        session_id: "session-1".into(),
+        questions: Vec::new(),
+        phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
+            synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),
+            evidence: Default::default(),
+        }),
+        roles: vec![RoleStatus {
+            role: "reviewer".into(),
+            label: "Reviewer".into(),
+            state: RoleState::Findings,
+        }],
+        status: "Enter to act".into(),
+        verdict: Some(VerdictView {
+            kind: VerdictKind::Findings,
+            text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
+            allowed: vec![
+                Resolution::Forwarded,
+                Resolution::Dismissed,
+                Resolution::Cancelled,
+            ],
+        }),
+    };
+
+    let projected = ViewerTurnReview::from_runtime(&review);
+
+    assert_eq!(
+        projected
+            .roles
+            .iter()
+            .map(|role| (role.label.as_str(), role.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("Reviewer", "findings")]
+    );
+    assert!(
+        serde_json::to_value(&projected)
+            .unwrap()
+            .get("tier")
+            .is_none()
+    );
+    let verdict = projected.verdict.expect("a findings verdict travels");
+    assert_eq!(verdict.kind, "findings");
+    assert!(verdict.text.contains("unbounded retry"));
+    assert_eq!(verdict.allowed, vec!["forward", "dismiss", "cancel"]);
+}
 
 /// A phone can always cancel a review, and can only forward or dismiss one
 /// the daemon says is ready for it. The same gate runs in the daemon; this
@@ -2706,7 +2780,6 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
-        tier: "quick".into(),
         status: "the reviewer is reading the change…".into(),
         roles: Vec::new(),
         verdict: None,
@@ -2722,12 +2795,11 @@ fn resolving_a_review_is_gated_on_what_the_daemon_published() {
 
     // A failed review can be dismissed but has nothing to forward.
     snapshot.sessions[0].turn_review = Some(ViewerTurnReview {
-        tier: "quick".into(),
         status: "the review failed".into(),
         roles: Vec::new(),
         verdict: Some(ViewerReviewVerdict {
             kind: "failed".into(),
-            text: "bifrost exited with 1".into(),
+            text: "reviewer exited with 1".into(),
             allowed: vec!["dismiss".into(), "cancel".into()],
         }),
     });

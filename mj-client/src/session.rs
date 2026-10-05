@@ -92,7 +92,6 @@ pub enum ReviewerAction {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    TakeLaneDispatches,
 }
 
 impl ReviewerAction {
@@ -107,7 +106,6 @@ impl ReviewerAction {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
 }
@@ -116,21 +114,14 @@ impl ReviewerAction {
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerOutcome {
     Started(Box<StartedReviewer>),
-    Accepted {
-        ordinal: u64,
-    },
+    Accepted { ordinal: u64 },
     Attached(Box<RelayAttachment>),
     Acknowledged(RelayCursor),
     Status(Box<RelayOperationalState>),
     ElicitationResolved,
     Paused,
-    Delta {
-        repositories: Vec<RepoDelta>,
-    },
+    Delta { repositories: Vec<RepoDelta> },
     BaselineAdvanced,
-    LaneDispatches {
-        requests: Vec<mj_core::review::lanes::ReviewSubagentRequest>,
-    },
 }
 
 /// Preserve whether a submit failed before delivery or lost its acknowledgement.

@@ -109,9 +109,8 @@ use mj_core::worker_launch::{
 };
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
-/// Where the worker keeps one directory per reviewing role, inside
-/// [`REVIEWER_DIR`]. Each holds that role's own copy of the staged profile and
-/// its own relay journal.
+/// Per-role directories inside [`REVIEWER_DIR`], holding the role's private
+/// profile copy and relay journal.
 #[cfg(unix)]
 pub(crate) const REVIEWER_ROLES_DIR: &str = "roles";
 

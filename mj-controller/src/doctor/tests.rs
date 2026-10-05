@@ -166,13 +166,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         "ssh executable is unavailable",
     )))]);
     let missing_ssh_check = ssh_podman_limits_check("missing-ssh", &ssh, &missing_ssh);
-    let bifrost = FakeExecutor::new([Ok(output(format!(
-        "bifrost {}\n",
-        mj_review::bifrost::REQUIRED_BIFROST_VERSION
-    )))]);
-    let bifrost_check = bifrost_check_for(Path::new("/usr/local/bin/bifrost"), &bifrost);
-    assert_eq!(bifrost.commands.borrow()[0].args, ["--version"]);
-
     let mut config = Config::default();
     config.subagents.max_concurrent = 3;
     config
@@ -192,13 +185,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         },
     );
     let subagent_checks = subagent_eligibility_checks(Ok(&config));
-    let mut checks = vec![
-        aws_check,
-        docker_check,
-        podman_check,
-        missing_ssh_check,
-        bifrost_check,
-    ];
+    let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
     let mut rendered = Vec::new();

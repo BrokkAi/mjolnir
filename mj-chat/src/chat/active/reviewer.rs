@@ -419,10 +419,7 @@ impl ActiveChat {
         });
     }
 
-    /// Reads one reviewing role's journal from where its pane left off.
-    ///
-    /// Each role has its own relay, so each is polled on its own cursor; a
-    /// lane's transcript never arrives in the supervisor's pane.
+    /// Reads the reviewer's journal from where its pane left off.
     pub(crate) fn poll_turn_review_role(&self, role: &str) {
         self.poll_turn_review_role_after(role, Duration::ZERO);
     }
@@ -431,14 +428,14 @@ impl ActiveChat {
     ///
     /// An attach answers at once even when the journal has not moved, so a
     /// loop that re-attaches on every empty page is a spin. A review runs
-    /// several roles at once, so each idle role waits a beat before asking
+    /// review uses one role, so an idle journal waits a beat before asking
     /// again; a page that did carry events is followed up immediately, which
-    /// is what keeps a streaming answer smooth.
+    /// keeps a streaming answer smooth.
     pub(crate) fn poll_turn_review_role_after(&self, role: &str, delay: Duration) {
         let Some(review) = self.state.turn_review() else {
             return;
         };
-        let (after_ordinal, cursor_digest) = review.cursor(role);
+        let (after_ordinal, cursor_digest) = review.cursor();
         let after_digest = if cursor_digest.is_empty() {
             mj_core::relay::RELAY_EVENT_GENESIS_DIGEST.to_owned()
         } else {
@@ -471,7 +468,7 @@ impl ActiveChat {
         });
     }
 
-    /// Folds one reviewing role's events into its pane, and keeps reading.
+    /// Folds reviewer events into its pane, and keeps reading.
     ///
     /// Display only: the daemon reads the same journals to drive the review,
     /// and nothing here advances it. Two readers on one journal are safe --
@@ -496,21 +493,27 @@ impl ActiveChat {
         if let Some(review) = self.state.turn_review_mut()
             && !events.is_empty()
         {
-            review.pane(&role).apply_events(&session_id, &events);
+            review.pane().apply_events(&session_id, &events);
         }
         self.surface_reviewer_elicitations();
         if self.state.turn_review().is_none() {
-            self.reviewed_roles.remove(&role);
+            if self.reviewed_role.as_deref() == Some(role.as_str()) {
+                self.reviewed_role = None;
+            }
             return;
         }
-        if !self
-            .state
-            .turn_review()
-            .is_some_and(|review| review.role_is_active(&role))
-        {
-            // A verdict retains role rows for navigation, but their harnesses
-            // have already been paused and need no further journal attaches.
-            self.reviewed_roles.remove(&role);
+        let Some(review) = self.state.turn_review() else {
+            return;
+        };
+        if !review.view.roles.iter().any(|status| status.role == role) {
+            return;
+        }
+        if !review.role_is_active(&role) {
+            // A verdict keeps the reviewer row for context but needs no more
+            // journal attaches.
+            if self.reviewed_role.as_deref() == Some(role.as_str()) {
+                self.reviewed_role = None;
+            }
             return;
         }
         self.poll_turn_review_role_after(

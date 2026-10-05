@@ -28,8 +28,9 @@ const PTY_COLUMNS: usize = 80;
 /// A local-target fixture's launches wait in the daemon until this file
 /// exists.
 const LAUNCH_RELEASE: &str = "release-launch";
-/// A first-run fixture's prerequisite checks wait until this file exists.
-const DOCTOR_RELEASE: &str = "release-doctor";
+/// A first-run fixture's doctor check waits until this file exists.
+const FIRST_RUN_CHECK_RELEASE: &str = "release-first-run-check";
+const FIRST_RUN_CHECK_STARTED: &str = "first-run-check-started";
 
 /// Keep the terminal's current cells independently of the captured byte log.
 /// Ratatui can retain an unchanged space and move the cursor over it, so the
@@ -670,32 +671,35 @@ image = "ubuntu:24.04"
     if first_run {
         fs::write(
             config_root.join("hel/config.toml"),
-            "version = 14\n[phone]\nenabled = false\n",
+            "version = 14\n[phone]\nenabled = false\n\n[targets.podman]\nkind = \"podman\"\nmachine = \"local\"\nimage = \"ubuntu:24.04\"\n",
         )
         .unwrap();
+        let setup_state = storage.path().join("data/hel/setup-state");
+        fs::create_dir_all(setup_state.parent().unwrap()).unwrap();
+        fs::write(setup_state, b"pending\n").unwrap();
         let tools = storage.path().join("first-run-tools");
         fs::create_dir_all(&tools).unwrap();
         fs::create_dir_all(storage.path().join(".codex")).unwrap();
         fs::create_dir_all(storage.path().join(".claude")).unwrap();
         mj_core::test_hooks::install_fake_command(&tools, "codex", "#!/bin/sh\nexit 0\n");
-        // Make login checking visibly slower than dismissal, without real accounts.
+        mj_core::test_hooks::install_fake_command(&tools, "claude", "#!/bin/sh\nexit 1\n");
+        // Hold the doctor image check after setup completes, so the welcome
+        // remains interactive while the first-run checks are in progress.
         mj_core::test_hooks::install_fake_command(
             &tools,
-            "claude",
-            "#!/bin/sh\nif [ \"$1\" = auth ]; then exit 1; fi\nexit 0\n",
-        );
-        // The prerequisite checks end by asking Bifrost for its version, on
-        // every platform and in no other startup work. Waiting there until
-        // the test releases it keeps the checks running while the test
-        // dismisses the welcome, whatever the load. A Bifrost that fails is
-        // only a warning, which the welcome does not show.
-        mj_core::test_hooks::install_fake_command(
-            &tools,
-            "bifrost",
+            "podman",
             &format!(
-                "#!/bin/sh\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 1\n",
-                storage.path().join(DOCTOR_RELEASE).display()
+                "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'podman version 5.4.2' ;;\n  unshare) printf '         0       1000          1\\n         1     100000      65536\\n' ;;\n  image) : > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.05; done; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+                storage.path().join(FIRST_RUN_CHECK_STARTED).display(),
+                storage.path().join(FIRST_RUN_CHECK_RELEASE).display()
             ),
+        );
+        // Platform detection is part of first-run setup, and this fixture
+        // deliberately gives the child a restricted PATH.
+        mj_core::test_hooks::install_fake_command(
+            &tools,
+            "uname",
+            "#!/bin/sh\nprintf 'Linux x86_64\\n'\n",
         );
         for name in ["node", "npm"] {
             mj_core::test_hooks::install_fake_command(&tools, name, "#!/bin/sh\necho 24.0.0\n");
@@ -1357,11 +1361,11 @@ fn startup_wait_reports_a_child_exit_without_waiting_for_the_deadline() {
 }
 
 #[test]
-fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
+fn first_startup_discovers_both_agents_and_remains_usable_during_background_checks() {
     let mut fixture = spawn_dashboard_pty_with_setup(false, false, false, None, true);
-    // Declared after the fixture so that it drops first: the held checks
+    // Declared after the fixture so that it drops first: the held check
     // must finish before teardown, even when this fails.
-    let held_doctor = ReleaseOnDrop(fixture._storage.path().join(DOCTOR_RELEASE));
+    let held_check = ReleaseOnDrop(fixture._storage.path().join(FIRST_RUN_CHECK_RELEASE));
     let mut output = PtyOutput::new();
     wait_for_ready(
         fixture.child.child_mut(),
@@ -1369,14 +1373,16 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
         &mut output,
         b"Welcome to Mjolnir",
     );
-    // Results that arrive while the welcome is open are shown in it, and
-    // dismissing it dismisses them too. The held checks make sure this
-    // dismissal happens while they run.
-    wait_for_screen(
-        &mut fixture.master,
-        &mut output,
-        "Checking prerequisites\u{2026}".as_bytes(),
-        Instant::now() + STARTUP_TIMEOUT,
+    // The held authentication check runs in the background while the welcome
+    // is open. Wait for its marker before dismissing the welcome.
+    let check_started = fixture._storage.path().join(FIRST_RUN_CHECK_STARTED);
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !check_started.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        check_started.exists(),
+        "first-run authentication check did not start"
     );
     fixture.master.write_all(b"\r").unwrap();
     wait_for_output_until(
@@ -1386,12 +1392,12 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_doctor() {
         Instant::now() + TIMEOUT,
         None,
     );
-    drop(held_doctor);
+    drop(held_check);
     // Results that arrive after dismissal become failure notices.
     wait_for_screen(
         &mut fixture.master,
         &mut output,
-        b"mj login",
+        b"Podman image for target podman",
         Instant::now() + STARTUP_TIMEOUT,
     );
     let path = fixture._storage.path();

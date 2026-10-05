@@ -310,11 +310,10 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │☐ Automatic review                                                                            │
-  │Tier      Quick ▾                                                                             │
-  │          One general reviewer; the agent checks its findings as it fixes them.               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
@@ -322,8 +321,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.                            │
   │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

@@ -89,7 +89,7 @@ function snapshot() {
     profiles: [{ id: 'codex', harness_kind: 'codex' }],
     targets: [{ id: 'local', kind: 'local', requires_project_directory: false }],
     bundles: [{ id: 'bundle-1', primary_repository: null, repositories: [] }],
-    review_config: { enabled: false, tier: 'quick', profile: null },
+    review_config: { enabled: false, profile: null },
   };
 }
 

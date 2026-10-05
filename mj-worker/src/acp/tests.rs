@@ -301,9 +301,9 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                 spec.command = "/canonical/worker/hel".into();
                 spec.extra_mcp_servers = vec![
                     ReviewMcpServer {
-                        name: "mj-review".into(),
-                        command: "/worker/hel".into(),
-                        args: vec!["worker".into(), "review-mcp".into()],
+                        name: "mj-tools".into(),
+                        command: "tool-server".into(),
+                        args: vec![],
                     },
                     // A name resembling our namespace must not imply ownership.
                     ReviewMcpServer {
@@ -313,7 +313,7 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                     },
                 ]
                 .into_iter()
-                .map(|server| ReviewerMcpServer::new(server, Path::new("/worker")))
+                .map(ReviewerMcpServer::new)
                 .collect();
                 let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
                 for request in [
@@ -327,8 +327,12 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                     if harness == HarnessKind::Codex {
                         assert_eq!(servers.len(), 4);
                         for server in servers {
-                            let expected = (guardian && server["name"] != "mj-third-party")
-                                .then(|| serde_json::json!("approve"));
+                            let expected = (guardian
+                                && matches!(
+                                    server["name"].as_str(),
+                                    Some("mj-memory" | "mj-agents")
+                                ))
+                            .then(|| serde_json::json!("approve"));
                             assert_eq!(
                                 server.pointer("/_meta/codex/defaultToolsApprovalMode"),
                                 expected.as_ref(),
@@ -349,7 +353,6 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
                                     .iter()
                                     .map(|tool| format!("mcp__mj-agents__{tool}")),
                             );
-                            expected.push("mcp__mj-review__*".into());
                             assert_eq!(allowed, Some(&serde_json::json!(expected)), "{request}");
                         } else {
                             assert!(

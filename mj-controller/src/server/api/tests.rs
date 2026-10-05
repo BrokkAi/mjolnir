@@ -5011,7 +5011,6 @@ async fn review_status_reports_the_open_review_or_none() {
             .unwrap()
             .clone();
         session.turn_review = Some(crate::server::ViewerTurnReview {
-            tier: "quick".into(),
             status: "sending findings to the primary agent…".into(),
             roles: vec![crate::server::ViewerReviewRole {
                 label: "reviewer".into(),
@@ -5026,7 +5025,7 @@ async fn review_status_reports_the_open_review_or_none() {
         snapshot.sessions.push(session);
     });
     let body = json_body(app.clone().oneshot(get()).await.unwrap()).await;
-    assert_eq!(body["review"]["tier"], "quick");
+    assert!(body["review"].get("tier").is_none());
     assert_eq!(body["review"]["roles"][0]["state"], "findings");
     assert_eq!(body["review"]["verdict"]["kind"], "findings");
 
@@ -5080,7 +5079,6 @@ async fn resolving_a_review_sends_the_controller_action_or_explains_the_refusal(
             .unwrap()
             .clone();
         session.turn_review = Some(crate::server::ViewerTurnReview {
-            tier: "quick".into(),
             status: "the review failed: relay reviewer_start timed out after 300 seconds".into(),
             roles: Vec::new(),
             verdict: Some(crate::server::ViewerReviewVerdict {

@@ -173,11 +173,10 @@ pub enum RelayRequest {
     /// nested here, so the reviewer's conversation is journaled and replayed
     /// the same way the primary's is.
     Reviewer {
-        /// Which reviewing agent this is for. Absent means the default role,
-        /// which is the one plan review uses; a turn review in the extended
-        /// tier also names its supervisor, its intent analyst, and each
-        /// specialist lane. An older controller sends no role, and an older
-        /// worker ignores one, so the field is additive in both directions.
+        /// Which isolated reviewing agent this is for. Absent means the
+        /// default role shared by plan and turn review. Named roles let
+        /// background work such as settings discovery avoid that reviewer.
+        /// The field is additive for older workers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
         request: ReviewerRequest,
@@ -240,10 +239,6 @@ pub enum ReviewerRequest {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    /// Collect the specialist lanes the review supervisor asked for through
-    /// its MCP tool since the last time the controller asked. This request is
-    /// answered by the sidecar itself rather than by any one role.
-    TakeLaneDispatches,
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -297,7 +292,6 @@ impl ReviewerRequest {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
 }
@@ -541,10 +535,6 @@ pub enum RelayResponsePayload {
     },
     /// The review baselines now name the trees the controller sent.
     ReviewBaselineAdvanced,
-    /// Specialist lanes the review supervisor asked for.
-    LaneDispatches {
-        requests: Vec<crate::review::lanes::ReviewSubagentRequest>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

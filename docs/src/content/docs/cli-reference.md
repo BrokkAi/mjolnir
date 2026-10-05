@@ -103,7 +103,7 @@ mj import <harness> (--session <uuid> | --latest) [options]
 | `--allow-dirty` | Acknowledge that dirty Git roots will be archived in their complete current state. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Review every turn of the imported session with that model, effort or tier, as `mj new` does. |
+| `--review-model <name>`, `--review-effort <name>`, `--review-tier quick\|extended` | Review every turn of the imported session with that model or effort. The deprecated tier flag still accepts either value and enables automatic review, but its value is ignored. |
 | `--no-review` | Do not review the imported session's turns automatically. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
@@ -272,10 +272,12 @@ cannot be combined with a session that runs directly in the selected directory.
   `--native-subagents` flags are no longer accepted.
 - `mj new --review-model <name>`, `--review-effort <name>` and
   `--review-tier quick|extended` review every turn of the new session with
-  that model, effort or tier, even when `[review]` is off. `--no-review` turns
-  off automatic review for the session, even when `[review]` is on; `/review`
-  still works. `mj import <harness>` takes the same four flags for the session
-  it adopts. See [per-session settings](/turn-review/#per-session-settings).
+  that model or effort, even when `[review]` is off. The deprecated tier flag
+  still accepts either value and enables automatic review, but its value is
+  ignored. `--no-review` turns off automatic review for the session, even when
+  `[review]` is on; `/review` still works. `mj import <harness>` takes the same
+  flags for the session it adopts. See
+  [per-session settings](/turn-review/#per-session-settings).
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
   that host, else 8 CPUs and 32 GiB, capped at the host's totals.
@@ -411,7 +413,7 @@ reviewer, as `/review` does in Prompt. It answers once the review has opened,
 which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
-review's tier, status, reviewing roles, and verdict, or `no review is open`.
+review's status, reviewer role, and verdict, or `no review is open`.
 `mj review dismiss` and `mj review cancel` close the open review, for example a
 failed one, so another can start; `mj review forward` retries a forward the
 primary refused. See [turn review](/turn-review/).
@@ -480,7 +482,6 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `MJ_DESKTOP_BINARY` | Explicit `mj-desktop` executable used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Explicit controller executable used by companion launchers. |
 | `MJ_VOICE_WORKER` | Explicit local voice-worker executable. |
-| `MJ_BIFROST_BIN` | Set on the daemon (`MJ_BIFROST_BIN=/path/to/bifrost mj daemon restart`), not in a profile. The daemon starts each reviewing agent's Bifrost code-navigation server with it; the path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. It needs Bifrost 0.12.0 or later, and `mj doctor` warns when the Bifrost on this machine is older. |
 | `CODEX_HOME` | Codex home used by setup discovery and native import. |
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |
 | `KIMI_CODE_HOME` | Kimi Code home used by setup discovery and native import. |

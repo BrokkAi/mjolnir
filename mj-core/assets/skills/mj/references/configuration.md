@@ -335,7 +335,6 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 enabled = true
-tier = "quick"
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -344,15 +343,14 @@ profile = "reviewer"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without a review prompt. |
-| `tier` | string enum | no | `"quick"` | `quick` or `extended`. |
+| `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Main-reviewer override for a named profile. Auto uses fixed model-family defaults; specialist lanes use provider-specific overrides. |
-| `effort` | string | no | unset (harness default) | Main-reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
+| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
 
-These settings also select the plan second-opinion reviewer. Auto prefers another provider, falling back to another profile or the primary profile when needed. The
-quick tier runs one general reviewer and validates reported findings. Extended
-review may add intent analysis, a supervisor, and specialist lanes. See
-[Independent turn review](/turn-review/).
+These settings also select the plan second-opinion reviewer. Auto prefers
+another provider, falling back to another profile or the primary profile when
+needed. Turn review uses one reviewer. See [Independent turn review](/turn-review/).
 
 `mj new --review-model <model>` and `--review-effort <effort>` review every turn
 of one new session with that model or effort, even when `enabled` is false. In
@@ -360,6 +358,11 @@ Auto, Mjolnir picks the first enabled profile that offers the model.
 `mj new --no-review` turns off automatic review for one session, even when
 `enabled` is true; `/review` still works. Sessions created without these flags
 follow `[review]`.
+
+The deprecated `mj new --review-tier quick|extended` option still accepts
+either value and enables automatic review for that session, but the value is
+ignored. `mj import <harness>` accepts the same compatibility option. Existing
+`tier` values in session settings are also ignored.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -974,7 +977,6 @@ tailscale_detect = true
 
 [review]
 enabled = false
-tier = "quick"
 profile = "claude-review"
 
 [profiles.codex-work]
@@ -1021,7 +1023,6 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
-| `MJ_BIFROST_BIN` | Path or command name of the Bifrost that turn review runs. Set it on the daemon; the daemon passes it to each new session's worker (a profile's `[environment]` table does not reach the review). The path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. `mj doctor` checks its version. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
 | `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |

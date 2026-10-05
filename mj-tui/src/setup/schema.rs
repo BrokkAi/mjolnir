@@ -17,7 +17,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
-            json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
+            json!({"enabled":false,"profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
         "jev" => json!({"enabled":true}),
@@ -256,7 +256,6 @@ pub(super) fn label(key: &str) -> String {
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
         "tls_key" => "TLS private key file",
-        "tier" => "Review depth",
         "model" => "Review model",
         "effort" => "Review effort",
         "image" => "Container image",
@@ -432,16 +431,9 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] != Value::Bool(true) {
                 "Off".to_owned()
             } else {
-                // An unset depth is the default one, and an unset profile is
-                // Auto, which picks a reviewer when each review starts.
-                let tier = match &section["tier"] {
-                    Value::Null => Value::String("quick".to_owned()),
-                    tier => tier.clone(),
-                };
-                let tier = choice_label(&["tier".to_owned()], &tier, draft);
                 match section["profile"].as_str() {
-                    Some(profile) => format!("{tier} · {profile}"),
-                    None => format!("{tier} · Auto · picks by quota"),
+                    Some(profile) => profile.to_owned(),
+                    None => "Auto · picks by quota".to_owned(),
                 }
             }
         }
@@ -561,8 +553,6 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
         "podman-volume" => "Managed volume",
         "container-layer" => "Inside the container",
         "host-helper" => "Custom storage helper",
-        "quick" => "Quick",
-        "extended" => "Extended",
         "public-dns" => "Public DNS name",
         "public-ip" => "Public IP address",
         "private-dns" => "Private DNS name",
@@ -583,7 +573,6 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "symbols" => &["unicode", "ascii"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
-        "tier" => &["quick", "extended"],
         "permissions" => &["guardian", "yolo"],
         "pull_policy" => &["auto", "always", "newer", "missing", "never"],
         "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],

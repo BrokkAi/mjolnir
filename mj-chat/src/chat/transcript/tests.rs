@@ -3566,7 +3566,6 @@ fn golden_conversation_title() {
     let mut view = RuntimeReviewView {
         session_id: "session".to_owned(),
         questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
         status: "starting the reviewer".to_owned(),
