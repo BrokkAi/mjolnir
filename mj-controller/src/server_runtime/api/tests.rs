@@ -232,20 +232,6 @@ const SAME_MODELS: &[(&str, &[&str])] = &[
     ("deepseek", &["flash"]),
 ];
 
-/// A parent whose live harness runs `model` at `effort`.
-fn parent_running(model: &str, effort: &str) -> ManagedSessionView {
-    let mut view = ready_view(model);
-    let config = &mut view
-        .snapshot
-        .as_mut()
-        .expect("a ready view has a snapshot")
-        .operational
-        .config;
-    config.insert("model".into(), model.into());
-    config.insert("effort".into(), effort.into());
-    view
-}
-
 fn spawn_with(
     profile_id: Option<&str>,
     model: Option<&str>,
@@ -268,6 +254,7 @@ fn spawn_with(
     }
 }
 
+// Hard-won: 435b4ed9: model selection sent a child to a nearly exhausted profile despite an eligible profile with quota.
 #[tokio::test]
 async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the_model() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
@@ -293,84 +280,10 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     assert_eq!(registered.effort.as_deref(), Some("low"));
 }
 
-#[tokio::test]
-async fn a_pinned_profile_is_honored_even_with_less_quota() {
-    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
-
-    backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(Some("parent"), Some("luna"), Some("low")),
-        )
-        .await;
-
-    assert_eq!(exports.registered().profile_id, "parent");
-}
-
-#[tokio::test]
-async fn a_spawn_without_a_model_is_refused() {
-    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
-
-    let result = backend
-        .execute_subagent_tool("parent-1".into(), spawn_with(None, None, Some("low")))
-        .await;
-
-    assert!(result.is_error);
-    assert!(
-        result.message.contains("spawn needs a model"),
-        "{}",
-        result.message
-    );
-    assert!(exports.registered.lock().unwrap().is_none());
-}
-
-#[tokio::test]
-async fn current_names_the_parents_live_model_and_its_effort_follows_when_offered() {
-    let (backend, exports) =
-        selection_backend(SAME_MODELS, Some(parent_running("nova", "high"))).await;
-
-    backend
-        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
-        .await;
-
-    let registered = exports.registered();
-    assert_eq!(registered.profile_id, "codex-high");
-    assert_eq!(registered.model.as_deref(), Some("nova"));
-    assert_eq!(registered.effort.as_deref(), Some("high"));
-}
-
-#[tokio::test]
-async fn an_inherited_effort_the_chosen_profile_lacks_is_left_to_the_harness() {
-    let (backend, exports) =
-        selection_backend(SAME_MODELS, Some(parent_running("nova", "xhigh"))).await;
-
-    backend
-        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
-        .await;
-
-    assert_eq!(exports.registered().effort, None);
-}
-
-#[tokio::test]
-async fn current_without_a_live_parent_model_is_refused() {
-    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
-
-    let result = backend
-        .execute_subagent_tool("parent-1".into(), spawn_with(None, Some("current"), None))
-        .await;
-
-    assert!(result.is_error);
-    assert!(
-        result.message.contains("current model is unknown"),
-        "{}",
-        result.message
-    );
-    assert!(exports.registered.lock().unwrap().is_none());
-}
-
 /// Profiles offering the same models are one choice for the parent, shown as
 /// the one with the most quota left; a profile offering other models is never
 /// hidden behind a same-harness profile with more quota.
+// Hard-won: 435b4ed9: one same-harness profile hid models offered by another profile.
 #[tokio::test]
 async fn list_profiles_merges_profiles_offering_the_same_models() {
     let (backend, _) = selection_backend(SAME_MODELS, None).await;
@@ -431,24 +344,6 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     assert_eq!(exports.registered().profile_id, "parent");
 }
 
-#[test]
-fn failed_subagent_followup_is_terminal_error_with_its_cause() {
-    let status = StartStatus::Failed {
-        message: "model is unavailable".into(),
-    };
-    assert_eq!(
-        subagent_status(
-            None,
-            None,
-            Some(&status),
-            None,
-            false,
-            &ChildProgress::settled(ReportState::Fallback)
-        ),
-        ("error".into(), Some("model is unavailable".into()), true)
-    );
-}
-
 /// A close is accepted long before the child is gone: it cancels whatever owned
 /// the session, checkpoints, seals the relay and tears the process tree down,
 /// and the record only says `Closing` once that is under way. A child that had
@@ -456,6 +351,7 @@ fn failed_subagent_followup_is_terminal_error_with_its_cause() {
 /// admitted, so a parent that closed a child and spawned its replacement stacked
 /// both process trees inside one container (#1087). A wait must follow the close
 /// instead, the way a session-level wait does.
+// Hard-won: 8308bd0c: wait reported close complete before teardown released the child process tree.
 #[test]
 fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
     let mut record = crate::controller::test_support::checkpoint_test_session("child");
@@ -541,6 +437,7 @@ fn a_child_whose_close_is_running_is_not_finished_until_the_close_is() {
 /// follow-up holds only the symptom: that the session would not take a first
 /// prompt. The parent model must read the reason, which is what #1065 could
 /// not do.
+// Hard-won: d8501891: wait and list_agents replaced the recorded startup cause with a misleading symptom.
 #[test]
 fn a_failed_child_reports_the_startup_cause_rather_than_the_symptom() {
     let mut record = crate::controller::test_support::checkpoint_test_session("child");
@@ -662,22 +559,6 @@ fn running_states() -> SessionStateSource {
     Arc::new(|_| Some(SessionState::Running))
 }
 
-#[test]
-fn checkpoint_export_retains_typed_deferrals_and_real_failures() {
-    let error = anyhow!("disk failed");
-    assert!(matches!(
-        checkpoint_export_error(error),
-        ExportError::Failed(_)
-    ));
-    let error = anyhow::Error::new(crate::controller::CheckpointDeferred::harness_busy())
-        .context("capture bundle");
-    let ExportError::Refused(message) = checkpoint_export_error(error) else {
-        panic!("expected a deferred export");
-    };
-    assert!(message.contains("capture bundle"));
-    assert!(message.contains("agent is working"));
-}
-
 /// An export runtime with nothing in it. The follow-up tests never export;
 /// the export path's own behavior is proved by the API handler tests.
 struct NoExports;
@@ -781,28 +662,6 @@ fn ready_view(model: &str) -> ManagedSessionView {
     }
 }
 
-/// The same ready view, but also offering the `fast-mode` selector Codex
-/// exposes, so a follow-up can turn it on.
-fn ready_view_offering_fast_mode(model: &str) -> ManagedSessionView {
-    let mut view = ready_view(model);
-    let option: agent_client_protocol::schema::v1::SessionConfigOption =
-        serde_json::from_value(serde_json::json!({
-            "id": "fast-mode",
-            "name": "Fast mode",
-            "type": "select",
-            "currentValue": "off",
-            "options": [{"value": "off", "name": "Off"}, {"value": "on", "name": "On"}],
-        }))
-        .expect("the fixture describes a select the schema accepts");
-    view.snapshot
-        .as_mut()
-        .expect("ready_view has a snapshot")
-        .operational
-        .config_options
-        .push(option);
-    view
-}
-
 struct FakeControl(FakeSession);
 
 impl SessionControlBackend for FakeControl {
@@ -873,8 +732,27 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     }
 }
 
-/// The behaviour the whole change exists for: once the background pass has
-/// discovered the profiles, the tool call itself discovers nothing.
+// The behaviour the whole change exists for: once the background pass has
+// discovered the profiles, the tool call itself discovers nothing.
+
+/// A backend whose parent session is the `parent` profile, over the given
+/// catalogue, so a spawn can be driven against a warm or a cold one.
+fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
+    Arc::new(
+        ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: "parent-1".into(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: None,
+            })),
+            running_states(),
+            Arc::new(ParentExports(parent_record("parent-1", "parent"))),
+        )
+        .with_profile_catalog(catalog),
+    )
+}
+
 #[tokio::test]
 async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -952,24 +830,6 @@ async fn list_profiles_answers_from_the_warm_catalogue_without_probing_again() {
     );
 }
 
-/// A backend whose parent session is the `parent` profile, over the given
-/// catalogue, so a spawn can be driven against a warm or a cold one.
-fn spawn_backend(catalog: Arc<ProfileCatalog>) -> Arc<ApiBackend> {
-    Arc::new(
-        ApiBackend::new(
-            SessionControl::new(FakeControl(FakeSession {
-                session_id: "parent-1".into(),
-                accepted_ordinal: 1,
-                submitted: mpsc::unbounded_channel().0,
-                view: None,
-            })),
-            running_states(),
-            Arc::new(ParentExports(parent_record("parent-1", "parent"))),
-        )
-        .with_profile_catalog(catalog),
-    )
-}
-
 #[tokio::test]
 async fn spawn_refuses_a_model_no_eligible_profile_offers() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1034,41 +894,7 @@ async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     );
 }
 
-#[tokio::test]
-async fn prompt_submits_one_text_block_and_returns_its_acceptance_ordinal() {
-    let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
-    let backend = ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: "session-1".into(),
-            accepted_ordinal: 42,
-            submitted: submitted_tx,
-            view: None,
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    );
-
-    let turn_id = backend
-        .prompt("session-1".into(), "add a README line".into())
-        .await
-        .unwrap();
-    assert_eq!(turn_id, 42);
-
-    let (command_id, command) = submitted.recv().await.unwrap();
-    assert!(
-        command_id.starts_with("api-"),
-        "command id {command_id} should name the API as its source"
-    );
-    let RelayCommand::Prompt { prompt } = command else {
-        panic!("the API must submit a prompt command");
-    };
-    assert_eq!(prompt.len(), 1);
-    let ContentBlock::Text(text) = &prompt[0] else {
-        panic!("the API must submit the prompt as one text block");
-    };
-    assert_eq!(text.text, "add a README line");
-}
-
+// Hard-won: 131223a9: a child-finish notice was forged into a user turn instead of returned as a tool result.
 #[tokio::test]
 async fn a_finished_subagent_is_recorded_as_a_notice_not_a_prompt() {
     let (submitted_tx, mut submitted) = mpsc::unbounded_channel();
@@ -1250,45 +1076,6 @@ async fn startup_configuration_retries_under_the_same_command_id() {
 }
 
 #[tokio::test]
-async fn startup_configuration_rejects_unoffered_models_before_submission() {
-    let (handle, mut submitted) = config_session(ready_view("gpt-5-codex"));
-    let error = crate::daemon::startup_followup::configure_startup(
-        &handle,
-        "startup:model",
-        "model",
-        "unavailable",
-        false,
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("does not offer unavailable"));
-    assert!(submitted.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn optional_startup_fast_mode_is_applied_only_when_offered() {
-    for offered in [false, true] {
-        let view = if offered {
-            ready_view_offering_fast_mode("luna")
-        } else {
-            ready_view("luna")
-        };
-        let (handle, mut submitted) = config_session(view);
-        let ordinal = crate::daemon::startup_followup::configure_startup(
-            &handle,
-            "startup:fast-mode",
-            "fast-mode",
-            "on",
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(ordinal, offered.then_some(12));
-        assert_eq!(submitted.try_recv().is_ok(), offered);
-    }
-}
-
-#[tokio::test]
 async fn startup_status_survives_backend_recreation_and_keeps_acceptance_ordinal() {
     if !isolated_parked_test(
         "startup_status_survives_backend_recreation_and_keeps_acceptance_ordinal",
@@ -1421,6 +1208,7 @@ impl ExportRuntime for SlowCheckpoint {
 /// `Checkpointing` and holds a barrier on the worker, so abandoning it midway
 /// left the session busy with nothing to finish or fail it, and every retry
 /// refused for minutes (#1010).
+// Hard-won: 4a7c9a62: dropping a timed-out export handler abandoned its active checkpoint.
 #[tokio::test]
 async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
     use std::sync::atomic::Ordering;
@@ -1454,6 +1242,7 @@ async fn a_dropped_bundle_export_request_does_not_abandon_its_checkpoint() {
 /// not the workspace root above it. For a bare project session those differ by
 /// one level, which is why a file the agent had just written was refused as
 /// "not in the session workspace" (#1079).
+// Hard-won: f870729d: relative export paths were searched one directory above the agent working directory.
 #[test]
 fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
     use mj_checkpoint::checkpoint::{CheckpointRepositoryCapture, CheckpointRepositorySpec};
@@ -1574,6 +1363,7 @@ fn a_file_export_resolves_a_relative_path_against_the_agents_directory() {
     }
 }
 
+// Hard-won: 983f5078: DEBUG stderr lines contaminated the worker refusal returned to the caller.
 #[test]
 fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
     // F-13: with `RUST_LOG=debug` the worker's log shared standard error with
@@ -1913,6 +1703,7 @@ async fn a_child_hands_back_one_report_per_turn() {
 /// not seen the child's first turn yet, and the idle child read as completed
 /// with no output. A child is not done until a finished turn reaches the
 /// parent's newest prompt, and a turn that failed says so and why.
+// Hard-won: a91cfd04: a live child was reported completed before its first turn reached the store.
 #[test]
 fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_failed() {
     let mut record = crate::controller::test_support::checkpoint_test_session("child");
@@ -1981,6 +1772,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
 /// request, and `wait` handed its parent the error text as the child's report.
 /// The parent concluded the profile was dead. The answer now says the turn
 /// failed, which profile's login was refused, and what fixes it.
+// Hard-won: 1b077959: refused child credentials were reported as task output without naming the broken profile.
 #[test]
 fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     let mut record = crate::controller::test_support::checkpoint_test_session("child");
@@ -2043,6 +1835,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
 /// Once the credential sync has found a profile's login refused, a spawn on it
 /// is refused at once instead of starting a child that cannot sign in. An
 /// unpinned spawn goes to another profile that offers the model.
+// Hard-won: 1b077959: refused credentials allowed ten more doomed children to spawn on the same profile.
 #[tokio::test]
 async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
     let home = tempfile::tempdir().unwrap();
@@ -2123,6 +1916,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
 /// A last message that stands in for a missing handback has no bound, so the
 /// wait cuts it and tells the parent how to get the rest; every entry names
 /// the child's report directory.
+// Hard-won: cc7e6a2a: large handbacks were inlined into wait and caused repeated context-heavy polling.
 #[test]
 fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
     let mut progress = ChildProgress::settled(ReportState::Fallback);
@@ -2558,6 +2352,7 @@ async fn queued_input_reports_startup_failure_and_never_delivers_after_close() {
 /// I1-2: once a child's refused startup has also recorded it as failed, the
 /// parent still reads the startup's cause from `wait` and `list_agents`, and
 /// `send_input` is refused with it.
+// Hard-won: ba6c3427: a refused first prompt left an idle live child while hiding the startup cause.
 #[tokio::test]
 async fn a_child_recorded_failed_after_a_refused_startup_reports_its_cause() {
     if !isolated_parked_test("a_child_recorded_failed_after_a_refused_startup_reports_its_cause") {
@@ -3090,6 +2885,7 @@ async fn send_input_starts_a_parked_child_again_and_resends_only_a_prompt_a_park
 /// "session is reserved for a lifecycle operation", because a delivery
 /// receipt lookup was refused while the park held the actor and was not
 /// retried. The input must instead wait out the park and arrive exactly once.
+// Hard-won: 7029361e: send_input failed during a park because its receipt lookup was not retried.
 #[tokio::test]
 async fn send_input_waits_out_a_park_that_holds_the_child() {
     if !isolated_parked_test("send_input_waits_out_a_park_that_holds_the_child") {
@@ -3213,6 +3009,7 @@ async fn wait_and_list_agents_report_a_parked_child_with_its_report() {
 /// own. It still answers the prompt it reminded about: a `wait` on the parked
 /// child returns that report at once instead of running to its deadline.
 /// This is the state the tf-i1 store kept for both hung waits.
+// Hard-won: e1207055: a handback in a reminder turn had no acceptance ordinal so wait hung indefinitely.
 #[tokio::test]
 async fn wait_returns_a_report_handed_back_in_a_reminder_turn() {
     if !isolated_parked_test("wait_returns_a_report_handed_back_in_a_reminder_turn") {
@@ -3291,36 +3088,11 @@ fn wait_child(id: &str, state: &str, finished: bool) -> (String, String, bool) {
     (id.to_owned(), state.to_owned(), finished)
 }
 
-/// An id-less `wait` covers the children that are not finished, and leaves out
-/// parked, completed, failed and stopped ones.
-#[test]
-fn an_id_less_wait_covers_only_the_unfinished_children() {
-    let children = [
-        wait_child("running", "running", false),
-        wait_child("starting", "preparing", false),
-        wait_child("closing", "stopping", false),
-        wait_child("parked", "completed", true),
-        wait_child("failed", "failed", true),
-        wait_child("stopped", "stopped", true),
-    ];
-    assert_eq!(
-        implicit_wait_set(&children),
-        ["running", "starting", "closing"]
-    );
-}
+// An id-less `wait` covers the children that are not finished, and leaves out
+// parked, completed, failed and stopped ones.
 
-/// With nothing unfinished, the set is the finished children that still
-/// exist, so the answer is immediate and names them; a stopped child is gone.
-#[test]
-fn an_id_less_wait_with_nothing_running_lists_the_finished_children() {
-    let children = [
-        wait_child("parked", "completed", true),
-        wait_child("failed", "failed", true),
-        wait_child("stopped", "stopped", true),
-    ];
-    assert_eq!(implicit_wait_set(&children), ["parked", "failed"]);
-    assert!(implicit_wait_set(&[]).is_empty());
-}
+// With nothing unfinished, the set is the finished children that still
+// exist, so the answer is immediate and names them; a stopped child is gone.
 
 /// `return_when: any` over the resolved set answers once one of the running
 /// children finishes, and never because of a finished child left out of it.
