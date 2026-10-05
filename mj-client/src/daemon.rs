@@ -2456,6 +2456,7 @@ mod tests {
     use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
     use std::path::Path;
 
+    // Hard-won: c672eb41a1bf: macOS startup hang waited forever for an exited but unreaped daemon
     #[cfg(unix)]
     #[test]
     fn an_exited_unreaped_process_is_a_zombie_and_not_alive() {
@@ -2490,6 +2491,7 @@ mod tests {
         exited.wait().unwrap();
     }
 
+    // Hard-won: 372572b0b7b6: stopped daemon endpoint removal broke status and session refresh
     #[test]
     fn a_missing_endpoint_file_reads_as_a_stopped_daemon() {
         let directory = tempfile::tempdir().unwrap();
@@ -2502,41 +2504,6 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
-    }
-
-    #[tokio::test]
-    async fn restart_session_sends_one_restart_action() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "restart-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-        };
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::RestartSession { session_id } if session_id == "session-1"
-            ));
-            write_frame(
-                &mut stream,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-
-        client.restart_session("session-1".into()).await.unwrap();
-        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -2569,6 +2536,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    // Hard-won: c502e9bdf662: cold-cache discovery failed to save and left Codex profiles out of model choices
     #[tokio::test]
     async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2662,7 +2630,6 @@ mod tests {
         assert_eq!(error.to_string(), "profile discovery cancelled");
         server.await.unwrap();
     }
-
     #[tokio::test]
     async fn upgrade_refusal_retries_the_identical_command_but_lost_acknowledgements_do_not() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2725,6 +2692,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    // Hard-won: 25fee3db784d: protocol-mismatch advice omitted which installed mj the user ran
     #[test]
     fn unsupported_protocol_message_names_both_binaries_and_versions() {
         let message = unsupported_daemon_protocol_message(

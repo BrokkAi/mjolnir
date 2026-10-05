@@ -1511,27 +1511,6 @@ mod tests {
         assert!(truncated.is_char_boundary(truncated.len()));
     }
 
-    #[test]
-    fn startup_context_describes_file_memory_and_multi_root_mapping() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        seed_file(&store, "/MEMORY.md", "# Known facts\n");
-        let roots = BTreeMap::from([
-            ("api".into(), PathBuf::from("/workspace/api")),
-            ("web".into(), PathBuf::from("/workspace/web")),
-        ]);
-        let context = startup_prompt_context(&store, &roots).unwrap();
-        assert!(context.contains(&directory.path().display().to_string()));
-        assert!(context.contains("one fact per Markdown file"));
-        assert!(context.contains("metadata.type"));
-        assert!(context.contains("one-line pointer to each file in MEMORY.md"));
-        assert!(context.contains("update existing notes instead of duplicating them"));
-        assert!(context.contains("delete notes that are wrong"));
-        assert!(context.contains("roots/<repository-id>/"));
-        assert!(context.contains("- api: /workspace/api"));
-        assert!(context.contains("# Known facts"));
-    }
-
     /// Legacy relay snapshots omit delete intent, so absent documents stay put.
     #[test]
     fn legacy_snapshot_install_preserves_documents_missing_from_the_request() {

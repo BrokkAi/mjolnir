@@ -1,0 +1,24 @@
+=== HTTPS remote (1 setup summary) ===
+repository prompt: BrokkAi/hel
+setup summary: Project: BrokkAi/hel.
+=== SSH remote (1 setup summary) ===
+repository prompt: BrokkAi/hel
+setup summary: Project: BrokkAi/hel.
+=== SSH URL (1 setup summary) ===
+repository prompt: BrokkAi/hel
+setup summary: Project: BrokkAi/hel.
+=== non-GitHub remote (1 setup summary) ===
+repository prompt: <none>
+setup summary: <no project line>
+=== shared executor success (1 setup summary) ===
+probe: git -C <working-directory> remote get-url origin
+repository prompt: BrokkAi/hel
+setup summary: Project: BrokkAi/hel.
+=== shared executor failure (1 setup summary) ===
+probe: command failed
+repository prompt: <none>
+setup summary: <no project line>
+=== shared executor unavailable (1 setup summary) ===
+probe: no result
+repository prompt: <none>
+setup summary: <no project line>

@@ -1,0 +1,303 @@
+=== small question pane keeps the focused custom answer and actions (60x6) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
+│Question 1                                                │
+│> custom draft                                            │
+│  Submit all     Skip     Cancel                          │
+│Text 1–1/4 · PgUp/PgDn or wheel scroll · Space toggle · En│
+╰──────────────────────────────────────────────────────────╯
+focused value=[Multi({}), Text(TextInput { value: "custom draft", cursor: 12, kill_buffer: "", chain_kill: false, max_chars: None, filter: Any, multiline: false, preferred_column: None, history: None })]
+
+=== plan review before scrolling (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│plan-line-04                                                                                      │
+│plan-line-05                                                                                      │
+│plan-line-06                                                                                      │
+│plan-line-07                                                                                      │
+│plan-line-08                                                                                      │
+│plan-line-09                                                                                      │
+│plan-line-10                                                                                      │
+│plan-line-11                                                                                      │
+│plan-line-12                                                                                      │
+│plan-line-13                                                                                      │
+│plan-line-14                                                                                      │
+│plan-line-15                                                                                      │
+│plan-line-16                                                                                      │
+│plan-line-17                                                                                      │
+│plan-line-18                                                                                      │
+│plan-line-19                                                                                      │
+│plan-line-20                                                                                      │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Text 1–21/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+focus index=0
+
+=== plan review after paging to the end (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-59                                                                                      │
+│plan-line-60                                                                                      │
+│plan-line-61                                                                                      │
+│plan-line-62                                                                                      │
+│plan-line-63                                                                                      │
+│plan-line-64                                                                                      │
+│plan-line-65                                                                                      │
+│plan-line-66                                                                                      │
+│plan-line-67                                                                                      │
+│plan-line-68                                                                                      │
+│plan-line-69                                                                                      │
+│plan-line-70                                                                                      │
+│plan-line-71                                                                                      │
+│plan-line-72                                                                                      │
+│plan-line-73                                                                                      │
+│plan-line-74                                                                                      │
+│plan-line-75                                                                                      │
+│plan-line-76                                                                                      │
+│plan-line-77                                                                                      │
+│plan-line-78                                                                                      │
+│plan-line-79                                                                                      │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Text 60–80/80 · PgUp/PgDn or wheel scroll · Space toggle · Enter answer · Alt+←/→ questions       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+focus index=0
+
+=== boolean checkbox click (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Architecture                                                                                      │
+│                                                                                                  │
+│Choose an architecture                                                                            │
+│☑ Yes                                                                                             │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+field value=Boolean(true)
+
+=== boolean field title click (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│Architecture                                                                                      │
+│                                                                                                  │
+│Choose an architecture                                                                            │
+│☑ Yes                                                                                             │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+field value=Boolean(true)
+
+=== plan review implement option selected (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│● Implement                                                                                       │
+│    Approve and continue                                                                          │
+│○ Revise                                                                                          │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== revise option exposes inline feedback (100x30) ===
+╭ × Question 1/1 · 1 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│○ Implement                                                                                       │
+│● Revise                                                                                          │
+│    Describe what the agent should change                                                         │
+│>                                                                                                 │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== revise submits its feedback with the selected action (100x30) ===
+╭ × Question 1/1 · 0 unanswered ───────────────────────────────────────────────────────────────────╮
+│plan-line-00                                                                                      │
+│plan-line-01                                                                                      │
+│plan-line-02                                                                                      │
+│plan-line-03                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│1/1  Architecture (required)                                                                      │
+│○ Implement                                                                                       │
+│● Revise                                                                                          │
+│    Describe what the agent should change                                                         │
+│> add a regression test                                                                           │
+│  Submit all     Skip     Cancel                                                                  │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+action: Some(Accept { content: {"feedback": String("add a regression test"), "question_0": String("revise")} })
+
+=== paired custom answer starts on question one of three (100x30) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 1                                                                                        │
+│Prompt 1                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+display fields=3
+
+=== paired custom answer advances to question two of three (100x30) ===
+╭ × Question 2/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Question 2                                                                                        │
+│Prompt 2                                                                                          │
+│                                                                                                  │
+│Input requested                                                                                   │
+│● Alpha                                                                                           │
+│    Choose alpha                                                                                  │
+│○ Beta                                                                                            │
+│○ Other                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+display fields=3

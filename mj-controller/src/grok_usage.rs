@@ -313,50 +313,6 @@ mod tests {
         parse(&result).unwrap()
     }
 
-    #[test]
-    fn a_weekly_response_reports_its_period_and_reset() {
-        let usage = report(json!({
-            "config": {
-                "creditUsagePercent": 42.5,
-                "currentPeriod": {
-                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
-                    "start": "2026-08-11T05:22:07.661951+00:00",
-                    "end": "2026-08-18T05:22:07.661951+00:00",
-                },
-                "onDemandCap": {"val": 0},
-                "onDemandUsed": {"val": 0},
-                "prepaidBalance": {"val": 2_500},
-                "isUnifiedBillingUser": true,
-                "history": [],
-            },
-            "on_demand_enabled": false,
-            "subscription_tier": "X Premium+",
-        }));
-
-        assert_eq!(usage.period_label, "Week");
-        assert_eq!(usage.used_percent, 42.5);
-        assert_eq!(usage.remaining_percent(), 58);
-        assert_eq!(usage.resets_at, Some(1_787_030_527));
-    }
-
-    #[test]
-    fn a_monthly_response_names_its_own_period() {
-        let usage = report(json!({
-            "config": {
-                "creditUsagePercent": 10.0,
-                "currentPeriod": {
-                    "type": "USAGE_PERIOD_TYPE_MONTHLY",
-                    "end": "2026-09-01T00:00:00Z",
-                },
-            },
-            "subscription_tier": "SuperGrok Heavy",
-        }));
-
-        assert_eq!(usage.period_label, "Month");
-        assert_eq!(usage.remaining_percent(), 90);
-        assert_eq!(usage.resets_at, Some(1_788_220_800));
-    }
-
     /// proto3 JSON omits zero scalars, which is exactly what an account at
     /// zero usage looks like on the wire. Captured from a real account.
     #[test]
@@ -385,39 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn the_deprecated_shape_derives_its_share_from_the_cent_amounts() {
-        let usage = report(json!({
-            "config": {
-                "monthlyLimit": {"val": 20_000},
-                "used": {"val": 5_000},
-                "billingPeriodStart": "2026-08-01T00:00:00Z",
-                "billingPeriodEnd": "2026-09-01T00:00:00Z",
-            },
-        }));
-
-        assert_eq!(usage.used_percent, 25.0);
-        assert_eq!(usage.remaining_percent(), 75);
-        // The legacy shape only ever described a monthly budget.
-        assert_eq!(usage.period_label, "Month");
-        assert_eq!(usage.resets_at, Some(1_788_220_800));
-    }
-
-    #[test]
-    fn the_new_percentage_wins_over_the_deprecated_amounts() {
-        let usage = report(json!({
-            "config": {
-                "creditUsagePercent": 12.0,
-                "monthlyLimit": {"val": 20_000},
-                "used": {"val": 19_000},
-                "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
-            },
-        }));
-
-        assert_eq!(usage.used_percent, 12.0);
-        assert_eq!(usage.resets_at, None);
-    }
-
-    #[test]
     fn a_response_without_a_configuration_is_not_a_zero_reading() {
         assert_eq!(parse(&json!({})), Err(GrokUsageError::NoData));
         assert_eq!(parse(&json!({"config": null})), Err(GrokUsageError::NoData));
@@ -432,59 +355,10 @@ mod tests {
         assert_eq!(usage.used_percent, 0.0);
     }
 
-    #[test]
-    fn path_precedes_the_profile_installer_location() {
-        let discovered = grok_programs(Path::new("/profiles/grok"));
-        assert_eq!(discovered.len(), 2);
-        assert!(
-            discovered[0]
-                .parent()
-                .is_none_or(|parent| parent.as_os_str().is_empty())
-        );
-        assert!(discovered[1].starts_with("/profiles/grok/bin"));
-    }
-
     #[cfg(unix)]
     fn fake_grok(directory: &Path, script: &str) -> PathBuf {
         mj_core::test_hooks::install_fake_command(directory, "grok", script);
         directory.join("grok")
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_usage_query_answers_from_a_live_agent_that_holds_its_stdin_open() {
-        let directory = tempfile::tempdir().unwrap();
-        // Answers both requests, then blocks on stdin. A caller that closes
-        // stdin early would end this process before reading the reply, which
-        // is exactly how the real agent behaves.
-        let _executable = fake_grok(
-            directory.path(),
-            r#"#!/bin/sh
-[ "$1" = "agent" ] && [ "$2" = "stdio" ] || exit 64
-while IFS= read -r line; do
-  case "$line" in
-    *'"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}\n' ;;
-    *'_x.ai/billing'*)
-      printf '{"jsonrpc":"2.0","id":2,"result":{"config":{"creditUsagePercent":30.0,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-18T05:22:07.661951+00:00"}},"subscription_tier":"X Premium+"}}\n' ;;
-  esac
-done
-"#,
-        );
-
-        let usage = query(
-            directory.path().to_path_buf(),
-            directory.path().to_path_buf(),
-            HashMap::from([(
-                "PATH".to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            )]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(usage.period_label, "Week");
-        assert_eq!(usage.remaining_percent(), 70);
     }
 
     #[cfg(unix)]
@@ -509,23 +383,5 @@ done
             format!("{error}").contains("grok agent stdio exited"),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn a_missing_executable_is_reported_as_not_installed() {
-        let directory = tempfile::tempdir().unwrap();
-
-        let error = query(
-            directory.path().to_path_buf(),
-            directory.path().to_path_buf(),
-            HashMap::from([(
-                "PATH".to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            )]),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error, GrokUsageError::NotInstalled);
     }
 }

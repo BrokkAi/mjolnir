@@ -13,6 +13,7 @@ name = "mj_chat"
 
 [features]
 default = []
+golden = ["mj-core/golden"]
 test-hooks = ["mj-core/test-hooks"]
 
 [lints]
@@ -44,6 +45,7 @@ linkify = "0.11"
 webbrowser = "1.2"
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["golden"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
 tempfile.workspace = true

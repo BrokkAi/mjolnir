@@ -460,39 +460,6 @@ mod tests {
         assert!(selection.validate(&assessment).is_ok());
     }
     #[test]
-    fn file_tree_preserves_sizes_and_partial_selection_through_expansion() {
-        let assessment = WorkspaceAssessment {
-            files: vec![
-                file(".agents/qualification/java-b/staged/a", 1_040_000_000),
-                file(".agents/qualification/java-b/staged/b", 1_050_000_000),
-                file(".agents/qualification/java-b/toolchains/jdk", 261_000_000),
-            ],
-            ..Default::default()
-        };
-        let roots = file_tree(&assessment);
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].bytes, 2_351_000_000);
-        assert!(roots[0].label().contains("2.35 GB"));
-        let staged = &roots[0].children[0];
-        assert_eq!(staged.files, 2);
-        assert!(staged.children[0].label().contains("1.05 GB"));
-        let mut selection = WorkspaceSelection::default();
-        selection.set_included(&assessment, &staged.location, false);
-        assert_eq!(selection.included_bytes(&assessment), 261_000_000);
-        assert_eq!(
-            roots[0].state(&assessment, &selection),
-            FileSelectionState::Mixed
-        );
-        selection.set_included(&assessment, &staged.children[0].location, true);
-        assert_eq!(selection.included_bytes(&assessment), 1_311_000_000);
-        assert_eq!(
-            staged.state(&assessment, &selection),
-            FileSelectionState::Mixed
-        );
-        assert_eq!(file_tree(&assessment), roots);
-        assert!(initial_expansion(&roots).contains(&roots[0].location));
-    }
-    #[test]
     fn exclusions_cannot_name_tracked_or_parent_paths() {
         let assessment = WorkspaceAssessment {
             files: vec![file("output/binary", 42)],

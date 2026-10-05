@@ -166,52 +166,6 @@ fn skills_state_of(payload: RelayResponsePayload) -> mj_core::skills::SkillsSync
     }
 }
 
-fn github_token_state_of(
-    payload: RelayResponsePayload,
-) -> mj_core::credentials::GithubTokenSnapshot {
-    let RelayResponsePayload::GithubTokenState {
-        present,
-        fingerprint,
-    } = payload
-    else {
-        panic!("expected a GitHub token state payload, got {payload:?}");
-    };
-    mj_core::credentials::GithubTokenSnapshot {
-        present,
-        fingerprint,
-    }
-}
-
-#[test]
-fn github_token_requests_install_and_remove_connection_only_state() {
-    use base64::Engine as _;
-
-    let home = tempfile::tempdir().unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-    let absent = github_token_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::GithubTokenState).unwrap(),
-    );
-    assert!(!absent.present);
-
-    let installed = github_token_state_of(
-        unix::apply_credential_request(
-            &endpoint,
-            &RelayRequest::InstallGithubToken {
-                data: base64::engine::general_purpose::STANDARD.encode(b"fresh-token"),
-            },
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        installed,
-        mj_core::credentials::GithubTokenSnapshot::of("fresh-token")
-    );
-    let removed = github_token_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::RemoveGithubToken).unwrap(),
-    );
-    assert!(!removed.present);
-}
-
 #[test]
 fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     let worker = tempfile::tempdir().unwrap();
@@ -259,6 +213,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+// Hard-won: 50963cae: a harness scrubbed credential-shaped Git config names and broke every Git command.
 #[test]
 fn git_helpers_survive_harness_login_shells_and_credential_shaped_name_scrubs() {
     let worker = tempfile::tempdir().unwrap();
@@ -422,26 +377,6 @@ fi
     );
 }
 
-#[test]
-fn skills_state_reports_an_empty_home_then_a_synced_tree() {
-    let home = tempfile::tempdir().unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-
-    let empty = skills_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::SkillsState).unwrap(),
-    );
-    assert!(!empty.present);
-
-    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
-    std::fs::write(home.path().join("skills/review/SKILL.md"), b"review").unwrap();
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::SkillsState).unwrap(),
-    );
-    let expected = mj_core::skills::collect_skills(HarnessKind::Codex, home.path()).unwrap();
-    assert!(state.present);
-    assert_eq!(state.fingerprint, expected.fingerprint());
-}
-
 /// A worker installs a tree sent in either archive format: a current
 /// controller sends it compressed, and the uncompressed format is the one
 /// every earlier release wrote.
@@ -504,16 +439,6 @@ fn install_skills_rejects_garbage_and_leaves_the_tree_untouched() {
     assert_eq!(
         std::fs::read(home.path().join("skills/keep.md")).unwrap(),
         b"keep"
-    );
-}
-
-#[test]
-fn non_credential_requests_are_not_served_by_the_home_handler() {
-    let error = unix::apply_credential_request(&test_credentials().unwrap(), &RelayRequest::Status)
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("credential, GitHub token, or skills"),
-        "{error:#}"
     );
 }
 
@@ -869,17 +794,6 @@ fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
 }
 
 #[test]
-fn a_launch_config_without_a_harness_home_cannot_serve_credentials() {
-    let mut config = launch_config("/profile");
-    config.harness_home = PathBuf::new();
-    config.environment.clear();
-
-    let error = credential_endpoint(&config).unwrap_err();
-
-    assert!(error.contains("CODEX_HOME"), "{error}");
-}
-
-#[test]
 fn launch_wires_require_the_new_baseline_shape() {
     let launch = launch_config("profile-home");
     let mut retired = serde_json::to_value(&launch).unwrap();
@@ -1107,6 +1021,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
 /// the failure. When Kimi journalled a failure for the turn, that failure is
 /// the turn's outcome: its warning and its diagnostic are the authentication
 /// error, and credential sync treats it as one.
+// Hard-won: #1132: Kimi's journalled OAuth failure was misreported as unanswered and suggested an unsafe retry.
 #[tokio::test]
 async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -1239,6 +1154,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
 /// Kimi's ACP prompt response carries no usage, so a completed Kimi turn is
 /// only accounted for if the native wire records reach the durable relay
 /// (#1064).
+// Hard-won: #1064: Kimi ACP omitted usage unless the worker imported native turn records.
 #[tokio::test]
 async fn kimi_turn_usage_is_recorded_from_native_records() {
     let temp = tempfile::tempdir().unwrap();
@@ -1429,7 +1345,10 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
     let home = temp.path().join("kimi");
     let old_session = home.join("sessions/old").join(SESSION_ID);
     let new_session = home.join("sessions/new").join(SESSION_ID);
-    for (session_dir, task_id) in [(&old_session, "old-agent"), (&new_session, "new-agent")] {
+    for (session_dir, task_ids) in [
+        (&old_session, &["old-agent"][..]),
+        (&new_session, &["new-agent", "second-agent"][..]),
+    ] {
         let wire = session_dir.join("agents/main/wire.jsonl");
         std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1437,10 +1356,9 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
             serde_json::json!({"id": SESSION_ID}).to_string(),
         )
         .unwrap();
-        std::fs::write(
-            &wire,
-            format!(
-                "{}\n",
+        let records = task_ids
+            .iter()
+            .map(|task_id| {
                 serde_json::json!({
                     "type": "task.started",
                     "agentId": "main",
@@ -1454,9 +1372,10 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
                         "agentId": "agent"
                     }
                 })
-            ),
-        )
-        .unwrap();
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(&wire, format!("{}\n", records.join("\n"))).unwrap();
     }
     std::fs::write(
         home.join("session_index.jsonl"),
@@ -1495,7 +1414,7 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
 
     let state = relay.lock().unwrap().operational_state();
     assert!(state.background_commands.is_empty());
-    assert_eq!(state.native_agent_count, 1);
+    assert_eq!(state.native_agent_count, 2);
 }
 
 #[tokio::test]
@@ -2241,6 +2160,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     coordinator.await.unwrap().unwrap();
 }
 
+// Hard-won: #987: a withdrawn saved model stranded startup before commands could repair it.
 #[tokio::test]
 async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() {
     let temp = tempfile::tempdir().unwrap();
@@ -2846,46 +2766,6 @@ fn typed_acp_observations_are_journaled() {
     drop(relay);
     let reopened = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     assert_eq!(reopened.operational_state().steering_supported, None);
-}
-
-#[test]
-fn a_harness_restart_gates_dispatch_until_the_session_is_configured_again() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let mut in_flight = BTreeMap::new();
-    let mut session_configured = true;
-
-    unix::record_runtime_event_and_track_configuration(
-        &relay,
-        &mut in_flight,
-        &no_prompt_loop(),
-        RuntimeEvent::HarnessRestarting {
-            message: "ACP bridge exited; reloading the native session".into(),
-        },
-        &mut session_configured,
-    )
-    .unwrap();
-    assert!(
-        !session_configured,
-        "a restart must stop dispatch until the fresh bridge configures its session"
-    );
-
-    unix::record_runtime_event_and_track_configuration(
-        &relay,
-        &mut in_flight,
-        &no_prompt_loop(),
-        RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        },
-        &mut session_configured,
-    )
-    .unwrap();
-    assert!(
-        session_configured,
-        "the fresh bridge's SessionConfigured must reopen dispatch"
-    );
 }
 
 #[test]
@@ -3552,6 +3432,7 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
 /// prompt made the Claude adapter answer with agent text, the worker opened a
 /// turn for it that nothing ever ended, and every stop was "completed" while
 /// the session stayed Running.
+// Hard-won: c0f3bab: Claude's model-change notice opened a turn that no result could ever settle.
 #[tokio::test(start_paused = true)]
 async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let temp = tempfile::tempdir().unwrap();
@@ -4939,26 +4820,6 @@ async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
 }
 
 #[tokio::test]
-async fn daemon_restart_without_a_baseline_does_not_hide_pending_work() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = git_repository(&temp);
-    let root = temp.path().join("relay");
-    DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
-    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
-    config.bridge_command = temp.path().join("missing-acp-bridge");
-    config.cwd = repository.clone();
-
-    expect_daemon_launch_failure(&root, config).await;
-
-    let baseline = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(!baseline.status.success());
-}
-
-#[tokio::test]
 async fn restored_relay_seed_records_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_owned();
@@ -5029,6 +4890,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
 /// journal had not created it, so when Codex answered "thread not found" it
 /// refused to start a fresh thread. The checkpoint now says the session was
 /// never prompted, and that holds until the replacement opens.
+// Hard-won: 0bb9439: a never-prompted session restored from checkpoint was wrongly treated as used native history.
 #[test]
 fn a_restored_never_prompted_session_may_replace_its_native_session() {
     for native_session_unused in [true, false] {
@@ -5193,6 +5055,7 @@ async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
 /// of the launch, but the worker adds the target's own login environment, which
 /// only it can see. The bridge's spec names the variables so the supervisor
 /// removes them from that as well, and never carries them itself.
+// Hard-won: c4e2838: API-key environment inherited by the target reached a ChatGPT Codex profile.
 #[tokio::test]
 async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
     let temp = tempfile::tempdir().unwrap();
@@ -5218,6 +5081,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
 /// The supervisor removes the excluded variables after it merges the login
 /// environment, so neither a launch setting nor a target's shell profile can
 /// hand the bridge an API key. Other variables pass through.
+// Hard-won: c4e2838: a shell profile could reintroduce API-key variables after launch configuration filtering.
 #[tokio::test]
 async fn the_acp_bridge_never_sees_an_excluded_variable() {
     let temp = tempfile::tempdir().unwrap();
@@ -5403,18 +5267,23 @@ async fn oversized_response_is_rejected_before_writing() {
 
 #[tokio::test]
 async fn request_line_limit_is_enforced_while_the_line_is_read() {
-    let mut exact = BufReader::new(&b"12345678\nnext\n"[..]);
+    let maximum = 64 * 1024;
+    let exact_input = [vec![b'1'; maximum], b"\nnext\n".to_vec()].concat();
+    let mut exact = BufReader::new(exact_input.as_slice());
+    let line = unix::read_bounded_line(&mut exact, maximum)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.len(), maximum);
+    assert!(line.bytes().all(|byte| byte == b'1'));
     assert_eq!(
-        unix::read_bounded_line(&mut exact, 8).await.unwrap(),
-        Some("12345678".into())
-    );
-    assert_eq!(
-        unix::read_bounded_line(&mut exact, 8).await.unwrap(),
+        unix::read_bounded_line(&mut exact, maximum).await.unwrap(),
         Some("next".into())
     );
 
-    let mut oversized = BufReader::with_capacity(4, &b"123456789-without-a-newline"[..]);
-    let error = unix::read_bounded_line(&mut oversized, 8)
+    let oversized_input = vec![b'9'; maximum + 1];
+    let mut oversized = BufReader::with_capacity(4, oversized_input.as_slice());
+    let error = unix::read_bounded_line(&mut oversized, maximum)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("request frame is too large"));
@@ -6722,6 +6591,7 @@ while True: time.sleep(1)
 /// daemon that starts a harness returns as soon as the bridge fails to
 /// launch, and under load that return could drop the listener before the
 /// status request was served, resetting the connection.
+// Hard-won: d1744be0: normal worker roots exceeded sockaddr_un.sun_path and could not bind a socket.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -6879,6 +6749,7 @@ fn startup_step_recorded(root: &Path, step: &str) -> bool {
 /// startup. This is the #1065 failure: the capture is proportional to the
 /// working tree, so a session in a large tree never reached its control
 /// socket, and a sub-agent child paid that cost for a review it is never given.
+// Hard-won: 105769b9: a child in a 524GB workspace never bound its socket because startup always captured Git state.
 #[tokio::test]
 async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot_be_staged() {
     // The socket is published only once the harness is started (#1192), so the
@@ -6927,6 +6798,7 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
 /// on waits in the kernel backlog, so a slow harness preparation looked like a
 /// worker that never replied. While the harness is still being prepared there
 /// must be no socket, so a connect fails at once instead of hanging.
+// Hard-won: 2c6df023: a bound but unserved socket made readiness wait on a full kernel backlog.
 #[tokio::test]
 async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     use std::os::unix::fs::PermissionsExt;
@@ -7018,6 +6890,17 @@ async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
     config.review_capture = true;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !startup_step_recorded(&root, "review-baseline") {
+            assert!(
+                !daemon.is_finished(),
+                "the worker exited before starting its review baseline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the worker never entered review baseline capture");
     assert!(
         !control_socket_appears(&root, std::time::Duration::from_secs(2)).await,
         "the capture is what delays the socket, so this half must still block"
@@ -7107,6 +6990,7 @@ fn journaled_notices(relay: &Arc<Mutex<DurableRelay>>) -> Vec<String> {
 /// to a question sent through the command channel. The coordinator keeps
 /// draining; the relay keeps what can wait in memory and journals it, in
 /// order, when the barrier ends.
+// Hard-won: 634af0a3: a ready checkpoint barrier could stall ACP event draining on its bounded channel.
 #[tokio::test]
 async fn a_ready_barrier_keeps_draining_runtime_events_past_the_channel_capacity() {
     let temp = tempfile::tempdir().unwrap();

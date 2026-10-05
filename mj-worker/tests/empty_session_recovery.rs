@@ -353,6 +353,7 @@ fn used_native_history_is_not_replaced_after_worker_restart() {
 /// worker starts from the checkpoint's relay seed with the native identity in
 /// its launch configuration, and the harness has no record of the session.
 /// Codex's wording is the one R4 recorded ("thread not found: <id>").
+// Hard-won: 0bb9439: a restored session with no prompts could not resume its unused native thread.
 #[test]
 fn a_never_prompted_session_resumes_fresh_from_its_checkpoint() {
     recover_missing_native_session_from(

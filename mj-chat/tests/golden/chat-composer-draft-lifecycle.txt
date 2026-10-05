@@ -1,0 +1,166 @@
+=== fresh chat restores saved draft (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> saved before opening                                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+draft: "saved before opening"
+
+=== fresh chat without saved draft (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+draft empty: true
+
+=== standby composer readline and normalized paste (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> alpha beta…                                                                                     │
+│  second                                                                                          │
+╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+draft: "alpha beta…\nsecond"
+cursor: 20
+
+=== standby command remains an editable draft (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Commands open when the session is live; the draft is kept.
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> /help                                                                                           │
+╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+draft: "/help"
+queued prompts: 0
+
+=== standby prompt is queued for the host (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│  queued 1: alpha beta… second                                                                    │
+│                                                                                                  │
+│> Type a draft · sending opens when the session is live                                           │
+╰ 1 queued───────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: Prompt("alpha beta…\nsecond")
+draft empty: true
+queued prompts: ["alpha beta…\nsecond"]
+
+=== standby composer does not offer slash autocomplete (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> /mod                                                                                            │
+│                                                                                                  │
+╰────────────────────────────────────────────────────────────────────────── Enter  keeps the draft ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+autocomplete active: false

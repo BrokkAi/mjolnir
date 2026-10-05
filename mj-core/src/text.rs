@@ -19,6 +19,7 @@ where
 mod tests {
     use super::counted;
 
+    // Hard-won: 25c6af83: Setup and Close showed user-facing counts with malformed noun suffixes.
     #[test]
     fn counted_agrees_the_noun_with_the_count() {
         assert_eq!(counted(0_usize, "entry", "entries"), "0 entries");

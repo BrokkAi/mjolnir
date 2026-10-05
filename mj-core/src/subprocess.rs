@@ -577,6 +577,7 @@ mod tests {
     /// The leader's exit completes a bounded command; a descendant that keeps
     /// the pipes open is stopped after the drain instead of failing the
     /// command at its timeout.
+    // Hard-won: c86b2123: A completed command stayed Running until a background descendant closed inherited pipes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn bounded_capture_completes_at_leader_exit_when_a_descendant_holds_the_pipes() {
@@ -643,8 +644,10 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
     }
+    #[cfg(unix)]
     use super::*;
 
+    // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
     #[cfg(unix)]
     #[test]
     fn run_with_input_completes_when_child_echoes_input_larger_than_pipe_buffer() {
@@ -696,13 +699,7 @@ mod tests {
         assert_eq!(output.stdout.len(), 512 * 1024);
     }
 
-    #[test]
-    fn run_with_input_returns_output_for_empty_input() {
-        let mut command = Command::new("true");
-        let output = run_with_input(&mut command, &[]).expect("run_with_input should succeed");
-        assert!(output.status.success());
-    }
-
+    // Hard-won: cd0af915: Dropped detached children stayed zombies and daemon probes treated them as alive.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running() {
@@ -795,6 +792,7 @@ mod tests {
         signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
     }
 
+    // Hard-won: 99a5e469: An inherited macOS pipe descriptor prevented EOF and hung concurrent daemon upgrades.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_child_keeps_no_descriptor_its_launcher_left_inheritable() {

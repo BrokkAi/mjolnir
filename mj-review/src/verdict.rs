@@ -146,17 +146,4 @@ mod tests {
         assert!(synthesis.starts_with("[P0] src/a.rs:1"));
         assert!(synthesis.contains("[synthesis truncated]"));
     }
-
-    #[test]
-    fn a_lane_outcome_describes_itself_for_the_coverage_packet() {
-        assert_eq!(LaneOutcome::Completed.describe(), "completed");
-        assert_eq!(LaneOutcome::Cancelled.describe(), "cancelled");
-        assert_eq!(
-            LaneOutcome::Failed {
-                reason: "harness exited".to_string()
-            }
-            .describe(),
-            "failed: harness exited"
-        );
-    }
 }

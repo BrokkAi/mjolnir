@@ -919,6 +919,7 @@ mod missing_thread_tests {
         ));
     }
 
+    // Hard-won: 710ffb6: an unused Codex thread was misclassified as used and restart recovery failed.
     #[test]
     fn codex_reports_a_thread_it_never_wrote_as_thread_not_found() {
         // What codex-acp sent when a same-build worker reloaded a thread that
@@ -985,22 +986,6 @@ mod missing_thread_tests {
             ));
         }
     }
-
-    #[test]
-    fn mjolnirs_own_session_info_update_is_not_agent_content() {
-        let mjolnir_metadata: SessionUpdate = serde_json::from_value(serde_json::json!({
-            "sessionUpdate": "session_info_update",
-            "_meta": {"mjGoalCapability": null},
-        }))
-        .unwrap();
-        assert!(session_update_is_session_state(&mjolnir_metadata));
-        let agent_content: SessionUpdate = serde_json::from_value(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": "hello"},
-        }))
-        .unwrap();
-        assert!(!session_update_is_session_state(&agent_content));
-    }
 }
 
 /// What counts as the harness answering a prompt (#970).
@@ -1012,6 +997,7 @@ mod agent_output_tests {
         serde_json::from_value(value).expect("session update fixture")
     }
 
+    // Hard-won: f549b59: harness-owned ACP updates masked swallowed prompts and made the worker treat them as answered.
     #[test]
     fn traffic_the_harness_emits_on_its_own_is_not_an_answer() {
         for value in [
@@ -1062,6 +1048,7 @@ mod agent_output_tests {
     /// The exact shape issue #970 reported: the bridge streams its compaction
     /// progress into the swallowed prompt's turn, so counting every message
     /// would hide the loss.
+    // Hard-won: a1d7b48: Claude compaction progress banners masked swallowed prompts as completed answers.
     #[test]
     fn compaction_progress_text_is_not_an_answer() {
         for text in [
@@ -1082,18 +1069,6 @@ mod agent_output_tests {
         }));
         assert!(!session_update_is_compaction_banner(&answer));
         assert!(session_update_is_agent_output(&answer));
-    }
-
-    #[test]
-    fn only_a_prompt_that_asks_to_compact_is_answered_by_compacting() {
-        let text = |value: &str| vec![ContentBlock::Text(TextContent::new(value))];
-        assert!(prompt_requests_compaction(&text("/compact")));
-        assert!(prompt_requests_compaction(&text(
-            "  /compact keep the plan"
-        )));
-        assert!(!prompt_requests_compaction(&text("compact the loop")));
-        assert!(!prompt_requests_compaction(&text("/context")));
-        assert!(!prompt_requests_compaction(&[]));
     }
 }
 

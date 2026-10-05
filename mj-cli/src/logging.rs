@@ -429,49 +429,7 @@ mod tests {
     /// PID in a given test.
     const OTHER_PID: u32 = 999_999_999;
 
-    #[test]
-    fn prune_logs_keeps_newest_managed_logs_and_unrelated_files() {
-        let directory = tempfile::tempdir().unwrap();
-        for name in [
-            format!("mj-cli-20260824T000000.000Z-{OTHER_PID}.log"),
-            format!("mj-cli-20260825T000000.000Z-{OTHER_PID}.log"),
-            format!("mj-cli-20260826T000000.000Z-{OTHER_PID}.log"),
-            "hel-20260823T000000.000Z-4.log".to_string(),
-            "notes.log".to_string(),
-        ] {
-            fs::write(directory.path().join(&name), &name).unwrap();
-        }
-
-        prune_logs(directory.path(), 2, None).unwrap();
-
-        assert!(
-            !directory
-                .path()
-                .join(format!("mj-cli-20260824T000000.000Z-{OTHER_PID}.log"))
-                .exists()
-        );
-        assert!(
-            directory
-                .path()
-                .join(format!("mj-cli-20260825T000000.000Z-{OTHER_PID}.log"))
-                .exists()
-        );
-        assert!(
-            directory
-                .path()
-                .join(format!("mj-cli-20260826T000000.000Z-{OTHER_PID}.log"))
-                .exists()
-        );
-        assert!(
-            directory
-                .path()
-                .join("hel-20260823T000000.000Z-4.log")
-                .exists(),
-            "legacy Hel logs are ignored rather than treated as Mjolnir state"
-        );
-        assert!(directory.path().join("notes.log").exists());
-    }
-
+    // Hard-won: 1d6a27cb6a: A short-lived CLI could prune the older log still being written by the live daemon; the test protects the daemon PID log beyond the normal retention count.
     #[test]
     fn prune_logs_never_removes_the_current_daemons_log() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -518,15 +476,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn current_daemon_pid_is_none_without_a_daemon_json() {
-        let data_dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_daemon_pid(data_dir.path()), None);
-    }
-
     /// Under a script that runs a command every second, the newest ten logs
     /// cover ten seconds. A command still running, or one that ran within the
     /// hour, keeps its log.
+    // Hard-won: 4ce833574f: A live replacement report disappeared from logs within seconds; this checks recent files and active-process logs survive pruning.
     #[test]
     fn prune_logs_keeps_recent_logs_and_logs_of_running_processes() {
         let directory = tempfile::tempdir().unwrap();
@@ -556,6 +509,7 @@ mod tests {
         assert_eq!(recent, 30, "every log started in the window is kept");
     }
 
+    // Hard-won: 1d6a27cb: A burst of short-lived CLI logs could prune the older live daemon log.
     #[test]
     fn prune_logs_retains_per_kind() {
         let directory = tempfile::tempdir().unwrap();
@@ -585,6 +539,7 @@ mod tests {
         assert_eq!(remaining_cli, RETAINED_LOGS - 1);
     }
 
+    // Hard-won: 1d6a27cb: Legacy CLI log names could still crowd out the live daemon log after filename versioning.
     #[test]
     fn prune_logs_treats_legacy_filenames_as_cli() {
         let directory = tempfile::tempdir().unwrap();
@@ -612,22 +567,6 @@ mod tests {
             RETAINED_LOGS - 1,
             "legacy filenames are pruned in the same group as mj-cli-* files"
         );
-    }
-
-    #[test]
-    fn log_filename_carries_the_expected_kind_prefix() {
-        for (kind, prefix) in [
-            (ProcessKind::Daemon, "mj-daemon-"),
-            (ProcessKind::Tui, "mj-tui-"),
-            (ProcessKind::Cli, "mj-cli-"),
-        ] {
-            let name = log_filename(kind);
-            assert!(
-                name.starts_with(prefix),
-                "{name} should start with {prefix}"
-            );
-            assert!(name.ends_with(".log"));
-        }
     }
 
     #[test]

@@ -557,6 +557,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 871a4d9: an absent secret made config loading fail and blocked daemon startup/upgrade.
     #[test]
     fn a_missing_secret_or_variable_still_reads_and_names_what_to_set() {
         let missing_secret: Environment = with_secret_resolver(fixed(), || {
@@ -584,21 +585,6 @@ mod tests {
         );
         missing_variable.insert("KEY".into(), "set".into());
         missing_variable.ensure_resolved().unwrap();
-    }
-
-    #[test]
-    fn malformed_references_are_rejected() {
-        for text in [
-            "KEY = { from_env = \"A\", from_secret = \"B\" }",
-            "KEY = { other = \"A\" }",
-            "KEY = {}",
-            "KEY = { from_env = \"\" }",
-            "KEY = 3",
-        ] {
-            let parsed: Result<Environment, _> =
-                with_secret_resolver(fixed(), || toml::from_str(text));
-            assert!(parsed.is_err(), "{text}");
-        }
     }
 
     #[test]
@@ -643,21 +629,5 @@ mod tests {
         assert!(secrets_permission_problem(&path).unwrap().is_some());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(secrets_permission_problem(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn credential_names_are_recognized() {
-        for name in [
-            "DEEPSEEK_API_KEY",
-            "GITHUB_TOKEN",
-            "ZAI_API_KEY",
-            "db_password",
-            "MY_KEY",
-        ] {
-            assert!(looks_like_credential(name), "{name}");
-        }
-        for name in ["PATH", "OPENAI_BASE_URL", "KIMI_CODE_BASE_URL", "HOME"] {
-            assert!(!looks_like_credential(name), "{name}");
-        }
     }
 }

@@ -1983,6 +1983,7 @@ mod tests {
     /// Stopping a session retires its relay actor, which closes the open
     /// chat's feed. The chat is told before that happens so it reads the
     /// closure as the expected end of a deliberate stop.
+    // Hard-won: 66c73159: an intentional stop triggered a misleading feed-loss warning and reconnect loop.
     #[tokio::test]
     async fn stopping_the_open_chats_session_marks_that_chat_retiring() {
         let mut chat = open_chat("session-open");
@@ -2002,6 +2003,7 @@ mod tests {
         assert!(!chat.session_retiring());
     }
 
+    // Hard-won: f2fc48f3: Restart removed the workspace and temporary volumes before restarting.
     #[tokio::test]
     async fn restart_dispatch_sends_one_daemon_restart_action() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

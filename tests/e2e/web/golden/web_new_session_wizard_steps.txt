@@ -1,0 +1,417 @@
+=== one profile omits Account but keeps Where to run: Step 1 of 3 · Where to run (390x844) ===
+New session
+
+Step 1 of 3 · Where to run
+
+Where to run
+local
+local
+container
+local-podman
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"local","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"container","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== one profile omits Account but keeps Where to run: Step 2 of 3 · Project (390x844) ===
+New session
+
+Step 2 of 3 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/a
+Project files
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== one profile omits Account but keeps Where to run: Step 3 of 3 · Review (390x844) ===
+New session
+
+Step 3 of 3 · Review
+
+Account
+only
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"only","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0
+=== several profiles keep Account: Step 1 of 4 · Account (390x844) ===
+New session
+
+Step 1 of 4 · Account
+
+Account
+a
+b
+codex
+Back
+Next
+Cancel
+controls: [{"tag":"select","id":"new-profile","label":"a\nb","value":"a","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== several profiles keep Account: Step 2 of 4 · Where to run (390x844) ===
+New session
+
+Step 2 of 4 · Where to run
+
+Where to run
+local
+local
+container
+local-podman
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"local","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"container","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== several profiles keep Account: Step 3 of 4 · Project (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/a
+Project files
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== several profiles keep Account: Step 4 of 4 · Review (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+a
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0
+=== only usable raw target omits Where to run: Step 1 of 3 · Account (390x844) ===
+New session
+
+Step 1 of 3 · Account
+
+Account
+a
+b
+codex
+Back
+Next
+Cancel
+controls: [{"tag":"select","id":"new-profile","label":"a\nb","value":"a","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== only usable raw target omits Where to run: Step 2 of 3 · Project (390x844) ===
+New session
+
+Step 2 of 3 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/a
+Project files
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== only usable raw target omits Where to run: Step 3 of 3 · Review (390x844) ===
+New session
+
+Step 3 of 3 · Review
+
+Account
+a
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0
+=== unknown target remains offered: Step 1 of 4 · Account (390x844) ===
+New session
+
+Step 1 of 4 · Account
+
+Account
+a
+b
+codex
+Back
+Next
+Cancel
+controls: [{"tag":"select","id":"new-profile","label":"a\nb","value":"a","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== unknown target remains offered: Step 2 of 4 · Where to run (390x844) ===
+New session
+
+Step 2 of 4 · Where to run
+
+Where to run
+local
+local
+container
+local-podman
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"local","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":null,"label":"choice-1","value":"container","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== unknown target remains offered: Step 3 of 4 · Project (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose an existing directory. Review whether to create an isolated clone before launching.
+
+Recent projects on this host
+
+/work/a
+Project files
+
+These folders are on local, where the session will run.
+
+Browse folders
+Back
+Next
+Cancel
+controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== unknown target remains offered: Step 4 of 4 · Review (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+a
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0
+=== single sized target keeps Where to run: Step 1 of 4 · Account (390x844) ===
+New session
+
+Step 1 of 4 · Account
+
+Account
+a
+b
+codex
+Back
+Next
+Cancel
+controls: [{"tag":"select","id":"new-profile","label":"a\nb","value":"a","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== single sized target keeps Where to run: Step 2 of 4 · Where to run (390x844) ===
+New session
+
+Step 2 of 4 · Where to run
+
+Where to run
+container
+local-podman
+Container size
+CPU cores
+Memory (GiB)
+
+This host allows up to 24 CPU cores and 64 GiB of memory.
+
+Back
+Next
+Cancel
+controls: [{"tag":"input","id":null,"label":"choice-1","value":"container","checked":true,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-cpus","label":null,"value":"8","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-resource-memory","label":null,"value":"32","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== single sized target keeps Where to run: Step 3 of 4 · Project (390x844) ===
+New session
+
+Step 3 of 4 · Project
+
+Choose a project
+
+Pick a saved project or find a repository to start from.
+
+GitHub
+Your repositories and search
+Browse folders
+On your Mjolnir computer
+Paste URL
+GitHub URL or owner/repository
+Saved projects
+existing
+Select multiple repositories
+Back
+Cancel
+controls: [{"tag":"button","id":"new-project-github","label":"GitHub\nYour repositories and search","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-directory","label":"Browse folders\nOn your Mjolnir computer","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-project-url","label":"Paste URL\nGitHub URL or owner/repository","value":"","checked":null,"disabled":false,"pressed":"false"},{"tag":"button","id":"new-saved-project-existing","label":"existing","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-multiple","label":"Select multiple repositories","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+project creation requests: 0
+=== single sized target keeps Where to run: Step 4 of 4 · Review (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+a
+Subagents
+Native
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+project creation requests: 0
+=== review after skipped steps supplies all required values (390x844) ===
+New session
+
+Step 2 of 2 · Review
+
+Account
+fake
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0
+=== launch payload after skipped steps (390x844) ===
+New session
+
+Step 2 of 2 · Review
+
+Account
+fake
+Subagents
+Native
+Where to run
+local
+Project files
+/work/a
+Title (optional)
+Create isolated checkout
+
+Create a separate session-owned clone on the selected or default branch.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 0
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","create_managed_worktree":true,"subagents":{"mode":"native"}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"fake","bundle_id":"","target_id":"local","project_directory":"/work/a","remote_repairs":[]}]
+project creation requests: 0

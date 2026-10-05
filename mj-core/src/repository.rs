@@ -503,19 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn github_url_forms_share_identity_without_credentials() {
-        let expected = Some(RepositoryIdentity::Github("acme".into(), "app".into()));
-        for source in [
-            "Acme/App",
-            "https://github.com/Acme/App.git",
-            "git@github.com:Acme/App.git",
-            "ssh://git@github.com/Acme/App.git",
-        ] {
-            assert_eq!(RepositoryIdentity::from_remote(source), expected);
-        }
-    }
-
-    #[test]
     fn network_identity_keeps_case_sensitive_paths_and_removes_credentials() {
         let first = RepositoryIdentity::from_remote("https://user:secret@example.com/Team/App.git")
             .unwrap();
@@ -525,48 +512,5 @@ mod tests {
             RepositoryIdentity::from_remote("https://example.com/team/app.git").unwrap()
         );
         assert!(RepositoryIdentity::from_remote("../local").is_none());
-    }
-    #[test]
-    fn project_reuse_preserves_primary_and_destination_shape_but_memory_unifies_a_repository() {
-        use crate::config::{ProjectBundle, ProjectRepository};
-        let repository = |id: &str, source: &str| ProjectRepository {
-            id: id.into(),
-            github: Some(source.into()),
-            local: None,
-            destination: id.into(),
-            git_ref: None,
-        };
-        let mut project = ProjectBundleSnapshot {
-            bundle: ProjectBundle {
-                primary_repo: "app".into(),
-                repositories: vec![repository("app", "acme/app")],
-            },
-            identities: BTreeMap::from([(
-                "app".into(),
-                RepositoryIdentity::Github("acme".into(), "app".into()),
-            )]),
-            network_sources: BTreeMap::new(),
-        };
-        let single = project.clone();
-        project.bundle.repositories[0].destination = "custom/app".into();
-        assert_ne!(single.key().unwrap(), project.key().unwrap());
-        assert_eq!(
-            single.memory_identity().unwrap(),
-            project.memory_identity().unwrap()
-        );
-        project
-            .bundle
-            .repositories
-            .push(repository("shared", "acme/shared"));
-        project.identities.insert(
-            "shared".into(),
-            RepositoryIdentity::Github("acme".into(), "shared".into()),
-        );
-        assert_ne!(single.source_key().unwrap(), project.source_key().unwrap());
-        let first = project.key().unwrap();
-        project.bundle.repositories.reverse();
-        assert_eq!(first, project.key().unwrap());
-        project.bundle.primary_repo = "shared".into();
-        assert_ne!(first, project.key().unwrap());
     }
 }

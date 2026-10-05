@@ -334,26 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn the_last_frame_leaves_only_the_dashboard_background() {
-        let mut timeline = SplashTimeline::default();
-        timeline.mark_ready(MS(100));
-        let background = canvas::color([15, 18, 20]);
-        let buf = rendered(
-            100,
-            30,
-            &SplashFrame {
-                background,
-                ..frame(HOLD_START + DISSOLVE, timeline)
-            },
-        );
-        assert!(
-            buf.content()
-                .iter()
-                .all(|cell| cell.symbol() == " " && cell.bg == background)
-        );
-    }
-
-    #[test]
     fn every_size_and_instant_renders_within_its_area() {
         let mut ready = SplashTimeline::default();
         ready.mark_ready(MS(1_200));
@@ -393,10 +373,49 @@ mod tests {
     }
 
     #[test]
-    fn the_held_scene_shows_the_hammer_centred_above_the_title() {
-        let buf = rendered(120, 40, &frame(MS(1_800), SplashTimeline::default()));
+    fn golden_splash_frames() {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+
+        let mut timeline = SplashTimeline::default();
+        timeline.mark_ready(MS(100));
+        let background = canvas::color([15, 18, 20]);
+        let dissolved = rendered(
+            100,
+            30,
+            &SplashFrame {
+                background,
+                ..frame(HOLD_START + DISSOLVE, timeline)
+            },
+        );
+        writeln!(
+            output,
+            "=== dashboard background after dissolve (100x30) ==="
+        )
+        .expect("write state header");
+        output.push_str(&crate::test_support::buffer_lines(&dissolved).join("\n"));
+        output.push('\n');
+        assert!(
+            dissolved
+                .content()
+                .iter()
+                .all(|cell| cell.symbol() == " " && cell.bg == background)
+        );
+        writeln!(
+            output,
+            "dissolved cells: {}; background: {:?}",
+            dissolved.content().len(),
+            dissolved.content()[0].bg
+        )
+        .expect("write dissolved surface");
+
+        let held = rendered(120, 40, &frame(MS(1_800), SplashTimeline::default()));
+        writeln!(output, "\n=== held hammer and title (120x40) ===").expect("write state header");
+        output.push_str(&crate::test_support::buffer_lines(&held).join("\n"));
+        output.push('\n');
         let brightness = |x: u16, y: u16| {
-            let cell = &buf[(x, y)];
+            let cell = &held[(x, y)];
             [cell.fg, cell.bg]
                 .into_iter()
                 .map(|color| match color {
@@ -406,20 +425,36 @@ mod tests {
                 .max()
                 .unwrap_or(0)
         };
-        // The hammer head straddles the centre column just above the horizon.
         let head_row = 20 + (GROUND_Y * 40.0 / 2.1 / 2.0) as u16 - 2;
-        assert!(brightness(60, head_row) > 150);
-        // Its left and right halves are equally wide.
-        let lit = |range: std::ops::Range<u16>| {
-            range.filter(|x| brightness(*x, head_row) > 150).count() as i32
-        };
-        assert!((lit(30..60) - lit(61..91)).abs() <= 2);
-        // The gold title fills the rows below the horizon.
+        let lit =
+            |range: std::ops::Range<u16>| range.filter(|x| brightness(*x, head_row) > 150).count();
+        let left = lit(30..60);
+        let right = lit(61..91);
         let title_rows = (head_row + 3..40)
             .filter(|y| (0..120).filter(|x| brightness(*x, *y) > 300).count() > 20)
             .count();
-        assert!(title_rows >= 3);
-        // The status line waits on the bottom row.
-        assert!(crate::test_support::buffer_lines(&buf)[39].contains("Starting Mjolnir"));
+        let title_colors = (head_row + 3..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .flat_map(|(x, y)| [held[(x, y)].fg, held[(x, y)].bg])
+            .filter(|color| match color {
+                Color::Rgb(r, g, b) => u32::from(*r) + u32::from(*g) + u32::from(*b) > 300,
+                _ => false,
+            })
+            .map(|color| format!("{color:?}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        writeln!(
+            output,
+            "hammer head row: {head_row}; center brightness: {}; left/right lit cells: {left}/{right}; title rows: {title_rows}; bright title colors: {title_colors:?}",
+            brightness(60, head_row)
+        )
+        .expect("write rendered art observations");
+        writeln!(
+            output,
+            "status row: {}",
+            crate::test_support::buffer_lines(&held)[39]
+        )
+        .expect("write status line");
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "splash-frames", &output);
     }
 }

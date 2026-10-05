@@ -215,6 +215,7 @@ mod tests {
     /// internal error whose data names `codexErrorInfo: usageLimitExceeded`.
     /// That is a usage limit, whatever its sentence says, and the sentence is
     /// the diagnostic's message.
+    // Hard-won: cd2f1b6d: Codex quota failures appeared as raw JSON and repeated warnings
     #[test]
     fn a_codex_usage_limit_error_is_a_usage_limit() {
         let error = agent_client_protocol::Error::internal_error().data(serde_json::json!({
@@ -267,6 +268,7 @@ mod tests {
     }
 
     /// Issue 1217: the failed turn's record, as codex-acp sends it.
+    // Hard-won: 03e1b5ac: Issue 1217 made a failed Codex sub-agent turn count as finished
     #[test]
     fn a_typed_provider_failure_keeps_the_providers_sentence_and_status() {
         let failure = record(
@@ -287,6 +289,7 @@ mod tests {
 
     /// The record drops Codex's error kind; the two kinds Mjolnir acts on
     /// come back from the bridge's category and actions.
+    // Hard-won: 03e1b5ac: Issue 1217 made a failed Codex sub-agent turn count as finished
     #[test]
     fn a_typed_usage_limit_or_login_failure_keeps_the_kind_mjolnir_acts_on() {
         let exhausted = TurnDiagnostic::from_session_failure(&record(

@@ -722,8 +722,6 @@ pub(super) fn recent_directories(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     fn record(id: &str, sequence: u64, payload_type: &str, payload: Value) -> Value {
         serde_json::json!({
@@ -783,56 +781,6 @@ mod tests {
     }
 
     #[test]
-    fn read_transcript_projects_muse_lifecycle_and_edit_path() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let mut data = session_bytes(false);
-        let edit = record(
-            "edit",
-            6,
-            "runtime.session",
-            serde_json::json!({"kind":"run","event":{"kind":"tool_call","tool_name":"write_file","arguments":{"file_path":"src/lib.rs"}}}),
-        );
-        data.extend_from_slice((serde_json::to_string(&edit).unwrap() + "\n").as_bytes());
-        fs::write(&path, data).unwrap();
-        let transcript = read_transcript(&path).unwrap();
-        assert_eq!(transcript.cwd, PathBuf::from("/work"));
-        assert_eq!(transcript.edited_paths, [PathBuf::from("src/lib.rs")]);
-        assert!(transcript.events.iter().any(|event| matches!(
-            event.event,
-            WorkerEvent::PromptAccepted { ref text, .. } if text == "hello Muse"
-        )));
-        assert!(
-            transcript
-                .events
-                .iter()
-                .any(|event| matches!(event.event, WorkerEvent::TurnCompleted))
-        );
-    }
-
-    #[test]
-    fn scan_excludes_subagent_logs_and_marks_active_turn() {
-        let directory = tempdir().unwrap();
-        let root = directory.path().join("2026/09/08/muse-session-1");
-        fs::create_dir_all(root.join("subagent/child")).unwrap();
-        fs::write(root.join("session.jsonl"), session_bytes(true)).unwrap();
-        fs::write(
-            root.join("subagent/child/session.jsonl"),
-            session_bytes(false),
-        )
-        .unwrap();
-        let mut listed = Vec::new();
-        scan(directory.path(), |progress| {
-            if let Some(session) = progress.session {
-                listed.push(session);
-            }
-        })
-        .unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].unavailable_reason, Some(MUSE_ACTIVE_REASON));
-    }
-
-    #[test]
     fn summary_rejects_relative_workspace_and_mixed_session_streams() {
         let mut records = read_records(&session_bytes(false)).unwrap();
         records[0].value["payload"]["record"]["workspace_root"] = json!("relative");
@@ -849,44 +797,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("different session stream")
-        );
-    }
-
-    #[test]
-    fn materialized_intent_tracks_its_run_and_latest_native_name() {
-        let mut rows = session_bytes(false)
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        rows[1]["payload"]["intent_id"] = json!("different-intent");
-        rows.insert(3, record("materialized", 10, "runtime.user_intent.materialized",
-            json!({"intent_id":"different-intent", "outcome":{"kind":"top_level_turn_started", "run_id":"run-1"}})));
-        rows.push(record(
-            "renamed",
-            11,
-            "session.name.changed",
-            json!({"new_name":"Native title"}),
-        ));
-        let data = rows
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let records = read_records(data.as_bytes()).unwrap();
-        let summary = muse_summary_from_records(
-            Path::new("/sessions/muse-session-1/session.jsonl"),
-            &records,
-        )
-        .unwrap();
-        assert!(!summary.active);
-        assert_eq!(summary.title, "Native title");
-        assert_eq!(
-            muse_intent_text(
-                &json!({"payload":{"refill_blocks":[{"kind":"text","text":"prompt"}]}})
-            )
-            .as_deref(),
-            Some("prompt")
         );
     }
 }

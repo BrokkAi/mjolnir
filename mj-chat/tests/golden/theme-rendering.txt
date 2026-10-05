@@ -1,0 +1,367 @@
+=== NO_COLOR monochrome controls (40x1) ===
+NO_COLOR theme: Mono; color-enabled light remains: Light; base: Style::new().fg(Color::Reset).bg(Color::Reset); selection: Style::new().bold().reversed(); active control: Style::new().bold().reversed()
+selected active canvas
+=== Midnight palette and contrast surfaces (56x44) ===
+landmarks: background=Rgb(15, 18, 20); surface=Rgb(22, 27, 30); raised=Rgb(32, 39, 43); selection=Rgb(42, 58, 57)
+text/background: fg=Rgb(239, 237, 232) bg=Rgb(15, 18, 20) contrast=16.07
+text/surface: fg=Rgb(239, 237, 232) bg=Rgb(22, 27, 30) contrast=14.84
+text/surface_raised: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) contrast=12.95
+text/selection: fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) contrast=10.18
+muted/background: fg=Rgb(151, 163, 163) bg=Rgb(15, 18, 20) contrast=7.24
+muted/surface: fg=Rgb(151, 163, 163) bg=Rgb(22, 27, 30) contrast=6.68
+muted/surface_raised: fg=Rgb(151, 163, 163) bg=Rgb(32, 39, 43) contrast=5.83
+muted/selection: fg=Rgb(151, 163, 163) bg=Rgb(42, 58, 57) contrast=4.59
+accent/background: fg=Rgb(157, 229, 202) bg=Rgb(15, 18, 20) contrast=12.98
+accent/surface: fg=Rgb(157, 229, 202) bg=Rgb(22, 27, 30) contrast=11.98
+accent/surface_raised: fg=Rgb(157, 229, 202) bg=Rgb(32, 39, 43) contrast=10.45
+accent/selection: fg=Rgb(157, 229, 202) bg=Rgb(42, 58, 57) contrast=8.22
+secondary/background: fg=Rgb(158, 194, 238) bg=Rgb(15, 18, 20) contrast=10.21
+secondary/surface: fg=Rgb(158, 194, 238) bg=Rgb(22, 27, 30) contrast=9.43
+secondary/surface_raised: fg=Rgb(158, 194, 238) bg=Rgb(32, 39, 43) contrast=8.23
+secondary/selection: fg=Rgb(158, 194, 238) bg=Rgb(42, 58, 57) contrast=6.47
+success/background: fg=Rgb(157, 229, 202) bg=Rgb(15, 18, 20) contrast=12.98
+success/surface: fg=Rgb(157, 229, 202) bg=Rgb(22, 27, 30) contrast=11.98
+success/surface_raised: fg=Rgb(157, 229, 202) bg=Rgb(32, 39, 43) contrast=10.45
+success/selection: fg=Rgb(157, 229, 202) bg=Rgb(42, 58, 57) contrast=8.22
+warning/background: fg=Rgb(232, 189, 123) bg=Rgb(15, 18, 20) contrast=10.74
+warning/surface: fg=Rgb(232, 189, 123) bg=Rgb(22, 27, 30) contrast=9.92
+warning/surface_raised: fg=Rgb(232, 189, 123) bg=Rgb(32, 39, 43) contrast=8.65
+warning/selection: fg=Rgb(232, 189, 123) bg=Rgb(42, 58, 57) contrast=6.81
+error/background: fg=Rgb(244, 154, 165) bg=Rgb(15, 18, 20) contrast=8.96
+error/surface: fg=Rgb(244, 154, 165) bg=Rgb(22, 27, 30) contrast=8.28
+error/surface_raised: fg=Rgb(244, 154, 165) bg=Rgb(32, 39, 43) contrast=7.22
+error/selection: fg=Rgb(244, 154, 165) bg=Rgb(42, 58, 57) contrast=5.68
+session_error/background: fg=Rgb(244, 154, 165) bg=Rgb(15, 18, 20) contrast=8.96
+session_error/surface: fg=Rgb(244, 154, 165) bg=Rgb(22, 27, 30) contrast=8.28
+session_error/surface_raised: fg=Rgb(244, 154, 165) bg=Rgb(32, 39, 43) contrast=7.22
+session_error/selection: fg=Rgb(244, 154, 165) bg=Rgb(42, 58, 57) contrast=5.68
+session_activity/background: fg=Rgb(232, 189, 123) bg=Rgb(15, 18, 20) contrast=10.74
+session_activity/surface: fg=Rgb(232, 189, 123) bg=Rgb(22, 27, 30) contrast=9.92
+session_activity/surface_raised: fg=Rgb(232, 189, 123) bg=Rgb(32, 39, 43) contrast=8.65
+session_activity/selection: fg=Rgb(232, 189, 123) bg=Rgb(42, 58, 57) contrast=6.81
+session_attention/background: fg=Rgb(240, 205, 145) bg=Rgb(15, 18, 20) contrast=12.40
+session_attention/surface: fg=Rgb(240, 205, 145) bg=Rgb(22, 27, 30) contrast=11.45
+session_attention/surface_raised: fg=Rgb(240, 205, 145) bg=Rgb(32, 39, 43) contrast=9.99
+session_attention/selection: fg=Rgb(240, 205, 145) bg=Rgb(42, 58, 57) contrast=7.86
+session_idle/background: fg=Rgb(158, 194, 238) bg=Rgb(15, 18, 20) contrast=10.21
+session_idle/surface: fg=Rgb(158, 194, 238) bg=Rgb(22, 27, 30) contrast=9.43
+session_idle/surface_raised: fg=Rgb(158, 194, 238) bg=Rgb(32, 39, 43) contrast=8.23
+session_idle/selection: fg=Rgb(158, 194, 238) bg=Rgb(42, 58, 57) contrast=6.47
+
+text on background: Aa
+text on surface: Aa
+text on surface_raised: Aa
+text on selection: Aa
+muted on background: Aa
+muted on surface: Aa
+muted on surface_raised: Aa
+muted on selection: Aa
+accent on background: Aa
+accent on surface: Aa
+accent on surface_raised: Aa
+accent on selection: Aa
+secondary on background: Aa
+secondary on surface: Aa
+secondary on surface_raised: Aa
+secondary on selection: Aa
+success on background: Aa
+success on surface: Aa
+success on surface_raised: Aa
+success on selection: Aa
+warning on background: Aa
+warning on surface: Aa
+warning on surface_raised: Aa
+warning on selection: Aa
+error on background: Aa
+error on surface: Aa
+error on surface_raised: Aa
+error on selection: Aa
+session_error on background: Aa
+session_error on surface: Aa
+session_error on surface_raised: Aa
+session_error on selection: Aa
+session_activity on background: Aa
+session_activity on surface: Aa
+session_activity on surface_raised: Aa
+session_activity on selection: Aa
+session_attention on background: Aa
+session_attention on surface: Aa
+session_attention on surface_raised: Aa
+session_attention on selection: Aa
+session_idle on background: Aa
+session_idle on surface: Aa
+session_idle on surface_raised: Aa
+session_idle on selection: Aa
+=== Light palette and contrast surfaces (56x44) ===
+landmarks: background=Rgb(242, 241, 237); surface=Rgb(251, 250, 247); raised=Rgb(233, 231, 226); selection=Rgb(214, 229, 220)
+text/background: fg=Rgb(38, 51, 46) bg=Rgb(242, 241, 237) contrast=11.65
+text/surface: fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247) contrast=12.61
+text/surface_raised: fg=Rgb(38, 51, 46) bg=Rgb(233, 231, 226) contrast=10.65
+text/selection: fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) contrast=10.09
+muted/background: fg=Rgb(89, 101, 95) bg=Rgb(242, 241, 237) contrast=5.38
+muted/surface: fg=Rgb(89, 101, 95) bg=Rgb(251, 250, 247) contrast=5.83
+muted/surface_raised: fg=Rgb(89, 101, 95) bg=Rgb(233, 231, 226) contrast=4.92
+muted/selection: fg=Rgb(89, 101, 95) bg=Rgb(214, 229, 220) contrast=4.66
+accent/background: fg=Rgb(35, 104, 77) bg=Rgb(242, 241, 237) contrast=5.88
+accent/surface: fg=Rgb(35, 104, 77) bg=Rgb(251, 250, 247) contrast=6.37
+accent/surface_raised: fg=Rgb(35, 104, 77) bg=Rgb(233, 231, 226) contrast=5.38
+accent/selection: fg=Rgb(35, 104, 77) bg=Rgb(214, 229, 220) contrast=5.10
+secondary/background: fg=Rgb(54, 95, 146) bg=Rgb(242, 241, 237) contrast=5.79
+secondary/surface: fg=Rgb(54, 95, 146) bg=Rgb(251, 250, 247) contrast=6.27
+secondary/surface_raised: fg=Rgb(54, 95, 146) bg=Rgb(233, 231, 226) contrast=5.30
+secondary/selection: fg=Rgb(54, 95, 146) bg=Rgb(214, 229, 220) contrast=5.02
+success/background: fg=Rgb(40, 108, 77) bg=Rgb(242, 241, 237) contrast=5.56
+success/surface: fg=Rgb(40, 108, 77) bg=Rgb(251, 250, 247) contrast=6.02
+success/surface_raised: fg=Rgb(40, 108, 77) bg=Rgb(233, 231, 226) contrast=5.08
+success/selection: fg=Rgb(40, 108, 77) bg=Rgb(214, 229, 220) contrast=4.82
+warning/background: fg=Rgb(133, 83, 19) bg=Rgb(242, 241, 237) contrast=5.73
+warning/surface: fg=Rgb(133, 83, 19) bg=Rgb(251, 250, 247) contrast=6.20
+warning/surface_raised: fg=Rgb(133, 83, 19) bg=Rgb(233, 231, 226) contrast=5.24
+warning/selection: fg=Rgb(133, 83, 19) bg=Rgb(214, 229, 220) contrast=4.96
+error/background: fg=Rgb(169, 61, 80) bg=Rgb(242, 241, 237) contrast=5.35
+error/surface: fg=Rgb(169, 61, 80) bg=Rgb(251, 250, 247) contrast=5.80
+error/surface_raised: fg=Rgb(169, 61, 80) bg=Rgb(233, 231, 226) contrast=4.90
+error/selection: fg=Rgb(169, 61, 80) bg=Rgb(214, 229, 220) contrast=4.64
+session_error/background: fg=Rgb(169, 61, 80) bg=Rgb(242, 241, 237) contrast=5.35
+session_error/surface: fg=Rgb(169, 61, 80) bg=Rgb(251, 250, 247) contrast=5.80
+session_error/surface_raised: fg=Rgb(169, 61, 80) bg=Rgb(233, 231, 226) contrast=4.90
+session_error/selection: fg=Rgb(169, 61, 80) bg=Rgb(214, 229, 220) contrast=4.64
+session_activity/background: fg=Rgb(133, 83, 19) bg=Rgb(242, 241, 237) contrast=5.73
+session_activity/surface: fg=Rgb(133, 83, 19) bg=Rgb(251, 250, 247) contrast=6.20
+session_activity/surface_raised: fg=Rgb(133, 83, 19) bg=Rgb(233, 231, 226) contrast=5.24
+session_activity/selection: fg=Rgb(133, 83, 19) bg=Rgb(214, 229, 220) contrast=4.96
+session_attention/background: fg=Rgb(133, 83, 19) bg=Rgb(242, 241, 237) contrast=5.73
+session_attention/surface: fg=Rgb(133, 83, 19) bg=Rgb(251, 250, 247) contrast=6.20
+session_attention/surface_raised: fg=Rgb(133, 83, 19) bg=Rgb(233, 231, 226) contrast=5.24
+session_attention/selection: fg=Rgb(133, 83, 19) bg=Rgb(214, 229, 220) contrast=4.96
+session_idle/background: fg=Rgb(54, 95, 146) bg=Rgb(242, 241, 237) contrast=5.79
+session_idle/surface: fg=Rgb(54, 95, 146) bg=Rgb(251, 250, 247) contrast=6.27
+session_idle/surface_raised: fg=Rgb(54, 95, 146) bg=Rgb(233, 231, 226) contrast=5.30
+session_idle/selection: fg=Rgb(54, 95, 146) bg=Rgb(214, 229, 220) contrast=5.02
+
+text on background: Aa
+text on surface: Aa
+text on surface_raised: Aa
+text on selection: Aa
+muted on background: Aa
+muted on surface: Aa
+muted on surface_raised: Aa
+muted on selection: Aa
+accent on background: Aa
+accent on surface: Aa
+accent on surface_raised: Aa
+accent on selection: Aa
+secondary on background: Aa
+secondary on surface: Aa
+secondary on surface_raised: Aa
+secondary on selection: Aa
+success on background: Aa
+success on surface: Aa
+success on surface_raised: Aa
+success on selection: Aa
+warning on background: Aa
+warning on surface: Aa
+warning on surface_raised: Aa
+warning on selection: Aa
+error on background: Aa
+error on surface: Aa
+error on surface_raised: Aa
+error on selection: Aa
+session_error on background: Aa
+session_error on surface: Aa
+session_error on surface_raised: Aa
+session_error on selection: Aa
+session_activity on background: Aa
+session_activity on surface: Aa
+session_activity on surface_raised: Aa
+session_activity on selection: Aa
+session_attention on background: Aa
+session_attention on surface: Aa
+session_attention on surface_raised: Aa
+session_attention on selection: Aa
+session_idle on background: Aa
+session_idle on surface: Aa
+session_idle on surface_raised: Aa
+session_idle on selection: Aa
+=== Darcula palette and contrast surfaces (56x44) ===
+landmarks: background=Rgb(43, 43, 43); surface=Rgb(49, 51, 53); raised=Rgb(60, 63, 65); selection=Rgb(39, 55, 78)
+text/background: fg=Rgb(169, 183, 198) bg=Rgb(43, 43, 43) contrast=6.93
+text/surface: fg=Rgb(169, 183, 198) bg=Rgb(49, 51, 53) contrast=6.21
+text/surface_raised: fg=Rgb(169, 183, 198) bg=Rgb(60, 63, 65) contrast=5.19
+text/selection: fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) contrast=5.90
+muted/background: fg=Rgb(159, 170, 183) bg=Rgb(43, 43, 43) contrast=6.01
+muted/surface: fg=Rgb(159, 170, 183) bg=Rgb(49, 51, 53) contrast=5.38
+muted/surface_raised: fg=Rgb(159, 170, 183) bg=Rgb(60, 63, 65) contrast=4.50
+muted/selection: fg=Rgb(159, 170, 183) bg=Rgb(39, 55, 78) contrast=5.11
+accent/background: fg=Rgb(112, 183, 255) bg=Rgb(43, 43, 43) contrast=6.68
+accent/surface: fg=Rgb(112, 183, 255) bg=Rgb(49, 51, 53) contrast=5.98
+accent/surface_raised: fg=Rgb(112, 183, 255) bg=Rgb(60, 63, 65) contrast=5.00
+accent/selection: fg=Rgb(112, 183, 255) bg=Rgb(39, 55, 78) contrast=5.68
+secondary/background: fg=Rgb(205, 169, 255) bg=Rgb(43, 43, 43) contrast=7.22
+secondary/surface: fg=Rgb(205, 169, 255) bg=Rgb(49, 51, 53) contrast=6.47
+secondary/surface_raised: fg=Rgb(205, 169, 255) bg=Rgb(60, 63, 65) contrast=5.41
+secondary/selection: fg=Rgb(205, 169, 255) bg=Rgb(39, 55, 78) contrast=6.15
+success/background: fg=Rgb(136, 231, 155) bg=Rgb(43, 43, 43) contrast=9.41
+success/surface: fg=Rgb(136, 231, 155) bg=Rgb(49, 51, 53) contrast=8.43
+success/surface_raised: fg=Rgb(136, 231, 155) bg=Rgb(60, 63, 65) contrast=7.05
+success/selection: fg=Rgb(136, 231, 155) bg=Rgb(39, 55, 78) contrast=8.00
+warning/background: fg=Rgb(255, 198, 109) bg=Rgb(43, 43, 43) contrast=9.14
+warning/surface: fg=Rgb(255, 198, 109) bg=Rgb(49, 51, 53) contrast=8.18
+warning/surface_raised: fg=Rgb(255, 198, 109) bg=Rgb(60, 63, 65) contrast=6.85
+warning/selection: fg=Rgb(255, 198, 109) bg=Rgb(39, 55, 78) contrast=7.78
+error/background: fg=Rgb(255, 155, 155) bg=Rgb(43, 43, 43) contrast=7.02
+error/surface: fg=Rgb(255, 155, 155) bg=Rgb(49, 51, 53) contrast=6.29
+error/surface_raised: fg=Rgb(255, 155, 155) bg=Rgb(60, 63, 65) contrast=5.26
+error/selection: fg=Rgb(255, 155, 155) bg=Rgb(39, 55, 78) contrast=5.98
+session_error/background: fg=Rgb(255, 155, 155) bg=Rgb(43, 43, 43) contrast=7.02
+session_error/surface: fg=Rgb(255, 155, 155) bg=Rgb(49, 51, 53) contrast=6.29
+session_error/surface_raised: fg=Rgb(255, 155, 155) bg=Rgb(60, 63, 65) contrast=5.26
+session_error/selection: fg=Rgb(255, 155, 155) bg=Rgb(39, 55, 78) contrast=5.98
+session_activity/background: fg=Rgb(255, 198, 109) bg=Rgb(43, 43, 43) contrast=9.14
+session_activity/surface: fg=Rgb(255, 198, 109) bg=Rgb(49, 51, 53) contrast=8.18
+session_activity/surface_raised: fg=Rgb(255, 198, 109) bg=Rgb(60, 63, 65) contrast=6.85
+session_activity/selection: fg=Rgb(255, 198, 109) bg=Rgb(39, 55, 78) contrast=7.78
+session_attention/background: fg=Rgb(255, 220, 96) bg=Rgb(43, 43, 43) contrast=10.56
+session_attention/surface: fg=Rgb(255, 220, 96) bg=Rgb(49, 51, 53) contrast=9.46
+session_attention/surface_raised: fg=Rgb(255, 220, 96) bg=Rgb(60, 63, 65) contrast=7.91
+session_attention/selection: fg=Rgb(255, 220, 96) bg=Rgb(39, 55, 78) contrast=8.98
+session_idle/background: fg=Rgb(145, 220, 255) bg=Rgb(43, 43, 43) contrast=9.36
+session_idle/surface: fg=Rgb(145, 220, 255) bg=Rgb(49, 51, 53) contrast=8.39
+session_idle/surface_raised: fg=Rgb(145, 220, 255) bg=Rgb(60, 63, 65) contrast=7.01
+session_idle/selection: fg=Rgb(145, 220, 255) bg=Rgb(39, 55, 78) contrast=7.97
+
+text on background: Aa
+text on surface: Aa
+text on surface_raised: Aa
+text on selection: Aa
+muted on background: Aa
+muted on surface: Aa
+muted on surface_raised: Aa
+muted on selection: Aa
+accent on background: Aa
+accent on surface: Aa
+accent on surface_raised: Aa
+accent on selection: Aa
+secondary on background: Aa
+secondary on surface: Aa
+secondary on surface_raised: Aa
+secondary on selection: Aa
+success on background: Aa
+success on surface: Aa
+success on surface_raised: Aa
+success on selection: Aa
+warning on background: Aa
+warning on surface: Aa
+warning on surface_raised: Aa
+warning on selection: Aa
+error on background: Aa
+error on surface: Aa
+error on surface_raised: Aa
+error on selection: Aa
+session_error on background: Aa
+session_error on surface: Aa
+session_error on surface_raised: Aa
+session_error on selection: Aa
+session_activity on background: Aa
+session_activity on surface: Aa
+session_activity on surface_raised: Aa
+session_activity on selection: Aa
+session_attention on background: Aa
+session_attention on surface: Aa
+session_attention on surface_raised: Aa
+session_attention on selection: Aa
+session_idle on background: Aa
+session_idle on surface: Aa
+session_idle on surface_raised: Aa
+session_idle on selection: Aa
+=== HighContrast palette and contrast surfaces (56x44) ===
+landmarks: background=Rgb(0, 0, 0); surface=Rgb(0, 0, 0); raised=Rgb(32, 32, 32); selection=Rgb(38, 38, 38)
+text/background: fg=Rgb(255, 255, 255) bg=Rgb(0, 0, 0) contrast=21.00
+text/surface: fg=Rgb(255, 255, 255) bg=Rgb(0, 0, 0) contrast=21.00
+text/surface_raised: fg=Rgb(255, 255, 255) bg=Rgb(32, 32, 32) contrast=16.29
+text/selection: fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) contrast=15.13
+muted/background: fg=Rgb(190, 190, 190) bg=Rgb(0, 0, 0) contrast=11.30
+muted/surface: fg=Rgb(190, 190, 190) bg=Rgb(0, 0, 0) contrast=11.30
+muted/surface_raised: fg=Rgb(190, 190, 190) bg=Rgb(32, 32, 32) contrast=8.77
+muted/selection: fg=Rgb(190, 190, 190) bg=Rgb(38, 38, 38) contrast=8.14
+accent/background: fg=Rgb(26, 235, 255) bg=Rgb(0, 0, 0) contrast=14.37
+accent/surface: fg=Rgb(26, 235, 255) bg=Rgb(0, 0, 0) contrast=14.37
+accent/surface_raised: fg=Rgb(26, 235, 255) bg=Rgb(32, 32, 32) contrast=11.15
+accent/selection: fg=Rgb(26, 235, 255) bg=Rgb(38, 38, 38) contrast=10.36
+secondary/background: fg=Rgb(255, 150, 255) bg=Rgb(0, 0, 0) contrast=11.06
+secondary/surface: fg=Rgb(255, 150, 255) bg=Rgb(0, 0, 0) contrast=11.06
+secondary/surface_raised: fg=Rgb(255, 150, 255) bg=Rgb(32, 32, 32) contrast=8.58
+secondary/selection: fg=Rgb(255, 150, 255) bg=Rgb(38, 38, 38) contrast=7.97
+success/background: fg=Rgb(80, 166, 97) bg=Rgb(0, 0, 0) contrast=6.97
+success/surface: fg=Rgb(80, 166, 97) bg=Rgb(0, 0, 0) contrast=6.97
+success/surface_raised: fg=Rgb(80, 166, 97) bg=Rgb(32, 32, 32) contrast=5.41
+success/selection: fg=Rgb(80, 166, 97) bg=Rgb(38, 38, 38) contrast=5.02
+warning/background: fg=Rgb(255, 191, 102) bg=Rgb(0, 0, 0) contrast=12.90
+warning/surface: fg=Rgb(255, 191, 102) bg=Rgb(0, 0, 0) contrast=12.90
+warning/surface_raised: fg=Rgb(255, 191, 102) bg=Rgb(32, 32, 32) contrast=10.01
+warning/selection: fg=Rgb(255, 191, 102) bg=Rgb(38, 38, 38) contrast=9.29
+error/background: fg=Rgb(255, 80, 80) bg=Rgb(0, 0, 0) contrast=6.52
+error/surface: fg=Rgb(255, 80, 80) bg=Rgb(0, 0, 0) contrast=6.52
+error/surface_raised: fg=Rgb(255, 80, 80) bg=Rgb(32, 32, 32) contrast=5.06
+error/selection: fg=Rgb(255, 80, 80) bg=Rgb(38, 38, 38) contrast=4.70
+session_error/background: fg=Rgb(255, 80, 80) bg=Rgb(0, 0, 0) contrast=6.52
+session_error/surface: fg=Rgb(255, 80, 80) bg=Rgb(0, 0, 0) contrast=6.52
+session_error/surface_raised: fg=Rgb(255, 80, 80) bg=Rgb(32, 32, 32) contrast=5.06
+session_error/selection: fg=Rgb(255, 80, 80) bg=Rgb(38, 38, 38) contrast=4.70
+session_activity/background: fg=Rgb(255, 191, 102) bg=Rgb(0, 0, 0) contrast=12.90
+session_activity/surface: fg=Rgb(255, 191, 102) bg=Rgb(0, 0, 0) contrast=12.90
+session_activity/surface_raised: fg=Rgb(255, 191, 102) bg=Rgb(32, 32, 32) contrast=10.01
+session_activity/selection: fg=Rgb(255, 191, 102) bg=Rgb(38, 38, 38) contrast=9.29
+session_attention/background: fg=Rgb(255, 220, 96) bg=Rgb(0, 0, 0) contrast=15.66
+session_attention/surface: fg=Rgb(255, 220, 96) bg=Rgb(0, 0, 0) contrast=15.66
+session_attention/surface_raised: fg=Rgb(255, 220, 96) bg=Rgb(32, 32, 32) contrast=12.15
+session_attention/selection: fg=Rgb(255, 220, 96) bg=Rgb(38, 38, 38) contrast=11.28
+session_idle/background: fg=Rgb(140, 220, 255) bg=Rgb(0, 0, 0) contrast=13.80
+session_idle/surface: fg=Rgb(140, 220, 255) bg=Rgb(0, 0, 0) contrast=13.80
+session_idle/surface_raised: fg=Rgb(140, 220, 255) bg=Rgb(32, 32, 32) contrast=10.70
+session_idle/selection: fg=Rgb(140, 220, 255) bg=Rgb(38, 38, 38) contrast=9.94
+
+text on background: Aa
+text on surface: Aa
+text on surface_raised: Aa
+text on selection: Aa
+muted on background: Aa
+muted on surface: Aa
+muted on surface_raised: Aa
+muted on selection: Aa
+accent on background: Aa
+accent on surface: Aa
+accent on surface_raised: Aa
+accent on selection: Aa
+secondary on background: Aa
+secondary on surface: Aa
+secondary on surface_raised: Aa
+secondary on selection: Aa
+success on background: Aa
+success on surface: Aa
+success on surface_raised: Aa
+success on selection: Aa
+warning on background: Aa
+warning on surface: Aa
+warning on surface_raised: Aa
+warning on selection: Aa
+error on background: Aa
+error on surface: Aa
+error on surface_raised: Aa
+error on selection: Aa
+session_error on background: Aa
+session_error on surface: Aa
+session_error on surface_raised: Aa
+session_error on selection: Aa
+session_activity on background: Aa
+session_activity on surface: Aa
+session_activity on surface_raised: Aa
+session_activity on selection: Aa
+session_attention on background: Aa
+session_attention on surface: Aa
+session_attention on surface_raised: Aa
+session_attention on selection: Aa
+session_idle on background: Aa
+session_idle on surface: Aa
+session_idle on surface_raised: Aa
+session_idle on selection: Aa

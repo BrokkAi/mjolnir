@@ -247,8 +247,8 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::CommandId;
     use crate::test_support::{dashboard_with_session, drawn, key, open_palette, running_session};
-    use crate::{CommandId, DashboardAction};
 
     /// A dashboard with one running session in "Default" and two other
     /// workspaces, focused on its row.
@@ -271,6 +271,22 @@ mod tests {
         }
     }
 
+    fn append_golden_state(
+        output: &mut String,
+        label: &str,
+        width: u16,
+        height: u16,
+        lines: &[String],
+    ) {
+        output.push_str(&format!("=== {label} ({width}x{height}) ===\n"));
+        output.push_str(&lines.join("\n"));
+        output.push('\n');
+    }
+
+    fn append_golden_value(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        output.push_str(&format!("{label}: {value:?}\n"));
+    }
+
     fn row(lines: &[String], needle: &str) -> usize {
         lines
             .iter()
@@ -286,118 +302,6 @@ mod tests {
             dashboard.handle_key(key(KeyCode::Down));
             drawn(dashboard, width, height);
         }
-    }
-
-    #[test]
-    fn the_session_menu_lists_change_workspace_under_organize() {
-        let mut dashboard = dashboard_with_workspaces();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        let (organize, rename, change, lifecycle) = (
-            row(&lines, "Organize"),
-            row(&lines, "Rename…"),
-            row(&lines, "Change Workspace ›"),
-            row(&lines, "Lifecycle"),
-        );
-        assert!(
-            organize < rename && rename < change && change < lifecycle,
-            "{lines:#?}"
-        );
-    }
-
-    fn assert_popup_on_menu_item(width: u16, height: u16) {
-        let mut dashboard = dashboard_with_workspaces();
-        menu_on_change_workspace(&mut dashboard, width, height);
-        let before = drawn(&mut dashboard, width, height);
-        let item_row = row(&before, "Change Workspace ›");
-        let item_column = before[item_row].find("Change Workspace").unwrap();
-
-        dashboard.handle_key(key(KeyCode::Enter));
-        // The menu stays: the list is a popup on the item, not a dialog.
-        assert!(
-            matches!(&dashboard.mode, Mode::Palette(p) if p.workspace_popup.is_some()),
-            "the list opens inside the menu"
-        );
-        let lines = drawn(&mut dashboard, width, height);
-        let joined = lines.join("\n");
-        assert_eq!(row(&lines, "Change Workspace ▾"), item_row, "{joined}");
-        assert_eq!(
-            lines[item_row].find("Change Workspace"),
-            Some(item_column),
-            "the item stays where it was: {joined}"
-        );
-        // Names only, in the workspace manager's order, the current one
-        // marked, directly under the item.
-        let (default, other, third) = (
-            row(&lines, "Default (current)"),
-            row(&lines, "│Other"),
-            row(&lines, "│Third"),
-        );
-        assert!(
-            item_row < default && default < other && other < third,
-            "{joined}"
-        );
-        assert!(!joined.contains("Session: "), "no second dialog: {joined}");
-    }
-
-    #[test]
-    fn the_menu_item_opens_the_inline_combobox_at_140_columns() {
-        assert_popup_on_menu_item(140, 40);
-    }
-
-    #[test]
-    fn the_menu_item_opens_the_inline_combobox_at_80_columns() {
-        assert_popup_on_menu_item(80, 40);
-    }
-
-    #[test]
-    fn the_palette_opens_the_same_combobox_on_its_row() {
-        let mut dashboard = dashboard_with_workspaces();
-        open_palette(&mut dashboard);
-        drawn(&mut dashboard, 100, 40);
-        for character in "change workspace".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        drawn(&mut dashboard, 100, 40);
-        assert_eq!(
-            selected_command(&dashboard),
-            Some(CommandId::ChangeWorkspace)
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(
-            matches!(&dashboard.mode, Mode::Palette(p) if p.workspace_popup.is_some()),
-            "the palette stays open under the list"
-        );
-        let lines = drawn(&mut dashboard, 100, 40);
-        let anchor = row(&lines, "Change workspace ▾");
-        assert!(
-            anchor < row(&lines, "Default (current)")
-                && row(&lines, "Default (current)") < row(&lines, "│Other"),
-            "{lines:#?}"
-        );
-    }
-
-    #[test]
-    fn choosing_a_workspace_moves_at_once() {
-        let mut dashboard = dashboard_with_workspaces();
-        dashboard.dispatch_command(CommandId::ChangeWorkspace);
-        drawn(&mut dashboard, 120, 40);
-        dashboard.handle_key(key(KeyCode::Down));
-        drawn(&mut dashboard, 120, 40);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::ChangeWorkspace {
-                session_id: "session-1".into(),
-                workspace_id: "other".into(),
-                workspace_name: "Other".into(),
-            }
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-        let joined = drawn(&mut dashboard, 120, 40).join("\n");
-        assert!(!joined.contains("Change workspace?"), "{joined}");
     }
 
     /// A session titled by the prompt it started with: a long handoff, over
@@ -438,44 +342,85 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_only_the_list_then_the_menu() {
+    fn golden_change_workspace_combobox() {
+        let mut output = String::new();
+
+        let mut dashboard = dashboard_with_workspaces();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "session menu", 120, 40, &lines);
+
+        for width in [140, 80] {
+            let mut dashboard = dashboard_with_workspaces();
+            menu_on_change_workspace(&mut dashboard, width, 40);
+            let _ = drawn(&mut dashboard, width, 40);
+            let action = dashboard.handle_key(key(KeyCode::Enter));
+            append_golden_value(&mut output, "menu popup action", action);
+            let lines = drawn(&mut dashboard, width, 40);
+            append_golden_state(
+                &mut output,
+                "session menu workspace list",
+                width,
+                40,
+                &lines,
+            );
+        }
+
+        let mut dashboard = dashboard_with_workspaces();
+        open_palette(&mut dashboard);
+        let _ = drawn(&mut dashboard, 100, 40);
+        for character in "change workspace".chars() {
+            dashboard.handle_key(key(KeyCode::Char(character)));
+        }
+        let _ = drawn(&mut dashboard, 100, 40);
+        append_golden_value(
+            &mut output,
+            "selected palette command",
+            selected_command(&dashboard),
+        );
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "palette popup action", action);
+        let lines = drawn(&mut dashboard, 100, 40);
+        append_golden_state(&mut output, "palette workspace list", 100, 40, &lines);
+
         let mut dashboard = dashboard_with_workspaces();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
-        drawn(&mut dashboard, 120, 40);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::None
+        let _ = drawn(&mut dashboard, 120, 40);
+        dashboard.handle_key(key(KeyCode::Down));
+        let _ = drawn(&mut dashboard, 120, 40);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "select Other action", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "dashboard after selecting Other",
+            120,
+            40,
+            &lines,
         );
-        assert!(
-            matches!(&dashboard.mode, Mode::Palette(p) if p.workspace_popup.is_none()),
-            "the menu is still open"
-        );
-        let joined = drawn(&mut dashboard, 120, 40).join("\n");
-        assert!(joined.contains("Change Workspace ›"), "{joined}");
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
 
-    #[test]
-    fn picking_the_current_workspace_only_says_so() {
         let mut dashboard = dashboard_with_workspaces();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
-        drawn(&mut dashboard, 120, 40);
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
+        let _ = drawn(&mut dashboard, 120, 40);
+        let action = dashboard.handle_key(key(KeyCode::Esc));
+        append_golden_value(&mut output, "first Escape action", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "menu after closing workspace list",
+            120,
+            40,
+            &lines,
+        );
+        let action = dashboard.handle_key(key(KeyCode::Esc));
+        append_golden_value(&mut output, "second Escape action", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "dashboard after closing menu", 120, 40, &lines);
 
-    #[test]
-    fn the_command_waits_for_a_second_workspace() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_workspace_names(BTreeMap::from([(
-            "default".to_owned(),
-            "Default".to_owned(),
-        )]));
-        dashboard.focus_sessions();
-        assert_eq!(
-            (crate::actions::spec(CommandId::ChangeWorkspace).available)(&dashboard),
-            crate::actions::Availability::Blocked("there is no other workspace")
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "change-workspace-combobox",
+            &output,
         );
     }
 }

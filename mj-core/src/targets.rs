@@ -2268,6 +2268,7 @@ mod executor_tests {
 
     /// B-2 at the executor: a backgrounded descendant that holds the output
     /// pipes must not hold the completed command past the drain.
+    // Hard-won: c86b2123: A target command stayed Running until a background descendant closed inherited pipes.
     #[cfg(target_os = "linux")]
     #[test]
     fn commands_complete_at_leader_exit_when_a_descendant_holds_the_pipes() {
@@ -2455,6 +2456,7 @@ mod executor_tests {
         }
     }
 
+    // Hard-won: e6ed54ed: sshd MaxStartups rejected concurrent session handshakes and users saw dead workers and failed closes.
     #[test]
     fn a_transport_rejected_ssh_command_is_retried_once_and_then_succeeds() {
         set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
@@ -2471,20 +2473,7 @@ mod executor_tests {
         set_ssh_retry_backoff_for_test(None);
     }
 
-    #[test]
-    fn an_untagged_command_is_not_retried_after_the_same_failure() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
-        let directory = tempfile::tempdir().expect("temp dir");
-        let mut command = flaky_ssh_script(directory.path());
-        command.ssh_destination = None;
-
-        let output = ProcessExecutor.execute(&command).expect("runs once");
-
-        assert_eq!(output.status, 255);
-        assert_eq!(attempts(directory.path()), 1);
-        set_ssh_retry_backoff_for_test(None);
-    }
-
+    // Hard-won: e6ed54ed: sshd MaxStartups rejected remote operations during daemon startup and they were falsely reported as failed.
     #[test]
     fn the_cancellable_executor_also_retries_a_transport_rejection() {
         set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));

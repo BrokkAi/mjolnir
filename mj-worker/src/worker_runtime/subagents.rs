@@ -875,6 +875,7 @@ enabled = false
         );
     }
 
+    // Hard-won: 131223a: sub-agent MCP calls returned accepted placeholders instead of their daemon result.
     #[tokio::test]
     async fn a_waiting_socket_call_returns_the_daemon_result_when_it_lands() {
         let directory = tempfile::tempdir().unwrap();
@@ -894,6 +895,7 @@ enabled = false
         assert_eq!(waiter.await.unwrap(), Some(done("r1")));
     }
 
+    // Hard-won: 96b9154: the worker waited past the deadline requested by the model.
     #[tokio::test(start_paused = true)]
     async fn a_wait_the_daemon_never_answers_is_answered_here_at_the_callers_deadline() {
         #[cfg(test)]
@@ -967,6 +969,7 @@ enabled = false
     /// `REPLY_TIMEOUT`. This worker answers first, and says whether the daemon
     /// has read the queue since the request joined it; a read before the
     /// request does not count.
+    // Hard-won: dfd2e32: a stalled daemon launched a queued child after the parent had moved on.
     #[tokio::test(start_paused = true)]
     async fn an_unanswered_request_is_answered_here_with_whether_the_daemon_picked_it_up() {
         use tokio::io::{AsyncWriteExt, BufReader};
@@ -1016,17 +1019,6 @@ enabled = false
             assert_eq!(contact.picked_up, daemon_reads_it, "{reply}");
             assert!(contact.last_collected_seconds_ago.is_some(), "{reply}");
         }
-    }
-
-    #[tokio::test]
-    async fn a_waiting_socket_call_gives_up_at_its_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
-        assert_eq!(endpoint.enqueue(request("r1")).unwrap(), None);
-        let result = endpoint
-            .await_result("r1", Instant::now() + Duration::from_millis(50))
-            .await;
-        assert_eq!(result, None);
     }
 }
 

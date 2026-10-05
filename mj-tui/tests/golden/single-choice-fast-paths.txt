@@ -1,0 +1,190 @@
+=== single_profile_and_raw_target_create_from_project_without_confirm (100x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                                                          │
+│Create new work or open a session.    ││                     ✦  M J O L N I R                     │
+│                                      ││                                                          │
+│                                                                                                  │
+│                                                                                                  │
+│           ╭ × New session · 1/1 local project ───────────────────────────────────────╮           │
+│           │                                                                          │           │
+│           │ Absolute project directory on this machine:                              │           │
+│           │                                                                          │           │
+│           │                                                                          │           │
+│           │                                                                          │           │
+│           │                                                                          │           │
+│           │   Cancel     Create                                                      │  ─────────╯
+│           ╰──────────────────────────────────────────────────────────────────────────╯  ─────────╮
+│                                                                                                  │
+│                                                                                          find    │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                           │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+action: ValidateProjectDirectory { target_template_id: "local", directory: "/work/project" }
+=== single_profile_and_raw_target_create_from_project_without_confirm (100x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                                                          │
+│Create new work or open a session.    ││                     ✦  M J O L N I R                     │
+│                                      ││                                                          │
+│                                      ││            Create a session to start building.           │
+│                                                                                                  │
+│                                                                                                  │
+│             ╭ × Creating session ──────────────────────────────────────────────────╮             │
+│             │                                                                      │             │
+│             │ Checking prerequisites…                                              │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │   Cancel                                                             │  ───────────╯
+│             ╰──────────────────────────────────────────────────────────────────────╯  ───────────╮
+│                                                                                                  │
+│                                                                                       to find    │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                           │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+action: CreateSession with managed worktree enabled
+=== single_profile_keeps_container_sizing_and_confirm (120x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│        ╭ × New session · 1/3 target ────────────────────────────────────────────────────────────────────────╮        │
+│        │                                                                                                    │        │
+│        │   TARGET  KIND          CPU     MEM (GiB)     STATUS                                               │        │
+│        │   podman  local Podman  8       32                                                                 │        │
+│        │                                                                                                    │        │
+│        │ Host totals unavailable; resource limits cannot be checked.                                        │        │
+│        │ ctrl+b shift+r recheck availability                                                                │        │
+│        │                                                                                                    │  ──────╯
+│        │   Cancel     Next                                                                                  │  ──────╮
+│        ╰────────────────────────────────────────────────────────────────────────────────────────────────────╯        │
+│                                                                                                                      │
+│                                                                                                                ──────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+action: None
+=== single_profile_keeps_container_sizing_and_confirm (120x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                  ╭ × New session · 2/3 choose a project ─────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │ hel  BrokkAi/hel                                                     Add…     │                   │
+│                  │                                                                      Remove   │                   │
+│                  │ hel · 1 repository                                                            │                   │
+│                  │                                                                               │                   │
+│                  │   BrokkAi/hel                                                                 │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Back     Next                                                    │  ─────────────────╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                                      │
+│                                                                                                     ─────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== single_profile_keeps_container_sizing_and_confirm (120x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create                                                                                                                │
+│                                                                                                                      │
+│         ╭ × New session · 3/3 review ──────────────────────────────────────────────────────────────────────╮         │
+│         │                                                                                                  │         │
+│         │ Profile: claude-1                                                                                │         │
+│         │ Project: hel                                                                                     │         │
+│         │ Target: podman (local Podman)                                                                    │         │
+│         │ Compute: 8 CPU / 32.0G                                                                           │         │
+│         │                                                                                                  │         │
+│         │ Attached directories: 0                                                                          │         │
+│         │                                                                                                  │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │  ───────╮
+│         │   Cancel     Back     Add directory…     Create                                                  │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+action: PreflightResumeRepositories
+=== single_profile_raw_resume_starts_checks_without_confirm (100x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│project ──────────────────────────────││                                                          │
+│› ■ ACP pretty name               ◇ ⋯ ││                     ✦  M J O L N I R                     │
+│  Stopped  local/project  codex-1     ││                                                          │
+│  │ No messages yet                   ││        Select a session to open its conversation.        │
+│  │                                                                                               │
+│                                                                                                  │
+│             ╭ × Opening session ───────────────────────────────────────────────────╮             │
+│             │                                                                      │             │
+│             │ Checking prerequisites…                                              │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │   Cancel                                                             │  ───────────╯
+│             ╰──────────────────────────────────────────────────────────────────────╯  ───────────╮
+│                                                                                                  │
+│                                                                                       o open.    │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                           │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys

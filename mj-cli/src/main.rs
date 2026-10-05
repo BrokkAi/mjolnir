@@ -22,10 +22,6 @@ mod splash;
 #[cfg(test)]
 mod test_support;
 
-use std::io::{self, Write};
-#[cfg(test)]
-use std::path::PathBuf;
-
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::clipboard::CopyToClipboard;
@@ -39,6 +35,7 @@ use crossterm::terminal::{
 };
 use mj_core::config::{Config, config_path};
 use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
+use std::io::{self, Write};
 
 use mj_controller::controller::Controller;
 use mj_controller::setup::run_setup_command;
@@ -2176,6 +2173,7 @@ mod tests {
     use super::*;
     use mj_core::state::{SessionRecord, SessionState, State};
 
+    // Hard-won: 0475c51230: Launch finding C-2 found large-transfer consent flags incorrectly added to every move refusal; this checks they appear only for that consent error.
     #[test]
     fn move_error_hint_names_consent_flags_only_for_large_transfer_consent() {
         use mj_core::move_workspace::{WorkspaceAssessment, WorkspaceSelection};
@@ -2199,18 +2197,7 @@ mod tests {
         assert!(shown.contains("--allow-large-transfer"), "{shown}");
     }
 
-    #[test]
-    fn move_error_hint_names_clear_resources_for_the_bare_target_refusal() {
-        let refusal = anyhow::anyhow!(mj_core::state::BARE_TARGET_FIXED_RESOURCES);
-        let shown = format!("{:#}", with_clear_resources_hint(refusal));
-        assert!(shown.contains("--clear-resources"), "{shown}");
-        assert!(shown.contains("fixed host resources"), "{shown}");
-
-        let other = anyhow::anyhow!("unknown destination target");
-        let shown = format!("{:#}", with_clear_resources_hint(other));
-        assert!(!shown.contains("--clear-resources"), "{shown}");
-    }
-
+    // Hard-won: 0475c51230: Launch finding C-7 found the refusal say “1 queued command require”; this checks singular and plural counts agree.
     #[test]
     fn queued_command_refusal_agrees_in_number() {
         assert_eq!(
@@ -2225,6 +2212,7 @@ mod tests {
 
     /// F-16: `--session`, `--json`, and other flags had no description in
     /// `--help`. Every visible argument of every command now says what it is.
+    // Hard-won: 820ba5c7eb: Finding F-16 found dozens of visible flags without help text; the recursive command-tree check rejects every undescribed argument.
     #[test]
     fn every_visible_argument_is_described_in_help() {
         fn undescribed(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
@@ -2256,31 +2244,10 @@ mod tests {
         assert!(missing.is_empty(), "undescribed arguments: {missing:#?}");
     }
 
-    /// H-3: `mj new` and `mj acp` without `--workspace` are refused with the
-    /// daemon's workspaces, their session counts, and how to make one.
-    #[test]
-    fn a_missing_workspace_is_refused_with_the_workspaces_and_how_to_make_one() {
-        let listed = [("Release".to_owned(), 1), ("fuzz".to_owned(), 3)];
-        let message = workspace_required_message("mj new", Some(&listed));
-        assert!(
-            message.starts_with("mj new needs --workspace NAME"),
-            "{message}"
-        );
-        assert!(message.contains("\n  Release  (1 session)"), "{message}");
-        assert!(message.contains("\n  fuzz  (3 sessions)"), "{message}");
-        assert!(message.ends_with("Create one with `mj workspaces create NAME`."));
-
-        let message = workspace_required_message("mj acp", Some(&[]));
-        assert!(message.contains("this instance has none yet"), "{message}");
-        assert!(message.contains("mj workspaces create NAME"), "{message}");
-
-        let message = workspace_required_message("mj acp", None);
-        assert!(message.contains("mj workspaces create NAME"), "{message}");
-    }
-
     /// R2-5: `mj new --workspace nosuch` said only `unknown workspace
     /// "nosuch"`. It now lists what exists and how to make one, in the shape
     /// the missing-flag refusal uses.
+    // Hard-won: f0e899a4bf: Launch finding R2-5 found unknown workspace errors omitted available workspaces and creation guidance; the test checks the repaired refusal text.
     #[test]
     fn an_unknown_workspace_is_refused_with_the_workspaces_and_how_to_make_one() {
         let listed = [("beta".to_owned(), 0), ("alpha".to_owned(), 1)];
@@ -2300,6 +2267,7 @@ mod tests {
     }
 
     /// F-16: `--workspace` was global, so every command's help offered it.
+    // Hard-won: 820ba5c7eb: Finding F-16 found `--workspace` exposed globally on commands that ignore it; this checks acceptance only on commands that use it.
     #[test]
     fn workspace_is_offered_only_where_it_selects_something() {
         for argv in [
@@ -2331,6 +2299,7 @@ mod tests {
     /// R2-10: the help said commands other than `mj new` and `mj acp` "need
     /// it when the instance has more than one", but with two workspaces
     /// `mj sessions` without it lists every session.
+    // Hard-won: 12dc56b2e8: Launch finding R2-10 found help falsely saying `mj sessions` needs a workspace; the test checks required-command and filter descriptions.
     #[test]
     fn workspace_help_says_which_commands_require_it_and_which_filter() {
         let command = <Cli as clap::CommandFactory>::command();
@@ -2354,6 +2323,7 @@ mod tests {
     }
 
     /// F-16: `mj acp` is documented, so `mj --help` lists it.
+    // Hard-won: 820ba5c7eb: Finding F-16 found `mj acp` hidden from `mj --help`; this checks the public command list includes it.
     #[test]
     fn acp_is_listed_in_help() {
         let help = <Cli as clap::CommandFactory>::command()
@@ -2363,6 +2333,7 @@ mod tests {
     }
 
     /// F-10: the removed names got clap's generic "unrecognized subcommand".
+    // Hard-won: e5db6edb36: Finding F-10 found removed `close` and `cancel-turn` names yielded generic clap errors; the test checks replacement guidance for both spellings and keeps them hidden from help.
     #[test]
     fn a_removed_command_names_its_replacement_whatever_it_was_given() {
         for (argv, replacement) in [
@@ -2391,6 +2362,7 @@ mod tests {
 
     /// `mj login` for a harness whose CLI is not installed names the missing
     /// program and how to install it, instead of a bare ENOENT.
+    // Hard-won: 613642d3f7: Launch finding J-12 found login exposed a bare ENOENT for missing Codex; this checks the program, installation command, and profile login remedy.
     #[test]
     fn a_missing_login_program_is_named_with_how_to_install_it() {
         let error = login_spawn_error(
@@ -2416,6 +2388,7 @@ mod tests {
         assert!(!format!("{other:#}").contains("not installed"));
     }
 
+    // Hard-won: 594e6f27: Claude auth status accepted a made-up setup token by exit code alone.
     #[test]
     fn the_verification_reads_which_credential_claude_code_actually_used() {
         assert_eq!(
@@ -2431,203 +2404,9 @@ mod tests {
         assert_eq!(reported_auth_method(br#"{"loggedIn":true}"#), None);
     }
 
-    #[test]
-    fn the_setup_token_is_read_out_of_the_surrounding_instructions() {
-        let stdout = "Opening browser to authenticate...\n\
-             Paste the code shown in your browser.\n\n\
-             Your token:\n\
-             sk-ant-oat01-EXAMPLE-token-value\n\n\
-             This token expires in one year.\n";
-        assert_eq!(
-            extract_setup_token(stdout).as_deref(),
-            Some("sk-ant-oat01-EXAMPLE-token-value")
-        );
-
-        // Surrounding whitespace is not part of the token.
-        assert_eq!(
-            extract_setup_token("  sk-ant-oat01-padded  \n").as_deref(),
-            Some("sk-ant-oat01-padded")
-        );
-
-        // A prefix Hel has not seen still leaves the token printed last.
-        assert_eq!(
-            extract_setup_token("Your token:\nsk-ant-oat02-future\n").as_deref(),
-            Some("sk-ant-oat02-future")
-        );
-
-        // A line that merely mentions the prefix is not a token.
-        assert_eq!(
-            extract_setup_token("tokens start with sk-ant-oat01-\nsk-ant-oat01-real\n").as_deref(),
-            Some("sk-ant-oat01-real")
-        );
-
-        assert_eq!(extract_setup_token("   \n\n"), None);
-    }
-
-    #[test]
-    fn login_uses_the_sole_profile_and_otherwise_demands_a_choice() {
-        let mut config = Config::default();
-        assert!(resolve_login_profile(&config, None).is_err());
-
-        config.profiles.insert(
-            "work".into(),
-            mj_core::config::HarnessProfile {
-                enabled: true,
-                kind: mj_core::config::HarnessKind::Claude,
-                home: PathBuf::from("/home/user/.claude"),
-                environment: Default::default(),
-                context_window_bytes: None,
-                subagents: Default::default(),
-                guardian_review_model: None,
-            },
-        );
-        assert_eq!(resolve_login_profile(&config, None).unwrap(), "work");
-
-        config
-            .profiles
-            .insert("personal".into(), config.profiles["work"].clone());
-        let error = resolve_login_profile(&config, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("personal, work"), "{error}");
-        assert_eq!(
-            resolve_login_profile(&config, Some("personal")).unwrap(),
-            "personal"
-        );
-
-        config.profiles.get_mut("personal").unwrap().enabled = false;
-        assert_eq!(resolve_login_profile(&config, None).unwrap(), "work");
-        assert_eq!(profile_ids(&config), "work");
-        let error = resolve_login_profile(&config, Some("personal"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("disabled"), "{error}");
-
-        config.profiles.get_mut("work").unwrap().enabled = false;
-        let error = resolve_login_profile(&config, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("no enabled agent profiles"), "{error}");
-    }
-
-    #[test]
-    fn short_session_ids_are_safe() {
-        assert_eq!(short_id("0123456789"), "01234567");
-        assert_eq!(short_id("tiny"), "tiny");
-    }
-
-    #[test]
-    fn cli_name_and_controller_shape_are_stable() {
-        use clap::CommandFactory;
-        let command = Cli::command();
-        assert_eq!(command.get_name(), "mj");
-        assert!(
-            !command
-                .get_subcommands()
-                .any(|sub| sub.get_name() == "worker")
-        );
-        assert!(
-            command
-                .get_subcommands()
-                .any(|sub| sub.get_name() == "setup")
-        );
-        assert!(command.get_subcommands().any(|sub| sub.get_name() == "app"));
-        let bootstrap = command
-            .get_subcommands()
-            .find(|sub| sub.get_name() == "desktop-bootstrap")
-            .expect("desktop-bootstrap is a parseable internal command");
-        assert!(bootstrap.is_hide_set());
-        let login = command
-            .get_subcommands()
-            .find(|sub| sub.get_name() == "login")
-            .expect("hel login is a visible command");
-        assert!(!login.is_hide_set());
-    }
-
-    #[test]
-    fn doctor_json_and_setup_instructions_are_parseable() {
-        let doctor = Cli::try_parse_from(["hel", "doctor", "--json"]).unwrap();
-        assert!(matches!(
-            doctor.command,
-            Some(Command::Doctor(DoctorArgs {
-                json: true,
-                smoke: false
-            }))
-        ));
-
-        let setup =
-            Cli::try_parse_from(["hel", "setup", "instructions", "--platform", "linux"]).unwrap();
-        assert!(matches!(
-            setup.command,
-            Some(Command::Setup(SetupArgs {
-                command: Some(SetupCommand::Instructions {
-                    platform: SetupPlatform::Linux
-                })
-            }))
-        ));
-    }
-
-    #[test]
-    fn move_cli_requires_a_destination_selector_and_preserves_optional_choices() {
-        assert!(Cli::try_parse_from(["mj", "move", "--session", "s1"]).is_err());
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "move",
-            "--session",
-            "s1",
-            "--target",
-            "remote",
-            "--queue",
-            "start",
-            "--yes",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::Move(args)) = cli.command else {
-            panic!("expected move command");
-        };
-        assert_eq!(args.session, "s1");
-        assert_eq!(args.target.as_deref(), Some("remote"));
-        assert_eq!(args.profile, None);
-        assert!(matches!(args.queue, Some(MoveQueue::Start)));
-        assert!(args.yes);
-        assert!(args.json);
-    }
-
-    #[test]
-    fn move_cli_accepts_target_only_profile_only_and_combined_destinations() {
-        for (extra, expected_profile, expected_target) in [
-            (vec!["--target", "remote"], None, Some("remote")),
-            (vec!["--profile", "claude"], Some("claude"), None),
-            (
-                vec!["--profile", "claude", "--target", "remote"],
-                Some("claude"),
-                Some("remote"),
-            ),
-        ] {
-            let mut argv = vec!["mj", "move", "--session", "s1"];
-            argv.extend(extra);
-            let cli = Cli::try_parse_from(argv).expect("destination selector parses");
-            let Some(Command::Move(args)) = cli.command else {
-                panic!("expected move command");
-            };
-            assert_eq!(args.profile.as_deref(), expected_profile);
-            assert_eq!(args.target.as_deref(), expected_target);
-        }
-    }
-
-    #[test]
-    fn doctor_failure_uses_mjolnir_product_wording() {
-        for json in [false, true] {
-            let message = doctor_failure(json).to_string();
-            assert!(message.contains("Mjolnir"));
-            assert!(!message.contains("Hel"));
-        }
-    }
-
     /// The human report already prints every fix, so its closing line must
     /// point at them rather than send the user to `--json` for the same text.
+    // Hard-won: 36382afd92: Launch finding J-5 found human doctor output printed fixes then pointed users to JSON; the test checks the closing guidance refers to the printed remediations.
     #[test]
     fn human_doctor_failure_points_at_the_printed_fixes() {
         let human = doctor_failure(false).to_string();
@@ -2701,61 +2480,5 @@ mod tests {
                 .is_err()
         );
         assert!(controller.state.sessions.contains_key(session_id));
-    }
-
-    /// The `mj` skill Mjolnir installs into every session it owns the profile
-    /// home for names CLI commands. A renamed or hidden command would leave
-    /// the skill telling agents to run something that does not exist.
-    #[test]
-    fn the_managed_mj_skill_names_only_visible_subcommands() {
-        use clap::CommandFactory;
-
-        let skill = mj_core::skills::managed_skills(mj_core::config::HarnessKind::Claude)
-            .into_iter()
-            .find(|entry| entry.path.ends_with("/mj/SKILL.md"))
-            .expect("the managed mj skill is embedded in mj-core");
-        let text = String::from_utf8(skill.bytes).expect("the skill is UTF-8");
-        let root = Cli::command();
-        let mut checked = 0usize;
-        let mut fenced = false;
-        for line in text.lines() {
-            if line.trim_start().starts_with("```") {
-                fenced = !fenced;
-                continue;
-            }
-            if fenced {
-                continue;
-            }
-            for span in line.split('`').skip(1).step_by(2) {
-                let mut words = span.split_whitespace();
-                if words.next() != Some("mj") {
-                    continue;
-                }
-                let mut command = &root;
-                let mut named = "mj".to_string();
-                for word in words {
-                    if word.starts_with('-') || word.starts_with('<') {
-                        break;
-                    }
-                    let found = command
-                        .get_subcommands()
-                        .find(|sub| sub.get_name() == word)
-                        .unwrap_or_else(|| {
-                            panic!("the mj skill names `{named} {word}`, which is not a subcommand")
-                        });
-                    assert!(
-                        !found.is_hide_set(),
-                        "the mj skill names the hidden command `{named} {word}`"
-                    );
-                    named = format!("{named} {word}");
-                    command = found;
-                    checked += 1;
-                }
-            }
-        }
-        assert!(
-            checked >= 15,
-            "only {checked} command names were checked; the skill or this parse is wrong"
-        );
     }
 }

@@ -1530,6 +1530,7 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
     }
 }
 
+// Hard-won: 6fc2ed80: unsupported rsync protection flags were discovered only after copying began
 #[test]
 fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
     let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args";
@@ -3087,8 +3088,9 @@ fn restart_daemon_and_recover_move(controller: &mut Controller) -> mj_core::stat
 /// restores from, the published guidance and the API agree that the
 /// checkpoint is retained, and the retry the guidance names succeeds and
 /// clears the failure.
-#[cfg(unix)]
+// Hard-won: 42de65fd: daemon death mid-swap left the in-place move without recoverable handoff state
 #[test]
+#[cfg(unix)]
 fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
     let name =
         test_name("in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart");
@@ -3191,8 +3193,9 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
 /// stop promising a retry, the retry is refused with the reason before it
 /// touches the session, and the session lands in `Error` where Destroy works,
 /// never in `Closing` (suspending) with nothing to finish it.
-#[cfg(unix)]
+// Hard-won: 42de65fd: lost in-place handoff was reported as success instead of destroyable failure
 #[test]
+#[cfg(unix)]
 fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state() {
     let name =
         test_name("in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state");
@@ -3263,8 +3266,9 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
 
 /// A retry that finds its archive gone mid-flight (removed while the daemon
 /// runs) records the loss on the Move and leaves the session in `Error`.
-#[cfg(unix)]
+// Hard-won: 42de65fd: retry with a missing handoff left the session stuck outside destroyable state
 #[test]
+#[cfg(unix)]
 fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyable() {
     let name =
         test_name("in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyable");
@@ -3366,22 +3370,6 @@ fn a_refused_sealed_move_retry_names_what_differs_and_what_to_pass() {
 }
 
 #[test]
-fn move_execution_hands_ownership_to_pending_queue_until_released() {
-    let session = "move-ownership-handoff";
-    let execution = MoveMutationGuard::reserve(session).unwrap();
-    super::set_move_queue_hold(session, true);
-    drop(execution);
-    assert!(move_owns_session(session));
-    assert!(super::move_has_pending_queue(session));
-    let retry = MoveMutationGuard::reserve(session).unwrap();
-    super::release_move_queue_hold(session);
-    assert!(move_owns_session(session), "retry still owns execution");
-    assert!(!super::move_has_pending_queue(session));
-    drop(retry);
-    assert!(!move_owns_session(session));
-}
-
-#[test]
 fn move_queue_handoff_never_exposes_unowned_session() {
     let session = "move-ownership-concurrent-handoff";
     let guard = MoveMutationGuard::reserve(session).unwrap();
@@ -3393,9 +3381,12 @@ fn move_queue_handoff_never_exposes_unowned_session() {
     let mut guard = Some(guard);
     for _ in 0..1000 {
         super::set_move_queue_hold(session, true);
+        assert!(super::move_has_pending_queue(session));
         drop(guard.take());
+        assert!(move_owns_session(session));
         guard = Some(MoveMutationGuard::reserve(session).unwrap());
         super::release_move_queue_hold(session);
+        assert!(!super::move_has_pending_queue(session));
     }
     reader.join().unwrap();
     drop(guard);

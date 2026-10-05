@@ -488,6 +488,7 @@ mod admission_tests {
     /// that follows kills the copy, and the Move reports that it was
     /// interrupted for the next daemon to resume, as `finish_move_result`
     /// does for a Move with a workspace transfer.
+    // Hard-won: 571e8aa0: a handoff waited through a resumable Move copy because duplicate admission stayed held.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_handoff_does_not_wait_for_a_slow_path_move_copy() {
         const NAME: &str = "a_handoff_does_not_wait_for_a_slow_path_move_copy";

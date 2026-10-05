@@ -141,6 +141,7 @@ pub fn process_exhaustion_message(
 mod tests {
     use super::*;
 
+    // Hard-won: #1161: A full container PID limit must be recognized when the parent harness runs out of slots.
     #[test]
     fn every_way_a_full_target_reports_itself_is_recognised() {
         for text in [
@@ -161,6 +162,7 @@ mod tests {
         }
     }
 
+    // Hard-won: #1161: PID exhaustion errors must explain the current and maximum process counts.
     #[test]
     fn the_message_names_the_counts_or_says_they_could_not_be_read() {
         let error = anyhow::anyhow!("sh: 1: Cannot fork");
@@ -196,6 +198,7 @@ mod tests {
         );
     }
 
+    // Hard-won: #1161: PID diagnostics must parse cgroup current/max values and the unlimited ceiling.
     #[test]
     fn pid_counts_parse_with_and_without_a_limit() {
         assert_eq!(

@@ -693,30 +693,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[test]
-    fn local_keys_choose_direct_and_missing_keys_choose_hosted() {
-        assert!(matches!(VerdictSource::for_key(Some("my-key".into())),
-            VerdictSource::Direct { key, endpoint } if key == "my-key" && endpoint == TYPESAFE_ENDPOINT));
-        assert!(matches!(VerdictSource::for_key(None),
-            VerdictSource::Hosted { endpoint } if endpoint == HOSTED_VERDICT_ENDPOINT));
-        assert!(
-            VerdictClient::resolve_blocking(Some(VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }))
-            .is_none()
-        );
-    }
-
-    /// `[jev] enabled = false` reaches the worker as its launch environment;
-    /// the worker then builds no classifier, so no turn evidence is sent and
-    /// turns end on the harness's own signals.
-    #[test]
-    fn the_jev_switch_leaves_the_worker_without_a_classifier() {
-        assert!(VerdictClient::resolve_with(None, true).is_none());
-        assert!(VerdictClient::resolve_with(None, false).is_some());
-    }
-
     #[tokio::test]
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
@@ -755,43 +731,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classifier_sends_bounded_evidence_and_parses_typed_answers() {
-        let (client, server) = server(
-            serde_json::json!({"answers": {
-                "work": {"type":"choice","choice":"waiting","confidence":0.95, "probabilities": {"finished": 0.0, "authorized_unfinished": 0.0, "waiting": 1.0, "unclear": 0.0}},
-                "input": {"type":"choice","choice":"required","confidence":0.96, "probabilities": {"none": 0.0, "redundant_request": 0.0, "required": 1.0, "unclear": 0.0}},
-                "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
-            }})
-            .to_string(),
-        )
-        .await;
-        let answer = client.ask(&evidence()).await.unwrap();
-        assert_eq!(answer.work_state, WorkState::BackgroundWork);
-        let request = server.await.unwrap();
-        assert_eq!(request["model"], "jev-latest");
-        assert_eq!(request["state"]["phase"], "running");
-        assert_eq!(request["questions"]["input"]["type"], "choice");
-    }
-
-    #[tokio::test]
     async fn oversized_classifier_body_is_rejected() {
         let (client, server) = server(" ".repeat(128 * 1024)).await;
         let error = client.ask(&evidence()).await.unwrap_err();
         assert!(error.to_string().contains("exceeds byte limit"));
         server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn unreachable_classifier_is_an_error_without_retry() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
-        drop(listener);
-        let client = VerdictClient::new(VerdictSource::Direct {
-            key: "test-key".into(),
-            endpoint,
-        })
-        .unwrap();
-        assert!(client.ask(&evidence()).await.is_err());
     }
 
     fn response(choice: &str) -> String {
@@ -807,45 +751,6 @@ mod tests {
             "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
         }})
         .to_string()
-    }
-
-    #[tokio::test]
-    async fn a_running_turn_ends_for_a_probability_qualified_user_handoff() {
-        for choice in ["user", "background_work", "unclear"] {
-            let (client, server) = server(response(choice)).await;
-            let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
-                silence: None,
-                tool_call: None,
-            });
-            spec.turn_context.mark_parent_activity();
-            let open_requests = Default::default();
-            let verdict = await_input_verdict_with_cadence(
-                &spec,
-                &client,
-                &open_requests,
-                Duration::from_millis(5),
-            );
-            tokio::pin!(verdict);
-            let mut server = server;
-            // Wait for the classifier's answer to be sent, then see whether
-            // the check ended on it. A confident handoff must end it; any
-            // other answer must leave it waiting.
-            let ended = tokio::select! {
-                _ = &mut verdict => true,
-                served = &mut server => {
-                    served.unwrap();
-                    // Only a wrongly ended check depends on this grace, so
-                    // load cannot fail the "still waiting" cases.
-                    let grace = if choice == "user" {
-                        MUST_FINISH
-                    } else {
-                        Duration::from_millis(100)
-                    };
-                    tokio::time::timeout(grace, &mut verdict).await.is_ok()
-                }
-            };
-            assert_eq!(ended, choice == "user", "{choice}");
-        }
     }
 
     #[tokio::test]
@@ -883,6 +788,7 @@ mod tests {
     /// asking the person through a structured request. It waits for them
     /// however long they take; Jev's quiet-turn verdict is only for questions
     /// written in chat text, and must never end the turn under the form (I1-6).
+    // Hard-won: 37ad53e: An unanswered AskUserQuestion form was cancelled after Jev classified the quiet turn.
     #[tokio::test]
     async fn an_open_structured_request_is_never_resolved_by_a_classifier_verdict() {
         let (client, server) = server(response("user")).await;

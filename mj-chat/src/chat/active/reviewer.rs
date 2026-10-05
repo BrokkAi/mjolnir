@@ -596,6 +596,7 @@ fn reviewer_answer_update(
 mod answer_tests {
     use super::*;
 
+    // Hard-won: 7c4a57a: late reviewer answers were silently dropped and misreported as review failures
     #[test]
     fn a_late_answer_says_why_it_was_not_delivered() {
         let late = Err(r#"elicitation "tool-permission-2" is no longer pending"#.to_owned());

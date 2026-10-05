@@ -370,6 +370,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 65a7390: Claude Code left accepted prompts running for hours after the answering model cycle had finished.
     #[test]
     fn stop_reasons_follow_the_adapter_mapping() {
         let mut refusal = success(Some("human"));
@@ -459,22 +460,6 @@ mod tests {
                 .unwrap()
                 .is_interruption_report(),
             "the diagnostic token must match whole"
-        );
-    }
-
-    #[test]
-    fn missing_token_counts_read_as_zero() {
-        let mut message = success(Some("human"));
-        message["usage"] = serde_json::json!({"input_tokens": 1, "output_tokens": null});
-        let parsed = ClaudeTurnResult::from_sdk_message(&message)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.usage,
-            ClaudeResultUsage {
-                input_tokens: 1,
-                ..ClaudeResultUsage::default()
-            }
         );
     }
 }

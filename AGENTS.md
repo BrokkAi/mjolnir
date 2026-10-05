@@ -93,8 +93,8 @@ Represent in-flight work immediately in UI state, make it cancellable where the
 underlying operation permits rollback, and report background failures instead
 of dropping them. Quitting a UI must remain responsive while cleanup is bounded.
 
-Prefer behavior tests that prove the advertised interface. Do not add tests that
-only duplicate implementation lists or internal construction order.
+Add only the kinds of tests described under "Which tests to add" in the Testing
+Guidelines below.
 
 Do not create a new workspace crate only to reorganize code. Create one only
 when a clear dependency, compilation, publication, or ownership boundary
@@ -281,7 +281,54 @@ worker explicitly with `--target x86_64-unknown-linux-musl` or
 
 Run every `cargo test` invocation outside the restricted sandbox with elevated permissions. The suite exercises loopback TCP and Unix sockets; sandboxed runs can fail with `EPERM` or hang and do not provide a valid test result.
 
-Add focused unit tests near the code under test using `#[cfg(test)] mod tests`. Follow the existing descriptive test naming style, e.g. `autocomplete_updates_matches_for_prefix`. For state-machine changes, test the event transition or input handling directly rather than relying only on manual TUI checks.
+### Which tests to add
+
+A test must protect behavior that would otherwise break unnoticed. Add a test
+only when it is one of the following, in priority order:
+
+1. Golden: real input runs through a user-facing surface (the `mj` CLI, the
+   daemon HTTP API, a TUI render, the web viewer, review output), and the whole
+   rendered output is compared with a checked-in expected file.
+2. End-to-end: the system runs as users or clients run it, with nothing
+   mocked: a real `mj` binary and daemon in an isolated `--instance`, a real
+   worker, and a real or recorded harness.
+3. Integration: two sides that change independently must agree. In this
+   project those are the store schema and migrations against data-access code
+   and other daemon revisions; the daemon API against mj-client, `mj api`,
+   the TUI, the web viewer and the desktop shell; the relay protocol and
+   journal across worker and daemon versions; checkpoint, handoff and other
+   persisted formats against their readers; ACP and the pinned harness
+   bridges; harness transcripts that we import; the MCP servers we expose;
+   git, OpenSSH, Docker or Podman, tmux and login shells; config and
+   credential files; and third-party services. Calling several of our own
+   modules together is not integration.
+4. Tricky condition: ordering or determinism; atomicity or partial failure;
+   cancellation or timeout timing; retries and idempotence; staleness;
+   concurrency; resource limits and backpressure (drive pipes with more than
+   64KB); termination; "unknown" versus "empty"; clocks; Unicode, encodings
+   and paths; security boundaries; and the mjolnir rules in this file, such
+   as handoff admission, work surviving a daemon restart, migration
+   compatibility, command-ID retries, session lifecycle transitions, refusal
+   of the default instance, process-group teardown and checkpoint fidelity.
+   Check that no existing test already covers the condition on the same code
+   path.
+
+Do not add unit tests or feature examples (our own code on a small hand-built
+input, checking one computed result). Do not test a default value, an input
+check, an ordinary happy path, or a list or count restated from the code.
+Extend an existing golden case instead of adding a family of examples.
+
+A test that pins a defect found after the code was believed done is hard-won.
+Mark it with a comment directly above the test attribute or call:
+`// Hard-won: <#issue or short commit SHA>: <the defect in one clause>` (use
+`#` in Python). Do not mark tests written with a new feature, or control tests
+that only show a fix does not over-apply.
+
+Put Rust tests near the code under test in `#[cfg(test)] mod tests`, and
+follow the existing descriptive naming style, e.g.
+`autocomplete_updates_matches_for_prefix`. For state-machine changes, test the
+event transition or input handling directly rather than relying only on manual
+TUI checks.
 
 For Rust code or Cargo dependency changes, run `cargo test` and
 `cargo clippy --all-targets -- -D warnings` before submitting changes. For
@@ -293,8 +340,6 @@ Run those checks on the dev profile, which is where `debug_assert!` and
 overflow checks run; this workspace sets no `[profile.release]` overrides, so a
 release test run silently drops both. The build scripts defaulting to release is
 not a reason to validate there.
-
-Do not write tests for reversible, low-impact changes that mirror the implementation. If you do choose to verify your work with tests, make sure that the tests are meaningful and necessary to verify implementation.
 
 Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
 

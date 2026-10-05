@@ -382,14 +382,27 @@ pub fn input_visual_rows(input: &str, width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::Paragraph;
+    use std::fmt::Write as _;
 
-    #[test]
-    fn truncated_widget_text_removes_cutoff_whitespace_and_punctuation() {
-        let options = Truncate::SUMMARY;
-        assert_eq!(truncate_to_cells("alpha, beta", 7, options), "alpha…");
-        assert_eq!(truncate_to_cells("alpha - beta", 8, options), "alpha…");
-        assert_eq!(truncate_to_cells("alpha beta", 20, options), "alpha beta");
-        assert_eq!(truncate_to_cells("alpha\n beta", 20, options), "alpha beta");
+    fn append_truncated_render(
+        output: &mut String,
+        label: &str,
+        input: &str,
+        width: u16,
+        options: Truncate,
+    ) {
+        let rendered = truncate_to_cells(input, usize::from(width), options);
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(rendered), frame.area()))
+            .expect("render truncated label");
+        writeln!(output, "=== {label} ({width}x1) ===").expect("write heading");
+        writeln!(output, "source: {input:?}").expect("write source");
+        output.push_str(&crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"));
+        output.push('\n');
     }
 
     #[test]
@@ -404,9 +417,50 @@ mod tests {
     }
 
     #[test]
-    fn plain_truncation_keeps_the_punctuation_it_cuts_after() {
-        let plain = Truncate::PLAIN;
-        assert_eq!(truncate_to_cells("alpha, beta", 7, plain), "alpha,…");
-        assert_eq!(truncate_to_cells("alpha  beta", 20, plain), "alpha  beta");
+    fn golden_text_truncation() {
+        let mut output = String::new();
+        append_truncated_render(
+            &mut output,
+            "summary cuts dangling comma",
+            "alpha, beta",
+            7,
+            Truncate::SUMMARY,
+        );
+        append_truncated_render(
+            &mut output,
+            "summary cuts dangling dash",
+            "alpha - beta",
+            8,
+            Truncate::SUMMARY,
+        );
+        append_truncated_render(
+            &mut output,
+            "summary keeps full phrase",
+            "alpha beta",
+            20,
+            Truncate::SUMMARY,
+        );
+        append_truncated_render(
+            &mut output,
+            "summary folds newlines",
+            "alpha\n beta",
+            20,
+            Truncate::SUMMARY,
+        );
+        append_truncated_render(
+            &mut output,
+            "plain keeps cut punctuation",
+            "alpha, beta",
+            7,
+            Truncate::PLAIN,
+        );
+        append_truncated_render(
+            &mut output,
+            "plain preserves repeated spaces",
+            "alpha  beta",
+            20,
+            Truncate::PLAIN,
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "text-truncation", &output);
     }
 }

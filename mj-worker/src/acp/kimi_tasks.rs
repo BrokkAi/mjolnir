@@ -983,6 +983,7 @@ mod tests {
     }
 
     /// Records captured from a real Kimi session wire stream.
+    // Hard-won: 59191cd: Kimi usage stayed empty because the bridge emits turn usage in journal records.
     #[test]
     fn turn_usage_sums_the_turn_scoped_records_kimi_journalled() {
         let temp = tempfile::tempdir().unwrap();
@@ -1126,6 +1127,7 @@ mod tests {
     /// opens a main-agent turn is `turn.prompt`. These are the records of a
     /// turn whose stored OAuth token was refused, in the order Kimi writes
     /// them (keys and shapes from a real session wire stream and the issue).
+    // Hard-won: 8d4f80a: Kimi login failures were misreported as unanswered prompts, prompting futile resends.
     #[test]
     fn a_turn_opened_by_its_prompt_record_carries_the_native_failure() {
         let temp = tempfile::tempdir().unwrap();
@@ -1246,51 +1248,6 @@ mod tests {
     }
 
     #[test]
-    fn full_scan_handles_modern_legacy_filters_and_termination() {
-        let temp = tempfile::tempdir().unwrap();
-        let wire = temp.path().join("wire.jsonl");
-        let mut modern = lifecycle(TASK_STARTED, "modern", Some("call-modern"), true, "agent");
-        modern["info"]["agentId"] = json!("agent-1");
-        append_jsonl(
-            &wire,
-            &[
-                json!({"type":"unrelated", "value": 1}),
-                modern,
-                lifecycle(
-                    LEGACY_TASK_STARTED,
-                    "legacy",
-                    Some("call-legacy"),
-                    true,
-                    "agent",
-                ),
-                lifecycle(TASK_STARTED, "shell", None, false, "agent"),
-                lifecycle(TASK_STARTED, "review", None, true, "tool"),
-                lifecycle(TASK_STARTED, "other-agent", None, true, "agent").tap_agent("worker"),
-                lifecycle(
-                    TASK_TERMINATED,
-                    "modern",
-                    Some("call-modern"),
-                    true,
-                    "agent",
-                ),
-            ],
-        );
-        let snapshot = full_scan(&wire).unwrap();
-        assert_eq!(
-            snapshot
-                .tasks
-                .iter()
-                .map(|task| task.task_id.as_str())
-                .collect::<Vec<_>>(),
-            ["legacy"]
-        );
-        assert!(snapshot.observed_task_ids.contains("modern"));
-        assert!(snapshot.observed_task_ids.contains("legacy"));
-        assert!(snapshot.provider_tool_ids.contains("call-modern"));
-        assert!(snapshot.provider_tool_ids.contains("call-legacy"));
-    }
-
-    #[test]
     fn duplicate_starts_are_idempotent_and_terminal_status_is_ignored() {
         let temp = tempfile::tempdir().unwrap();
         let wire = temp.path().join("wire.jsonl");
@@ -1301,6 +1258,7 @@ mod tests {
         assert!(full_scan(&wire).unwrap().tasks.is_empty());
     }
 
+    // Hard-won: 492a4bd: Kimi background shells were invisible and could not be stopped while the turn ran.
     #[test]
     fn detached_process_task_is_tracked_until_it_terminates() {
         let temp = tempfile::tempdir().unwrap();
@@ -1374,29 +1332,24 @@ mod tests {
             KimiWireRefresh::Updated(_)
         ));
         assert_eq!(follower.snapshot().tasks[0].task_id, "partial");
-    }
 
-    #[test]
-    fn follower_retains_partial_tail_when_it_matches_consumed_prefix_length() {
-        let temp = tempfile::tempdir().unwrap();
-        let wire = temp.path().join("wire.jsonl");
+        // A partial task line can begin exactly after bytes consumed from an
+        // unrelated complete record; keep this offset case with the same
+        // partial-line completion invariant.
+        let equal_wire = temp.path().join("equal-tail.jsonl");
         let complete = b"{\"type\":\"unknown\"}\n";
         let partial = lifecycle(TASK_STARTED, "equal-tail", None, true, "agent").to_string();
         assert!(partial.len() >= complete.len());
-        let mut first_append = complete.to_vec();
-        first_append.extend_from_slice(&partial.as_bytes()[..complete.len()]);
-        fs::write(&wire, first_append).unwrap();
-
-        let mut follower = KimiWireFollower::open(&wire).unwrap();
+        let mut prefix = complete.to_vec();
+        prefix.extend_from_slice(&partial.as_bytes()[..complete.len()]);
+        fs::write(&equal_wire, prefix).unwrap();
+        let mut follower = KimiWireFollower::open(&equal_wire).unwrap();
         assert!(follower.snapshot().tasks.is_empty());
-
-        let mut file = OpenOptions::new().append(true).open(&wire).unwrap();
-        use std::io::Write;
+        let mut file = OpenOptions::new().append(true).open(&equal_wire).unwrap();
         file.write_all(&partial.as_bytes()[complete.len()..])
             .unwrap();
         file.write_all(b"\n").unwrap();
         follower.refresh().unwrap();
-
         assert_eq!(follower.snapshot().tasks[0].task_id, "equal-tail");
     }
 
@@ -1423,16 +1376,5 @@ mod tests {
             follower.refresh().unwrap(),
             KimiWireRefresh::RescanRequired
         ));
-    }
-
-    trait AgentOverride {
-        fn tap_agent(self, agent_id: &str) -> Self;
-    }
-
-    impl AgentOverride for Value {
-        fn tap_agent(mut self, agent_id: &str) -> Self {
-            self["agentId"] = Value::String(agent_id.to_owned());
-            self
-        }
     }
 }

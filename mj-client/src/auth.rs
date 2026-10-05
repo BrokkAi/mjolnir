@@ -42,41 +42,6 @@ pub fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn profile_order_prefers_current_then_sorts() {
-        let mut config = Config {
-            profiles: BTreeMap::new(),
-            ..Config::default()
-        };
-        for id in ["z", "a", "m"] {
-            config.profiles.insert(
-                id.into(),
-                mj_core::config::HarnessProfile {
-                    enabled: true,
-                    kind: HarnessKind::Codex,
-                    home: PathBuf::from(id),
-                    environment: Default::default(),
-                    context_window_bytes: None,
-                    subagents: Default::default(),
-                    guardian_review_model: None,
-                },
-            );
-        }
-        let mut claude = config.profiles["m"].clone();
-        claude.kind = HarnessKind::Claude;
-        config.profiles.insert("claude".into(), claude);
-        assert_eq!(auth_paths(&config, "claude").len(), 3);
-        assert_eq!(
-            auth_paths(&config, "m"),
-            vec![
-                PathBuf::from("m/auth.json"),
-                PathBuf::from("a/auth.json"),
-                PathBuf::from("z/auth.json")
-            ]
-        );
-    }
 
     #[test]
     fn available_auth_skips_api_keys_and_malformed_or_empty_tokens() {

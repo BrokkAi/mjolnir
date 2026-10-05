@@ -1,0 +1,186 @@
+=== findings default action (64x14) ===
+╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
+│ No messages yet — send a pro▐││General running Verdict       │
+│                             ▐││[P1] src/lib.rs:1 -- unbounded│
+│                             ▐││retry                         │
+│                             ▐││                              │
+│                             ▐││                              │
+│                             ▐││                              │
+╰──────────────────────────────╯╰──────────────────────────────╯
+  ●··········· Reviewing
+  Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
+
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+selected action: Some(Some(Forward))
+action: TurnReview(Resolve(Forwarded))
+
+=== failed verdict allowed actions (64x14) ===
+╭ Conversation · Reviewing ────╮╭ Turn review · failed ────────╮
+│ No messages yet — send a pro▐││General running Verdict       │
+│                             ▐││bifrost exited with 1         │
+│                             ▐││                              │
+│                             ▐││                              │
+│                             ▐││                              │
+│                             ▐││                              │
+╰──────────────────────────────╯╰──────────────────────────────╯
+  ●··········· Reviewing
+  Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
+
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+selected action: Some(Some(Dismiss))
+allowed actions: Some([(Forward, false), (Dismiss, true), (Cancel, true)])
+action: TurnReview(Resolve(Dismissed))
+
+=== review running overview (64x14) ===
+╭ Turn review ─────────────────────────────────────────────────╮
+│Overview General running                                      │
+│                                                              │
+│Stage: the reviewer is reading the change…                    │
+│                                                              │
+│Reviewers                                                     │
+│  General  running                                            │
+│                                                              │
+│Prompt paused during review. Esc cancels; Tab opens           │
+│transcripts.                                                  │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+
+=== verdict selects first enabled action and panel (64x14) ===
+╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
+│ No messages yet — send a pro▐││General running Verdict       │
+│                             ▐││[P1] src/lib.rs:1 -- unbounded│
+│                             ▐││retry                         │
+│                             ▐││                              │
+│                             ▐││                              │
+│                             ▐││                              │
+╰──────────────────────────────╯╰──────────────────────────────╯
+  ●··········· Reviewing
+  Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
+
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+selected action: Some(Some(Forward))
+verdict selected: true
+
+=== running progress and held prompt (64x14) ===
+╭ Turn review ─────────────────────────────────────────────────╮
+│Overview General running                                      │
+│                                                              │
+│Stage: the reviewer is reading the change…                    │
+│                                                              │
+│Reviewers                                                     │
+│  General  running                                            │
+│                                                              │
+│Prompt paused during review. Esc cancels; Tab opens           │
+│transcripts.                                                  │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+percentage displayed: false
+
+=== short overview scrolled to held prompt (32x6) ===
+╭ Turn review ─────────────────╮
+│Overview General running      │
+│Prompt paused during review.  │
+│Esc cancels; Tab opens        │
+│transcripts.                  │
+╰──────────────────────────────╯
+
+=== clean reviewer role (64x14) ===
+╭ Turn review ─────────────────────────────────────────────────╮
+│Overview General done                                         │
+│                                                              │
+│Stage: the reviewer is reading the change…                    │
+│                                                              │
+│Reviewers                                                     │
+│  General  done                                               │
+│                                                              │
+│Prompt paused during review. Esc cancels; Tab opens           │
+│transcripts.                                                  │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+
+=== verdict tab (64x14) ===
+╭ Turn review · findings ──────────────────────────────────────╮
+│General running Verdict                                       │
+│[P1] src/lib.rs:1 -- unbounded retry                          │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+
+=== reviewer transcript tab (64x14) ===
+╭ Turn review · findings ──────────────────────────────────────╮
+│General running Verdict                                       │
+│● Agent · 18:00                                               │
+││ reviewer transcript                                         │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+selected role: "reviewer"
+verdict selected: false
+
+=== return to verdict tab (64x14) ===
+╭ Turn review · findings ──────────────────────────────────────╮
+│General running Verdict                                       │
+│[P1] src/lib.rs:1 -- unbounded retry                          │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰──────────────────────────────────────────────────────────────╯
+verdict selected: true
+
+=== long verdict top (48x10) ===
+╭ Turn review · findings ──────────────────────╮
+│General running Verdict                       │
+│finding line 0                                │
+│finding line 1                                │
+│finding line 2                                │
+│finding line 3                                │
+│finding line 4                                │
+│finding line 5                                │
+│finding line 6                                │
+╰──────────────────────────────────────────────╯
+
+=== long verdict scrolled (48x10) ===
+╭ Turn review · findings ──────────────────────╮
+│General running Verdict                       │
+│finding line 17                               │
+│finding line 18                               │
+│finding line 19                               │
+│finding line 20                               │
+│finding line 21                               │
+│finding line 22                               │
+│finding line 23                               │
+╰──────────────────────────────────────────────╯

@@ -1,0 +1,36 @@
+=== npx marker takes precedence ===
+method: Npx
+upgrade: npx -y @brokkai/mjolnir@latest
+
+=== npm marker ===
+method: Npm
+upgrade: npm install -g @brokkai/mjolnir@latest
+
+=== Homebrew marker ===
+method: Homebrew
+upgrade: brew upgrade --formula brokkai/tap/mjolnir
+
+=== Homebrew Cellar layout ===
+method: Homebrew
+upgrade: brew upgrade --formula brokkai/tap/mjolnir
+
+=== npm bundle layout ===
+method: Npm
+upgrade: npm install -g @brokkai/mjolnir@latest
+
+=== Cargo .crates2.json ===
+method: Cargo { voice_worker: true }
+upgrade: cargo install --locked brokk-mjolnir brokk-mj-voice-worker
+
+=== Cargo .crates.toml ===
+method: Cargo { voice_worker: true }
+upgrade: cargo install --locked brokk-mjolnir brokk-mj-voice-worker
+
+=== unrecorded executable ===
+method: Direct
+upgrade: (none)
+
+=== package-manager commands ===
+npm: npm install -g @brokkai/mjolnir@latest
+brew update: brew update
+brew upgrade: brew upgrade --formula brokkai/tap/mjolnir

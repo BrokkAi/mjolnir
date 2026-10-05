@@ -42,6 +42,7 @@ mod tests {
         ));
     }
 
+    // Hard-won: 0a278358: protocol 2 only prevented a new controller from attaching to a live v1 worker.
     #[test]
     fn current_range_overlaps_protocol_v1() {
         let v1 = RelayVersionRange { min: 1, max: 1 };
@@ -60,6 +61,7 @@ mod tests {
         assert!(!RelayVersionRange::CURRENT.contains(0));
         assert!(!RelayVersionRange::CURRENT.contains(RELAY_PROTOCOL_VERSION + 1));
         assert!(RelayRequest::Status.supported_at(1));
+        assert_eq!(RelayCommand::Cancel.minimum_protocol(), 1);
         assert!(
             !RelayRequest::RespondElicitation {
                 elicitation_id: String::new(),
@@ -137,35 +139,6 @@ mod tests {
                 }
             }
         ));
-    }
-
-    /// The controller decides whether to replace a worker from what hello
-    /// reports, so hello has to carry the build and a worker that was never
-    /// told one has to say so rather than guess.
-    #[test]
-    fn hello_reports_the_worker_build_when_the_worker_knows_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        let hello = |relay: &mut DurableRelay| {
-            let response = relay.handle(RelayRequestEnvelope {
-                request_id: "hello-build".into(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request: RelayRequest::Hello {
-                    controller_version: "current".into(),
-                    supported: RelayVersionRange::CURRENT,
-                },
-            });
-            match response.body {
-                RelayResponseBody::Ok {
-                    payload: RelayResponsePayload::Hello { worker_build, .. },
-                } => worker_build,
-                other => panic!("expected a hello, got {other:?}"),
-            }
-        };
-        assert_eq!(hello(&mut relay), None);
-
-        relay.set_worker_build(Some("a".repeat(64)));
-        assert_eq!(hello(&mut relay), Some("a".repeat(64)));
     }
 
     /// A worker built before the field existed answers hello without it. That

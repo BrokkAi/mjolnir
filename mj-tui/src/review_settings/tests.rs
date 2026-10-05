@@ -1,9 +1,10 @@
 use super::*;
 use crate::actions::CommandId;
 use crate::test_support::{
-    buffer_lines, config, dashboard_with_session, key, open_palette, running_session,
+    buffer_lines, chord, config, dashboard_with_session, drawn, key, mouse_at, open_palette, point,
+    running_session,
 };
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
 fn open(dashboard: &mut DashboardState) -> DashboardAction {
@@ -62,6 +63,147 @@ fn available(
         },
         cleanup_warning: None,
     }
+}
+
+fn rendered(dashboard: &mut DashboardState, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, dashboard))
+        .expect("draw review settings");
+    buffer_lines(terminal.backend().buffer()).join("\n")
+}
+
+fn append_golden_state(output: &mut String, label: &str, width: u16, height: u16, surface: &str) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(surface);
+    output.push('\n');
+}
+
+fn open_review_from_setup(dashboard: &mut DashboardState) -> DashboardAction {
+    let _ = chord(dashboard, CommandId::OpenConfig);
+    let lines = drawn(dashboard, 100, 30);
+    let code_review = point(&lines, "Code Review");
+    for _ in 0..2 {
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Left),
+            code_review,
+        ));
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), code_review));
+    }
+    DashboardAction::None
+}
+
+#[test]
+fn golden_review_settings() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut no_session = DashboardState::new(
+        config(),
+        mj_core::state::State::default(),
+        Default::default(),
+    );
+    let action = open_review_from_setup(&mut no_session);
+    append_golden_state(
+        &mut output,
+        "Code Review opens without a selected session",
+        100,
+        30,
+        &rendered(&mut no_session, 100, 30),
+    );
+    writeln!(output, "action: {action:?}").expect("write entry action");
+    writeln!(
+        output,
+        "selected session: {:?}",
+        no_session.selected_session_id()
+    )
+    .expect("write selected session");
+
+    let mut palette = DashboardState::new(
+        config(),
+        mj_core::state::State::default(),
+        Default::default(),
+    );
+    open_palette(&mut palette);
+    let has_setup = match &palette.mode {
+        Mode::Palette(palette) => palette
+            .entries
+            .iter()
+            .any(|entry| entry.id == CommandId::OpenConfig),
+        _ => false,
+    };
+    append_golden_state(
+        &mut output,
+        "command palette exposes Setup without a selected session",
+        100,
+        30,
+        &rendered(&mut palette, 100, 30),
+    );
+    writeln!(output, "Setup command available: {has_setup}").expect("write command availability");
+
+    let mut dashboard = dashboard_with_session(running_session());
+    let entry_action = open_review_from_setup(&mut dashboard);
+    append_golden_state(
+        &mut output,
+        "global review form",
+        100,
+        30,
+        &rendered(&mut dashboard, 100, 30),
+    );
+    writeln!(output, "action: {entry_action:?}").expect("write entry action");
+
+    // Enabled -> Tier -> Profile, then choose the first configured profile.
+    dashboard.handle_key(key(KeyCode::Tab));
+    dashboard.handle_key(key(KeyCode::Tab));
+    let probe = choose_next(&mut dashboard);
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    choose_next(&mut dashboard);
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
+        dashboard.handle_key(key(KeyCode::Tab));
+    }
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    append_golden_state(
+        &mut output,
+        "save applies only global review values",
+        100,
+        30,
+        &rendered(&mut dashboard, 100, 30),
+    );
+    writeln!(output, "discovery action: {probe:?}").expect("write discovery action");
+    match action {
+        DashboardAction::SaveSetup { updated, .. } => {
+            let updated: serde_json::Value = serde_json::from_str(&updated).expect("saved config");
+            writeln!(output, "saved global review: {}", updated["review"])
+                .expect("write saved review");
+        }
+        other => panic!("expected global setup save, got {other:?}"),
+    }
+
+    let mut auto = dashboard_with_session(running_session());
+    let _ = open_review_from_setup(&mut auto);
+    let editor = dialog(&auto);
+    let model_enabled = editor.form.borrow().is_enabled(ReviewSettingsFocus::Model);
+    let effort_enabled = editor.form.borrow().is_enabled(ReviewSettingsFocus::Effort);
+    let save_enabled = editor.can_save();
+    append_golden_state(
+        &mut output,
+        "Auto profile leaves manual overrides disabled",
+        100,
+        30,
+        &rendered(&mut auto, 100, 30),
+    );
+    writeln!(output, "profile: Auto; model enabled: {model_enabled}; effort enabled: {effort_enabled}; save enabled: {save_enabled}")
+        .expect("write Auto form state");
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "review-settings", &output);
 }
 
 #[test]
@@ -131,35 +273,6 @@ fn progress_choices_are_cached_before_cleanup_and_stale_replies_are_ignored() {
 }
 
 #[test]
-fn review_settings_is_available_through_setup_without_a_selected_session() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    let action = open(&mut dashboard);
-    assert!(matches!(action, DashboardAction::None));
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
-    assert_eq!(dashboard.selected_session_id(), None);
-
-    let mut dashboard = DashboardState::new(
-        config(),
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    open_palette(&mut dashboard);
-    let Mode::Palette(palette) = &dashboard.mode else {
-        panic!("the palette chord should open the command palette")
-    };
-    assert!(
-        palette
-            .entries
-            .iter()
-            .any(|entry| entry.id == CommandId::OpenConfig)
-    );
-}
-
-#[test]
 fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     let mut dashboard = dashboard_with_session(running_session());
     open(&mut dashboard);
@@ -185,31 +298,6 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     };
     assert!(setup.review_editor.is_none());
     assert!(setup.is_dirty(), "the enabled review stays in the draft");
-}
-
-#[test]
-fn edit_and_save_action_contains_only_global_review_values() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let _ = open(&mut dashboard);
-    // Enabled -> Tier -> Profile, then choose the first configured profile.
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
-    let probe = choose_next(&mut dashboard);
-    assert!(matches!(
-        probe,
-        DashboardAction::DiscoverReviewSettings { .. }
-    ));
-
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    choose_next(&mut dashboard);
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    let action = dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(action, DashboardAction::SaveSetup { .. }));
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
 }
 
 #[test]
@@ -690,23 +778,4 @@ fn save_is_local_while_loading_unavailable_or_failed() {
         Err("offline".to_owned()),
     ));
     assert!(dialog(&dashboard).can_save());
-}
-
-#[test]
-fn auto_is_explicit_saveable_and_disables_manual_model_overrides() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open(&mut dashboard);
-    let editor = dialog(&dashboard);
-    let selectors = editor.selectors();
-    assert_eq!(
-        selectors
-            .iter()
-            .find(|(id, _, _, _)| *id == ReviewSettingsFocus::Profile)
-            .unwrap()
-            .2[0],
-        "Auto"
-    );
-    assert!(editor.can_save());
-    assert!(!editor.form.borrow().is_enabled(ReviewSettingsFocus::Model));
-    assert!(!editor.form.borrow().is_enabled(ReviewSettingsFocus::Effort));
 }

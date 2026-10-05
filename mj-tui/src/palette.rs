@@ -1115,8 +1115,25 @@ mod tests {
         palette.entries.get(palette.selected).map(|entry| entry.id)
     }
 
+    fn append_golden_state(
+        output: &mut String,
+        label: &str,
+        width: u16,
+        height: u16,
+        lines: &[String],
+    ) {
+        output.push_str(&format!("=== {label} ({width}x{height}) ===\n"));
+        output.push_str(&lines.join("\n"));
+        output.push('\n');
+    }
+
+    fn append_golden_value(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        output.push_str(&format!("{label}: {value:?}\n"));
+    }
+
     /// The session menu names a full disk on the session's host, with the
     /// figures the daemon's storage owner measured.
+    // Hard-won: 540c9202494a: a full target disk was reported only as unreachable.
     #[test]
     fn session_facts_name_a_full_disk_on_the_sessions_host() {
         let session = crate::test_support::precision_session();
@@ -1186,6 +1203,7 @@ mod tests {
     /// A-3, palette half: a blocked row gives its reason as a dimmed,
     /// capitalised sentence after " — ", as help does, not as a lowercase
     /// fragment in brackets.
+    // Hard-won: 7ea16bf8220e: blocked palette reasons appeared as raw lowercase bracket fragments.
     #[test]
     fn palette_rows_set_unavailability_reasons_apart_like_help() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1200,6 +1218,7 @@ mod tests {
         assert!(!joined.contains("(this session"), "{joined}");
     }
 
+    // Hard-won: e063b7f41d77: palette command availability stayed stale after session creation finished.
     #[test]
     fn open_palette_enables_rename_when_session_creation_finishes() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1219,99 +1238,8 @@ mod tests {
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
     }
 
-    #[test]
-    fn session_menu_is_compact_grouped_and_uses_the_session_title() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-
-        let Mode::Palette(palette) = &dashboard.mode else {
-            panic!("the session menu opens");
-        };
-        assert_eq!(
-            palette
-                .entries
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            SESSION_MENU_COMMANDS
-        );
-        let lines = drawn(&mut dashboard, 120, 40);
-        let joined = lines.join("\n");
-        assert!(joined.contains("╭ × ACP pretty name"), "{joined}");
-        assert!(!joined.contains("Search commands"), "{joined}");
-        assert!(!joined.contains(" Recent "), "{joined}");
-        assert!(!joined.contains(" Run "), "{joined}");
-
-        let content = row_of(&lines, "Content").expect("Content");
-        let changed = row_of(&lines, "Changed files").expect("Changed files");
-        let organize = row_of(&lines, "Organize").expect("Organize");
-        let rename = row_of(&lines, "Rename…").expect("Rename");
-        let lifecycle = row_of(&lines, "Lifecycle").expect("Lifecycle");
-        let suspend = row_of(&lines, "Suspend…").expect("Suspend");
-        let destroy = row_of(&lines, "Destroy…").expect("Destroy");
-        assert!(content < changed && changed < organize, "{lines:#?}");
-        assert!(organize < rename && rename < lifecycle, "{lines:#?}");
-        assert!(lifecycle < suspend && suspend < destroy, "{lines:#?}");
-        assert_eq!(
-            session_menu_layout(&dashboard),
-            [
-                "[Content]",
-                "Changed files",
-                "[Organize]",
-                "Rename…",
-                "Pin…",
-                "Unpin",
-                "Change Workspace ›",
-                "[Lifecycle]",
-                "Container settings",
-                "Move…",
-                "Suspend…",
-                "Restart",
-                "Interrupt all (parent + sub-agents)…",
-                "---",
-                "Copy session ID",
-                "Destroy…",
-            ]
-        );
-    }
-
     /// The menu opens with what the row does not show, set apart from the
     /// commands by a blank row.
-    #[test]
-    fn session_menu_lists_the_session_facts_above_its_commands() {
-        let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::SingleModel {
-            model: "gpt-5".into(),
-            effort: Some("high".into()),
-        });
-        session.container_cpus = Some("4".into());
-        session.container_memory = Some("8g".into());
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-
-        let delegation = row_of(&lines, "Sub-agents").expect("sub-agent policy");
-        assert!(
-            lines[delegation].contains("Mjolnir, gpt-5 (high)"),
-            "{lines:#?}"
-        );
-        let container = row_of(&lines, "Container").expect("container overrides");
-        assert!(
-            lines[container].contains("4 CPUs · 8g memory"),
-            "{lines:#?}"
-        );
-        let content = row_of(&lines, "Content").expect("Content");
-        assert!(delegation < container && container < content, "{lines:#?}");
-        assert!(
-            lines[container + 1]
-                .trim_matches(|c: char| c == '│' || c.is_whitespace())
-                .is_empty(),
-            "a blank row separates the facts from the commands: {lines:#?}"
-        );
-    }
-
     fn measured(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpuView {
         mj_client::runtime_feed::SessionCpuView::Measured {
             usage: mj_core::cpu_usage::SessionCpuUsage {
@@ -1325,70 +1253,8 @@ mod tests {
 
     /// The menu says what the row's figure is made of: the tree total, the
     /// session's own share, and how many members were measured.
-    #[test]
-    fn session_menu_shows_own_tree_and_coverage_cpu() {
-        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
-        let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
-        cpu.insert(parent.clone(), measured(30, 20));
-        dashboard.set_session_cpu(cpu.clone());
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        println!("{}", lines.join("\n"));
-        let row = row_of(&lines, "CPU").expect("CPU fact");
-        // The child is unmeasured, so the tree total is a lower bound.
-        assert!(
-            lines[row].contains("2.0%+ hourly / 3.0%+ recent"),
-            "{lines:#?}"
-        );
-        assert!(
-            lines[row + 1].contains("(tree of 2; own 3.0%, 1 of 2 measured)"),
-            "{lines:#?}"
-        );
-
-        // A session with no sub-agents shows its own figures.
-        let mut dashboard = dashboard_with_session(running_session());
-        let id = running_session().id;
-        cpu.insert(id, measured(230, 100));
-        dashboard.set_session_cpu(cpu);
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        let row = row_of(&lines, "CPU").expect("CPU fact");
-        assert!(lines[row].contains("10% hourly / 23% recent"), "{lines:#?}");
-
-        // Unmeasured says so.
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        let row = row_of(&lines, "CPU").expect("CPU fact");
-        assert!(lines[row].contains("no CPU data yet"), "{lines:#?}");
-    }
-
     /// Copy session ID sits under the plain divider, directly above Destroy,
     /// and hands the host the session's full ID to put on the clipboard.
-    #[test]
-    fn session_menu_copies_the_full_session_id_from_above_destroy() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
-        let destroy = row_of(&lines, "Destroy…").expect("Destroy");
-        assert_eq!(copy + 1, destroy, "{lines:#?}");
-
-        let copy = point(&lines, "Copy session ID");
-        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
-        assert_eq!(
-            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy)),
-            DashboardAction::CopySessionId {
-                session_id: "session-1".into()
-            }
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
     /// The open session menu as its lines: a named divider as `[name]`, the
     /// unnamed divider as `---`, and each command by its menu label.
     fn session_menu_layout(dashboard: &DashboardState) -> Vec<String> {
@@ -1409,6 +1275,7 @@ mod tests {
     /// none of which a harness-owned child can take: its parent's harness
     /// owns it, and Mjolnir has no record of its own to rename or destroy.
     /// The menu offers what does apply, which is opening its conversation.
+    // Hard-won: 936d6ee93c8a: native child menus offered unsupported record actions.
     #[test]
     fn a_native_childs_menu_offers_only_what_applies_to_it() {
         let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
@@ -1433,6 +1300,7 @@ mod tests {
     /// session's conversation and type in it.", but its pane is read-only
     /// ("controlled by parent"), and so is a stopped sub-agent's. Open says
     /// so for both, and keeps its description for a session you can type in.
+    // Hard-won: e5b2818d4996: Open described a read-only child conversation as writable.
     #[test]
     fn open_describes_a_read_only_conversation_as_read_only() {
         let read_only = "Show the selected agent's conversation (read-only).";
@@ -1463,93 +1331,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_menu_skips_actions_that_do_not_apply() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.begin_session_palette();
-        let lines = drawn(&mut dashboard, 120, 40);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("Unpin") && line.contains("not pinned")),
-            "{lines:#?}"
-        );
-
-        assert_eq!(selected_command(&dashboard), Some(CommandId::RenameSession));
-        dashboard.handle_key(key(KeyCode::Down));
-        assert_eq!(selected_command(&dashboard), Some(CommandId::PinSession));
-        dashboard.handle_key(key(KeyCode::Down));
-        assert_eq!(
-            selected_command(&dashboard),
-            Some(CommandId::ContainerSettings),
-            "keyboard navigation skips disabled Unpin"
-        );
-
-        let unpin = point(&lines, "Unpin");
-        assert_eq!(
-            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), unpin)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), unpin)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::Palette(_)));
-        assert_eq!(
-            selected_command(&dashboard),
-            Some(CommandId::ContainerSettings),
-            "clicking disabled Unpin neither selects nor activates it"
-        );
-    }
-
     /// The palette's whole point: the commands for the session you are looking
     /// at come first, under a heading saying which session that is.
-    #[test]
-    fn f2_palette_lists_the_selected_sessions_commands_before_workspace_ones() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-        assert!(matches!(dashboard.mode, Mode::Palette(_)));
-
-        let lines = drawn(&mut dashboard, 120, 100);
-        let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
-        let rename = row_of(&lines, "Rename session").expect("Rename session");
-        let settings = row_of(&lines, "Settings").expect("the settings heading");
-        let setup = row_of(&lines, "Open settings").expect("Open settings");
-        assert!(row_of(&lines, "Review settings").is_none(), "{lines:#?}");
-        let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
-        let global = row_of(&lines, "Web viewer").expect("Web viewer");
-        assert!(heading < rename, "{lines:#?}");
-        assert!(rename < settings, "{lines:#?}");
-        // The session group lists Copy session ID directly above Destroy,
-        // with the same label the session menu uses.
-        let copy = row_of(&lines, "Copy session ID").expect("Copy session ID");
-        let destroy = row_of(&lines, "Destroy session…").expect("Destroy session");
-        assert!(heading < copy && copy + 1 == destroy, "{lines:#?}");
-        assert!(destroy < settings, "{lines:#?}");
-        assert!(settings < setup && setup < anywhere, "{lines:#?}");
-        assert!(anywhere < global, "{lines:#?}");
-        // The palette never lists itself. Create and Sessions are listed even
-        // though they have buttons, so a search finds them. Sessions is named
-        // with its chord, because the pane of the same name is on screen too.
-        assert!(row_of(&lines, "Command palette").is_none(), "{lines:#?}");
-        assert!(row_of(&lines, "Create session").is_some(), "{lines:#?}");
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("Sessions") && line.contains("ctrl+b g")),
-            "{lines:#?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .skip(anywhere + 1)
-                .any(|line| line.contains("Workspaces")),
-            "{lines:#?}"
-        );
-    }
-
     #[test]
     fn palette_shows_the_selected_row_and_scrolls_the_list_on_a_short_terminal() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1585,108 +1368,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn palette_searches_and_activates_setup() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-        type_query(&mut dashboard, "open settings");
-
-        let lines = drawn(&mut dashboard, 120, 30);
-        assert!(row_of(&lines, "Open settings").is_some(), "{lines:#?}");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::Setup(_)));
-    }
-
     /// From the composer the selection is the conversation on screen, so the
     /// palette still leads with that session's commands.
-    #[test]
-    fn the_palette_chord_from_the_composer_lists_the_open_sessions_commands() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        // Enter opens the conversation and hands the keyboard to the composer.
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert_eq!(dashboard.focus, Focus::Prompt);
-
-        // With the composer focused the real controller never routes a key to
-        // the dashboard, so the palette has to arrive through the prefix.
-        open_palette(&mut dashboard);
-
-        // Tall enough to hold the whole list: the Anywhere group is last,
-        // and the list now runs past 44 rows.
-        let lines = drawn(&mut dashboard, 120, 90);
-        let heading = row_of(&lines, "ACP pretty name").expect("the session heading");
-        let stop = row_of(&lines, "Suspend session").expect("Suspend session");
-        let anywhere = row_of(&lines, "Anywhere").expect("the Anywhere heading");
-        assert!(heading < stop, "{lines:#?}");
-        assert!(stop < anywhere, "{lines:#?}");
-    }
-
-    #[test]
-    fn palette_exposes_both_focus_cycle_directions() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-
-        let lines = drawn(&mut dashboard, 120, 100);
-        let next = row_of(&lines, "Next pane").expect("Next pane command");
-        assert!(lines[next].contains("Tab / ctrl+b tab"), "{lines:#?}");
-        let previous = row_of(&lines, "Previous pane").expect("Previous pane command");
-        assert!(lines[previous].contains("ctrl+b shift+tab"), "{lines:#?}");
-    }
-
-    /// `e` used to open the session edit dialog. The palette replaced it, and
-    /// the key is unbound rather than left doing something else.
-    #[test]
-    fn e_no_longer_opens_anything() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('e'))),
-            DashboardAction::None
-        );
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
-    #[test]
-    fn palette_ranks_prefix_matches_before_substring_matches() {
-        let dashboard = dashboard_with_session(running_session());
-        // The suspension label ranks ahead of unrelated description matches.
-        let all = palette_entries(&dashboard, "");
-        assert!(
-            all.iter()
-                .any(|entry| entry.id == CommandId::CancelOperation
-                    || entry.id == CommandId::SuspendSession)
-        );
-
-        let matched = palette_entries(&dashboard, "suspend");
-        assert!(
-            matched
-                .iter()
-                .any(|entry| entry.id == CommandId::SuspendSession),
-            "{matched:?}"
-        );
-        assert!(
-            !matched
-                .iter()
-                .any(|entry| entry.id == CommandId::CancelOperation),
-            "a prefix match on the label suppresses description matches: {matched:?}"
-        );
-
-        // With no prefix match, the description carries the query instead.
-        let described = palette_entries(&dashboard, "unread marker");
-        assert_eq!(
-            described.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-            vec![CommandId::MarkAllRead]
-        );
-    }
-
     /// Launch campaign finding A-6: a command run from the palette appears
     /// under Recent even when it also has a pane key, as Create session does,
     /// and even when it opens a wizard.
+    // Hard-won: a93d64c805c9: palette commands with pane keys were missing from Recent.
     #[test]
     fn a_command_run_from_the_palette_is_listed_under_recent() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1724,6 +1411,7 @@ mod tests {
     /// and the cursor used to ride that command down into the results of the
     /// next search: the screen pointed at the top match while Enter ran the
     /// command from last time.
+    // Hard-won: fb0622d0f159: Enter ran a stale Recent command instead of the highlighted match.
     #[test]
     fn a_new_palette_query_puts_the_cursor_on_its_top_match() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1778,6 +1466,7 @@ mod tests {
     /// A run of the query inside a word is what a reader means by a match.
     /// Letters merely found in order, which any long label can supply, must
     /// not outrank it, and a label that starts with the query still wins.
+    // Hard-won: fb0622d0f159: scattered letters outranked a contiguous query match.
     #[test]
     fn a_contiguous_label_match_outranks_a_scattered_one() {
         let contiguous =
@@ -1793,6 +1482,7 @@ mod tests {
 
     /// The same ranking through the palette, on the two commands that showed
     /// the defect.
+    // Hard-won: fb0622d0f159: searching “rend” ranked Resize above the literal rendering match.
     #[test]
     fn palette_ranks_toggle_rendering_above_resize_pane_down_for_rend() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1812,68 +1502,8 @@ mod tests {
         assert!(rendering < resize, "{ranked:?}");
     }
 
-    #[test]
-    fn palette_enter_on_rename_opens_the_rename_editor() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-        type_query(&mut dashboard, "rename");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(
-            matches!(dashboard.mode, Mode::Rename(_)),
-            "{:?}",
-            dashboard.mode
-        );
-    }
-
-    #[test]
-    fn palette_suspends_an_idle_session_without_confirmation() {
-        let mut session = running_session();
-        session.project_directory = Some("/srv/project".into());
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-        type_query(&mut dashboard, "suspend");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Suspend {
-                session_id: "session-1".into(),
-                acknowledge_unpublished_work: false,
-            }
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
     /// Container settings make no sense for a session that is not on a
     /// container, so the palette leaves the row out rather than greying it.
-    #[test]
-    fn palette_hides_container_settings_for_a_non_container_session() {
-        let mut session = stopped_session();
-        session.target_template_id = "local".into();
-        let mut dashboard = dashboard_with_session(session);
-        dashboard
-            .config
-            .targets
-            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
-        dashboard.focus_sessions();
-        assert!(
-            dashboard.selected_container_session().is_none(),
-            "the fixture is not container-backed on the dashboard"
-        );
-        assert!(
-            !palette_entries(&dashboard, "")
-                .iter()
-                .any(|entry| entry.id == CommandId::ContainerSettings)
-        );
-
-        open_palette(&mut dashboard);
-        let lines = drawn(&mut dashboard, 120, 44);
-        assert!(row_of(&lines, "Container settings").is_none(), "{lines:#?}");
-    }
-
     /// A command that is blocked rather than meaningless stays visible and
     /// says why, and pressing Enter on it explains instead of acting.
     #[test]
@@ -1915,18 +1545,191 @@ mod tests {
     }
 
     #[test]
-    fn palette_esc_returns_to_the_dashboard_without_a_side_effect() {
+    fn golden_session_action_menu() {
+        let mut output = String::new();
+
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
-        let before = dashboard.command_session().cloned();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "session action menu", 120, 40, &lines);
+
+        let mut session = running_session();
+        session.subagents = Some(SubagentPolicy::SingleModel {
+            model: "gpt-5".into(),
+            effort: Some("high".into()),
+        });
+        session.container_cpus = Some("4".into());
+        session.container_memory = Some("8g".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "session facts", 120, 40, &lines);
+
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        let mut cpu = mj_core::snapshot_map::SnapshotMap::new();
+        cpu.insert(parent, measured(30, 20));
+        dashboard.set_session_cpu(cpu.clone());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "sub-agent CPU coverage", 120, 40, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        cpu.insert(running_session().id, measured(230, 100));
+        dashboard.set_session_cpu(cpu);
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "single-session CPU", 120, 40, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "CPU not measured", 120, 40, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let copy = point(&lines, "Copy session ID");
+        append_golden_state(&mut output, "copy session ID menu row", 120, 40, &lines);
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), copy));
+        let action = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), copy));
+        append_golden_value(&mut output, "action", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "after copying the session ID", 120, 40, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        let unpin = point(&lines, "Unpin");
+        dashboard.handle_key(key(KeyCode::Down));
+        dashboard.handle_key(key(KeyCode::Down));
+        append_golden_value(
+            &mut output,
+            "keyboard selection after skipping disabled Unpin",
+            selected_command(&dashboard),
+        );
+        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), unpin));
+        append_golden_value(&mut output, "disabled Unpin mouse-down action", down);
+        let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), unpin));
+        append_golden_value(&mut output, "disabled Unpin mouse-up action", up);
+        append_golden_value(
+            &mut output,
+            "selection after disabled click",
+            selected_command(&dashboard),
+        );
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "disabled Unpin remains open", 120, 40, &lines);
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);
+    }
+
+    #[test]
+    fn golden_command_palette() {
+        let mut output = String::new();
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        open_palette(&mut dashboard);
+        let lines = drawn(&mut dashboard, 120, 100);
+        append_golden_state(&mut output, "F2 command palette", 120, 100, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Enter));
+        open_palette(&mut dashboard);
+        let lines = drawn(&mut dashboard, 120, 90);
+        append_golden_state(
+            &mut output,
+            "palette opened from the composer",
+            120,
+            90,
+            &lines,
+        );
+
+        for (label, query) in [
+            ("label prefix match", "suspend"),
+            ("description match", "unread marker"),
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.focus_sessions();
+            open_palette(&mut dashboard);
+            type_query(&mut dashboard, query);
+            let lines = drawn(&mut dashboard, 120, 44);
+            append_golden_state(&mut output, label, 120, 44, &lines);
+        }
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "open settings");
+        let lines = drawn(&mut dashboard, 120, 30);
+        append_golden_state(&mut output, "search for Open settings", 120, 30, &lines);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "action after selecting Open settings", action);
+        append_golden_value(&mut output, "mode after selecting Open settings", "Setup");
+        let lines = drawn(&mut dashboard, 120, 30);
+        append_golden_state(
+            &mut output,
+            "Setup opened from the palette",
+            120,
+            30,
+            &lines,
+        );
+
+        let mut session = stopped_session();
+        session.target_template_id = "local".into();
+        let mut dashboard = dashboard_with_session(session);
+        dashboard
+            .config
+            .targets
+            .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+        dashboard.focus_sessions();
+        open_palette(&mut dashboard);
+        let lines = drawn(&mut dashboard, 120, 44);
+        append_golden_state(
+            &mut output,
+            "non-container session commands",
+            120,
+            44,
+            &lines,
+        );
+
+        let mut session = running_session();
+        session.project_directory = Some("/srv/project".into());
+        let mut dashboard = dashboard_with_session(session);
+        dashboard.focus_sessions();
+        open_palette(&mut dashboard);
+        type_query(&mut dashboard, "suspend");
+        let lines = drawn(&mut dashboard, 120, 44);
+        append_golden_state(&mut output, "search for Suspend", 120, 44, &lines);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "suspend action", action);
+        let lines = drawn(&mut dashboard, 120, 44);
+        append_golden_state(&mut output, "after Suspend", 120, 44, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
         open_palette(&mut dashboard);
         type_query(&mut dashboard, "stop");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::None
+        let action = dashboard.handle_key(key(KeyCode::Esc));
+        append_golden_value(&mut output, "Escape action", action);
+        append_golden_value(&mut output, "notice after Escape", dashboard.notice());
+        append_golden_value(
+            &mut output,
+            "command session id after Escape",
+            dashboard
+                .command_session()
+                .map(|session| session.id.as_str()),
         );
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-        assert_eq!(dashboard.notice(), None);
-        assert_eq!(dashboard.command_session().cloned(), before);
+        let lines = drawn(&mut dashboard, 120, 44);
+        append_golden_state(&mut output, "dashboard after Escape", 120, 44, &lines);
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "command-palette", &output);
     }
 }

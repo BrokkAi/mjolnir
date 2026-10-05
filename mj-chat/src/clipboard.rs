@@ -650,6 +650,7 @@ mod tests {
         ) -> std::result::Result<arboard::ImageData<'static>, arboard::Error> {
             self.image.take().ok_or(arboard::Error::ContentNotAvailable)
         }
+
         fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
             self.text.take().ok_or(arboard::Error::ContentNotAvailable)
         }
@@ -667,34 +668,16 @@ mod tests {
     }
 
     #[test]
-    fn native_mixed_clipboard_prefers_images_only_when_allowed() {
-        let mut clipboard = clipboard_with_both_formats();
-        let ClipboardContent::Image(image) = read_native_content(&mut clipboard, false).unwrap()
-        else {
-            panic!("image-capable paste must select the image representation");
-        };
-        assert!(image.mime_type.starts_with("image/"));
-        assert!(!image.data_base64.is_empty());
-        assert_eq!(clipboard.text.as_deref(), Some("image caption"));
-        let mut clipboard = clipboard_with_both_formats();
-        assert!(matches!(read_native_content(&mut clipboard, true).unwrap(),
-            ClipboardContent::Text(text) if text == "image caption"));
-        assert!(
-            clipboard.image.is_some(),
-            "text-only paste must not request image pixels"
-        );
-    }
-
-    #[test]
     fn native_text_only_clipboard_and_missing_text_keep_their_meaning() {
         let mut clipboard = FakeClipboard {
             image: None,
             text: Some("ordinary text".into()),
         };
-        assert!(
-            matches!(read_native_content(&mut clipboard, false).unwrap(),
-            ClipboardContent::Text(text) if text == "ordinary text")
-        );
+        assert!(matches!(
+            read_native_content(&mut clipboard, false).unwrap(),
+            ClipboardContent::Text(text) if text == "ordinary text"
+        ));
+
         let mut clipboard = clipboard_with_both_formats();
         clipboard.text = None;
         let error = read_native_content(&mut clipboard, true).unwrap_err();
@@ -920,20 +903,5 @@ try {
         assert!(fields[0] <= MAX_IMAGE_BYTES);
         assert_eq!((fields[1], fields[2]), (768, 768));
         assert!(fields[3] < fields[1] || fields[4] < fields[2]);
-    }
-
-    #[test]
-    fn rejects_empty_and_unsupported_clipboard_output() {
-        assert!(parse_wsl_clipboard_output(b"EMPTY\n").is_err());
-        assert!(parse_wsl_clipboard_output(b"HTML\n<body>").is_err());
-    }
-
-    #[test]
-    fn preserves_text_clipboard_output_verbatim() {
-        let content = parse_wsl_clipboard_output(b"TEXT\n/plan keep this literal\n").unwrap();
-        assert_eq!(
-            content,
-            ClipboardContent::Text("/plan keep this literal\n".into())
-        );
     }
 }

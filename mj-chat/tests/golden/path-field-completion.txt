@@ -1,0 +1,205 @@
+=== collapsed path field (40x14) ===
+
+~/p
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+
+=== ctrl space requests completion (40x14) ===
+
+~/p
+╭ completing ─╮
+│Completing…  │
+╰─────────────╯
+
+
+
+  Continue
+
+
+
+
+
+action: Some(Complete(1))
+request prefix: Some("~/p")
+
+=== terminal NUL completion key (40x14) ===
+
+~/p
+╭ completing ─╮
+│Completing…  │
+╰─────────────╯
+
+
+
+  Continue
+
+
+
+
+
+action: Some(Complete(1))
+duplicate request: None
+
+=== completion candidates (40x14) ===
+
+~/p
+╭ matches ─────╮
+│~/projects/   │
+│~/provision/  │
+╰──────────────╯
+
+
+  Continue
+
+
+
+
+
+
+=== keyboard previews second candidate (40x14) ===
+
+~/p
+╭ matches ─────╮
+│~/projects/   │
+│~/provision/  │
+╰──────────────╯
+
+
+  Continue
+
+
+
+
+
+action: Some(Select(1, 1))
+
+=== enter commits candidate (40x14) ===
+
+/provision/
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(PathCommit(1, 1))
+accepted: true
+
+=== collapsed path edits as text (40x14) ===
+
+a
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(Edit(1, Key(KeyEvent { code: Char('a'), modifiers: KeyModifiers(0x0), kind: Press, state: KeyEventState(0x0) })))
+
+=== collapsed path enter activates (40x14) ===
+
+a
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(Activate(1))
+
+=== escape dismisses candidates (40x14) ===
+
+~/p
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(PathDismiss(1))
+
+=== tab dismisses and focuses next control (40x14) ===
+
+~/p
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(PathDismiss(1))
+focused control: Some(2)
+
+=== mouse click commits candidate (40x14) ===
+
+~/projects/
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(PathCommit(1, 0))
+
+=== outside click dismisses candidates (40x14) ===
+
+~/p
+
+
+
+
+
+
+  Continue
+
+
+
+
+
+action: Some(PathDismiss(1))

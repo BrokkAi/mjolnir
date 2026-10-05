@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
 
-test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block' });
+test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block', timezoneId: 'UTC' });
 
 const WEB_ROOT = path.resolve(__dirname, '../../../mj-controller/src/web');
 const WORKSPACE_ID = 'workspace-1';
@@ -44,9 +44,10 @@ function session(id, projectKey, projectLabel, options = {}) {
     state: lifecycle === 'live' ? 'running' : lifecycle,
     lifecycle,
     transitioning: Boolean(options.transitioning),
-    created_at: '2030-06-15T00:00:00Z',
+    created_at: options.createdAt || '2030-06-15T00:00:00Z',
     updated_at: '2030-06-15T00:00:00Z',
     last_activity_at_ms: options.activity || SERVER_TIME_MS,
+    last_message_at_ms: options.message,
     has_error: Boolean(options.hasError),
     preview: [],
     queued_prompts: Array.from({ length: options.queued || 0 }, (_, index) => ({ id: `queued-${id}-${index}`, text: 'queued' })),
@@ -235,191 +236,256 @@ function transcript(text) {
   };
 }
 
-test('dashboard adapts from a phone column to workstation session columns', async ({ page }, testInfo) => {
-  await mount(page, [
+async function captureGoldenState(output, page, label, extra = null) {
+  const viewport = page.viewportSize();
+  output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
+  output.push((await page.locator('#app').innerText()).trim());
+  if (extra !== null) output.push(`layout: ${JSON.stringify(extra)}`);
+}
+
+async function fixGoldenTime(page) {
+  await page.clock.install({ time: new Date(SERVER_TIME_MS) });
+}
+
+test('golden_viewer_dashboard', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+  const page = await context.newPage();
+  await fixGoldenTime(page);
+  const responsiveState = await mount(page, [
     ...Array.from({ length: 6 }, (_, index) => session(`session-${index}`, 'mjolnir', 'Mjolnir', {
       title: `Session ${index}: investigate the desktop layout and validate responsive behavior`,
       capabilities: { rename: true },
     })),
     session('other-project', 'other', 'Other project', { activity: SERVER_TIME_MS - 60_000 }),
   ]);
-
   for (const width of [390, 900, 1024, 1440, 1920, 2560, 390]) {
     await page.setViewportSize({ width, height: 900 });
-    const first = await card(page, 'session-0').boundingBox();
-    const second = await card(page, 'session-1').boundingBox();
-    const app = await page.locator('#app').boundingBox();
-    if (width >= 1024) {
-      expect(app.width).toBeGreaterThanOrEqual(Math.min(width - 64, 1600) - 1);
-      expect(second.y).toBe(first.y);
-      expect(second.x).toBeGreaterThan(first.x + first.width);
-    } else {
-      expect(second.x).toBe(first.x);
-      expect(second.y).toBeGreaterThan(first.y + first.height);
-    }
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
-    expect(overflow).toBe(false);
+    const geometry = await page.evaluate(() => {
+      const first = document.querySelector('[data-session-id="session-0"]').getBoundingClientRect();
+      const second = document.querySelector('[data-session-id="session-1"]').getBoundingClientRect();
+      const app = document.querySelector('#app').getBoundingClientRect();
+      return {
+        appWidth: Math.round(app.width),
+        first: { x: Math.round(first.x), y: Math.round(first.y), width: Math.round(first.width), height: Math.round(first.height) },
+        second: { x: Math.round(second.x), y: Math.round(second.y) },
+        documentWidth: document.documentElement.scrollWidth,
+      };
+    });
     if (width === 1440) {
       await card(page, 'session-1').getByRole('button', { name: /actions/i }).click();
-      await expect(card(page, 'session-1').getByRole('menu')).toBeVisible();
+      await captureGoldenState(output, page, 'dashboard desktop actions open', geometry);
       await page.keyboard.press('Escape');
-      await page.screenshot({ path: testInfo.outputPath('desktop-dashboard.png'), fullPage: true });
+    } else {
+      await captureGoldenState(output, page, `dashboard responsive ${width}`, geometry);
     }
   }
-});
+  await page.close();
 
-test('desktop transcript scrolls without moving the header or composer', async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  const state = await mount(page, [session('desktop', 'mjolnir', 'Mjolnir', {
-    queued: 20,
-    capabilities: { prompt: true },
-  })]);
-  state.conversation = transcript('A long transcript paragraph to exercise scrolling.\n\n'.repeat(100));
-  await card(page, 'desktop').click();
-  await expect(page.locator('#conversation-feed')).toContainText('A long transcript paragraph');
-  await page.locator('#conversation-side > summary').click();
-  await page.locator('#prompt-text').fill('Keep this draft while resizing the window.');
-
-  for (const size of [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }, { width: 1024, height: 768 }]) {
-    await page.setViewportSize(size);
-    // Include the real offline banner: it consumes height above the header.
-    await page.evaluate(() => { document.body.dataset.connection = 'offline'; });
-    const header = await page.locator('#shell-header').boundingBox();
-    const composer = await page.locator('#prompt-form').boundingBox();
-    const conversation = await page.locator('#conversation').boundingBox();
-    expect(conversation.width).toBeGreaterThan(900);
-    expect(composer.y + composer.height).toBeLessThanOrEqual(size.height);
-    const metrics = await page.locator('#conversation-scroll').evaluate(node => {
-      node.scrollTop = 0;
-      return { height: node.clientHeight, scrollHeight: node.scrollHeight };
-    });
-    expect(metrics.height).toBeGreaterThan(100);
-    expect(metrics.scrollHeight).toBeGreaterThan(metrics.height);
-    expect(await page.locator('#shell-header').boundingBox()).toEqual(header);
-    expect(await page.locator('#prompt-form').boundingBox()).toEqual(composer);
-    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(size.height);
-    await expect(page.locator('#prompt-text')).toHaveText('Keep this draft while resizing the window.');
-    if (size.width === 1440) {
-      await page.screenshot({ path: testInfo.outputPath('desktop-conversation.png') });
-    }
-  }
-});
-
-test('compact cards sort initial activity, expose metadata, clocks, attention, and a phone screenshot', async ({ page }) => {
-  const longTitle = 'A long session title that occupies one ellipsized line on a narrow phone screen';
-  await mount(page, [
+  const compactPage = await context.newPage();
+  await fixGoldenTime(compactPage);
+  await mount(compactPage, [
     session('beta-turn', 'project-beta', 'Beta', {
       activity: SERVER_TIME_MS - 1_000,
-      title: longTitle,
+      title: 'A long session title that occupies one ellipsized line on a narrow phone screen',
       displayLocation: '/work/attention',
       profileId: 'codex',
       hasError: true,
       pendingElicitations: [{ id: 'input-1' }],
       queued: 2,
-      activityDetails: activity('turn', {
-        turn_started_at_ms: SERVER_TIME_MS - 65_000,
-        step_started_at_ms: SERVER_TIME_MS - 65_000,
-      }),
+      activityDetails: activity('turn', { turn_started_at_ms: SERVER_TIME_MS - 65_000, step_started_at_ms: SERVER_TIME_MS - 65_000 }),
       isIdle: false,
     }),
-    session('beta-step', 'project-beta', 'Beta', {
-      activity: SERVER_TIME_MS - 2_000,
-      activityDetails: activity('step', {
-        step_started_at_ms: SERVER_TIME_MS - 3_600_000,
-      }),
-      isIdle: false,
-    }),
-    session('alpha-background', 'project-alpha', 'Alpha', {
-      activity: SERVER_TIME_MS - 3_000,
-      activityDetails: activity('background', {
-        background_started_at_ms: SERVER_TIME_MS - 65_000,
-        label: 'Indexing',
-      }),
-      isIdle: false,
-    }),
-    session('alpha-idle', 'project-alpha', 'Alpha', {
-      activity: SERVER_TIME_MS - 4_000,
-      activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }),
-    }),
-    session('alpha-yesterday', 'project-alpha', 'Alpha', {
-      activity: SERVER_TIME_MS - 4_500,
-      activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }),
-    }),
-    session('lifecycle', 'project-lifecycle', 'Lifecycle', {
-      activity: SERVER_TIME_MS - 5_000,
-      activityDetails: activity('lifecycle', { label: 'Starting target' }),
-      isIdle: false,
-    }),
-    session('unknown-idle', 'project-unknown', 'Unknown', {
-      activity: SERVER_TIME_MS - 6_000,
-      activityDetails: activity('idle'),
-    }),
+    session('beta-step', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
+    session('alpha-background', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
+    session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }) }),
+    session('alpha-yesterday', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }) }),
+    session('lifecycle', 'project-lifecycle', 'Lifecycle', { activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
+    session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle') }),
   ]);
-
-  await expect(page.locator('#sessions .session h3')).toHaveText([
-    longTitle,
-    'beta-step',
-    'alpha-background',
-    'alpha-idle',
-    'alpha-yesterday',
-    'lifecycle',
-    'unknown-idle',
-  ]);
-
-  const attention = card(page, 'beta-turn').locator('.session-attention-item');
-  await expect(attention).toHaveText(['!', '?', '2']);
-  await expect.poll(() => attention.evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label')))).toEqual([
-    'Error',
-    'Input needed',
-    '2 queued prompts',
-  ]);
-  await expect(card(page, 'beta-turn').locator('button[aria-label^="Actions for"]')).toHaveText('⋯');
-  await expect(card(page, 'beta-turn')).toHaveAttribute(
-    'aria-label',
-    /needs attention: error, input needed, 2 queued prompts/,
-  );
-
-  const meta = await card(page, 'beta-turn').locator('.session-project, .session-location, .session-profile').evaluateAll(nodes =>
-    nodes.map(node => ({ text: node.textContent, left: node.getBoundingClientRect().left, right: node.getBoundingClientRect().right })));
-  expect(meta.map(node => node.text)).toEqual(['Beta', '/work/attention', 'codex']);
-  expect(meta[0].left).toBeLessThan(meta[1].left);
-  expect(meta[1].left).toBeLessThan(meta[2].left);
-  expect(meta[2].right).toBeGreaterThan(meta[0].right - 2);
-
-  const titleMetrics = await card(page, 'beta-turn').locator('h3').evaluate(node => {
-    const style = getComputedStyle(node);
-    const lineHeight = Number.parseFloat(style.lineHeight);
-    return {
-      lines: Math.round(node.getBoundingClientRect().height / lineHeight),
-      height: node.getBoundingClientRect().height,
-      lineHeight,
-      whiteSpace: style.whiteSpace,
-    };
-  });
-  // The card has three rows; its title occupies exactly one of them.
-  expect(titleMetrics.lines).toBe(1);
-  expect(titleMetrics.height).toBeLessThanOrEqual(titleMetrics.lineHeight + 1);
-  expect(titleMetrics.whiteSpace).toBe('nowrap');
-  await expect(card(page, 'beta-turn').locator(':scope > div, :scope > p')).toHaveCount(3);
-
-  await expect(card(page, 'beta-turn').locator('.session-activity')).toHaveText(/Turn 1m05s · Step 1m05s/);
-  await expect(card(page, 'beta-step').locator('.session-activity')).toHaveText(/Step 1h00m/);
-  await expect(card(page, 'alpha-background').locator('.session-activity')).toHaveText('Indexing 1m05s');
-  const idleClock = await page.evaluate(timestamp => {
-    const date = new Date(timestamp);
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-  }, SERVER_TIME_MS - 65_000);
-  await expect(card(page, 'alpha-idle').locator('.session-activity')).toHaveText(`Idle since ${idleClock}`);
-  await expect(card(page, 'alpha-yesterday').locator('.session-activity')).toHaveText(/Idle since yesterday \d\d:\d\d/);
-  await expect(card(page, 'lifecycle').locator('.session-activity')).toHaveText('Starting target');
-  await expect(card(page, 'unknown-idle').locator('.session-activity')).toHaveText('Idle');
-
-  const overflow = await page.evaluate(() => ({
+  await captureGoldenState(output, compactPage, 'compact cards with attention and activity clocks', await compactPage.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
     viewportWidth: document.documentElement.clientWidth,
-  }));
-  expect(overflow.documentWidth).toBeLessThanOrEqual(overflow.viewportWidth + 1);
-  await page.screenshot({ path: '/tmp/compact-web-cards.png', fullPage: true });
+    cards: [...document.querySelectorAll('#sessions .session')].map(node => ({
+      title: node.querySelector('h3')?.textContent,
+      attention: [...node.querySelectorAll('.session-attention-item')].map(item => ({
+        text: item.textContent,
+        label: item.getAttribute('aria-label'),
+      })),
+      meta: [...node.querySelectorAll('.session-project, .session-location, .session-profile')].map(item => item.textContent),
+      activity: node.querySelector('.session-activity')?.textContent,
+      titleStyle: (() => {
+        const title = node.querySelector('h3');
+        const style = getComputedStyle(title);
+        return { height: +title.getBoundingClientRect().height.toFixed(2), lineHeight: style.lineHeight, whiteSpace: style.whiteSpace };
+      })(),
+    })),
+  })));
+  await compactPage.close();
+
+  const orderedPage = await context.newPage();
+  await fixGoldenTime(orderedPage);
+  const orderedState = await mount(orderedPage, [
+    session('gamma-message', 'project-gamma', 'Gamma', { message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
+    session('alpha-created', 'project-alpha', 'Alpha', { createdAt: '2030-06-14T00:00:00Z' }),
+    session('stopped', 'project-stopped', 'Stopped', { lifecycle: 'suspended', message: SERVER_TIME_MS + 20_000 }),
+    session('beta-activity', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 5_000 }),
+    session('echo-tie', 'project-echo', 'Echo', { activity: SERVER_TIME_MS + 1_000 }),
+    session('delta-tie', 'project-delta', 'Delta', { activity: SERVER_TIME_MS + 1_000 }),
+    session('other-workspace', 'project-other', 'Other', { workspaceId: OTHER_WORKSPACE_ID, message: SERVER_TIME_MS + 30_000 }),
+  ]);
+  await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by latest message', await orderedPage.evaluate(() => ({
+    cards: [...document.querySelectorAll('#sessions .session')].map(node => ({
+      title: node.querySelector('h3')?.textContent,
+      meta: node.querySelector('.session-meta')?.innerText,
+    })),
+  })));
+  orderedState.snapshot.targets = [
+    { id: 'container', default_candidate: true, runtime_missing: false },
+    { id: 'configured-remote', default_candidate: false, runtime_missing: true },
+    { id: 'missing-local', default_candidate: true, runtime_missing: true },
+  ];
+  orderedState.snapshot.capacity = [{
+    id: 'local-host',
+    label: 'Local workstation',
+    target_ids: ['container', 'configured-remote', 'missing-local'],
+    sampled_at_epoch_seconds: SERVER_TIME_MS / 1000,
+    cpu_percent: 32,
+    memory_total_bytes: 16 * 1024 ** 3,
+    memory_used_bytes: 8 * 1024 ** 3,
+    logical_cores: 8,
+    disk_total_bytes: 512 * 1024 ** 3,
+    storage: [],
+  }];
+  await refresh(orderedPage, orderedState);
+  await orderedPage.getByRole('button', { name: 'Menu' }).click();
+  await orderedPage.getByRole('menuitem', { name: 'Targets' }).click();
+  await expect(orderedPage.locator('#targets-page')).toBeVisible();
+  await expect(orderedPage.locator('#targets')).toContainText('container, configured-remote');
+  await expect(orderedPage.locator('#targets')).not.toContainText('missing-local');
+  await captureGoldenState(output, orderedPage, 'target capacity omits a missing default candidate', {
+    listedTargets: await orderedPage.locator('#targets article p.dim').first().innerText(),
+  });
+  await orderedPage.close();
+
+  const insertionPage = await context.newPage();
+  await fixGoldenTime(insertionPage);
+  const insertionState = await mount(insertionPage, [
+    session('alpha-first', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 1_000 }),
+    session('alpha-second', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 2_000 }),
+    session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 3_000 }),
+  ]);
+  const captureTitles = async label => captureGoldenState(output, insertionPage, label, await insertionPage.locator('#sessions .session h3').allTextContents());
+  await captureTitles('initial activity order');
+  insertionState.snapshot.sessions.push(
+    session('alpha-late', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 500 }),
+    session('gamma-late', 'project-gamma', 'Gamma', { activity: SERVER_TIME_MS - 1_500 }),
+  );
+  await refresh(insertionPage, insertionState);
+  await captureTitles('later sessions inserted in order');
+  await card(insertionPage, 'gamma-late').focus();
+  insertionState.snapshot.sessions = insertionState.snapshot.sessions.filter(item => item.id !== 'beta');
+  await refresh(insertionPage, insertionState);
+  insertionState.snapshot.sessions.push(session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 1_000 }));
+  await refresh(insertionPage, insertionState);
+  await captureGoldenState(output, insertionPage, 'reappearing session re-sorted while focus stays put', {
+    titles: await insertionPage.locator('#sessions .session h3').allTextContents(),
+    focused: await insertionPage.evaluate(() => document.activeElement?.dataset.sessionId || document.activeElement?.closest('[data-session-id]')?.dataset.sessionId || null),
+  });
+  await insertionPage.close();
+
+  const reloadPage = await context.newPage();
+  await fixGoldenTime(reloadPage);
+  const reloadState = await mount(reloadPage, [
+    session('first', 'project-first', 'First', { activity: SERVER_TIME_MS - 1_000 }),
+    session('second', 'project-second', 'Second', { activity: SERVER_TIME_MS - 2_000 }),
+  ]);
+  reloadState.snapshot.sessions.find(item => item.id === 'first').last_activity_at_ms = SERVER_TIME_MS - 4_000;
+  reloadState.snapshot.sessions.find(item => item.id === 'second').last_activity_at_ms = SERVER_TIME_MS - 100;
+  await reloadPage.reload();
+  await expect.poll(() => reloadPage.locator('#sessions .session h3').allTextContents()).toEqual(['second', 'first']);
+  await captureGoldenState(output, reloadPage, 'reload uses latest activity order', await reloadPage.locator('#sessions .session h3').allTextContents());
+  await reloadPage.close();
+
+  const desktopPage = await context.newPage();
+  await fixGoldenTime(desktopPage);
+  await desktopPage.setViewportSize({ width: 1440, height: 900 });
+  const desktopState = await mount(desktopPage, [session('desktop', 'mjolnir', 'Mjolnir', {
+    queued: 20,
+    capabilities: { prompt: true },
+  })]);
+  desktopState.conversation = transcript('A long transcript paragraph to exercise scrolling.\n\n'.repeat(100));
+  await card(desktopPage, 'desktop').click();
+  await desktopPage.locator('#conversation-side > summary').click();
+  await desktopPage.locator('#prompt-text').fill('Keep this draft while resizing the window.');
+  for (const size of [{ width: 1440, height: 900 }, { width: 1920, height: 1080 }, { width: 1024, height: 768 }]) {
+    await desktopPage.setViewportSize(size);
+    await desktopPage.evaluate(() => { document.body.dataset.connection = 'offline'; });
+    const geometry = await desktopPage.evaluate(() => {
+      const bounds = selector => {
+        const box = document.querySelector(selector).getBoundingClientRect();
+        return { x: +box.x.toFixed(2), y: +box.y.toFixed(2), width: +box.width.toFixed(2), height: +box.height.toFixed(2) };
+      };
+      const scroll = document.querySelector('#conversation-scroll');
+      const before = { header: bounds('#shell-header'), composer: bounds('#prompt-form') };
+      scroll.scrollTop = scroll.scrollHeight;
+      const after = { header: bounds('#shell-header'), composer: bounds('#prompt-form') };
+      return {
+        header: after.header,
+        composer: after.composer,
+        conversation: bounds('#conversation'),
+        scroll: { top: scroll.scrollTop, height: scroll.clientHeight, scrollHeight: scroll.scrollHeight },
+        fixedWhileScrolling: {
+          header: JSON.stringify(before.header) === JSON.stringify(after.header),
+          composer: JSON.stringify(before.composer) === JSON.stringify(after.composer),
+        },
+        draft: document.querySelector('#prompt-text').textContent,
+        documentHeight: document.documentElement.scrollHeight,
+      };
+    });
+    expect(geometry.scroll.top).toBeGreaterThan(0);
+    expect(geometry.fixedWhileScrolling).toEqual({ header: true, composer: true });
+    await captureGoldenState(output, desktopPage, 'desktop conversation with fixed header and composer', geometry);
+  }
+  await desktopPage.close();
+
+  const checkpointPage = await context.newPage();
+  await fixGoldenTime(checkpointPage);
+  const checkpointAt = Math.floor((SERVER_TIME_MS - 30_000) / 1_000);
+  const checkpointState = await mount(checkpointPage, [session('checkpoint', 'project-checkpoint', 'Checkpoint', {
+    operation: { id: 'checkpoint-1', session_id: 'checkpoint', kind: 'checkpoint', started_at_epoch_seconds: checkpointAt, stages: [{ label: 'Checkpointing', started_at_epoch_seconds: checkpointAt }], notice: null, cancellable: false },
+  })]);
+  checkpointState.conversation = transcript('checkpoint conversation remains readable');
+  await card(checkpointPage, 'checkpoint').click();
+  await expect(checkpointPage.locator('#conversation')).toContainText('checkpoint conversation remains readable');
+  await captureGoldenState(output, checkpointPage, 'ordinary checkpoint keeps conversation and composer readable');
+  await checkpointPage.close();
+
+  const subagentPage = await context.newPage();
+  await fixGoldenTime(subagentPage);
+  await mount(subagentPage, [
+    session('parent', 'project-parent', 'Parent project', { title: 'Parent session', subagentSessionIds: ['child-one', 'child-two'] }),
+    session('child-one', 'project-parent', 'Parent project', { title: 'Grok helper', subagentParentId: 'parent' }),
+    session('child-two', 'project-parent', 'Parent project', { title: 'Muse helper', subagentParentId: 'parent' }),
+  ]);
+  await captureGoldenState(output, subagentPage, 'parent dashboard hides child sessions');
+  await card(subagentPage, 'parent').click();
+  await expect(subagentPage).toHaveURL(/#conversation\/parent$/);
+  await subagentPage.locator('#subagents-button').click();
+  await expect(subagentPage).toHaveURL(/#subagents\/parent$/);
+  await expect(subagentPage.locator('#workspaces .virtual-workspace')).toContainText('Parent session');
+  await captureGoldenState(output, subagentPage, 'named subagent workspace lists child sessions');
+  await card(subagentPage, 'child-one').click();
+  await expect(subagentPage).toHaveURL(/#subagents\/parent\/child-one$/);
+  await subagentPage.locator('#back').click();
+  await expect(subagentPage).toHaveURL(/#subagents\/parent$/);
+  await subagentPage.getByRole('button', { name: 'Close Parent session sub-agent workspace' }).click();
+  await expect(subagentPage).toHaveURL(/#conversation\/parent$/);
+  await expect(subagentPage.locator('#conversation-title')).toContainText('Parent session');
+  await captureGoldenState(output, subagentPage, 'closing subagent workspace returns to parent conversation');
+  await subagentPage.close();
+
+  assertGolden('viewer_dashboard', output.join('\n'));
 });
 
 test('transition cards show compact stages and suppress a late transcript response', async ({ page }) => {
@@ -576,31 +642,6 @@ test('a live route survives transition completion while its conversation project
   await expect(page.locator('#prompt-form')).toBeVisible();
 });
 
-test('ordinary checkpoint keeps the conversation and composer readable', async ({ page }) => {
-  const checkpointAt = Math.floor((SERVER_TIME_MS - 30_000) / 1_000);
-  const state = await mount(page, [
-    session('checkpoint', 'project-checkpoint', 'Checkpoint', {
-      operation: {
-        id: 'checkpoint-1',
-        session_id: 'checkpoint',
-        kind: 'checkpoint',
-        started_at_epoch_seconds: checkpointAt,
-        stages: [{ label: 'Checkpointing', started_at_epoch_seconds: checkpointAt }],
-        notice: null,
-        cancellable: false,
-      },
-    }),
-  ]);
-  state.conversation = transcript('checkpoint conversation remains readable');
-
-  await card(page, 'checkpoint').click();
-  await expect(page).toHaveURL(/#conversation\/checkpoint$/);
-  await expect(page.locator('#conversation-feed')).toContainText('checkpoint conversation remains readable');
-  await expect(page.locator('#conversation-transition')).toBeHidden();
-  await expect(page.locator('#conversation-scroll')).toBeVisible();
-  await expect(page.locator('#prompt-form')).toBeVisible();
-});
-
 test('refresh, workspace navigation, and reconnect preserve card identity, focus, order, and an active press', async ({ page }) => {
   const state = await mount(page, [
     session('alpha-new', 'project-alpha', 'Alpha', {
@@ -650,56 +691,6 @@ test('refresh, workspace navigation, and reconnect preserve card identity, focus
   // The list re-sorts live as newer activity arrives; identity survives it.
   await expect(page.locator('#sessions .session h3')).toHaveText(['beta', 'alpha-new', 'alpha-old']);
   expect(await original.evaluate(node => node.isConnected)).toBe(true);
-});
-
-test('later sessions insert in sorted position, and a reappearing session re-sorts', async ({ page }) => {
-  const state = await mount(page, [
-    session('alpha-first', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 1_000 }),
-    session('alpha-second', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 2_000 }),
-    session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 3_000 }),
-  ]);
-  const titles = page.locator('#sessions .session h3');
-  await expect(titles).toHaveText(['alpha-first', 'alpha-second', 'beta']);
-
-  state.snapshot.sessions.push(
-    session('alpha-late', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 500 }),
-    session('gamma-late', 'project-gamma', 'Gamma', { activity: SERVER_TIME_MS - 1_500 }),
-  );
-  await refresh(page, state);
-  await expect(titles).toHaveText(['alpha-late', 'alpha-first', 'gamma-late', 'alpha-second', 'beta']);
-
-  await card(page, 'gamma-late').focus();
-  state.snapshot.sessions = state.snapshot.sessions.filter(item => item.id !== 'beta');
-  await refresh(page, state);
-  await expect(card(page, 'gamma-late')).toBeFocused();
-  await expect(titles).toHaveText(['alpha-late', 'alpha-first', 'gamma-late', 'alpha-second']);
-  state.snapshot.sessions.push(session('beta', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 1_000 }));
-  await refresh(page, state);
-  await expect(card(page, 'gamma-late')).toBeFocused();
-  await expect(titles).toHaveText(['beta', 'alpha-late', 'alpha-first', 'gamma-late', 'alpha-second']);
-
-  await card(page, 'alpha-late').focus();
-  state.snapshot.sessions = state.snapshot.sessions.filter(item => item.id !== 'alpha-second');
-  await refresh(page, state);
-  await expect(card(page, 'alpha-late')).toBeFocused();
-  state.snapshot.sessions.push(session('alpha-second', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS + 2_000 }));
-  await refresh(page, state);
-  await expect(card(page, 'alpha-late')).toBeFocused();
-  await expect(titles).toHaveText(['alpha-second', 'beta', 'alpha-late', 'alpha-first', 'gamma-late']);
-});
-
-test('a reload sorts by the latest activity', async ({ page }) => {
-  const state = await mount(page, [
-    session('first', 'project-first', 'First', { activity: SERVER_TIME_MS - 1_000 }),
-    session('second', 'project-second', 'Second', { activity: SERVER_TIME_MS - 2_000 }),
-  ]);
-  const titles = page.locator('#sessions .session h3');
-  await expect(titles).toHaveText(['first', 'second']);
-  state.snapshot.sessions.find(item => item.id === 'first').last_activity_at_ms = SERVER_TIME_MS - 4_000;
-  state.snapshot.sessions.find(item => item.id === 'second').last_activity_at_ms = SERVER_TIME_MS - 100;
-  await page.reload();
-  await expect(page.locator('#app')).toBeVisible();
-  await expect(titles).toHaveText(['second', 'first']);
 });
 
 test('menus follow capabilities, long press cancellation, right click, keyboard, confirmation, and errors', async ({ page }) => {
@@ -812,44 +803,6 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(openMenu).toBeVisible();
   await page.mouse.up();
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
-});
-
-test('sub-agent workspace hides children from the normal list and closes back to its named parent', async ({ page }) => {
-  await mount(page, [
-    session('parent', 'project-parent', 'Parent project', {
-      title: 'Parent session',
-      subagentSessionIds: ['child-one', 'child-two'],
-    }),
-    session('child-one', 'project-parent', 'Parent project', {
-      title: 'Grok helper',
-      subagentParentId: 'parent',
-    }),
-    session('child-two', 'project-parent', 'Parent project', {
-      title: 'Muse helper',
-      subagentParentId: 'parent',
-    }),
-  ]);
-
-  await expect(card(page, 'parent')).toBeVisible();
-  await expect(card(page, 'child-one')).toHaveCount(0);
-  await card(page, 'parent').click();
-  await expect(page).toHaveURL(/#conversation\/parent$/);
-  await expect(page.locator('#subagents-button')).toHaveText('Subagents · 0/2');
-  await page.locator('#subagents-button').click();
-
-  await expect(page).toHaveURL(/#subagents\/parent$/);
-  await expect(page.locator('#workspaces .virtual-workspace')).toContainText('Parent session');
-  await expect(page.getByRole('button', { name: 'Close Parent session sub-agent workspace' })).toBeVisible();
-  await expect(card(page, 'parent')).toHaveCount(0);
-  await expect(card(page, 'child-one')).toBeVisible();
-  await expect(card(page, 'child-two')).toBeVisible();
-
-  await card(page, 'child-one').click();
-  await expect(page).toHaveURL(/#subagents\/parent\/child-one$/);
-  await page.locator('#back').click();
-  await expect(page).toHaveURL(/#subagents\/parent$/);
-  await page.getByRole('button', { name: 'Close Parent session sub-agent workspace' }).click();
-  await expect(page).toHaveURL(/#conversation\/parent$/);
 });
 
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {

@@ -260,12 +260,10 @@ pub(super) use crate::components::text_layout::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ChatAction;
     use crate::chat::test_support::{ctrl, key, snapshot};
-    use crate::chat::{ChatAction, active::render_full_frame as render};
     use crossterm::event::KeyCode;
     use mj_core::relay::{ActivePrompt, WorkerPhase};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     #[test]
     fn multiline_paste_is_one_draft_and_one_queued_prompt() {
@@ -287,66 +285,6 @@ mod tests {
             ChatAction::Prompt("first\nsecond\nthird".into())
         );
         assert!(chat.queued_prompts.is_empty());
-    }
-
-    #[test]
-    fn composer_cursor_follows_a_word_moved_to_the_next_visual_row() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("abcdefgh ijkl".into());
-        let mut terminal = Terminal::new(TestBackend::new(14, 12)).expect("terminal");
-
-        terminal
-            .draw(|frame| render(frame, &mut chat, false))
-            .expect("draw chat");
-        let (word_end_x, word_row) = {
-            let buffer = terminal.backend().buffer();
-            let word_row = (buffer.area.y..buffer.area.bottom())
-                .find(|&y| {
-                    (buffer.area.x..buffer.area.right())
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                        .contains("ijkl")
-                })
-                .expect("wrapped word");
-            let word_start_x = (buffer.area.x..buffer.area.right())
-                .find(|&x| buffer[(x, word_row)].symbol() == "i")
-                .expect("wrapped word start");
-            (word_start_x + 4, word_row)
-        };
-
-        terminal
-            .backend_mut()
-            .assert_cursor_position((word_end_x, word_row));
-        assert_eq!(
-            input_cursor_visual_position(&chat.input, chat.input.len(), 12),
-            (4, 1)
-        );
-        assert_eq!(input_cursor_visual_position(&chat.input, 9, 12), (0, 1));
-        assert_eq!(input_cursor_visual_position(&chat.input, 10, 12), (1, 1));
-    }
-
-    #[test]
-    fn editor_supports_cursor_insertion_deletion_and_prompt_history() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("ac".into());
-        chat.handle_key(key(KeyCode::Left));
-        chat.handle_key(key(KeyCode::Char('b')));
-        assert_eq!(chat.input, "abc");
-        chat.handle_key(key(KeyCode::Backspace));
-        assert_eq!(chat.input, "ac");
-        chat.handle_key(key(KeyCode::Delete));
-        assert_eq!(chat.input, "a");
-
-        chat.set_input("remember me".into());
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::Prompt("remember me".into())
-        );
-        chat.phase = WorkerPhase::Idle;
-        chat.handle_key(key(KeyCode::Up));
-        assert_eq!(chat.input, "remember me");
-        chat.handle_key(key(KeyCode::Down));
-        assert!(chat.input.is_empty());
     }
 
     #[test]

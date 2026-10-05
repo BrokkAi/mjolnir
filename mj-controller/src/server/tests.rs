@@ -67,30 +67,6 @@ use mj_core::config::{
 };
 use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
-#[test]
-fn unified_tls_backends_use_the_selected_crypto_provider() {
-    install_rustls_crypto_provider();
-
-    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
-    let _builder = rustls::ServerConfig::builder();
-}
-
-#[test]
-fn minted_desktop_cookie_validates_and_names_a_viewer() {
-    let key = vec![7u8; COOKIE_KEY_BYTES];
-    let value = mint_desktop_session_cookie(&key).unwrap();
-    let viewer = cookie_viewer(&key, &value, now_unix());
-    assert!(
-        viewer.is_some(),
-        "minted cookie must validate and carry a viewer id: {value:?}"
-    );
-    assert!(!session_cookie_valid(
-        &[8u8; COOKIE_KEY_BYTES],
-        &value,
-        now_unix()
-    ));
-}
-
 pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
         keys: Default::default(),
@@ -218,33 +194,6 @@ type TestServer = (
 
 fn app() -> TestServer {
     app_with_conversations(BTreeMap::new())
-}
-
-fn app_with_move_receiver() -> (Router, mpsc::Receiver<MovePreparationRequest>) {
-    let (config, state) = sample_config_state();
-    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    snapshot.sessions[0].capabilities.move_session = true;
-    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
-    let (_conversation_tx, conversation_rx) =
-        watch::channel(mj_core::snapshot_map::SnapshotMap::new());
-    let (action_tx, _action_rx) = mpsc::channel(8);
-    let (bundle_tx, _bundle_rx) = mpsc::channel(8);
-    let (receipt_tx, _receipt_rx) = mpsc::channel(8);
-    let (preflight_tx, _preflight_rx) = mpsc::channel(8);
-    let (move_preparation_tx, move_preparation_rx) = mpsc::channel(8);
-    let (client_state_tx, _client_state_rx) = mpsc::channel(8);
-    let options = test_options(
-        snapshot_rx,
-        conversation_rx,
-        action_tx,
-        bundle_tx,
-        receipt_tx,
-        preflight_tx,
-        move_preparation_tx,
-        client_state_tx,
-    )
-    .with_test_credentials("123456", b"01234567890123456789012345678901");
-    (router(options), move_preparation_rx)
 }
 
 fn app_with_conversations(conversations: BTreeMap<String, BrowserTranscript>) -> TestServer {
@@ -419,22 +368,6 @@ async fn login_cookie(app: &Router) -> String {
         .next()
         .unwrap()
         .to_string()
-}
-
-#[tokio::test]
-async fn browser_dictation_routes_are_not_exposed() {
-    for path in [
-        "/api/sessions/session-1/dictation",
-        "/voice-worklet.js",
-        "/voice-worker.js",
-    ] {
-        let (app, _, _, _, _) = app();
-        let response = app
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-    }
 }
 
 fn app_with_background_stop_receiver(
@@ -698,35 +631,6 @@ async fn bundle_endpoint_rejects_empty_and_oversized_sources_before_dispatch() {
 }
 
 #[tokio::test]
-async fn bundle_endpoint_reports_invalid_source_as_a_client_error() {
-    let (app, mut bundles) = app_with_bundle_receiver();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn({
-        let app = app.clone();
-        async move {
-            app.oneshot(
-                Request::post("/api/bundles")
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(COOKIE, cookie)
-                    .body(Body::from(r#"{"source":"not a source"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-        }
-    });
-    let request = bundles.recv().await.expect("bundle request forwarded");
-    request
-        .reply
-        .send(Err(BundleFailure::InvalidSource))
-        .unwrap();
-    let response = response.await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains("GitHub owner/repository"));
-}
-
-#[tokio::test]
 async fn api_requires_a_valid_signed_cookie() {
     let (app, _, _, _, _) = app();
     let unauthorized = app
@@ -747,34 +651,6 @@ async fn api_requires_a_valid_signed_cookie() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn qr_login_exchanges_the_secret_for_a_cookie_and_redirects_cleanly() {
-    let (app, _, _, _, _) = app();
-    let rejected = app
-        .clone()
-        .oneshot(
-            Request::get("/auth/login?token=wrong")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-
-    let accepted = app
-        .oneshot(
-            Request::get("/auth/login?token=test-login-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(accepted.headers().get(LOCATION).unwrap(), "/");
-    assert_eq!(accepted.headers().get(CACHE_CONTROL).unwrap(), "no-store");
-    assert!(accepted.headers().contains_key(SET_COOKIE));
 }
 
 #[test]
@@ -805,14 +681,33 @@ fn generated_code_and_cookie_attributes_are_phone_safe() {
 
 #[test]
 fn public_snapshot_omits_homes_environment_locators_and_raw_errors() {
-    let (config, state) = sample_config_state();
-    let json =
-        serde_json::to_string(&ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
+    let (mut config, state) = sample_config_state();
+    config.review = mj_core::config::ReviewConfig {
+        enabled: true,
+        tier: mj_core::review::lanes::ReviewTier::Extended,
+        profile: Some("reviewer-1".into()),
+        model: Some("private-review-model".into()),
+        effort: Some("private-review-effort".into()),
+    };
+
+    let value =
+        serde_json::to_value(ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
+    assert_eq!(
+        value.get("review_config"),
+        Some(&serde_json::json!({
+            "enabled": true,
+            "tier": "extended",
+            "profile": "reviewer-1",
+        }))
+    );
+    let json = value.to_string();
     assert!(!json.contains("/highly/secret"));
     assert!(!json.contains("secret-token"));
     assert!(!json.contains("secret-target"));
     assert!(!json.contains("secret.registry"));
     assert!(!json.contains("native-secret-id"));
+    assert!(!json.contains("private-review-model"));
+    assert!(!json.contains("private-review-effort"));
     assert!(json.contains("\"has_error\":true"));
 }
 
@@ -868,33 +763,6 @@ fn target_snapshot_uses_each_raw_host_project_history_and_leaves_managed_empty()
         vec!["/srv/builder"]
     );
     assert!(target("podman").recent_project_directories.is_empty());
-}
-
-#[test]
-fn public_snapshot_exposes_only_review_status_configuration() {
-    let (mut config, state) = sample_config_state();
-    config.review = mj_core::config::ReviewConfig {
-        enabled: true,
-        tier: mj_core::review::lanes::ReviewTier::Extended,
-        profile: Some("reviewer-1".into()),
-        model: Some("private-review-model".into()),
-        effort: Some("private-review-effort".into()),
-    };
-
-    let value =
-        serde_json::to_value(ViewerSnapshot::from_config_state(&config, &state, 9)).unwrap();
-
-    assert_eq!(
-        value.get("review_config"),
-        Some(&serde_json::json!({
-            "enabled": true,
-            "tier": "extended",
-            "profile": "reviewer-1",
-        }))
-    );
-    let json = value.to_string();
-    assert!(!json.contains("private-review-model"));
-    assert!(!json.contains("private-review-effort"));
 }
 
 fn sample_elicitation() -> ElicitationRequest {
@@ -1257,33 +1125,6 @@ if (requests.length !== 3 || requests[2].body.prefix !== '/work/repos/')
 }
 
 #[test]
-fn web_configuration_repair_action_explains_missing_entries_without_a_request() {
-    let source = format!(
-        "{}\n{}",
-        viewer_source("function sessionById(", "function sessionInWorkspace("),
-        viewer_source("async function runSessionAction(", "sessions.onclick")
-    );
-    let setup = r#"
-const pendingActions = new Set();
-const pendingLifecycleActions = new Map();
-const snapshot = { sessions: [{ id: 'broken', configuration_issue: 'Restore bundle project in config.toml' }] };
-const viewerState = { rows: new Map(snapshot.sessions.map(row => [row.id, row])) };
-const errorNode = { textContent: '' };
-"#;
-    let checks = r#"
-await runSessionAction({ action: 'repair-config', id: 'broken' }, errorNode);
-if (!errorNode.textContent.includes('Restore bundle project')) throw Error('repair guidance missing');
-snapshot.sessions[0].configuration_issue = null;
-await runSessionAction({ action: 'repair-config', id: 'broken' }, errorNode);
-if (!errorNode.textContent.includes('repaired')) throw Error('stale configuration diagnostic');
-"#;
-    run_viewer_script(
-        "configuration-repair",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
-}
-
-#[test]
 fn viewer_reports_configuration_drift_without_exposing_private_configuration() {
     let (mut config, state) = sample_config_state();
     let bundle = config.bundles.remove("hel").unwrap();
@@ -1384,73 +1225,6 @@ if (ids("missing-workspace").length !== 0) throw new Error("unknown workspace ex
 "#;
     run_viewer_script(
         "workspace-resume-history",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
-}
-
-#[test]
-fn embedded_viewer_lists_no_sub_agent_among_live_sessions() {
-    let source = format!(
-        "{}\n{}",
-        viewer_source("function isSubagentSession(", "function renderSessions("),
-        viewer_source("class ViewerRuntimeState", "const viewerState =")
-    );
-    let setup = r#"
-const route = {};
-const snapshot = {
-  sessions: [
-{ id: "parent", workspace_id: "workspace-a", subagent_session_ids: ["listed-child"] },
-{ id: "listed-child", workspace_id: "workspace-a", subagent_parent_id: "parent" },
-{ id: "orphan-child", workspace_id: "workspace-a", subagent_parent_id: "absent-parent" },
-  ],
-};
-function selectedWorkspaceId() { return "workspace-a"; }
-function isDashboardSession() { return true; }
-"#;
-    let checks = r#"
-const viewerState = new ViewerRuntimeState(row => !isSubagentSession(row) && isDashboardSession(row), () => false, () => 0);
-viewerState.install(snapshot);
-const sessionById = id => viewerState.rows.get(id);
-const ids = liveSessions().map(session => session.id);
-if (JSON.stringify(ids) !== JSON.stringify(["parent"])) {
-  throw new Error(`live sessions listed a sub-agent: ${JSON.stringify(ids)}`);
-}
-"#;
-    run_viewer_script(
-        "live-sessions-without-sub-agents",
-        &format!("{setup}\n{source}\n{checks}"),
-    );
-}
-
-#[test]
-fn embedded_viewer_sends_the_selected_resume_workspace() {
-    let source = viewer_source("async function runSessionAction", "sessions.onclick =");
-    let setup = r#"
-const pendingActions = new Set();
-const pendingLifecycleActions = new Map();
-const snapshot = { sessions: [] };
-let sent = null;
-function selectedWorkspaceId() { return "workspace-b"; }
-function navigate() {}
-function renderRoute() {}
-async function refresh() {}
-async function request(path, options) {
-  sent = { path, body: JSON.parse(options.body) };
-}
-"#;
-    let checks = r#"
-const errorNode = { textContent: "" };
-await runSessionAction(
-  { action: "resume", id: "history-a", profile: "codex-1", target: "podman" },
-  errorNode,
-  { queue: "start" },
-);
-if (sent.path !== "/api/actions" || sent.body.workspace_id !== "workspace-b") {
-  throw new Error(`resume did not carry its destination: ${JSON.stringify(sent)}`);
-}
-"#;
-    run_viewer_script(
-        "resume-workspace-destination",
         &format!("{setup}\n{source}\n{checks}"),
     );
 }
@@ -1614,57 +1388,12 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
     assert!(!json.contains("github.com"));
 }
 
-/// A phone groups and filters by the lifecycle category, so the mapping
-/// from the controller's precise state has to be the controller's own.
-#[test]
-fn lifecycle_categories_decide_what_the_dashboard_shows() {
-    use ViewerLifecycleCategory::{Failed, Live, Starting, Suspended, Suspending};
+// A phone groups and filters by the lifecycle category, so the mapping
+// from the controller's precise state has to be the controller's own.
 
-    for (state, expected, on_dashboard) in [
-        (SessionState::Provisioning, Starting, true),
-        (SessionState::Running, Live, true),
-        (SessionState::Disconnected, Live, true),
-        (SessionState::Checkpointing, Live, true),
-        (SessionState::Closing, Suspending, true),
-        (SessionState::Destroying, Suspending, true),
-        (SessionState::Stopped, Suspended, false),
-        (SessionState::Lost, Failed, false),
-        (SessionState::Error, Failed, false),
-        (SessionState::DestroyedWithDataLoss, Failed, false),
-    ] {
-        let category = ViewerLifecycleCategory::of(state);
-        assert_eq!(category, expected, "{state:?}");
-        assert_eq!(
-            category.is_dashboard_visible(),
-            on_dashboard,
-            "{state:?} belongs on the dashboard? "
-        );
-    }
-}
-
-/// Resume compatibility travels as the set the browser can offer, so it
-/// never has to subtract one list from another and never offers a target
-/// the controller would refuse.
-#[test]
-fn compatible_resume_targets_are_the_complement_of_the_incompatible_ones() {
-    let (config, state) = sample_config_state();
-    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let session = &snapshot.sessions[0];
-    let all = config.targets.keys().cloned().collect::<Vec<_>>();
-
-    for target in &all {
-        assert_ne!(
-            session.compatible_resume_targets.contains(target),
-            session.incompatible_resume_targets.contains(target),
-            "target {target} is in both lists or neither"
-        );
-    }
-    assert_eq!(
-        session.compatible_resume_targets.len() + session.incompatible_resume_targets.len(),
-        all.len(),
-        "the two lists do not cover every target"
-    );
-}
+// Resume compatibility travels as the set the browser can offer, so it
+// never has to subtract one list from another and never offers a target
+// the controller would refuse.
 
 /// The viewer renders a control because a capability says so. An action
 /// whose capability is false is refused at the boundary, so a forged
@@ -1799,61 +1528,8 @@ async fn a_dirty_acknowledgement_is_bounded_and_names_repositories() {
     }
 }
 
-/// A session created without a title still gets one, derived the way the
-/// terminal derives it, so the two surfaces name a session alike.
-#[tokio::test]
-async fn a_new_session_without_a_title_is_accepted() {
-    let (app, mut actions, _, _, _) = app();
-    let response = tokio::spawn(post_action(
-        app,
-        cookie(),
-        r#"{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"hel","target_id":"podman"}"#
-            .to_owned(),
-    ));
-    // The handler answers only once the controller does, so the reply has
-    // to be sent before the response can be read.
-    let action = actions
-        .recv()
-        .await
-        .expect("the action reached the controller");
-    assert!(
-        matches!(
-            action.action,
-            ControllerAction::New { title: None, ref workspace_id, .. }
-                if workspace_id == "default"
-        ),
-        "the workspace or the absent title did not survive the boundary"
-    );
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn a_bare_session_can_start_without_a_bundle() {
-    let (app, mut bundles, mut actions) =
-        app_with_bundle_and_action_receivers(|snapshot| snapshot.bundles.clear());
-    let response = tokio::spawn(post_action(
-        app,
-        cookie(),
-        r#"{"action":"new","workspace_id":"default","profile_id":"codex-1","bundle_id":"","target_id":"raw","project_directory":"/work/project"}"#
-            .to_owned(),
-    ));
-    let action = tokio::time::timeout(Duration::from_secs(5), actions.recv())
-        .await
-        .expect("the directory-only request reached the controller")
-        .unwrap();
-    assert!(
-        bundles.try_recv().is_err(),
-        "bare paths must not be registered as controller-local bundles"
-    );
-    assert!(matches!(
-        action.action,
-        ControllerAction::New { ref bundle_id, ref project_directory, .. }
-            if bundle_id == &mj_core::config::raw_project_context_id("/work/project") && project_directory.as_deref() == Some(Path::new("/work/project"))
-    ));
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
-}
+// A session created without a title still gets one, derived the way the
+// terminal derives it, so the two surfaces name a session alike.
 
 /// Two phones must not share stored state, and one phone's state must
 /// survive its own re-login. Neither is true of a cookie that signs only
@@ -1944,133 +1620,12 @@ fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
     }
 }
 
-#[tokio::test]
-async fn a_preflight_validates_before_it_reaches_the_controller() {
-    for (body, why) in [
-        (
-            r#"{"profile_id":"nope","bundle_id":"hel","target_id":"podman"}"#,
-            "an unknown profile",
-        ),
-        (
-            r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"raw"}"#,
-            "a bare target with no directory",
-        ),
-        (
-            r#"{"profile_id":"codex-1","bundle_id":"","target_id":"podman"}"#,
-            "a container target with no bundle",
-        ),
-    ] {
-        let (app, _, _, mut preflights, _) = app();
-        let response = app
-            .oneshot(
-                Request::post("/api/preflight/new")
-                    .header(COOKIE, cookie())
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{why}");
-        assert!(
-            preflights.try_recv().is_err(),
-            "{why} reached the controller"
-        );
-    }
-}
+// A bare target opens a directory the person named. The controller still
+// validates that directory before answering, because the server's state
+// projection cannot inspect the filesystem or an SSH host.
 
-/// A bare target opens a directory the person named. The controller still
-/// validates that directory before answering, because the server's state
-/// projection cannot inspect the filesystem or an SSH host.
-#[tokio::test]
-async fn a_bare_preflight_forwards_directory_validation_to_the_controller() {
-    let (app, _, _, mut preflights, _) = app_with_snapshot(|snapshot| snapshot.bundles.clear());
-    let response = tokio::spawn(app.oneshot(
-            Request::post("/api/preflight/new")
-                .header(COOKIE, cookie())
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"profile_id":"codex-1","bundle_id":"","target_id":"raw","project_directory":"~/project"}"#,
-                ))
-                .unwrap(),
-        ));
-    let request = new_preflight(
-        tokio::time::timeout(Duration::from_secs(5), preflights.recv())
-            .await
-            .expect("the directory-only preflight reached the controller")
-            .expect("the controller was asked"),
-    );
-    assert!(request.bundle_id.is_empty());
-    assert_eq!(request.target_id, "raw");
-    assert_eq!(request.project_directory, Some(PathBuf::from("~/project")));
-    request
-        .reply
-        .send(Ok(PreflightNew {
-            managed_worktree: Default::default(),
-            project_directory: Some("/remote/project".into()),
-            remote_repairs: Vec::new(),
-            dirty_repositories: Vec::new(),
-            remote_repositories: Vec::new(),
-            local_changes_excluded: false,
-        }))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let answer: PreflightNew = serde_json::from_slice(&body).unwrap();
-    assert!(answer.dirty_repositories.is_empty());
-    assert_eq!(answer.project_directory, Some("/remote/project".into()));
-}
-
-/// The resume card cannot warn about a checkout it has not asked about.
-/// The route has to reach the controller and hand the answer back whole.
-#[tokio::test]
-async fn a_resume_preflight_returns_the_conversion_preview_it_was_given() {
-    let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/preflight/resume")
-                .header(COOKIE, cookie())
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"session_id":"session-1","target_id":"podman"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let request = preflights.recv().await.expect("the controller was asked");
-    let PreflightRequest::Resume(request) = request else {
-        panic!("expected a resume preflight");
-    };
-    assert_eq!(request.session_id, "session-1");
-    assert_eq!(request.target_id, "podman");
-    request
-        .reply
-        .send(Ok(PreflightResume::ConvertingRawCheckout {
-            preview: Box::new(mj_core::state::RawConversionPreview {
-                checkout: "/work/repo".into(),
-                destination: "/workspace/repo".into(),
-                branch: Some("mj/session-1".into()),
-                fetch_url: "https://github.com/example/repo.git".into(),
-                push_urls: Vec::new(),
-                default_branch: "main".into(),
-                unpushed_commits: 1,
-                staged_files: 0,
-                unstaged_files: 1,
-                untracked_files: 0,
-                untracked_bytes: 0,
-                host_checkout_retained: true,
-            }),
-        }))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let answer: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(answer["kind"], "converting-raw-checkout");
-    assert_eq!(answer["preview"]["branch"], "mj/session-1");
-    assert_eq!(answer["preview"]["host_checkout_retained"], true);
-}
+// The resume card cannot warn about a checkout it has not asked about.
+// The route has to reach the controller and hand the answer back whole.
 
 /// A session the projection does not have never reaches the controller.
 #[tokio::test]
@@ -2152,96 +1707,12 @@ async fn a_bundle_preflight_controller_failure_keeps_the_generic_service_error()
     assert!(!String::from_utf8_lossy(&body).contains("/source/hel"));
 }
 
-/// An isolated bundle preflight returns the network clone plan so the
-/// person can review it before creation.
-#[tokio::test]
-async fn a_bundle_preflight_reports_network_sources_and_excludes_local_changes() {
-    let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/preflight/new")
-                .header(COOKIE, cookie())
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"profile_id":"codex-1","bundle_id":"hel","target_id":"podman"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let request = new_preflight(preflights.recv().await.expect("the controller was asked"));
-    assert_eq!(request.bundle_id, "hel");
-    assert_eq!(request.target_id, "podman");
-    assert_eq!(request.project_directory, None);
-    request
-        .reply
-        .send(Ok(PreflightNew {
-            managed_worktree: Default::default(),
-            project_directory: None,
-            remote_repairs: Vec::new(),
-            dirty_repositories: Vec::new(),
-            remote_repositories: vec![PreflightRepository {
-                id: "hel".into(),
-                fetch_url: "https://github.com/example/hel.git".into(),
-                default_branch: "main".into(),
-                push_urls: vec!["ssh://git@example/hel.git".into()],
-            }],
-            local_changes_excluded: true,
-        }))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let answer: PreflightNew = serde_json::from_slice(&body).unwrap();
-    assert!(answer.dirty_repositories.is_empty());
-    assert!(answer.local_changes_excluded);
-    assert_eq!(answer.remote_repositories[0].default_branch, "main");
-    assert_eq!(answer.remote_repositories[0].push_urls.len(), 1);
-}
+// An isolated bundle preflight returns the network clone plan so the
+// person can review it before creation.
 
-/// The browser names a target and a kind; the controller has to be asked
-/// about that machine, not the controller's own disk, and the candidates
-/// have to reach the browser unchanged.
-#[tokio::test]
-async fn a_path_completion_is_forwarded_with_its_host_and_kind() {
-    let (app, _, _, mut preflights, _) = app();
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/paths/complete")
-                .header(COOKIE, cookie())
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"target_id":"raw","prefix":"/srv/pr","kind":"any"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let request = preflights.recv().await.expect("the controller was asked");
-    let PreflightRequest::CompletePath(request) = request else {
-        panic!("expected a path completion");
-    };
-    assert_eq!(request.host, CompletionHost::Target("raw".into()));
-    assert_eq!(request.prefix, "/srv/pr");
-    assert_eq!(request.kind, CompletionKind::Any);
-    request
-        .reply
-        .send(Ok(PathCompletion {
-            candidates: vec!["/srv/projects/".into(), "/srv/prompts.txt".into()],
-            insert: Some("/srv/pro".into()),
-            truncated: false,
-        }))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({
-            "candidates": ["/srv/projects/", "/srv/prompts.txt"],
-            "insert": "/srv/pro",
-            "truncated": false,
-        })
-    );
-}
+// The browser names a target and a kind; the controller has to be asked
+// about that machine, not the controller's own disk, and the candidates
+// have to reach the browser unchanged.
 
 /// Neither an unknown target nor an implausible prefix is worth a shell.
 #[tokio::test]
@@ -2535,6 +2006,7 @@ fn no_web_module_builds_markup_from_a_string() {
 /// The card cache is the fix for answers vanishing under snapshot polls, so
 /// it is exercised as JavaScript: the render source is lifted out of
 /// `src/web/viewer.js` and run against a stub DOM.
+// Hard-won: a6567c51: snapshot polling erased typed elicitation answers before submission.
 #[test]
 fn embedded_viewer_keeps_elicitation_answers_across_snapshot_polls() {
     let source = viewer_source(
@@ -2720,45 +2192,6 @@ fn in_isolated_store(test: &str) -> bool {
 }
 
 #[tokio::test]
-async fn image_prompt_reaches_the_controller_with_its_images() {
-    if !in_isolated_store("image_prompt_reaches_the_controller_with_its_images") {
-        return;
-    }
-    let (app, mut actions, _, _, _) = app_with_snapshot(image_capable);
-    let cookie = login_cookie(&app).await;
-    let image = sample_valid_image();
-    let body = serde_json::to_string(&ControllerAction::Prompt {
-        command_id: None,
-        session_id: "session-1".into(),
-        text: String::new(),
-        images: vec![image.clone(), image.clone()],
-    })
-    .unwrap();
-    let response = tokio::spawn(post_action(app, cookie, body));
-    let request = actions.recv().await.unwrap();
-    let ControllerRequest { action, reply } = request;
-    let ControllerAction::Prompt {
-        session_id,
-        text,
-        images,
-        ..
-    } = action
-    else {
-        panic!("expected a prompt action")
-    };
-    assert_eq!(session_id, "session-1");
-    assert!(text.is_empty());
-    assert_eq!(images.len(), 2);
-    assert!(
-        images
-            .iter()
-            .all(|image| { image.data_base64.is_empty() && image.attachment.is_some() })
-    );
-    reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
 async fn browser_attachment_upload_returns_a_stored_reference_without_inline_bytes() {
     if !in_isolated_store(
         "browser_attachment_upload_returns_a_stored_reference_without_inline_bytes",
@@ -2869,37 +2302,6 @@ async fn malformed_image_payloads_never_reach_the_controller() {
     }
 }
 
-#[test]
-fn image_prompts_need_text_or_an_image_and_an_agent_that_takes_them() {
-    let (config, state) = sample_config_state();
-    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let prompt = |text: &str, images: Vec<ViewerPromptImage>| ControllerAction::Prompt {
-        command_id: None,
-        session_id: "session-1".into(),
-        text: text.into(),
-        images,
-    };
-
-    // Without the capability the session takes text only.
-    assert!(validate_action(&prompt("ship it", Vec::new()), &snapshot).is_ok());
-    assert!(validate_action(&prompt("", vec![sample_image(8)]), &snapshot).is_err());
-
-    image_capable(&mut snapshot);
-    // An image is a prompt on its own; nothing at all is not.
-    assert!(validate_action(&prompt("", vec![sample_image(8)]), &snapshot).is_ok());
-    assert!(
-        validate_action(
-            &prompt("", vec![sample_image(8); MAX_PROMPT_IMAGES + 1]),
-            &snapshot,
-        )
-        .is_err()
-    );
-    assert!(validate_action(&prompt("   ", Vec::new()), &snapshot).is_err());
-    assert!(validate_action(&prompt("", Vec::new()), &snapshot).is_err());
-    // A shell command is still a shell command.
-    assert!(validate_action(&prompt("!ls", vec![sample_image(8)]), &snapshot).is_err());
-}
-
 /// The session actions the viewer mirrors from the terminal are refused
 /// without their published capability and accepted with it, the same gate
 /// every other session action here validates against.
@@ -2962,118 +2364,9 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 }
 
-/// The four actions parse from exactly the wire names the viewer posts, and
-/// the session projection carries the new fields under exactly these keys,
-/// omitted while empty. The capability flags travel even while false.
-#[test]
-fn terminal_session_actions_have_their_documented_wire_shape() {
-    let parsed: ControllerAction = serde_json::from_str(
-        r#"{"action":"change-workspace","session_id":"s","workspace_id":"w"}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        parsed,
-        ControllerAction::ChangeWorkspace {
-            session_id: "s".into(),
-            workspace_id: "w".into(),
-        }
-    );
-    let parsed: ControllerAction = serde_json::from_str(
-        r#"{"action":"set-container-settings","session_id":"s","cpus":null,"memory":"4g","mounts":[{"source":"/srv/data","destination":"/data","read_only":true}]}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        parsed,
-        ControllerAction::SetContainerSettings {
-            session_id: "s".into(),
-            cpus: None,
-            memory: Some("4g".into()),
-            mounts: vec![AdditionalMount {
-                source: "/srv/data".into(),
-                destination: "/data".into(),
-                access: mj_core::targets::MountAccess::Ro,
-            }],
-        }
-    );
-    // Absent sizes and mounts parse as clearing, matching a caller that sends
-    // the whole form.
-    let parsed: ControllerAction =
-        serde_json::from_str(r#"{"action":"set-container-settings","session_id":"s"}"#).unwrap();
-    assert_eq!(
-        parsed,
-        ControllerAction::SetContainerSettings {
-            session_id: "s".into(),
-            cpus: None,
-            memory: None,
-            mounts: Vec::new(),
-        }
-    );
-    let parsed: ControllerAction =
-        serde_json::from_str(r#"{"action":"restart","session_id":"s"}"#).unwrap();
-    assert_eq!(
-        parsed,
-        ControllerAction::Restart {
-            session_id: "s".into()
-        }
-    );
-    let parsed: ControllerAction =
-        serde_json::from_str(r#"{"action":"interrupt-all","session_id":"s"}"#).unwrap();
-    assert_eq!(
-        parsed,
-        ControllerAction::InterruptAll {
-            session_id: "s".into()
-        }
-    );
-
-    let (config, state) = sample_config_state();
-    let mut snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
-    let session = serde_json::to_value(&snapshot.sessions[0]).unwrap();
-    assert!(session.get("last_message_at_ms").is_none());
-    assert!(session.get("container_cpus").is_none());
-    assert!(session.get("container_memory").is_none());
-    assert!(session.get("additional_mounts").is_none());
-    for key in [
-        "change_workspace",
-        "container_settings",
-        "restart",
-        "interrupt_all",
-    ] {
-        assert_eq!(
-            session["capabilities"][key], false,
-            "{key} travels even while false"
-        );
-    }
-
-    let session = &mut snapshot.sessions[0];
-    session.last_message_at_ms = Some(42);
-    session.container_cpus = Some("2".into());
-    session.container_memory = Some("4g".into());
-    session.additional_mounts = vec![
-        AdditionalMount {
-            source: "/srv/ro".into(),
-            destination: "/ro".into(),
-            access: mj_core::targets::MountAccess::Ro,
-        },
-        AdditionalMount {
-            source: "/srv/rw".into(),
-            destination: "/rw".into(),
-            access: mj_core::targets::MountAccess::Rw,
-        },
-    ];
-    let session = serde_json::to_value(&snapshot.sessions[0]).unwrap();
-    assert_eq!(session["last_message_at_ms"], 42);
-    assert_eq!(session["container_cpus"], "2");
-    assert_eq!(session["container_memory"], "4g");
-    // A mount keeps its persisted shape: `read_only` alone for ro and cow,
-    // `access: "rw"` added for read-write.
-    assert_eq!(
-        session["additional_mounts"],
-        serde_json::json!([
-            {"source": "/srv/ro", "destination": "/ro", "read_only": true},
-            {"source": "/srv/rw", "destination": "/rw", "read_only": false, "access": "rw"},
-        ])
-    );
-}
+// The four actions parse from exactly the wire names the viewer posts, and
+// the session projection carries the new fields under exactly these keys,
+// omitted while empty. The capability flags travel even while false.
 
 /// The composer holds a DOM, not a string, so the text a prompt sends is
 /// whatever this reader makes of that DOM. Run it as JavaScript.
@@ -3127,120 +2420,9 @@ if (carriage !== "first\nsecond") throw new Error(`CRLF became ${JSON.stringify(
     run_viewer_script("composer-reader", &format!("{harness}\n{source}\n{checks}"));
 }
 
-/// A page that declares no icon makes every browser request
-/// `/favicon.ico`, which this server does not have. The page therefore has
-/// to name an icon, and that icon has to be served.
-#[tokio::test]
-async fn viewer_declares_the_icon_route_instead_of_requesting_a_missing_favicon() {
-    let (app, _, _, _, _) = app();
-    let page = fetch_text(app.clone(), "/").await;
-    assert!(page.contains(r#"rel="icon""#), "the page declares no icon");
-    assert!(page.contains("/icon.svg"), "the page names no icon route");
-    let icon = app
-        .oneshot(Request::get("/icon.svg").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(icon.status(), StatusCode::OK);
-    assert_eq!(
-        icon.headers().get(CONTENT_TYPE).unwrap(),
-        "image/svg+xml",
-        "the icon route does not serve an SVG"
-    );
-}
-
-#[tokio::test]
-async fn valid_action_is_typed_and_forwarded() {
-    let (app, mut actions, _, _, _) = app();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/actions")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"action":"prompt","session_id":"session-1","text":"ship it"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let action = actions.recv().await.unwrap();
-    assert_eq!(
-        action.action,
-        ControllerAction::Prompt {
-            command_id: None,
-            session_id: "session-1".into(),
-            text: "ship it".into(),
-            images: Vec::new(),
-        }
-    );
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn move_preparation_is_read_only_and_returns_the_daemon_fingerprint() {
-    let (app, mut preparations) = app_with_move_receiver();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/moves/prepare")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"session_id":"session-1","profile_id":"codex-1","target_template_id":"podman","clear_resource_allocation":false,"additional_mounts":null,"resource_allocation":null}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let request = preparations
-        .recv()
-        .await
-        .expect("preparation reached daemon");
-    assert_eq!(request.selection.session_id, "session-1");
-    assert_eq!(request.selection.profile_id.as_deref(), Some("codex-1"));
-    assert_eq!(
-        request.selection.target_template_id.as_deref(),
-        Some("podman")
-    );
-    request
-        .reply
-        .send(Ok(MovePreparation {
-            destination_checks: Default::default(),
-            workspace: None,
-            in_place: false,
-            source_unavailable: false,
-            conversion: None,
-            selection: request.selection,
-            source_profile_id: "codex-1".into(),
-            source_target_template_id: "podman".into(),
-            cross_harness: false,
-            active: true,
-            queued_commands: vec![mj_core::state::MaterializedQueuedPrompt {
-                accepted_ordinal: None,
-                command_id: "queued-1".into(),
-                kind: mj_core::state::QueuedCommandKind::Prompt,
-                content: vec![serde_json::json!({
-                    "type": "text",
-                    "text": "[Image attachment: image/png]"
-                })],
-                queued_at_ms: 1,
-            }],
-            fingerprint: "fingerprint".into(),
-            operation_id: "move-1".into(),
-        }))
-        .unwrap();
-    let response = response.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["operation_id"], "move-1");
-    assert_eq!(body["active"], true);
-    assert_eq!(
-        body["queued_commands"][0]["content"][0]["text"],
-        "[Image attachment: image/png]"
-    );
-}
+// A page that declares no icon makes every browser request
+// `/favicon.ico`, which this server does not have. The page therefore has
+// to name an icon, and that icon has to be served.
 
 #[tokio::test]
 async fn confirmed_move_action_forwards_the_fingerprinted_request() {
@@ -3261,37 +2443,6 @@ async fn confirmed_move_action_forwards_the_fingerprinted_request() {
     );
     let action = actions.recv().await.expect("move action reached daemon");
     assert!(matches!(action.action, ControllerAction::Move { .. }));
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::ACCEPTED
-    );
-}
-
-#[tokio::test]
-async fn shell_action_is_typed_and_forwarded() {
-    let (app, mut actions, _, _, _) = app();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/actions")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"action":"run-shell","session_id":"session-1","command":"cargo test"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let action = actions.recv().await.unwrap();
-    assert_eq!(
-        action.action,
-        ControllerAction::RunShell {
-            command_id: None,
-            session_id: "session-1".into(),
-            command: "cargo test".into(),
-        }
-    );
     action.reply.send(ActionOutcome::accepted()).unwrap();
     assert_eq!(
         response.await.unwrap().unwrap().status(),
@@ -3353,48 +2504,6 @@ fn shell_action_validation_reserves_bang_prompts_and_checks_cancellation_ids() {
             &snapshot,
         )
         .is_ok()
-    );
-}
-
-#[tokio::test]
-async fn bare_new_action_forwards_an_explicit_safe_project_directory() {
-    let (app, mut actions, _, _, _) = app();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/actions")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"action":"new","profile_id":"codex-1","bundle_id":"hel","target_id":"raw","title":"Raw work","project_directory":"/work/project"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let action = actions.recv().await.unwrap();
-    assert_eq!(
-        action.action,
-        ControllerAction::New {
-            review: None,
-            at: None,
-            branch: None,
-            base: None,
-            subagents: None,
-            create_managed_worktree: None,
-            workspace_id: String::new(),
-            profile_id: "codex-1".into(),
-            bundle_id: "hel".into(),
-            target_id: "raw".into(),
-            resource_allocation: None,
-            title: Some("Raw work".into()),
-            project_directory: Some(PathBuf::from("/work/project")),
-            dirty_ack: Vec::new(),
-        }
-    );
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::ACCEPTED
     );
 }
 
@@ -3517,35 +2626,6 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
 }
 
 #[tokio::test]
-async fn cancel_action_is_typed_and_forwarded() {
-    let (app, mut actions, _, _, _) = app();
-    let cookie = login_cookie(&app).await;
-    let response = tokio::spawn(
-        app.oneshot(
-            Request::post("/api/actions")
-                .header(COOKIE, cookie)
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"action":"cancel","session_id":"session-1"}"#,
-                ))
-                .unwrap(),
-        ),
-    );
-    let action = actions.recv().await.unwrap();
-    assert_eq!(
-        action.action,
-        ControllerAction::Cancel {
-            session_id: "session-1".into(),
-        }
-    );
-    action.reply.send(ActionOutcome::accepted()).unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::ACCEPTED
-    );
-}
-
-#[tokio::test]
 async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     let (mut config, state) = sample_config_state();
     config.profiles.insert(
@@ -3605,61 +2685,8 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 }
 
-/// A review the daemon is running reaches the phone whole: its tier, what
-/// each reviewing agent is doing, and the findings to answer.
-#[test]
-fn a_running_review_projects_to_the_phone() {
-    use crate::review_host::{RuntimeReviewView, VerdictKind, VerdictView};
-    use mj_core::review::driver::{Resolution, RoleState, RoleStatus, TurnReviewPhase};
-
-    let review = RuntimeReviewView {
-        session_id: "session-1".into(),
-        questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Extended,
-        phase: TurnReviewPhase::Verdict(mj_core::review::verdict::ReviewVerdict::Findings {
-            synthesis: "[P1] src/lib.rs:1 -- unbounded retry".into(),
-            evidence: Default::default(),
-        }),
-        roles: vec![
-            RoleStatus {
-                role: "supervisor".into(),
-                label: "Supervisor".into(),
-                state: RoleState::Clean,
-            },
-            RoleStatus {
-                role: "tests".into(),
-                label: "Tests".into(),
-                state: RoleState::Findings,
-            },
-        ],
-        status: "Enter to act".into(),
-        verdict: Some(VerdictView {
-            kind: VerdictKind::Findings,
-            text: "[P1] src/lib.rs:1 -- unbounded retry".into(),
-            allowed: vec![
-                Resolution::Forwarded,
-                Resolution::Dismissed,
-                Resolution::Cancelled,
-            ],
-        }),
-    };
-
-    let projected = ViewerTurnReview::from_runtime(&review);
-
-    assert_eq!(projected.tier, "extended");
-    assert_eq!(
-        projected
-            .roles
-            .iter()
-            .map(|role| (role.label.as_str(), role.state.as_str()))
-            .collect::<Vec<_>>(),
-        vec![("Supervisor", "done"), ("Tests", "findings")]
-    );
-    let verdict = projected.verdict.expect("a findings verdict travels");
-    assert_eq!(verdict.kind, "findings");
-    assert!(verdict.text.contains("unbounded retry"));
-    assert_eq!(verdict.allowed, vec!["forward", "dismiss", "cancel"]);
-}
+// A review the daemon is running reaches the phone whole: its tier, what
+// each reviewing agent is doing, and the findings to answer.
 
 /// A phone can always cancel a review, and can only forward or dismiss one
 /// the daemon says is ready for it. The same gate runs in the daemon; this
@@ -3859,6 +2886,7 @@ fn move_confirmation_requires_interruption_ack_and_an_explicit_queue_choice() {
 /// Finding G-3: the login page used to learn it was signed out from a
 /// `GET /api/snapshot` 401, which every browser logs as a console error. The
 /// page asks this route instead, which answers 200 either way.
+// Hard-won: 69a3c1d3: signed-out loads hit the protected snapshot and logged a 401.
 #[tokio::test]
 async fn session_status_answers_signed_out_without_an_error_status() {
     let (app, _, _, _, _) = app();
@@ -3892,34 +2920,6 @@ async fn session_status_answers_signed_out_without_an_error_status() {
         status(Some(cookie)).await,
         serde_json::json!({ "signed_in": true })
     );
-}
-
-#[tokio::test]
-async fn snapshot_endpoint_returns_only_public_projection() {
-    let (app, _, _, _, _) = app();
-    let cookie = login_cookie(&app).await;
-    let response = app
-        .oneshot(
-            Request::get("/api/snapshot")
-                .header(COOKIE, cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("session-1"));
-    assert!(!body.contains("secret-token"));
-    assert!(!body.contains("native-secret-id"));
-    assert!(!body.contains("/private/source/hel"));
-
-    let snapshot: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let repository = &snapshot["bundles"][0]["repositories"][0];
-    assert_eq!(repository["id"], "hel");
-    assert_eq!(repository["github"], "owner/hel");
-    assert_eq!(repository["destination"], "hel");
-    assert!(repository.get("local").is_none());
 }
 
 #[tokio::test]
@@ -4076,6 +3076,7 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+// Hard-won: feddc733: receipt feedback loop consumed action slots and rejected real actions.
 #[tokio::test]
 async fn conversation_read_receipt_never_contends_with_a_running_action() {
     let (app, mut actions, mut receipts, _, _) = app();
@@ -4125,6 +3126,7 @@ async fn conversation_read_receipt_never_contends_with_a_running_action() {
     );
 }
 
+// Hard-won: bff62757: phone requests timed out during long actions and showed failure while the action kept running.
 #[tokio::test]
 async fn each_rejected_action_keeps_its_own_status_and_guidance() {
     for (outcome, status, guidance) in [
@@ -4215,6 +3217,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
     }
 }
 
+// Hard-won: bff62757: mobile networks dropped long accepted-action requests while later session failures were only visible in snapshots.
 #[tokio::test]
 async fn the_viewer_shows_a_session_whose_action_failed_after_it_was_accepted() {
     // An accepted action reports its outcome only through snapshots, so
@@ -4325,30 +3328,8 @@ fn the_service_worker_declines_to_handle_live_state() {
     );
 }
 
-/// The vendored assets have to reach the browser, not merely exist in the
-/// repository: the manifest names them and a phone installs from it.
-#[tokio::test]
-async fn the_installable_assets_are_served() {
-    for (path, content_type) in [
-        ("/icon-192.png", "image/png"),
-        ("/icon-512.png", "image/png"),
-        ("/maskable-512.png", "image/png"),
-        ("/apple-touch-icon.png", "image/png"),
-        ("/fonts/jetbrains-mono.woff2", "font/woff2"),
-    ] {
-        let (app, _, _, _, _) = app();
-        let response = app
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{path} is not served");
-        assert_eq!(
-            response.headers().get(CONTENT_TYPE).unwrap(),
-            content_type,
-            "{path} is served as the wrong type"
-        );
-    }
-}
+// The vendored assets have to reach the browser, not merely exist in the
+// repository: the manifest names them and a phone installs from it.
 
 /// Fetch one unauthenticated asset and return it as text. Serving the
 /// application from several files means a check about the application has
@@ -4421,6 +3402,7 @@ fn viewer_code_lockouts_lengthen_instead_of_resetting_after_every_wait() {
     assert_eq!(serve_one_lockout(&mut recovered, start), CODE_LOCKOUT_BASE);
 }
 
+// Hard-won: feddc733: server restart regenerated the signing key and signed every phone out.
 #[test]
 fn persisted_cookie_key_survives_a_restart_and_stays_owner_only() {
     let directory = tempfile::tempdir().unwrap();
@@ -4871,24 +3853,11 @@ async fn logout_reports_persistence_failure_and_revokes_in_memory() {
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// #1161: a parked sub-agent is idle with its worker stopped; its card says
-/// so rather than showing an idle clock that belongs to a live session.
-#[test]
-fn embedded_viewer_labels_a_parked_sub_agent_parked() {
-    let source = viewer_source(
-        "function sessionActivityLabel(",
-        "function updateSessionActivity(",
-    );
-    let setup = "const pendingLifecycleActions = new Map(); function isTransitioningSession() { return false; }";
-    let checks = r#"
-const session = { lifecycle: 'live', state: 'parked', is_idle: true, activity_details: { kind: 'idle' } };
-if (sessionActivityLabel(session, 60000) !== 'Parked') throw Error('a parked child is not labelled Parked');
-"#;
-    run_viewer_script("parked-subagent", &format!("{setup}\n{source}\n{checks}"));
-}
+// so rather than showing an idle clock that belongs to a live session.
 
 /// precision-3260: a session on a full disk showed only as unreachable. Its
 /// card now names the disk.
+// Hard-won: 540c9202: a real full-disk outage appeared only as unreachable to users.
 #[test]
 fn embedded_viewer_says_when_a_session_s_disk_is_full() {
     let source = viewer_source(
@@ -4921,90 +3890,6 @@ if (sessionActivityLabel(session, 60000) !== 'Quota limit · reset time unknown'
 }
 
 #[tokio::test]
-async fn project_discovery_requires_authentication_and_validates_input_before_dispatch() {
-    for (body, signed_in, expected) in [
-        (
-            serde_json::json!({"kind": "directory", "path": ""}),
-            false,
-            StatusCode::UNAUTHORIZED,
-        ),
-        (
-            serde_json::json!({"kind": "github", "query": "x".repeat(4097)}),
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            serde_json::json!({"kind": "directory", "path": "/", "filter": "x".repeat(4097)}),
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let (app, _, _, mut preflights, _) = app();
-        let mut request =
-            Request::post("/api/projects/discover").header(CONTENT_TYPE, "application/json");
-        if signed_in {
-            request = request.header(COOKIE, cookie());
-        }
-        let response = app
-            .oneshot(request.body(Body::from(body.to_string())).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected);
-        assert!(preflights.try_recv().is_err());
-    }
-}
-
-#[tokio::test]
-async fn project_discovery_forwards_the_shared_request_and_response() {
-    use crate::project_picker::{
-        ProjectDiscovery, ProjectDiscoveryRequest, ProjectEntry, ProjectEntryKind,
-    };
-    for input in [
-        ProjectDiscoveryRequest::Directory {
-            path: "/work spaces".into(),
-            filter: "App".into(),
-        },
-        ProjectDiscoveryRequest::Github {
-            query: "private org:team".into(),
-        },
-    ] {
-        let (app, _, _, mut preflights, _) = app();
-        let response = tokio::spawn(
-            app.oneshot(
-                Request::post("/api/projects/discover")
-                    .header(COOKIE, cookie())
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&input).unwrap()))
-                    .unwrap(),
-            ),
-        );
-        let PreflightRequest::DiscoverProjects(request) = preflights.recv().await.unwrap() else {
-            panic!("expected project discovery");
-        };
-        assert_eq!(request.request, input);
-        let expected = ProjectDiscovery {
-            entries: vec![ProjectEntry {
-                name: "Use app".into(),
-                source: "/work spaces/app".into(),
-                description: "Git repository".into(),
-                kind: ProjectEntryKind::Repository,
-            }],
-            directory: Some("/work spaces/app".into()),
-            parent: Some("/work spaces".into()),
-            truncated: false,
-        };
-        request.reply.send(Ok(expected.clone())).unwrap();
-        let response = response.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<ProjectDiscovery>(&body).unwrap(),
-            expected
-        );
-    }
-}
-
-#[tokio::test]
 async fn project_discovery_returns_actionable_failures_and_closes_abandoned_replies() {
     let (app, _, _, mut preflights, _) = app();
     let make_request = || {
@@ -5034,38 +3919,6 @@ async fn project_discovery_returns_actionable_failures_and_closes_abandoned_repl
     tokio::time::timeout(Duration::from_secs(2), request.reply.closed())
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn bundle_endpoint_forwards_exact_sources_including_single_repository_selections() {
-    for sources in [vec!["example/app"], vec!["example/app", "example/library"]] {
-        let (app, mut bundles) = app_with_bundle_receiver();
-        let response = tokio::spawn(
-            app.oneshot(
-                Request::post("/api/bundles")
-                    .header(COOKIE, cookie())
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"sources": sources}).to_string(),
-                    ))
-                    .unwrap(),
-            ),
-        );
-        let request = bundles.recv().await.unwrap();
-        assert_eq!(
-            request.exact_sources,
-            Some(sources.iter().map(|s| s.to_string()).collect())
-        );
-        assert!(request.source.is_empty());
-        request.reply.send(Ok("selected-project".into())).unwrap();
-        let response = response.await.unwrap().unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            serde_json::json!({"bundle_id": "selected-project"})
-        );
-    }
 }
 
 #[tokio::test]

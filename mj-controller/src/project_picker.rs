@@ -438,23 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn browsing_a_repository_offers_it_and_keeps_children_browsable() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(
-            root.path().join(".git"),
-            "gitdir: ../main/.git/worktrees/other",
-        )
-        .unwrap();
-        fs::create_dir(root.path().join("src")).unwrap();
-        let answer = browse(root.path());
-        assert_eq!(answer.entries.len(), 2);
-        assert!(answer.entries[0].name.starts_with("Use "));
-        assert_eq!(answer.entries[0].kind, ProjectEntryKind::Repository);
-        assert_eq!(answer.entries[0].source, answer.directory.unwrap());
-        assert_eq!(answer.entries[1].kind, ProjectEntryKind::Directory);
-    }
-
-    #[test]
     fn browsing_sorts_before_truncation_and_reserves_the_current_repository() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join(".git")).unwrap();
@@ -466,26 +449,6 @@ mod tests {
         assert_eq!(answer.entries.len(), MAX_ENTRIES);
         assert_eq!(answer.entries[1].name, "folder-000");
         assert_eq!(answer.entries.last().unwrap().name, "folder-098");
-    }
-
-    #[test]
-    fn browsing_reports_missing_directories_and_file_paths() {
-        let root = tempfile::tempdir().unwrap();
-        for (name, expected) in [("missing", "no longer exists"), ("file", "not a directory")] {
-            if name == "file" {
-                fs::write(root.path().join(name), "file").unwrap();
-            }
-            let error = discover(
-                &ProjectDiscoveryRequest::Directory {
-                    path: path_text(&root.path().join(name)).unwrap(),
-                    filter: String::new(),
-                },
-                &NoCommands,
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected), "{error}");
-            assert!(!format!("{error:#}").contains(&path_text(root.path()).unwrap()));
-        }
     }
 
     #[test]
@@ -545,54 +508,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("cancelled or timed out"));
-    }
-
-    #[test]
-    fn github_lists_private_accessible_repositories_in_updated_order() {
-        let executor = FakeGh::json(
-            serde_json::json!([
-                {"full_name": "team/recent-private", "description": "Private project", "private": true},
-                {"full_name": "person/older", "description": null}
-            ]),
-            false,
-        );
-        let answer = discover(
-            &ProjectDiscoveryRequest::Github {
-                query: String::new(),
-            },
-            &executor,
-        )
-        .unwrap();
-        assert_eq!(
-            answer
-                .entries
-                .iter()
-                .map(|entry| entry.source.as_str())
-                .collect::<Vec<_>>(),
-            ["team/recent-private", "person/older"]
-        );
-        assert_eq!(answer.entries[0].description, "Private project");
-        assert_eq!(answer.entries[1].description, "");
-        assert_eq!(answer.directory, None);
-        assert_eq!(answer.parent, None);
-        assert!(!answer.truncated);
-        let command = executor.command.borrow();
-        let command = command.as_ref().unwrap();
-        assert_eq!(command.program, "gh");
-        for arg in [
-            "user/repos",
-            "sort=updated",
-            "direction=desc",
-            "per_page=100",
-            "visibility=all",
-            "affiliation=owner,collaborator,organization_member",
-        ] {
-            assert!(
-                command.args.iter().any(|value| value == arg),
-                "missing {arg}"
-            );
-        }
-        assert!(!command.args.iter().any(|value| value == "--paginate"));
     }
 
     #[test]

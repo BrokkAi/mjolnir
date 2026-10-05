@@ -703,7 +703,7 @@ fn value_summary(
             Some(label) => label,
             None if storage_path(&child_path) == ["theme"] => schema::theme_report(
                 &schema::choice_label(&child_path, value, draft),
-                theme::no_color_requested(),
+                crate::no_color_requested(),
             ),
             None => schema::choice_label(&child_path, value, draft),
         },

@@ -1,0 +1,61 @@
+=== expected continuation (1 session row) ===
+wide activity: expecting the agent to continue
+compact activity: expecting the agent to continue
+idle: false; working without turn: false; working with turn: true; kind: Expecting
+chat title: expecting the agent to continue
+=== Claude background agent active (1 session row) ===
+wide activity:   BG 1m00s
+compact activity: [BG 1m00s]
+idle: false
+=== Claude background agent finished (1 session row) ===
+wide activity: [idle]
+compact activity: [idle]
+idle: true
+=== elapsed clock cells (11 values) ===
+0s -> 0s
+36s -> 36s
+59s -> 59s
+60s -> 1m00s
+2616s -> 43m36s
+3599s -> 59m59s
+3600s -> 1h00m
+6180s -> 1h43m
+86399s -> 23h59m
+86400s -> 1d00h
+183600s -> 2d03h
+=== turn clock cells (3 states) ===
+2m05s
+4d14h
+[idle]
+=== active goal between turns (1 session row) ===
+wide activity: Pursuing goal
+compact activity: Pursuing goal
+idle: false; working: false; kind: Goal
+=== foreground tool over older background task (1 session row) ===
+wide activity: Step 1m40s
+compact activity: [Step 1m40s]
+=== running turn and step (1 session row) ===
+wide activity: Turn 43m36s  Step 12s
+compact activity: 43m36s
+=== background work (1 session row) ===
+wide activity:   BG 43m36s
+compact activity: [BG 43m36s]
+=== idle session (1 session row) ===
+wide activity: [idle]
+compact activity: [idle]
+=== turn with no reported step (1 session row) ===
+wide activity: Turn 43m36s  Step 43m36s
+compact activity: 43m36s
+=== narrow activity clock (6 states) ===
+turn and background: Working 50s
+turn and background with both clocks: T 50s S 10s
+background only: 1 task 50s
+background shorthand: BG 50s
+newer turn: Working 5s
+idle: Idle
+=== background task and shell counts (5 states) ===
+2 tasks 50s
+2 tasks, 1 shell 50s
+1 shell 30s
+Working 10s
+Idle

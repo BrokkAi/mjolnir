@@ -1,0 +1,51 @@
+=== idle (80x10) ===
+╭ podman  Idle  codex3  Review the build ──────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+foreground: host=Rgb(151, 163, 163), session title=Rgb(239, 237, 232)
+
+=== reviewing (80x10) ===
+╭ podman  [Reviewing]  codex3  Review the build ───────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+foreground: host=Rgb(151, 163, 163), session title=Rgb(239, 237, 232)
+
+=== findings (80x10) ===
+╭ podman  [Findings]  codex3  Review the build ────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+foreground: host=Rgb(151, 163, 163), session title=Rgb(239, 237, 232)
+
+=== idle restored (80x10) ===
+╭ podman  Idle  codex3  Review the build ──────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+foreground: host=Rgb(151, 163, 163), session title=Rgb(239, 237, 232)

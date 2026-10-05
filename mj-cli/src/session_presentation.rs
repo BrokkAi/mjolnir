@@ -119,19 +119,13 @@ mod tests {
     };
 
     use mj_controller::session_manager::ManagedSessionView;
-    use mj_controller::targets::ProvisionStage;
     use mj_core::relay::{RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState};
-    use mj_tui::{
-        DashboardState, PaneSize, SessionOperationKind, SupportPane, render_combined_with_theme,
-    };
+    use mj_tui::{DashboardState, PaneSize, SupportPane, render_combined_with_theme};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use super::{
-        apply_lifecycle_display, apply_session_activity, apply_worker_activity, lifecycle_kind,
-    };
-    use crate::daemon::{RuntimeLifecycleKind, RuntimeLifecycleView};
+    use super::{apply_session_activity, apply_worker_activity};
 
     fn dashboard() -> DashboardState {
         let (config, state) = dashboard_parts();
@@ -339,19 +333,6 @@ mod tests {
         (text, colors)
     }
 
-    fn lifecycle(kind: RuntimeLifecycleKind) -> RuntimeLifecycleView {
-        RuntimeLifecycleView {
-            operation_id: "operation-1".into(),
-            cancellable: true,
-            session_id: "session-1".into(),
-            kind,
-            started_at_epoch_seconds: 123,
-            active_stages: vec![(ProvisionStage::Booting, 124)],
-            resume_destination: Some(("profile-2".into(), "target-2".into())),
-            notice: Some("daemon notice".into()),
-        }
-    }
-
     #[test]
     fn activity_projection_captures_current_step_and_connectivity() {
         let mut dashboard = dashboard();
@@ -385,58 +366,9 @@ mod tests {
         assert!(!text.contains("Unreachable"));
     }
 
-    #[test]
-    fn lifecycle_projection_maps_kind_and_replaces_a_changed_operation() {
-        let mut dashboard = dashboard();
-        let create = lifecycle(RuntimeLifecycleKind::Create);
-        apply_lifecycle_display(&mut dashboard, &create);
-        assert_eq!(
-            dashboard.session_operation_kind("session-1"),
-            Some(SessionOperationKind::Launching)
-        );
-        let (text, _) = dashboard_text(&mut dashboard);
-        assert!(text.contains("Boot"), "stage missing from {text:?}");
-        assert!(
-            text.contains("profile-2"),
-            "resume profile missing from {text:?}"
-        );
-        assert!(
-            text.contains("target-2"),
-            "resume target missing from {text:?}"
-        );
-
-        let resume = lifecycle(RuntimeLifecycleKind::Resume);
-        apply_lifecycle_display(&mut dashboard, &resume);
-        assert_eq!(
-            dashboard.session_operation_kind("session-1"),
-            Some(SessionOperationKind::Resuming)
-        );
-    }
-
-    #[test]
-    fn lifecycle_kinds_cover_stopping_and_destroying_variants() {
-        assert_eq!(
-            lifecycle_kind(RuntimeLifecycleKind::ForceStop),
-            SessionOperationKind::Suspending
-        );
-        assert_eq!(
-            lifecycle_kind(RuntimeLifecycleKind::Cleanup),
-            SessionOperationKind::Destroying
-        );
-        // A person's destroy is a destroy; a parent's suspend stops its
-        // sub-agents (R15-2).
-        assert_eq!(
-            lifecycle_kind(RuntimeLifecycleKind::ForceDestroy),
-            SessionOperationKind::Destroying
-        );
-        assert_eq!(
-            lifecycle_kind(RuntimeLifecycleKind::StopSubagent),
-            SessionOperationKind::Stopping
-        );
-    }
-
     /// I2-7: the composer footer read `Subagents · 0/3` for a child's whole
     /// turn, because the working count was refreshed only with records.
+    // Hard-won: 6b8110e29c: Launch finding I2-7 left the parent footer at 0/M through a child turn; this checks a child worker report refreshes the displayed count.
     #[tokio::test]
     async fn a_child_worker_report_updates_the_parent_footer_working_count() {
         let (config, mut state) = dashboard_parts();

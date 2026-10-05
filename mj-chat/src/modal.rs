@@ -217,7 +217,7 @@ mod tests {
     use ratatui::style::Modifier;
     use ratatui::style::{Color, Style};
     use ratatui::text::Line;
-    use ratatui::widgets::Paragraph;
+    use ratatui::widgets::{Block, Paragraph};
 
     const SCREEN: Rect = Rect {
         x: 0,
@@ -237,6 +237,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 4e98115d: chat dialogs shipped without the two-cell screen margin.
     #[test]
     fn every_centering_helper_keeps_the_screen_margin() {
         assert_keeps_margin(centered_rect(82, 30, SCREEN), SCREEN);
@@ -251,12 +252,54 @@ mod tests {
         assert_keeps_margin(centered_rect_fixed(400, 400, SCREEN), SCREEN);
     }
 
-    #[test]
-    fn centering_offsets_by_the_origin_of_the_area_it_is_given() {
+    fn centered_modal_render(label: &str, place: impl Fn(Rect) -> Rect) -> String {
+        const WIDTH: u16 = 90;
+        const HEIGHT: u16 = 32;
         let pane = Rect::new(20, 5, 60, 20);
-        assert_keeps_margin(centered_rect(80, 10, pane), pane);
-        assert_keeps_margin(centered_rect_percent(80, 50, pane), pane);
-        assert_keeps_margin(centered_rect_fixed(30, 10, pane), pane);
+        let popup = place(pane);
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Block::bordered().title(label), popup);
+            })
+            .expect("render centered modal");
+        let mut output =
+            format!("=== {label} ({WIDTH}x{HEIGHT}) ===\npane: {pane:?}\npopup: {popup:?}\n");
+        output.push_str(&crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"));
+        output.push('\n');
+        output
+    }
+
+    #[test]
+    fn golden_modal_layout() {
+        let pane = Rect::new(20, 5, 60, 20);
+        let states = [
+            (
+                "percentage width and fixed height",
+                centered_rect(80, 10, pane),
+            ),
+            (
+                "percentage width and height",
+                centered_rect_percent(80, 50, pane),
+            ),
+            ("fixed dimensions", centered_rect_fixed(30, 10, pane)),
+        ];
+        let mut output = String::new();
+        for (label, popup) in states {
+            assert_keeps_margin(popup, pane);
+            let rendered = match label {
+                "percentage width and fixed height" => {
+                    centered_modal_render(label, |area| centered_rect(80, 10, area))
+                }
+                "percentage width and height" => {
+                    centered_modal_render(label, |area| centered_rect_percent(80, 50, area))
+                }
+                _ => centered_modal_render(label, |area| centered_rect_fixed(30, 10, area)),
+            };
+            output.push_str(&rendered);
+        }
+        output.push_str("=== end of rendered states ===\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "modal-layout", &output);
     }
 
     #[test]
@@ -321,34 +364,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dismissible_title_registers_the_three_cell_border_target_and_preserves_title_style() {
-        let popup = Rect::new(10, 6, 30, 12);
+    fn dismiss_state(label: &str, form: &mut Form<u8>, popup: Rect, enabled: bool) -> String {
         let title_style = Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::ITALIC);
-        let mut form = Form::<u8>::new();
-        let title = dismissible_modal_title(&mut form, popup, "Settings", title_style, true);
-
-        assert_eq!(title.spans.len(), 3);
-        assert_eq!(title.spans[0].content, " × ");
-        assert_eq!(title.spans[1].content, "Settings");
-        assert_eq!(title.spans[1].style, title_style);
-        assert_eq!(title.spans[2].content, " ");
-        assert_eq!(title.spans[2].style, title_style);
-        assert!(form.contains(popup.x + 1, popup.y));
-        assert!(form.contains(popup.x + 3, popup.y));
-        assert!(!form.contains(popup.x, popup.y));
-        assert!(!form.contains(popup.x + 4, popup.y));
+        let title = dismissible_modal_title(form, popup, "Settings", title_style, enabled);
+        let span_state = title
+            .spans
+            .iter()
+            .map(|span| format!("{:?}={:?}", span.content, span.style))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let target = (popup.x + 1..popup.x + 4)
+            .map(|x| format!("{x}:{}", form.contains(x, popup.y)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Block::bordered().title(title), popup))
+            .expect("render dismiss title");
+        format!(
+            "=== {label} (40x16) ===\nenabled: {enabled}\ntitle spans: {span_state}\nhit cells: {target}\noutside: {} {}\n{}\n",
+            form.contains(popup.x, popup.y),
+            form.contains(popup.x + 4, popup.y),
+            crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+        )
     }
 
     #[test]
-    fn dismissible_title_reports_available_armed_and_disabled_glyph_styles() {
-        let popup = Rect::new(10, 6, 30, 12);
+    fn golden_modal_dismiss_control() {
+        let popup = Rect::new(4, 2, 30, 8);
         let mut form = Form::<u8>::new();
-        let available = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
-        assert_eq!(available.spans[0].style, theme::actionable_chip());
-
+        let mut output = dismiss_state("available close affordance", &mut form, popup, true);
         let mouse = |kind, column, row| {
             Event::Mouse(crossterm::event::MouseEvent {
                 kind,
@@ -362,13 +409,23 @@ mod tests {
             popup.x + 2,
             popup.y,
         ));
-        let armed = dismissible_modal_title(&mut form, popup, "Title", Style::default(), true);
-        assert_eq!(armed.spans[0].style, theme::focus_control());
-
-        let disabled = dismissible_modal_title(&mut form, popup, "Title", Style::default(), false);
-        assert_eq!(
-            disabled.spans[0].style,
-            theme::muted().patch(theme::raised())
+        output.push_str(&dismiss_state(
+            "armed close affordance",
+            &mut form,
+            popup,
+            true,
+        ));
+        output.push_str(&dismiss_state(
+            "disabled close affordance",
+            &mut form,
+            popup,
+            false,
+        ));
+        output.push_str("=== end of rendered states ===\n");
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "modal-dismiss-control",
+            &output,
         );
     }
 }

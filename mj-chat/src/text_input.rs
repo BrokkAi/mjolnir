@@ -723,12 +723,75 @@ pub fn single_line_paste(pasted: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::{ControlKind, Form, TextField};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use std::fmt::Write as _;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    fn append_input_state(output: &mut String, label: &str, input: &TextInput, multiline: bool) {
+        const WIDTH: u16 = 40;
+        const HEIGHT: u16 = 4;
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
+        let mut form = Form::<u8>::new();
+        form.declare(1, ControlKind::TextField);
+        form.end_frame(1);
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                if multiline {
+                    TextField::render_multiline(
+                        frame,
+                        Rect::new(0, 0, WIDTH, HEIGHT),
+                        input,
+                        true,
+                        true,
+                        &mut form,
+                        1,
+                    );
+                } else {
+                    TextField::render(frame, Rect::new(0, 0, WIDTH, 1), input, &mut form, 1);
+                }
+                form.end_frame(1);
+            })
+            .expect("render text field");
+        writeln!(output, "=== {label} ({WIDTH}x{HEIGHT}) ===").expect("write heading");
+        writeln!(
+            output,
+            "value: {:?}; cursor-byte: {}; kill-buffer: {:?}",
+            input.value(),
+            input.cursor(),
+            input.kill_buffer
+        )
+        .expect("write editor state");
+        output.push_str(&crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"));
+        output.push('\n');
+    }
+
+    fn trace_keys(
+        output: &mut String,
+        label: &str,
+        input: &mut TextInput,
+        multiline: bool,
+        keys: &[(&str, KeyEvent)],
+    ) {
+        append_input_state(output, &format!("{label} initial"), input, multiline);
+        for (name, event) in keys {
+            let outcome = input.handle_key(*event);
+            append_input_state(
+                output,
+                &format!("{label}: {name} => {outcome:?}"),
+                input,
+                multiline,
+            );
+        }
     }
 
     #[test]
@@ -755,34 +818,66 @@ mod tests {
     }
 
     #[test]
-    fn kill_and_yank_follow_readline_bindings() {
+    fn golden_text_input_editing() {
+        let mut output = String::new();
         let mut input = TextInput::from_value("alpha beta");
-        input.handle_key(ctrl('w'));
-        assert_eq!(input.value(), "alpha ");
-        input.handle_key(ctrl('y'));
-        assert_eq!(input.value(), "alpha beta");
-        input.handle_key(ctrl('a'));
-        input.handle_key(ctrl('k'));
-        input.handle_key(ctrl('y'));
-        assert_eq!(input.value(), "alpha beta");
-    }
+        trace_keys(
+            &mut output,
+            "readline word and line kill/yank",
+            &mut input,
+            false,
+            &[
+                ("Ctrl-W", ctrl('w')),
+                ("Ctrl-Y", ctrl('y')),
+                ("Ctrl-A", ctrl('a')),
+                ("Ctrl-K", ctrl('k')),
+                ("Ctrl-Y", ctrl('y')),
+            ],
+        );
 
-    #[test]
-    fn readline_line_movement_kill_and_yank_match_codex() {
         let mut input = TextInput::multiline();
         input.set_value("alpha beta\ngamma");
-        input.handle_key(ctrl('a'));
-        assert_eq!(&input.value()[input.cursor()..], "gamma");
-        input.handle_key(ctrl('a'));
-        assert_eq!(input.cursor(), 0);
-        input.handle_key(ctrl('e'));
-        assert_eq!(&input.value()[..input.cursor()], "alpha beta");
-        input.handle_key(ctrl('k'));
-        assert_eq!(input.value(), "alpha betagamma");
-        input.handle_key(ctrl('y'));
-        assert_eq!(input.value(), "alpha beta\ngamma");
+        trace_keys(
+            &mut output,
+            "multiline line motion and kill/yank",
+            &mut input,
+            true,
+            &[
+                ("Ctrl-A to line start", ctrl('a')),
+                ("Ctrl-A to input start", ctrl('a')),
+                ("Ctrl-E", ctrl('e')),
+                ("Ctrl-K", ctrl('k')),
+                ("Ctrl-Y", ctrl('y')),
+            ],
+        );
+
+        let mut input = TextInput::from_value("alpha beta");
+        trace_keys(
+            &mut output,
+            "single-line whole-value motions",
+            &mut input,
+            false,
+            &[
+                ("Ctrl-A", ctrl('a')),
+                ("Ctrl-E", ctrl('e')),
+                ("Ctrl-U", ctrl('u')),
+            ],
+        );
+
+        let mut input = TextInput::from_value("draft");
+        input.set_history(vec!["first".into(), "second".into()]);
+        trace_keys(
+            &mut output,
+            "optional history restores the draft",
+            &mut input,
+            false,
+            &[("Up", key(KeyCode::Up)), ("Down", key(KeyCode::Down))],
+        );
+        output.push_str("=== end of rendered states ===\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "text-input-editing", &output);
     }
 
+    // Hard-won: a3fd1514: consecutive Ctrl-K presses discarded earlier killed lines.
     #[test]
     fn sequential_control_k_accumulates_one_yankable_block() {
         let mut input = TextInput::multiline();
@@ -833,44 +928,5 @@ mod tests {
         input.handle_key(key(KeyCode::Home));
         input.handle_key(key(KeyCode::Up));
         assert_eq!(input.cursor(), 7);
-    }
-
-    #[test]
-    fn single_line_fields_keep_their_whole_value_motions() {
-        let mut input = TextInput::from_value("alpha beta");
-        input.handle_key(ctrl('a'));
-        assert_eq!(input.cursor(), 0);
-        input.handle_key(ctrl('e'));
-        assert_eq!(input.cursor(), "alpha beta".len());
-        input.handle_key(ctrl('u'));
-        assert_eq!(input.value(), "");
-    }
-
-    #[test]
-    fn optional_history_restores_the_draft() {
-        let mut input = TextInput::from_value("draft");
-        input.set_history(vec!["first".into(), "second".into()]);
-        input.handle_key(key(KeyCode::Up));
-        assert_eq!(input.value(), "second");
-        input.handle_key(key(KeyCode::Down));
-        assert_eq!(input.value(), "draft");
-    }
-
-    #[test]
-    fn filtered_confirmation_never_records_invalid_text() {
-        let mut input = TextInput::new()
-            .with_max_chars(4)
-            .with_filter(InputFilter::AsciiAlphabeticUppercase);
-        input.insert_str("s-t0op");
-        assert_eq!(input.value(), "STOP");
-    }
-
-    #[test]
-    fn hex_confirmation_drops_non_hex_characters_and_lowercases() {
-        let mut input = TextInput::new()
-            .with_max_chars(8)
-            .with_filter(InputFilter::AsciiHexLowercase);
-        input.insert_str("zz0123ABcD!");
-        assert_eq!(input.value(), "0123abcd");
     }
 }

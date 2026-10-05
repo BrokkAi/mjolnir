@@ -343,12 +343,14 @@ mod capture_tests {
     /// prompt whose diff was cut short still names it.
     #[test]
     fn a_capture_counts_new_renamed_and_binary_files() {
+        assert!(parse_numstat(b"").is_empty());
         let temp = repository();
         std::fs::write(
             temp.path().join("moved.rs"),
             "fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\n",
         )
         .unwrap();
+        std::fs::write(temp.path().join("old name.rs"), "fn named() {}\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-qm", "more"]);
         let roots = vec![temp.path().to_path_buf()];
@@ -357,6 +359,7 @@ mod capture_tests {
                 .unwrap(),
         );
         git(temp.path(), &["mv", "moved.rs", "renamed.rs"]);
+        git(temp.path(), &["mv", "old name.rs", "new name.rs"]);
         std::fs::write(temp.path().join("logo.bin"), [0u8, 1, 2, 0, 255]).unwrap();
         std::fs::write(temp.path().join("new.rs"), "fn new() {}\nfn other() {}\n").unwrap();
         let deltas =
@@ -372,6 +375,13 @@ mod capture_tests {
                     ..Default::default()
                 },
                 FileLineChange {
+                    path: "new name.rs".into(),
+                    old_path: Some("old name.rs".into()),
+                    insertions: 0,
+                    deletions: 0,
+                    ..Default::default()
+                },
+                FileLineChange {
                     path: "new.rs".into(),
                     insertions: 2,
                     ..Default::default()
@@ -383,35 +393,6 @@ mod capture_tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn numstat_records_are_read_with_renames_and_binaries() {
-        let output = b"3\t1\tsrc/lib.rs\0-\t-\tlogo.png\x002\t0\t\0old name.rs\0new name.rs\0";
-        assert_eq!(
-            parse_numstat(output),
-            vec![
-                FileLineChange {
-                    path: "src/lib.rs".into(),
-                    insertions: 3,
-                    deletions: 1,
-                    ..Default::default()
-                },
-                FileLineChange {
-                    path: "logo.png".into(),
-                    binary: true,
-                    ..Default::default()
-                },
-                FileLineChange {
-                    path: "new name.rs".into(),
-                    old_path: Some("old name.rs".into()),
-                    insertions: 2,
-                    deletions: 0,
-                    binary: false,
-                },
-            ]
-        );
-        assert!(parse_numstat(b"").is_empty());
     }
 
     #[test]
@@ -613,6 +594,7 @@ mod capture_tests {
     /// of the working tree. This is #1065: a workspace with hundreds of
     /// thousands of untracked files made every session start read, hash and
     /// store every one of them before the worker could be reached.
+    // Hard-won: b3457c71: capturing a session baseline staged and hashed hundreds of thousands of unrelated files.
     #[test]
     fn a_startup_baseline_does_not_read_untracked_files_it_was_not_asked_about() {
         let temp = repository();
@@ -639,6 +621,7 @@ mod capture_tests {
 
     /// A review captures what the turn changed and nothing else, so the same
     /// untouched untracked files stay unread at review time too.
+    // Hard-won: b3457c71: review capture cost grew with all untracked workspace files instead of turn changes.
     #[test]
     fn a_review_capture_costs_the_turns_changes_and_not_the_tree() {
         let temp = repository();

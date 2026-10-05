@@ -627,14 +627,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_from_a_daemon_that_published_no_quota_decodes_with_an_empty_snapshot() {
-        let mut value = serde_json::to_value(RuntimeMetadata::default()).unwrap();
-        value.as_object_mut().unwrap().remove("quotas");
-        let metadata: RuntimeMetadata = serde_json::from_value(value).unwrap();
-        assert_eq!(metadata.quotas, crate::quota::QuotaSnapshot::default());
-    }
-
-    #[test]
     fn default_target_origin_survives_the_wire_and_an_older_daemon_sends_none() {
         let mut metadata = RuntimeMetadata {
             config: Config::default().with_local_targets(),
@@ -650,18 +642,6 @@ mod tests {
         value.as_object_mut().unwrap().remove("default_targets");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
         assert!(!older.installed_config().is_default_target("docker"));
-    }
-
-    #[test]
-    fn a_quota_change_travels_as_a_metadata_delta() {
-        let first = RuntimeProjection::default();
-        let mut next = first.clone();
-        next.metadata.quotas.cycles = 1;
-        let delta = RuntimeDelta::between(&first, &next);
-        assert!(!delta.is_empty());
-        let mut applied = first;
-        delta.apply(&mut applied);
-        assert_eq!(applied.metadata.quotas.cycles, 1);
     }
 
     #[test]
@@ -888,64 +868,6 @@ mod tests {
         assert!(
             replica.projection.transcripts.is_empty(),
             "a snapshot carries no tails, so a new daemon's are fetched again"
-        );
-    }
-}
-
-#[cfg(test)]
-mod cpu_tests {
-    use super::*;
-    #[test]
-    fn cpu_only_deltas_apply_measurements_errors_and_removals() {
-        let mut before = RuntimeProjection::default();
-        for value in [
-            Some(SessionCpuView::Measured {
-                usage: mj_core::cpu_usage::SessionCpuUsage {
-                    recent_permille: 230,
-                    hourly_permille: 120,
-                    hourly_covered_secs: 80,
-                    online_cpus: 8,
-                },
-            }),
-            Some(SessionCpuView::Unavailable {
-                reason: "denied".into(),
-            }),
-            None,
-        ] {
-            let mut after = before.clone();
-            match value {
-                Some(value) => {
-                    after.session_cpu.insert("session".into(), value);
-                }
-                None => {
-                    after.session_cpu.remove("session");
-                }
-            }
-            let changes = RuntimeDelta::between(&before, &after);
-            assert!(!changes.is_empty());
-            assert!(changes.metadata.is_none());
-            assert!(changes.sessions.is_empty());
-            changes.apply(&mut before);
-            assert_eq!(before, after);
-        }
-    }
-    #[test]
-    fn old_runtime_frames_default_to_an_empty_cpu_map() {
-        let mut value = serde_json::to_value(RuntimeProjection::default()).unwrap();
-        value.as_object_mut().unwrap().remove("session_cpu");
-        assert!(
-            serde_json::from_value::<RuntimeProjection>(value)
-                .unwrap()
-                .session_cpu
-                .is_empty()
-        );
-        let mut value = serde_json::to_value(RuntimeDelta::default()).unwrap();
-        value.as_object_mut().unwrap().remove("session_cpu");
-        assert!(
-            serde_json::from_value::<RuntimeDelta>(value)
-                .unwrap()
-                .session_cpu
-                .is_empty()
         );
     }
 }

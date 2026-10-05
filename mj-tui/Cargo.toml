@@ -28,5 +28,7 @@ tracing.workspace = true
 qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["golden"] }
+mj-chat = { workspace = true, features = ["golden"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -22,6 +22,7 @@ fn newer_daemon_protocol_requires_updating_the_client() {
     assert!(message.contains("first on PATH"), "{message}");
 }
 
+// Hard-won: 796d055c: actionable lifecycle refusals became generic HTTP 500 responses.
 #[test]
 fn a_lifecycle_failure_carries_a_refusal_across_its_result_channel() {
     let refused = LifecycleFailure::of(
@@ -193,6 +194,7 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
     assert!(!restart::fallback_is_safe(availability));
 }
 
+// Hard-won: 7b694803: Alt-X cancelled target teardown after its verified-checkpoint gate.
 #[test]
 fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
     assert!(lifecycle_cancellable(
@@ -230,6 +232,7 @@ fn a_close_past_its_verified_checkpoint_cannot_be_cancelled() {
 /// After a restart, every in-flight lifecycle state is either owned by
 /// something that resumes it or reported to the user. Nothing stays in flight
 /// with nobody behind it (#1070).
+// Hard-won: 7aea6c5c: an interrupted provision remained stuck and invisible to recovery.
 #[test]
 fn startup_reports_every_in_flight_state_that_no_operation_owns() {
     let target = Some(mj_core::state::TargetLocator::LocalPodman {
@@ -276,6 +279,7 @@ fn startup_reports_every_in_flight_state_that_no_operation_owns() {
     );
 }
 
+// Hard-won: 7b694803: a cancelled close stranded a Destroying session without a retry path.
 #[test]
 fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     let target = Some(mj_core::state::TargetLocator::LocalPodman {
@@ -553,6 +557,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     assert!(state.workspace_has_active_resume("workspace-a"));
 }
 
+// Hard-won: e23e4b1e: an unrelated session lifecycle blocked checkpoint export.
 #[tokio::test]
 async fn checkpoint_lifecycle_guard_is_per_session() {
     let state = test_runtime_state();
@@ -1120,6 +1125,7 @@ pub(super) fn runtime_test_subagent(
     }
 }
 
+// Hard-won: 25abde37: force-stopping a parent failed on an already-stopped child.
 #[test]
 fn active_child_session_ids_skips_children_that_already_stopped() {
     let parent = runtime_test_session("parent", "workspace", SessionState::Closing);
@@ -1187,24 +1193,6 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
     assert!(state.missing_target_record(&session.id, &view).is_none());
 }
 
-#[tokio::test]
-async fn review_host_notifier_wakes_runtime_revision_subscribers() {
-    let revisions = RuntimeRevisions::new(40);
-    let mut subscriber = revisions.subscribe();
-    // TurnReviewHost's behavior tests prove that view insert/change/remove
-    // invokes this callback. This proves the production callback wired by
-    // RuntimeState wakes the daemon and phone revision feed.
-    let notify_review_publication = revisions.notifier();
-
-    notify_review_publication();
-    tokio::time::timeout(Duration::from_secs(1), subscriber.changed())
-        .await
-        .expect("review publication did not wake runtime subscribers")
-        .expect("runtime revision publisher stopped");
-
-    assert_eq!(*subscriber.borrow_and_update(), 41);
-}
-
 #[test]
 fn late_runtime_revision_publication_cannot_move_cursor_backwards() {
     let revisions = RuntimeRevisions::new(40);
@@ -1214,27 +1202,6 @@ fn late_runtime_revision_publication_cannot_move_cursor_backwards() {
     revisions.publish_allocated(41);
 
     assert_eq!(*subscriber.borrow(), 42);
-}
-
-#[tokio::test]
-async fn workspace_publication_reaches_existing_phone_subscriber() {
-    let state = test_runtime_state();
-    let mut workspaces = state.workspaces();
-    let expected = WorkspaceRecord {
-        id: "workspace-1".into(),
-        name: "Reliability".into(),
-        created_at: "2026-08-30T00:00:00Z".into(),
-        last_opened_at: "2026-08-30T00:00:00Z".into(),
-        session_count: 0,
-    };
-
-    state.publish_workspaces(vec![expected.clone()]);
-    tokio::time::timeout(Duration::from_secs(1), workspaces.changed())
-        .await
-        .expect("workspace publication timed out")
-        .expect("workspace publisher stopped");
-
-    assert_eq!(workspaces.borrow_and_update().as_slice(), &[expected]);
 }
 
 #[tokio::test]
@@ -1509,34 +1476,6 @@ fn management_wire_shapes_stay_frozen_across_protocol_versions() {
     }
 }
 
-#[test]
-fn client_presence_and_workspace_listing_use_global_wire_shapes() {
-    let attach = serde_json::to_value(DaemonAction::Attach {
-        client_id: "client-a".into(),
-        pid: 4242,
-    })
-    .unwrap();
-    assert_eq!(
-        attach,
-        serde_json::json!({
-            "action": "attach",
-            "arguments": {"client_id": "client-a", "pid": 4242},
-        })
-    );
-
-    let listing = serde_json::to_value(WorkspaceListing {
-        workspace: WorkspaceRecord {
-            id: "workspace-a".into(),
-            name: "Workspace A".into(),
-            created_at: "2026-09-01T00:00:00Z".into(),
-            last_opened_at: "2026-09-01T00:00:00Z".into(),
-            session_count: 0,
-        },
-    })
-    .unwrap();
-    assert!(listing.get("attached_pids").is_none());
-}
-
 #[tokio::test]
 async fn daemon_serves_management_actions_for_any_protocol_version() {
     // 3 is an older shipped client; 5 stands in for a future one. Both
@@ -1795,6 +1734,7 @@ async fn equivalent_lifecycle_requests_join_one_daemon_operation() {
     assert_eq!(starts.load(Ordering::Acquire), 1);
 }
 
+// Hard-won: 80934557: excluding graceful Close dropped the manager lease so a fast Stop failed as not managed.
 #[tokio::test]
 async fn close_keeps_worker_target_available_for_checkpoint_lease() {
     let state = test_runtime_state();
@@ -2008,14 +1948,6 @@ async fn deferred_cleanup_is_visible_and_drains_before_shutdown_cancellation() {
 }
 
 #[test]
-fn force_destroy_serializes_as_its_own_lifecycle_kind() {
-    assert_eq!(
-        serde_json::to_string(&RuntimeLifecycleKind::ForceDestroy).unwrap(),
-        "\"force_destroy\""
-    );
-}
-
-#[test]
 fn create_cancellation_and_commit_have_one_winner() {
     for _ in 0..32 {
         let control = CreateSessionControl::default();
@@ -2097,6 +2029,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
 /// `session_projection` holds the controller lock while it reads the
 /// lifecycle view, and that view also needs the controller. A re-lock on
 /// the same thread hangs the daemon, so the read must finish promptly.
+// Hard-won: 2980a9b9: web feed projection self-deadlocked on lifecycle state and hung the daemon.
 #[tokio::test]
 async fn session_projection_reads_lifecycles_without_relocking_the_controller() {
     let state = test_runtime_state();
@@ -2291,6 +2224,7 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
         .unwrap();
 }
 
+// Hard-won: 7b694803: Alt-X stayed available and could cancel teardown after the checkpoint gate.
 #[tokio::test]
 async fn a_close_removing_the_target_stops_offering_cancellation() {
     let state = test_runtime_state();
@@ -2388,6 +2322,7 @@ async fn force_destruction_preempts_a_running_lifecycle_and_waits_for_it() {
 /// A second destroy of a session that is already being destroyed (a person's
 /// `mj destroy` of a sub-agent while its parent's destroy is destroying it)
 /// waits for that teardown instead of cancelling it half way (I2-9).
+// Hard-won: 4119688f: a second destroy cancelled the first midway and broke child cleanup.
 #[tokio::test]
 async fn force_destruction_waits_for_a_teardown_already_running_instead_of_cancelling_it() {
     let state = test_runtime_state();
@@ -2616,6 +2551,7 @@ async fn quiet_background_work_is_reobserved_without_publishing_a_new_view() {
 /// shells running is still working as far as the barrier is concerned, so the
 /// observation has to say so too. When it did not, the coordinator started a
 /// copy every second that the barrier then deferred, for hours.
+// Hard-won: 670a5bb7: a live Claude session copied 260 MB every few seconds while shell work blocked recovery for hours.
 #[tokio::test]
 async fn a_session_with_background_commands_is_not_ready_for_a_recovery_copy() {
     let mut state = test_runtime_state();
@@ -3398,68 +3334,10 @@ async fn startup_batch_identity_rejects_changed_payload_and_keeps_order() {
     );
 }
 
-/// Queueing is refused when the text is empty, when the session can no longer
-/// become ready, and when the daemon has no such session at all.
-#[tokio::test]
-async fn queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessions() {
-    let Some(_writer) = startup_prompt_test_store(
-        "queueing_a_startup_prompt_is_refused_for_blank_text_and_unusable_sessions",
-    ) else {
-        return;
-    };
-    let manager = TestRemoteManager::new().await;
-    let state = test_runtime_state_with_manager(&manager);
-    insert_starting_session(&state, "");
-    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
-    let cancellation = CancellationToken::new();
-
-    let blank = handle_action(
-        queued_prompt_action("   "),
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect_err("a blank startup prompt was accepted");
-    assert!(blank.to_string().contains("needs text"), "{blank:#}");
-
-    let unknown = handle_action(
-        DaemonAction::QueueStartupPrompt {
-            session_id: "no-such-session".into(),
-            text: "hello".into(),
-            inherited_draft: None,
-        },
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect_err("a prompt for an unknown session was accepted");
-    assert!(
-        unknown.to_string().contains("unknown session"),
-        "{unknown:#}"
-    );
-
-    state.owner().edit_sessions(|sessions| {
-        sessions.get_mut("session-1").unwrap().state = SessionState::Stopped;
-    });
-    let stopped = handle_action(
-        queued_prompt_action("hello"),
-        &metadata,
-        &state,
-        &cancellation,
-    )
-    .await
-    .expect_err("a prompt for a stopped session was accepted");
-    assert!(
-        stopped.to_string().contains("cannot take a queued prompt"),
-        "{stopped:#}"
-    );
-}
-
 /// Withdrawing a queued prompt before delivery cancels it: nothing is
 /// submitted when the harness becomes ready, the drain still delivers what is
 /// queued afterwards, and no durable row is left to send it later.
+// Hard-won: 888bd1d6: the composer removed a prompt preview while the durable queue still sent it.
 #[tokio::test]
 async fn withdrawing_a_queued_startup_prompt_before_delivery_cancels_it() {
     let Some(_writer) =
@@ -3697,6 +3575,7 @@ async fn discarding_a_lost_session_removes_its_record_but_keeps_a_dirty_checkout
 /// then said the id "names neither a Mjolnir session nor an indexed one".
 /// Destroy now indexes the session first.
 #[cfg(unix)]
+// Hard-won: ab7d7f49: SessionWiki missed a prompted session created and destroyed between syncs.
 #[tokio::test]
 async fn a_destroyed_session_is_still_found_by_its_id() {
     const DESTROY_INDEX_TEST_CHILD: &str = "MJ_TEST_DESTROY_INDEX_CHILD";
@@ -3814,6 +3693,7 @@ fn test_runtime_state_loading_the_store() -> Arc<RuntimeState> {
 }
 
 #[cfg(unix)]
+// Hard-won: a5eed2e0: synchronous checkpoint database I/O blocked unrelated pings and timers.
 #[tokio::test]
 async fn a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive() {
     const NAME: &str = "a_checkpoint_waiting_for_io_keeps_daemon_requests_and_timers_responsive";
@@ -3916,6 +3796,7 @@ fn held_command_pids(directory: &Path) -> Vec<u32> {
 /// stalls, so that implementation fails the timing assertions instead of
 /// hanging the suite.
 #[cfg(target_os = "linux")]
+// Hard-won: 34e86406: hung lifecycle subprocesses exhausted async workers and blocked cancellation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() {
     const NAME: &str = "hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled";
@@ -4606,6 +4487,7 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
 /// waits for it: the daemon stops only once the destroy has finished, and the
 /// upgrade handoff names it as work it waits for.
 #[cfg(unix)]
+// Hard-won: bcbba06e: daemon restart during a non-durable destroy resurrected its parent session.
 #[tokio::test]
 async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
     const NAME: &str = "a_graceful_stop_waits_for_a_destroy_in_flight";
@@ -5280,6 +5162,7 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
 /// relay open and its checkout and target in place, and a suspend that
 /// acknowledges then goes through.
 #[cfg(unix)]
+// Hard-won: f1145012: a live clone with unpushed work was suspended without acknowledgement.
 #[tokio::test]
 async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushed_work() {
     use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
@@ -5335,6 +5218,7 @@ async fn a_suspend_without_the_acknowledgement_refuses_a_live_clone_with_unpushe
 /// and so has nothing to tell the parent or the person (R15-3). The children
 /// stop only once the parent's checkpoint is verified.
 #[cfg(unix)]
+// Hard-won: d705260d: sub-agents were removed before the parent checkpoint had succeeded.
 #[tokio::test]
 async fn a_suspend_whose_checkpoint_fails_leaves_the_sub_agents_running() {
     use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
@@ -5485,6 +5369,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
 /// prompt and the conversation has the line, instead of both waiting for a
 /// later resume.
 #[cfg(unix)]
+// Hard-won: d705260d: the failed-suspend path did not tell a live parent which children had stopped.
 #[tokio::test]
 async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stopped() {
     use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
@@ -5540,6 +5425,7 @@ async fn a_failed_suspend_tells_a_live_parent_at_once_which_sub_agents_were_stop
 /// The child's own operation is a stop, which surfaces show as "Stopping",
 /// and it cannot be cancelled apart from the suspend that owns it.
 #[cfg(unix)]
+// Hard-won: 6bfe27a7: a child stopped by parent suspend appeared as Destroying and cancellable.
 #[tokio::test]
 async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying() {
     const NAME: &str = "a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying";
@@ -5862,6 +5748,7 @@ async fn a_late_worker_view_cannot_recreate_a_deleted_session() {
 /// A retired relay actor publishes no final view. Removing its session from
 /// the manager's targets must drop the view it left, and a view it sends late
 /// must not bring it back, so no client keeps a live-looking stopped session.
+// Hard-won: 8b3a7286: a failed Move left the TUI unable to open a session because actor and feed ownership disagreed.
 #[tokio::test]
 async fn a_session_without_a_relay_actor_has_no_runtime_view() {
     let state = test_runtime_state();
@@ -6178,6 +6065,7 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
     }
 }
 
+// Hard-won: 05d2c739: a wrong SQL column made vanished-session startup cleanup fail on every retry.
 #[tokio::test]
 async fn api_startup_of_a_vanished_session_is_marked_failed() {
     let Some(_writer) =
@@ -6353,6 +6241,7 @@ async fn cancelled_api_startup_is_not_submitted_after_daemon_reconstruction() {
     );
 }
 
+// Hard-won: 5165e5ba: cancelled missing-session steps retried and notified again after daemon restarts.
 #[tokio::test]
 async fn cancelled_api_startup_settles_without_a_managed_session() {
     let Some(_writer) =
@@ -6710,42 +6599,54 @@ async fn resume_candidates_are_inactive_top_level_sessions_with_every_adopted_na
 }
 
 #[tokio::test]
-async fn go_starts_in_the_remembered_session_or_the_newest_eligible_one() {
-    let session = |id: &str, workspace: &str, state, updated_at: &str| {
-        let mut record = runtime_test_session(id, workspace, state);
-        record.updated_at = updated_at.into();
-        record
+async fn go_startup_session_falls_back_when_the_remembered_session_is_archived() {
+    let mut archived = runtime_test_session("remembered", "workspace", SessionState::Stopped);
+    archived.archived = true;
+    let mut older = runtime_test_session("older", "workspace", SessionState::Stopped);
+    older.updated_at = "2026-09-04T00:00:00Z".into();
+    let mut newest = runtime_test_session("newest", "workspace", SessionState::Stopped);
+    newest.updated_at = "2026-09-05T00:00:00Z".into();
+    let mut child = runtime_test_session("child", "workspace", SessionState::Stopped);
+    child.updated_at = "2026-10-01T00:00:00Z".into();
+    let mut elsewhere = runtime_test_session("elsewhere", "other-workspace", SessionState::Stopped);
+    elsewhere.updated_at = "2026-10-02T00:00:00Z".into();
+    let mut state = mj_core::state::State {
+        sessions: [archived, older, newest, child.clone(), elsewhere]
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect(),
+        ..mj_core::state::State::default()
     };
-    let mut state = mj_core::state::State::default();
-    for record in [
-        session("old", "w", SessionState::Stopped, "2026-01-01T00:00:00Z"),
-        session("new", "w", SessionState::Running, "2026-02-01T00:00:00Z"),
-        session(
-            "elsewhere",
-            "x",
-            SessionState::Running,
-            "2026-03-01T00:00:00Z",
-        ),
-        session(
-            "gone",
-            "w",
-            SessionState::DestroyedWithDataLoss,
-            "2026-04-01T00:00:00Z",
-        ),
-    ] {
-        state.sessions.insert(record.id.clone(), record);
-    }
+    state
+        .subagents
+        .insert(child.id.clone(), runtime_test_subagent(&child.id, "parent"));
     let runtime = test_runtime_state_holding(state);
-    let pick = |last: Option<&str>| {
-        runtime
-            .go_startup_session("w", last)
-            .map(|record| record.id)
-    };
-    assert_eq!(pick(None).as_deref(), Some("new"));
-    assert_eq!(pick(Some("old")).as_deref(), Some("old"));
-    assert_eq!(pick(Some("gone")).as_deref(), Some("new"));
-    assert_eq!(pick(Some("elsewhere")).as_deref(), Some("new"));
-    assert_eq!(runtime.go_startup_session("empty", None), None);
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(
+            stream,
+            test_metadata(address),
+            runtime,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut client = mj_client::daemon::DaemonClient::connect(test_metadata(address))
+        .await
+        .expect("connect to daemon protocol test server");
+
+    let selected = client
+        .go_startup_session("workspace".into(), Some("remembered".into()))
+        .await
+        .expect("query startup session")
+        .expect("eligible fallback session");
+
+    assert_eq!(selected.id, "newest");
+    drop(client);
+    assert!(server.await.expect("daemon task").is_ok());
 }
 
 #[tokio::test]

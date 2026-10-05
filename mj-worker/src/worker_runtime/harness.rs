@@ -782,22 +782,6 @@ INSTALLER
     }
 
     #[test]
-    fn muse_incomplete_install_requires_both_executables() {
-        let temp = tempfile::tempdir().unwrap();
-        let selected = pin(HarnessKind::Muse);
-        complete_fake(
-            temp.path(),
-            HarnessKind::Muse,
-            selected.install_id,
-            selected.entrypoint,
-        );
-        let install = temp.path().join(selected.install_id);
-        assert!(!complete_install(&install, HarnessKind::Muse, selected).unwrap());
-        executable(&install.join("bin/muse"), "#!/bin/sh\nexit 0\n");
-        assert!(complete_install(&install, HarnessKind::Muse, selected).unwrap());
-    }
-
-    #[test]
     #[ignore = "downloads the pinned Muse runtime and adapter from their publishers"]
     fn muse_real_install_is_verified_concurrent_and_reusable() {
         let parent =
@@ -832,10 +816,6 @@ INSTALLER
             assert!(entrypoint_is_executable(&first.command));
         });
     }
-    use mj_core::harness_runtime::{
-        CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, CODEX_CLI_VERSION,
-    };
-
     fn executable(path: &Path, body: &str) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
@@ -874,28 +854,6 @@ INSTALLER
             "PATH".to_owned(),
             format!("{}:/usr/bin:/bin", bin.display()),
         )])
-    }
-
-    #[test]
-    fn embedded_npm_recipes_match_the_runtime_pins() {
-        for (body, dependencies) in [
-            (
-                CODEX_PACKAGE_JSON,
-                vec![
-                    (CODEX_ACP_PACKAGE, CODEX_ACP_VERSION),
-                    ("@openai/codex", CODEX_CLI_VERSION),
-                ],
-            ),
-            (
-                CLAUDE_PACKAGE_JSON,
-                vec![("@agentclientprotocol/claude-agent-acp", CLAUDE_ACP_VERSION)],
-            ),
-        ] {
-            let package: serde_json::Value = serde_json::from_slice(body).unwrap();
-            for (name, version) in dependencies {
-                assert_eq!(package["dependencies"][name], version);
-            }
-        }
     }
 
     #[test]

@@ -1,0 +1,125 @@
+=== session build cache (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No messages                                                                                                       │
+│  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
+│                 │Session: ACP pretty name                                                          │                 │
+│                 │Applies when the container is next recreated.                                     │                 │
+│                 │                                                                                  │                 │
+│                 │CPUs:                                                                             │                 │
+│                 │Memory:                                                                           │                 │
+│                 │Empty keeps the target's value.                                                   │                 │
+│                 │                                                                                  │                 │
+│                 │Attached directories                                                              │                 │
+│                 │  none                                                                            │                 │
+│                 │                                                                                  │                 │
+│                 │Attach host directory:                                                            │                 │
+│                 │Container destination:                                                            │                 │
+│                 │Access: ro · read-only ▾                                                          │                 │
+│                 │                                                                                  │                 │
+│                 │Build cache                                                                       │                 │
+│                 │  /mnt/nvme/mbx                                                                   │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
+│                                                                                                       ──────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+
+=== session without build cache (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No messages                                                                                                       │
+│  │              ╭ × Edit container size and mounts ────────────────────────────────────────────────╮                 │
+│                 │Session: ACP pretty name                                                          │                 │
+│                 │Applies when the container is next recreated.                                     │                 │
+│                 │                                                                                  │                 │
+│                 │CPUs:                                                                             │                 │
+│                 │Memory:                                                                           │                 │
+│                 │Empty keeps the target's value.                                                   │                 │
+│                 │                                                                                  │                 │
+│                 │Attached directories                                                              │                 │
+│                 │  none                                                                            │                 │
+│                 │                                                                                  │                 │
+│                 │Attach host directory:                                                            │                 │
+│                 │Container destination:                                                            │                 │
+│                 │Access: ro · read-only ▾                                                          │                 │
+│                 │                                                                                  │                 │
+│                 │Build cache                                                                       │                 │
+│                 │  none for this session                                                           │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │Enter attaches/accepts · Space edits · d removes · Tab moves                      │                 │
+│                 │  Cancel     Save                                                                 │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
+│                                                                                                       ──────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+
+=== mount change takes effect on recreation (100x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│hel ──────────────────────────────────││                                                          │
+│› · ACP pret                                                                                      │
+│  Idle  podm                                                                                      │
+│  │ No messa  ╭ × Edit container size and mounts ──────────────────────────────────╮              │
+│  │           │Session: ACP pretty name                                            │              │
+│              │Applies when the container is next recreated.                       │              │
+│              │                                                                    │              │
+│              │CPUs:                                                               │  ion.        │
+│              │Memory:                                                             │              │
+│              │Empty keeps the target's value.                                     │              │
+│              │                                                                    │              │
+│              │Attached directories                                                │              │
+│              │/srv/data -> /mnt/data · cow                                        │              │
+│              │                                                                    │              │
+│              │Attach host directory:                                              │              │
+│              │Container destination:                                              │              │
+│              │Access: ro · read-only ▾                                            │              │
+│              │                                                                    │              │
+│              │Remembered directories                                              │              │
+│              │/srv/models                                                         │              │
+│              │                                                                    │  ────────────╯
+│              │Build cache                                                         │  ────────────╮
+│              │  none for this session                                             │              │
+│              │                                                                    │  to open.    │
+│              │Enter attaches/accepts · Space edits · d removes · Tab moves        │  ────────────╯
+│              │  Cancel     Save                                                   │  ───── ▁   ▪ ╮
+│              ╰────────────────────────────────────────────────────────────────────╯              │
+│                                                                                      ────────────╯
+│                                                                                      ───── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys

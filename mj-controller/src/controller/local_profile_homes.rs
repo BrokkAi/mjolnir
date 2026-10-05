@@ -453,6 +453,7 @@ mod tests {
     /// their session has ended, and only then. Measured on fixture homes: a
     /// Codex home with one replica per case, and a Claude home whose replica
     /// directory also holds the session's native transcript.
+    // Hard-won: 9c2991f8: ended sessions stranded profile replicas while live and unknown data needed preserving
     #[test]
     fn replicas_of_ended_sessions_are_removed_and_every_other_directory_is_kept() {
         let directory = tempfile::tempdir().unwrap();

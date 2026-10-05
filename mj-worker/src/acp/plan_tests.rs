@@ -63,6 +63,7 @@ async fn set_claude_config_mode(probe: &mut PlanProbe, request_id: &str, mode: &
     }
 }
 
+// Hard-won: f8bb425: Leaving Claude Plan mode forced bypassPermissions instead of restoring the prior mode.
 #[tokio::test]
 async fn claude_plan_mode_stays_active_and_exit_restores_the_pre_plan_mode() {
     for config in [false, true] {
@@ -138,6 +139,7 @@ async fn claude_plan_mode_stays_active_and_exit_restores_the_pre_plan_mode() {
     }
 }
 
+// Hard-won: f8bb425: Plan exit escalated a lower prior permission mode to bypassPermissions.
 #[tokio::test]
 async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() {
     let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
@@ -169,6 +171,7 @@ async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() 
     probe.close().await;
 }
 
+// Hard-won: f8bb425: A person-chosen mode during Plan was overwritten on exit.
 #[tokio::test]
 async fn explicit_mode_change_during_plan_is_not_reverted_at_plan_exit() {
     let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
@@ -986,6 +989,7 @@ async fn config_mode_restoration_checks_the_mode_returned_by_claude() {
     }
 }
 
+// Hard-won: b81228f: ZCode close retries left the session permanently stuck in closing when session/close was unsupported.
 #[tokio::test]
 async fn close_is_applied_when_the_harness_lacks_session_close() {
     for (code, applied) in [(-32601, true), (-32603, false)] {
@@ -1261,6 +1265,7 @@ async fn unconstrained_user_questions_still_wait_for_an_answer() {
 /// A tool permission request that is not a plan review must reach the user as
 /// a form instead of being cancelled, which the adapter reports to the agent
 /// as "Tool use aborted".
+// Hard-won: c607200: Guardian Claude tool asks were cancelled because no execution mode was selected.
 #[tokio::test]
 async fn a_non_plan_permission_request_is_answered_by_the_user() {
     let mut probe = PlanProbe::new(ExecutionPolicy::ConfiguredApprovals).await;
@@ -1385,6 +1390,7 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+// Hard-won: 42d0e02: Guardian plan approval exposed an option that switched Claude to bypassPermissions.
 #[test]
 fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_guardian() {
     let guardian = ExecutionPolicy::ConfiguredApprovals;
@@ -1444,6 +1450,7 @@ fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_gua
 /// The published form and the accepted answers come from the same decision:
 /// Yes selects the bridge option for the session's policy, and an answer
 /// naming the hidden bypass option is refused without reaching Claude.
+// Hard-won: 42d0e02: A crafted Guardian answer could select an unoffered bypass mode.
 #[tokio::test]
 async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_bypass() {
     for (policy, yes) in [

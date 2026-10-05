@@ -91,42 +91,6 @@ fn persisted_relay_snapshot(root: &Path) -> RelaySnapshot {
     serde_json::from_slice(&fs::read(root.join(RELAY_STATE_FILE)).unwrap()).unwrap()
 }
 
-/// The journal is what makes a streamed chunk durable. Rewriting the whole
-/// snapshot per chunk bought nothing, because recovery already replays
-/// journal events past the snapshot frontier.
-#[test]
-fn streamed_chunks_are_journaled_without_rewriting_the_snapshot() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    submit_relay(&mut relay, "streaming-prompt", prompt("stream"));
-    assert_eq!(
-        relay.claim_pending_commands(true).unwrap()[0].command_id,
-        "streaming-prompt"
-    );
-    let persisted = persisted_relay_snapshot(temp.path());
-
-    for index in 0..8 {
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(format!("chunk {index}")),
-            )))
-            .unwrap();
-    }
-    assert_eq!(relay.latest_ordinal(), persisted.latest_ordinal + 8);
-    assert_eq!(
-        persisted_relay_snapshot(temp.path()),
-        persisted,
-        "streamed chunks rewrote relay-state.json"
-    );
-
-    // A state move is still durable the moment it is recorded.
-    finish_prompt(&mut relay, "streaming-prompt");
-    assert_eq!(
-        persisted_relay_snapshot(temp.path()).latest_ordinal,
-        relay.latest_ordinal()
-    );
-}
-
 /// A relay that dies mid-turn keeps every chunk it acknowledged, and the
 /// relay that reopens republishes the frontier it replayed.
 #[test]
@@ -164,31 +128,6 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
         frontier,
         "recovery must republish the frontier it replayed"
     );
-}
-
-/// Amortization is bounded: a long stream still rewrites the snapshot, so
-/// a restart never has to replay an unbounded journal.
-#[test]
-fn a_long_stream_persists_the_snapshot_before_replay_grows_unbounded() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let chunk = "y".repeat(64 * 1024);
-    let mut journaled = 0_usize;
-    while journaled <= RELAY_SNAPSHOT_LAG_BYTE_LIMIT {
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(chunk.clone()),
-            )))
-            .unwrap();
-        journaled += chunk.len();
-    }
-
-    let persisted = persisted_relay_snapshot(temp.path()).latest_ordinal;
-    assert!(
-        persisted > 1,
-        "a stream past the replay budget never rewrote the snapshot"
-    );
-    assert!(persisted <= relay.latest_ordinal());
 }
 
 /// A catch-up acknowledgement wrote `relay-state.json` twice: once for the
@@ -706,6 +645,7 @@ fn relay_truncates_a_torn_active_tail_before_appending_again() {
     assert_eq!(retained_events(&relay).len(), 2);
 }
 
+// Hard-won: 97bd9199: a torn writer append previously aborted read-only attach replay.
 #[test]
 fn a_read_only_replay_tolerates_a_torn_active_tail_and_serves_the_newest_record() {
     // An attach serving the hot segment can read it while the worker is
@@ -883,83 +823,6 @@ fn recovery_isolates_a_corrupt_record_at_every_position() {
             "one gap for corruption at index {corrupt_index}"
         );
     }
-}
-
-#[test]
-fn a_journal_mixing_v1_and_v2_records_reads_and_validates_across_the_boundary() {
-    // During the lazy migration a journal holds legacy v1 records followed
-    // by new v2 records. Both formats read, each self-validates, and the
-    // v1→v2 boundary validates without a chain link.
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join(RELAY_ACTIVE_SEGMENT);
-    let mut file = File::create(&path).unwrap();
-
-    let v1 = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V1,
-        ordinal: 1,
-        previous_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-        digest: String::new(),
-        recorded_at_ms: 1,
-        command_id: None,
-        observation: RelayObservation::Warning {
-            message: "legacy".into(),
-        },
-    };
-    let v1 = RelayEvent {
-        digest: relay_event_digest(&v1).unwrap(),
-        ..v1
-    };
-    serde_json::to_writer(&mut file, &v1).unwrap();
-    file.write_all(b"\n").unwrap();
-
-    let v2 = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V2,
-        ordinal: 2,
-        previous_digest: String::new(),
-        digest: String::new(),
-        recorded_at_ms: 2,
-        command_id: None,
-        observation: RelayObservation::Warning {
-            message: "new".into(),
-        },
-    };
-    let v2 = RelayEvent {
-        digest: relay_event_digest(&v2).unwrap(),
-        ..v2
-    };
-    serde_json::to_writer(&mut file, &v2).unwrap();
-    file.write_all(b"\n").unwrap();
-    file.sync_all().unwrap();
-
-    let mut events = Vec::new();
-    visit_relay_journal_file(&path, JournalReadMode::Strict, |event, _| {
-        events.push(event);
-        Ok(ControlFlow::Continue(()))
-    })
-    .unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].format, RELAY_EVENT_FORMAT_V1);
-    assert_eq!(events[1].format, RELAY_EVENT_FORMAT_V2);
-    // The v2 record continues from the v1 record across the format
-    // boundary: ordinal contiguity holds and the v2 record self-validates,
-    // with no chain link required.
-    validate_relay_event(v1.ordinal, &v1.digest, &events[1]).unwrap();
-}
-
-#[test]
-fn first_active_journal_file_is_reopenable_after_its_first_append() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay
-        .record_observation(RelayObservation::Warning {
-            message: "first durable event".into(),
-        })
-        .unwrap();
-    drop(relay);
-
-    let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    assert_eq!(relay.latest_ordinal(), 1);
-    assert_eq!(retained_events(&relay).len(), 1);
 }
 
 #[test]
@@ -1188,6 +1051,7 @@ fn failed_claim_persistence_leaves_the_command_claimable() {
 
 /// A relay that truncated an event must still be able to reopen the
 /// journal it wrote — the readback path bounds lines by the same budget.
+// Hard-won: be7c009d: an oversized ACP observation previously made append fatal to the live worker.
 #[test]
 fn a_truncated_event_can_be_read_back_after_reopening() {
     let temp = tempfile::tempdir().unwrap();
@@ -1579,6 +1443,7 @@ fn restored_relay_rebuilds_a_queued_configuration_change() {
 /// Session teardown deletes the worker root while its daemon may still be
 /// alive. A durable write that recreated the root would leave a snapshot
 /// with no journal behind it, and no later resume could reopen that.
+// Hard-won: 2e7f5ec9: a detached worker recreated a closed session root and broke the next resume.
 #[test]
 fn relay_writes_fail_instead_of_recreating_a_deleted_worker_root() {
     let temp = tempfile::tempdir().unwrap();

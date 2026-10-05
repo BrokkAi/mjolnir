@@ -388,7 +388,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             "{} · sidebar {}",
             theme_report(
                 &choice_label(&["theme".to_owned()], &draft["theme"], draft),
-                mj_chat::theme::no_color_requested()
+                crate::no_color_requested()
             ),
             choice_label(
                 &["sessions_side".to_owned()],
