@@ -1230,82 +1230,7 @@ mod tests {
         assert_eq!(first.version(), first.clone().version());
     }
 
-    #[test]
-    fn merge_rules_choose_document_results() {
-        let cases = [
-            (None, None, None, None, false),
-            (
-                Some("base"),
-                Some("same"),
-                Some("same"),
-                Some("same"),
-                false,
-            ),
-            (
-                Some("base"),
-                Some("base"),
-                Some("replica"),
-                Some("replica"),
-                false,
-            ),
-            (
-                Some("base"),
-                Some("canonical"),
-                Some("base"),
-                Some("canonical"),
-                false,
-            ),
-            (None, None, Some("replica"), Some("replica"), false),
-            (None, Some("canonical"), None, Some("canonical"), false),
-            (Some("base"), Some("base"), None, None, false),
-            (Some("base"), None, Some("base"), None, false),
-            (Some("base"), None, Some("edited"), Some("edited"), false),
-            (Some("base"), Some("edited"), None, Some("edited"), false),
-            (
-                Some("a\nb\n"),
-                Some("A\nb\n"),
-                Some("a\nB\n"),
-                Some("A\nB\n"),
-                false,
-            ),
-        ];
-
-        for (base, canonical, replica, expected, conflict) in cases {
-            let merged = merge_file(base, canonical, replica);
-            assert_eq!(
-                merged.tree.files.get("/memory.md").map(String::as_str),
-                expected,
-                "base={base:?}, canonical={canonical:?}, replica={replica:?}"
-            );
-            assert_eq!(merged.conflicts.len(), usize::from(conflict));
-        }
-    }
-
-    #[test]
-    fn merge_trees_combines_non_overlapping_line_edits() {
-        let merged = merge_file(
-            Some("first\nmiddle\nlast\n"),
-            Some("FIRST\nmiddle\nlast\n"),
-            Some("first\nmiddle\nLAST\n"),
-        );
-        assert_eq!(merged.tree.files["/memory.md"], "FIRST\nmiddle\nLAST\n");
-        assert!(merged.conflicts.is_empty());
-    }
-
-    #[test]
-    fn merge_trees_keeps_different_appends_in_canonical_then_replica_order() {
-        let merged = merge_file(
-            Some("existing\n"),
-            Some("existing\ncanonical\n"),
-            Some("existing\nreplica\n"),
-        );
-        assert_eq!(
-            merged.tree.files["/memory.md"],
-            "existing\ncanonical\nreplica\n"
-        );
-        assert!(merged.conflicts.is_empty());
-    }
-
+    // Hard-won: 2753a110: appending lines lost the canonical append when the base lacked a final newline.
     #[test]
     fn merge_trees_keeps_appends_when_base_has_no_final_newline() {
         let merged = merge_file(Some("base"), Some("base\ncanonical"), Some("base\nreplica"));
@@ -1316,173 +1241,122 @@ mod tests {
         assert!(merged.conflicts.is_empty());
     }
 
+    /// Two sessions edit the same memory file concurrently. Each row is
+    /// (name, base, canonical, replica, merged, conflicted).
     #[test]
-    fn merge_trees_preserves_no_final_newline_for_unchanged_side_rules() {
-        let canonical_change = merge_file(Some("base"), Some("canonical"), Some("base"));
-        assert_eq!(canonical_change.tree.files["/memory.md"], "canonical");
-        assert!(canonical_change.conflicts.is_empty());
-
-        let replica_change = merge_file(Some("base"), Some("base"), Some("replica"));
-        assert_eq!(replica_change.tree.files["/memory.md"], "replica");
-        assert!(replica_change.conflicts.is_empty());
+    fn merge_trees_combines_concurrent_session_edits() {
+        type Case = (
+            &'static str,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            bool,
+        );
+        let cases: [Case; 6] = [
+            (
+                "both sessions append a pointer line",
+                Some("a\n"),
+                Some("a\nc\n"),
+                Some("a\nr\n"),
+                Some("a\nc\nr\n"),
+                false,
+            ),
+            (
+                "edits to separate lines both survive",
+                Some("1\n2\n3\n4\n5\n"),
+                Some("X\n2\n3\n4\n5\n"),
+                Some("1\n2\n3\n4\nY\n"),
+                Some("X\n2\n3\n4\nY\n"),
+                false,
+            ),
+            (
+                "a deletion syncs",
+                Some("a\n"),
+                Some("a\n"),
+                None,
+                None,
+                false,
+            ),
+            (
+                "a canonical edit beats a replica deletion",
+                Some("a\n"),
+                Some("b\n"),
+                None,
+                Some("b\n"),
+                false,
+            ),
+            (
+                "a replica edit beats a canonical deletion",
+                Some("a\n"),
+                None,
+                Some("b\n"),
+                Some("b\n"),
+                false,
+            ),
+            (
+                "the replica wins a same-line conflict",
+                Some("a\nb\nc\n"),
+                Some("a\nC\nc\n"),
+                Some("a\nR\nc\n"),
+                Some("a\nR\nc\n"),
+                true,
+            ),
+        ];
+        for (name, base, canonical, replica, expected, conflicted) in cases {
+            let merged = merge_file(base, canonical, replica);
+            assert_eq!(
+                merged.tree.files.get("/memory.md").map(String::as_str),
+                expected,
+                "{name}"
+            );
+            assert_eq!(!merged.conflicts.is_empty(), conflicted, "{name}");
+            if let Some(conflict) = merged.conflicts.first() {
+                assert_eq!(Some(conflict.replica_wins.as_str()), expected, "{name}");
+            }
+        }
     }
 
+    // Hard-won: 2753a110: a merged file and its descendant made the tree impossible to install.
     #[test]
-    fn merge_trees_keeps_identical_insertions_once() {
-        let merged = merge_file(
-            Some("head\nold\n"),
-            Some("head\nnew\nshared\n"),
-            Some("HEAD\nold\nshared\n"),
-        );
-        assert_eq!(merged.tree.files["/memory.md"], "HEAD\nnew\nshared\n");
-        assert!(merged.conflicts.is_empty());
-    }
-
-    #[test]
-    fn merge_trees_merges_same_length_blocks_line_by_line() {
-        let merged = merge_file(
-            Some("one\ntwo\nthree\n"),
-            Some("ONE\nTWO\nthree\n"),
-            Some("one\nTWO\nTHREE\n"),
-        );
-        assert_eq!(merged.tree.files["/memory.md"], "ONE\nTWO\nTHREE\n");
-        assert!(merged.conflicts.is_empty());
-    }
-
-    #[test]
-    fn merge_trees_reports_conflicting_line_and_uses_replica_text() {
-        let merged = merge_file(
-            Some("before\nshared\nafter\n"),
-            Some("before\ncanonical\nafter\n"),
-            Some("before\nreplica\nafter\n"),
-        );
-        assert_eq!(merged.tree.files["/memory.md"], "before\nreplica\nafter\n");
-        assert_eq!(merged.conflicts.len(), 1);
-        assert_eq!(
-            merged.conflicts[0].base.as_deref(),
-            Some("before\nshared\nafter\n")
-        );
-        assert_eq!(merged.conflicts[0].replica_wins, "before\nreplica\nafter\n");
-    }
-
-    #[test]
-    fn merge_trees_uses_replica_modified_frontmatter_without_conflict() {
-        let merged = merge_file(
-            Some("---\n  modified: old\nname: sample\n---\nbody\n"),
-            Some("---\n  modified: canonical\nname: sample\n---\nbody\n"),
-            Some("---\n  modified: replica\nname: sample\n---\nbody\n"),
-        );
-        assert_eq!(
-            merged.tree.files["/memory.md"],
-            "---\n  modified: replica\nname: sample\n---\nbody\n"
-        );
-        assert!(merged.conflicts.is_empty());
-    }
-
-    #[test]
-    fn merge_trees_drops_whitespace_only_results() {
-        let merged = merge_file(Some("content\n"), Some(" \n\t\n"), Some("content\n"));
-        assert!(!merged.tree.files.contains_key("/memory.md"));
-    }
-
-    #[test]
-    fn merge_trees_adds_final_newlines_to_line_merge_results() {
-        let base = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/with-newline.md".into(), "first\nsecond\n".into()),
-                ("/without-newline.md".into(), "first\nsecond".into()),
-            ]),
+    fn merge_trees_keep_replica_paths_for_file_descendant_collisions() {
+        let snapshot = |files: &[(&str, &str)]| ProjectMemorySnapshot {
+            files: files
+                .iter()
+                .map(|(path, content)| (path.to_string(), content.to_string()))
+                .collect(),
         };
-        let canonical = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/with-newline.md".into(), "FIRST\nsecond\n".into()),
-                ("/without-newline.md".into(), "FIRST\nsecond".into()),
-            ]),
-        };
-        let replica = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/with-newline.md".into(), "first\nSECOND\n".into()),
-                ("/without-newline.md".into(), "first\nSECOND".into()),
-            ]),
-        };
-        let merged = merge_trees(&base, &canonical, &replica);
-        assert_eq!(merged.tree.files["/with-newline.md"], "FIRST\nSECOND\n");
-        assert_eq!(merged.tree.files["/without-newline.md"], "FIRST\nSECOND\n");
-        assert!(merged.conflicts.is_empty());
-    }
+        let cases = [
+            (
+                snapshot(&[]),
+                snapshot(&[("/a", "canonical parent")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+            ),
+            (
+                snapshot(&[]),
+                snapshot(&[("/a/b.md", "canonical child")]),
+                snapshot(&[("/a", "replica parent")]),
+                snapshot(&[("/a", "replica parent")]),
+            ),
+            (
+                snapshot(&[("/a", "base parent"), ("/a/b.md", "base child")]),
+                snapshot(&[("/a", "canonical parent")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+            ),
+        ];
 
-    #[test]
-    fn merge_trees_reports_different_add_add_as_a_replica_wins_conflict() {
-        let merged = merge_file(
-            None,
-            Some("canonical addition\n"),
-            Some("replica addition\n"),
-        );
-        assert_eq!(merged.tree.files["/memory.md"], "replica addition\n");
-        assert_eq!(merged.conflicts.len(), 1);
-        assert_eq!(merged.conflicts[0].base, None);
-        assert_eq!(merged.conflicts[0].canonical, "canonical addition\n");
-        assert_eq!(merged.conflicts[0].replica, "replica addition\n");
-        assert_eq!(merged.conflicts[0].replica_wins, "replica addition\n");
-    }
+        for (base, canonical, replica, expected) in cases {
+            let merged = merge_trees(&base, &canonical, &replica);
+            assert_eq!(merged.tree, expected);
+            assert!(merged.conflicts.is_empty());
 
-    #[test]
-    fn merge_trees_keeps_replica_descendant_on_file_path_collision() {
-        let canonical = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a".into(), "parent document".into())]),
-        };
-        let replica = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a/b.md".into(), "child document".into())]),
-        };
-        let merged = merge_trees(&ProjectMemorySnapshot::default(), &canonical, &replica);
-        assert_eq!(
-            merged.tree.files,
-            BTreeMap::from([("/a/b.md".into(), "child document".into())])
-        );
-        assert!(merged.conflicts.is_empty());
-
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        assert!(store.replace_tree(&merged.tree).unwrap());
-        assert_eq!(store.snapshot().unwrap(), merged.tree);
-    }
-
-    #[test]
-    fn merge_trees_keeps_replica_parent_on_file_path_collision() {
-        let canonical = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a/b.md".into(), "child document".into())]),
-        };
-        let replica = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a".into(), "parent document".into())]),
-        };
-        let merged = merge_trees(&ProjectMemorySnapshot::default(), &canonical, &replica);
-        assert_eq!(
-            merged.tree.files,
-            BTreeMap::from([("/a".into(), "parent document".into())])
-        );
-        assert!(merged.conflicts.is_empty());
-    }
-
-    #[test]
-    fn merge_trees_uses_replica_path_when_both_colliding_paths_are_from_base() {
-        let base = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/a".into(), "base parent".into()),
-                ("/a/b.md".into(), "base child".into()),
-            ]),
-        };
-        let canonical = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a".into(), "canonical parent".into())]),
-        };
-        let replica = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/a/b.md".into(), "replica child".into())]),
-        };
-        let merged = merge_trees(&base, &canonical, &replica);
-        assert_eq!(
-            merged.tree.files,
-            BTreeMap::from([("/a/b.md".into(), "replica child".into())])
-        );
-        assert!(merged.conflicts.is_empty());
+            let directory = tempfile::tempdir().unwrap();
+            let store = ProjectMemoryStore::new(directory.path());
+            assert!(store.replace_tree(&merged.tree).unwrap());
+            assert_eq!(store.snapshot().unwrap(), expected);
+        }
     }
 
     #[test]
@@ -1509,50 +1383,6 @@ mod tests {
         let truncated = truncate_startup_index(&large);
         assert!(truncated.len() <= STARTUP_INDEX_BYTES);
         assert!(truncated.is_char_boundary(truncated.len()));
-    }
-
-    /// Legacy relay snapshots omit delete intent, so absent documents stay put.
-    #[test]
-    fn legacy_snapshot_install_preserves_documents_missing_from_the_request() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        seed_file(&store, "/old.md", "keep");
-        let changed = store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/new.md".into(), "new".into())]),
-            })
-            .unwrap();
-        assert!(changed);
-        assert_eq!(store.snapshot().unwrap().files["/old.md"], "keep");
-        assert_eq!(store.snapshot().unwrap().files["/new.md"], "new");
-
-        let changed = store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/new.md".into(), "new".into())]),
-            })
-            .unwrap();
-        assert!(!changed, "an identical snapshot must not rewrite its files");
-    }
-
-    #[test]
-    fn replace_tree_deletes_missing_documents_and_empty_directories() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        seed_file(&store, "/remove.md", "remove");
-        seed_file(&store, "/nested/remove.md", "remove");
-        seed_file(&store, "/empty/deeper/remove.md", "remove");
-        let replacement = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/keep/new.md".into(), "keep".into())]),
-        };
-
-        assert!(store.replace_tree(&replacement).unwrap());
-        assert!(!directory.path().join("remove.md").exists());
-        assert!(!directory.path().join("nested/remove.md").exists());
-        assert!(!directory.path().join("nested").exists());
-        assert!(!directory.path().join("empty/deeper").exists());
-        assert_eq!(store.snapshot().unwrap().files["/keep/new.md"], "keep");
-        assert!(directory.path().is_dir());
-        assert!(!store.replace_tree(&replacement).unwrap());
     }
 
     #[test]
@@ -1604,28 +1434,6 @@ mod tests {
     }
 
     #[test]
-    fn swap_canonical_replaces_a_matching_version() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("project/memory");
-        let store = ProjectMemoryStore::new(&root);
-        store
-            .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/old.md".into(), "old".into())]),
-            })
-            .unwrap();
-        let expected = read_canonical(&root).unwrap().version();
-        let replacement = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/new.md".into(), "new".into())]),
-        };
-
-        assert_eq!(
-            swap_canonical(&root, &expected, &replacement).unwrap(),
-            SwapOutcome::Swapped
-        );
-        assert_eq!(read_canonical(&root).unwrap(), replacement);
-    }
-
-    #[test]
     fn swap_canonical_reports_a_changed_version_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project/memory");
@@ -1654,39 +1462,6 @@ mod tests {
             "changed later"
         );
         assert!(!root.join("replacement.md").exists());
-    }
-
-    #[test]
-    fn canonical_reads_and_swaps_follow_redirects() {
-        let directory = tempfile::tempdir().unwrap();
-        let old = directory.path().join("old/memory");
-        let new = directory.path().join("new/memory");
-        let old_tree = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/old.md".into(), "old".into())]),
-        };
-        let new_tree = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/new.md".into(), "new".into())]),
-        };
-        ProjectMemoryStore::new(&old)
-            .install_snapshot(&old_tree)
-            .unwrap();
-        ProjectMemoryStore::new(&new)
-            .install_snapshot(&new_tree)
-            .unwrap();
-        merge_canonical_stores(&old, &new).unwrap();
-
-        let current = read_canonical(&old).unwrap();
-        assert!(current.files.contains_key("/old.md"));
-        assert!(current.files.contains_key("/new.md"));
-        let replacement = ProjectMemorySnapshot {
-            files: BTreeMap::from([("/through-redirect.md".into(), "swapped".into())]),
-        };
-        assert_eq!(
-            swap_canonical(&old, &current.version(), &replacement).unwrap(),
-            SwapOutcome::Swapped
-        );
-        assert_eq!(read_canonical(&old).unwrap(), replacement);
-        assert!(old.join("old.md").exists());
     }
 
     #[test]

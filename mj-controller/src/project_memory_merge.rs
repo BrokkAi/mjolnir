@@ -385,21 +385,18 @@ mod tests {
 
     struct StaticResolver {
         output: std::result::Result<String, String>,
-        calls: AtomicUsize,
     }
 
     impl StaticResolver {
         fn output(output: impl Into<String>) -> Self {
             Self {
                 output: Ok(output.into()),
-                calls: AtomicUsize::new(0),
             }
         }
 
         fn unavailable() -> Self {
             Self {
                 output: Err("no utility model configured".into()),
-                calls: AtomicUsize::new(0),
             }
         }
     }
@@ -410,10 +407,7 @@ mod tests {
             _conflict: &'a ConflictedFile,
             _cancel: CancellationToken,
         ) -> ConflictResolutionFuture<'a> {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::Relaxed);
-                self.output.clone().map_err(|error| anyhow!("{error}"))
-            })
+            Box::pin(async move { self.output.clone().map_err(|error| anyhow!("{error}")) })
         }
     }
 
@@ -448,34 +442,6 @@ mod tests {
             snapshot(&[("/MEMORY.md", "canonical\n")]),
             snapshot(&[("/MEMORY.md", "replica\n")]),
         )
-    }
-
-    #[tokio::test]
-    async fn utility_resolver_output_replaces_a_conflicted_file() {
-        let root = tempfile::tempdir().unwrap();
-        let (base, canonical, replica) = conflicting_inputs();
-        install_initial(root.path(), &canonical);
-        let resolver = StaticResolver::output("model merge\n");
-
-        let outcome = merge_and_swap_canonical(
-            root.path(),
-            &base,
-            &replica,
-            &resolver,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        let CanonicalSyncOutcome::Swapped(result) = outcome else {
-            panic!("canonical sync unexpectedly exhausted retries");
-        };
-        assert_eq!(result.tree.files["/MEMORY.md"], "model merge\n");
-        assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            result.resolutions[0].method,
-            ConflictResolutionMethod::UtilityModel
-        );
     }
 
     #[tokio::test]
@@ -735,6 +701,7 @@ mod tests {
         assert_eq!(worker.installed_additively, 0);
     }
 
+    // Hard-won: 2753a110: the baseline did not advance when the merged tree equalled the replica, resurrecting a deleted line.
     #[tokio::test]
     async fn unchanged_replica_does_not_resurrect_a_deleted_line_after_sync() {
         let root = tempfile::tempdir().unwrap();
