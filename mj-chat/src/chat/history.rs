@@ -442,6 +442,7 @@ fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ChatAction;
     use crate::chat::test_support::{ctrl, key, snapshot};
     use crate::clipboard::{ClipboardContent, ClipboardImage};
     use crossterm::event::KeyCode;
@@ -465,6 +466,27 @@ mod tests {
         }));
         assert!(!chat.input_images.is_empty());
         chat.input_images.clone()
+    }
+
+    // Hard-won: e557e89: shipped Ctrl-C did nothing, forcing users to retype abandoned prompts
+    #[test]
+    fn control_c_stashes_the_typed_prompt_into_history_and_clears_the_input() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for character in "draft prompt".chars() {
+            chat.handle_key(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
+        assert!(chat.input.is_empty());
+        assert_eq!(chat.input_cursor, 0);
+
+        // Repeated cancellation on the empty composer keeps the draft recoverable.
+        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
+        assert_eq!(chat.handle_key(ctrl('c')), ChatAction::None);
+        assert!(chat.input.is_empty());
+
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.input, "draft prompt");
     }
 
     #[test]
@@ -534,5 +556,52 @@ mod tests {
         chat.move_history(-1);
         assert_eq!(chat.input, "unrelated history prompt");
         assert!(chat.input_images.is_empty());
+    }
+
+    // Hard-won: b6b9787: this session's prompts appeared interleaved with other sessions' history
+    #[test]
+    fn move_history_walks_this_session_before_the_rest_of_the_project() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_history_context("bundle");
+        // Newest-first, with this session's prompts interleaved with another's.
+        chat.set_project_history(vec![
+            PromptHistoryEntry {
+                id: 4,
+                session_id: "other".into(),
+                text: "other newest".into(),
+            },
+            PromptHistoryEntry {
+                id: 3,
+                session_id: "1234567890".into(),
+                text: "mine newest".into(),
+            },
+            PromptHistoryEntry {
+                id: 2,
+                session_id: "other".into(),
+                text: "other oldest".into(),
+            },
+            PromptHistoryEntry {
+                id: 1,
+                session_id: "1234567890".into(),
+                text: "mine oldest".into(),
+            },
+        ]);
+        chat.record_prompt_history("this visit");
+
+        let mut recalled = Vec::new();
+        for _ in 0..5 {
+            chat.handle_key(key(KeyCode::Up));
+            recalled.push(chat.input.clone());
+        }
+        assert_eq!(
+            recalled,
+            vec![
+                "this visit",
+                "mine newest",
+                "mine oldest",
+                "other newest",
+                "other oldest",
+            ]
+        );
     }
 }

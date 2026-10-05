@@ -118,6 +118,34 @@ fn buffer_text(buffer: &Buffer) -> String {
 }
 
 #[test]
+fn an_upgrade_preserves_unsubmitted_form_answers() {
+    let request = request(
+        ElicitationFieldKind::Text {
+            default: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            format: None,
+        },
+        true,
+    );
+    let mut dialog = ElicitationDialog::new(request.clone());
+    let text = "Keep this answer 🦀 ".repeat(8_000);
+    dialog.paste(&text);
+    let encoded = serde_json::to_vec(&dialog.draft()).unwrap();
+    assert!(encoded.len() > 64 * 1024);
+    let draft = serde_json::from_slice(&encoded).unwrap();
+    let mut restored = ElicitationDialog::from_draft(request, draft).unwrap();
+    restored.focus_control(1);
+    assert_eq!(
+        restored.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Some(ElicitationResponse::Accept {
+            content: BTreeMap::from([("question_0".into(), ElicitationValue::String(text))]),
+        })
+    );
+}
+
+#[test]
 fn pane_resize_preserves_the_visible_word_inside_an_indented_paragraph() {
     for (indent, old_width, new_width) in [
         ("", 42, 62),

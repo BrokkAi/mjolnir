@@ -2708,6 +2708,33 @@ fn long_session() -> MaterializedSession {
     session
 }
 
+// Hard-won: 2b229f7: opening a long conversation blocked the event loop for seconds
+#[test]
+fn the_converted_history_completes_a_chat_opened_on_its_tail() {
+    let session = long_session();
+    let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
+    let pending = chat.unconverted_prefix();
+    assert!(pending > 0);
+    let prefix = materialized_prefix_entries(
+        &session.transcript[..pending],
+        session.applied_event_ordinal,
+    );
+
+    let rebuild = apply_chat_io_update(
+        &mut chat,
+        ChatIoUpdate::TranscriptPrefix {
+            attempt: 1,
+            result: Ok((prefix, Vec::new())),
+        },
+    );
+
+    assert_eq!(rebuild, PrefixRebuild::NotNeeded);
+    assert_eq!(chat.unconverted_prefix(), 0);
+    assert_eq!(chat.entries.len(), session.transcript.len());
+    assert_eq!(chat.entries[0].text, "message 1");
+    assert_eq!(chat.notice(), None);
+}
+
 #[test]
 fn history_that_no_longer_fits_the_tail_is_rebuilt_and_then_gives_up_with_a_notice() {
     let session = long_session();
