@@ -1388,151 +1388,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn acp_new_file_diff_counts_each_inserted_line() {
-        let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
-
-        assert_eq!(format_diffstat(&diff), "/workspace/new.txt  +2 \u{2212}0");
-    }
-
-    #[test]
-    fn terminal_exit_summary_names_signal_release_and_truncation() {
-        let record = |exit_code, signal: Option<&str>, truncated| TerminalOutputRecord {
-            terminal_id: "term-1".into(),
-            output: "out".into(),
-            truncated,
-            exit_code,
-            signal: signal.map(str::to_owned),
-        };
-
-        assert_eq!(
-            terminal_exit_summary(&record(Some(0), None, false)),
-            "exited 0"
-        );
-        assert_eq!(
-            terminal_exit_summary(&record(Some(1), None, true)),
-            "exited 1 · output truncated"
-        );
-        assert_eq!(
-            terminal_exit_summary(&record(None, Some("SIGKILL"), false)),
-            "killed by SIGKILL"
-        );
-        assert_eq!(
-            terminal_exit_summary(&record(None, None, false)),
-            "released before exit"
-        );
-
-        // A terminal that produced nothing is still worth a line: the summary
-        // is all a reader has to go on.
-        let mut silent = record(None, Some("SIGTERM"), false);
-        silent.output.clear();
-        assert_eq!(terminal_output_detail(&silent), "killed by SIGTERM");
-    }
-
-    #[test]
-    fn execute_sources_handle_shell_argv_and_ordinary_argv() {
-        let shell = ToolCall::new("shell", "Terminal")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({
-                "command": ["bash", "-lc", "cd dir && python x.py | cat"]
-            }));
-        assert_eq!(tool_call_presentation(&shell).summary, "cd && python | cat");
-
-        let argv = ToolCall::new("argv", "Execute")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": ["python", "-c", "print(1)"]}));
-        assert_eq!(tool_call_presentation(&argv).summary, "python");
-    }
-
-    #[test]
-    fn output_updates_reuse_input_command_summaries_but_changed_commands_do_not() {
-        let call = ToolCall::new("shell", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": "cargo test"}));
-        let mut output = ToolCallUpdateFields::default();
-        output.raw_output = Some(json!({"output": "x".repeat(128 * 1024)}));
-        assert!(!tool_call_update_changes_presentation(&call, &output));
-        let mut status = ToolCallUpdateFields::default();
-        status.status = Some(ToolCallStatus::Completed);
-        assert!(!tool_call_update_changes_presentation(&call, &status));
-        let mut changed = ToolCallUpdateFields::default();
-        changed.raw_input = Some(json!({"command": "cargo check"}));
-        assert!(tool_call_update_changes_presentation(&call, &changed));
-        let output_call = ToolCall::new("output", "Bash").kind(ToolKind::Execute);
-        assert!(tool_call_update_changes_presentation(&output_call, &output));
-    }
-
     fn execute_summary(command: serde_json::Value) -> String {
         let call = ToolCall::new("argv", "Bash")
             .kind(ToolKind::Execute)
             .raw_input(command);
         tool_call_presentation(&call).summary
-    }
-
-    #[test]
-    fn argv_summary_keeps_registered_command_verbs() {
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["git", "--no-pager", "status", "--short"]
-            })),
-            "git status"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["cargo", "+nightly", "test", "--package", "hel"]
-            })),
-            "cargo test"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["gh", "--hostname", "github.example", "pr", "list"]
-            })),
-            "gh pr list"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["docker", "--context", "work", "compose", "up"]
-            })),
-            "docker compose up"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["podman", "machine", "list"]
-            })),
-            "podman machine list"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["uv", "--project", "app", "pip", "install", "ruff"]
-            })),
-            "uv pip install"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["rustup", "toolchain", "list"]
-            })),
-            "rustup toolchain list"
-        );
-        assert_eq!(
-            execute_summary(json!({
-                "command": ["npm", "--prefix", "web", "run", "build"]
-            })),
-            "npm run"
-        );
-    }
-
-    #[test]
-    fn string_shell_and_argv_summaries_have_the_same_invocation_depth() {
-        let string = ToolCall::new("string", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": "git --no-pager status --short"}));
-        let argv = ToolCall::new("argv", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": ["git", "--no-pager", "status", "--short"]}));
-        assert_eq!(
-            tool_call_presentation(&string).summary,
-            tool_call_presentation(&argv).summary
-        );
     }
 
     #[test]
@@ -1544,22 +1404,6 @@ mod tests {
         assert_eq!(
             execute_summary(json!({"command": ["cargo", "--mystery", "test"]})),
             "cargo"
-        );
-    }
-
-    #[test]
-    fn non_whitelisted_commands_keep_only_the_executable() {
-        assert_eq!(
-            execute_summary(json!({"command": ["mytool", "build", "src"]})),
-            "mytool"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["mytool", "./script.sh"]})),
-            "mytool"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["python", "script.py"]})),
-            "python"
         );
     }
 
@@ -1579,77 +1423,6 @@ mod tests {
             .kind(ToolKind::Execute)
             .raw_input(json!({"command": "$command status"}));
         assert_eq!(tool_call_presentation(&dynamic_name).summary, "Bash");
-    }
-
-    #[test]
-    fn wrappers_remain_direct_invocations() {
-        assert_eq!(
-            tool_call_presentation(
-                &ToolCall::new("sudo", "Bash")
-                    .kind(ToolKind::Execute)
-                    .raw_input(json!({"command": "sudo -n git status"}))
-            )
-            .summary,
-            "sudo"
-        );
-        assert_eq!(
-            tool_call_presentation(
-                &ToolCall::new("env", "Bash")
-                    .kind(ToolKind::Execute)
-                    .raw_input(json!({"command": "env FOO=bar git status"}))
-            )
-            .summary,
-            "env"
-        );
-        assert_eq!(
-            tool_call_presentation(
-                &ToolCall::new("command", "Bash")
-                    .kind(ToolKind::Execute)
-                    .raw_input(json!({"command": "command git status"}))
-            )
-            .summary,
-            "command"
-        );
-    }
-
-    #[test]
-    fn second_verbs_require_a_registered_namespace() {
-        assert_eq!(
-            execute_summary(json!({"command": ["gh", "api", "graphql"]})),
-            "gh api"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["docker", "run", "ubuntu"]})),
-            "docker run"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["git", "future-verb"]})),
-            "git future-verb"
-        );
-    }
-
-    #[test]
-    fn known_attached_and_short_global_options_are_skipped() {
-        assert_eq!(
-            execute_summary(json!({"command": ["/usr/bin/git", "-Crepo", "status"]})),
-            "/usr/bin/git status"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["git", "-c", "core.pager=cat", "status"]})),
-            "git status"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["gh", "-Rorg/repo", "pr", "list"]})),
-            "gh pr list"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["cargo", "--color=always", "test"]})),
-            "cargo test"
-        );
-        assert_eq!(
-            execute_summary(json!({"command": ["cargo", "--config", "build.jobs=2", "test"]})),
-            "cargo test"
-        );
     }
 
     #[test]
@@ -1784,25 +1557,6 @@ mod tests {
     }
 
     #[test]
-    fn nice_summary_skips_its_known_adjustment_options() {
-        for command in [
-            vec!["nice", "-n", "10", "python3", "script.py"],
-            vec!["nice", "--adjustment", "10", "python3", "script.py"],
-            vec!["nice", "--adjustment=10", "python3", "script.py"],
-            vec!["nice", "-10", "python3", "script.py"],
-            vec!["nice", "-n10", "python3", "script.py"],
-            vec!["nice", "--", "python3", "script.py"],
-        ] {
-            assert_eq!(execute_summary(json!({"command": command})), "nice python3");
-        }
-
-        let string = ToolCall::new("nice-string", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({"command": "nice -n 10 python3 script.py"}));
-        assert_eq!(tool_call_presentation(&string).summary, "nice python3");
-    }
-
-    #[test]
     fn execute_summary_bounds_the_retained_source_before_parsing() {
         let command = format!("echo {}", "argument".repeat(TOOL_SUMMARY_SOURCE_BYTES));
         let call = ToolCall::new("bounded", "Bash")
@@ -1812,14 +1566,6 @@ mod tests {
         let presentation = tool_call_presentation(&call);
         assert_eq!(presentation.source.len(), TOOL_SUMMARY_SOURCE_BYTES);
         assert_eq!(presentation.summary, "echo");
-    }
-
-    #[test]
-    fn non_execute_titles_use_the_first_meaningful_token() {
-        let call = ToolCall::new("read", "Read src/lib.rs").kind(ToolKind::Read);
-        let presentation = tool_call_presentation(&call);
-        assert_eq!(presentation.summary, "Read");
-        assert_eq!(presentation.source_kind, ToolSummarySourceKind::Title);
     }
 
     #[test]
@@ -1875,5 +1621,304 @@ mod tests {
         );
         assert_eq!(updated.summary, "ls");
         assert_eq!(updated.source_kind, ToolSummarySourceKind::Title);
+    }
+
+    fn rendered_tool_row(call: &ToolCall) -> String {
+        let presentation = tool_call_presentation(call);
+        let item = TranscriptItem {
+            stable_id: "tool:golden".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::Tool {
+                call: serde_json::to_value(call).expect("serialize tool call"),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: Some(Box::new(presentation)),
+            },
+        };
+        transcript_item_text(&item)
+    }
+
+    fn append_tool_row(output: &mut String, label: &str, call: &ToolCall) {
+        use std::fmt::Write as _;
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} (transcript row) ===").unwrap();
+        output.push_str(&rendered_tool_row(call));
+        output.push('\n');
+    }
+
+    #[test]
+    fn golden_transcript_tool_row_summary() {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        let diff = agent_client_protocol::schema::v1::Diff::new("/workspace/new.txt", "one\ntwo\n");
+        writeln!(output, "=== new file diff detail (transcript row) ===").unwrap();
+        writeln!(output, "{}", format_diffstat(&diff)).unwrap();
+
+        let terminal = |exit_code, signal: Option<&str>, truncated, text: &str| {
+            let record = TerminalOutputRecord {
+                terminal_id: "term-1".into(),
+                output: text.into(),
+                truncated,
+                exit_code,
+                signal: signal.map(str::to_owned),
+            };
+            let item = TranscriptItem {
+                stable_id: "terminal:golden".into(),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1,
+                last_changed_at_ms: 1,
+                body: TranscriptBody::TerminalOutput { record },
+            };
+            transcript_item_text(&item)
+        };
+        for (label, row) in [
+            ("successful terminal", terminal(Some(0), None, false, "out")),
+            ("truncated terminal", terminal(Some(1), None, true, "out")),
+            (
+                "signal termination",
+                terminal(None, Some("SIGKILL"), false, "out"),
+            ),
+            ("released terminal", terminal(None, None, false, "out")),
+            (
+                "silent signal termination",
+                terminal(None, Some("SIGTERM"), false, ""),
+            ),
+        ] {
+            writeln!(output, "\n=== {label} (transcript row) ===\n{row}").unwrap();
+        }
+
+        append_tool_row(
+            &mut output,
+            "shell command",
+            &ToolCall::new("shell", "Terminal")
+                .kind(ToolKind::Execute)
+                .raw_input(json!({
+                    "command": ["bash", "-lc", "cd dir && python x.py | cat"]
+                })),
+        );
+        append_tool_row(
+            &mut output,
+            "ordinary argv command",
+            &ToolCall::new("argv", "Execute")
+                .kind(ToolKind::Execute)
+                .raw_input(json!({"command": ["python", "-c", "print(1)"]})),
+        );
+
+        let update_call = ToolCall::new("shell", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "cargo test"}));
+        let original = tool_call_presentation(&update_call);
+        let mut output_update = ToolCallUpdateFields::default();
+        output_update.raw_output = Some(json!({"output": "x".repeat(128 * 1024)}));
+        writeln!(output, "\n=== output-only update (transcript row) ===").unwrap();
+        writeln!(
+            output,
+            "presentation changed: {}",
+            tool_call_update_changes_presentation(&update_call, &output_update)
+        )
+        .unwrap();
+        writeln!(output, "{}", original.summary).unwrap();
+        let mut status_update = ToolCallUpdateFields::default();
+        status_update.status = Some(ToolCallStatus::Completed);
+        writeln!(
+            output,
+            "status-only update changes presentation: {}",
+            tool_call_update_changes_presentation(&update_call, &status_update)
+        )
+        .unwrap();
+        let output_call = ToolCall::new("output", "Bash").kind(ToolKind::Execute);
+        writeln!(
+            output,
+            "output-only call changes presentation: {}",
+            tool_call_update_changes_presentation(&output_call, &output_update)
+        )
+        .unwrap();
+        let changed_input = json!({"command": "cargo check"});
+        let mut input_update = ToolCallUpdateFields::default();
+        input_update.raw_input = Some(changed_input.clone());
+        writeln!(
+            output,
+            "changed command presentation: {}",
+            tool_call_update_changes_presentation(&update_call, &input_update)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "updated row: {}",
+            update_tool_call_presentation(
+                Some(&original),
+                "Bash",
+                Some(ToolKind::Execute),
+                Some(&changed_input),
+                None,
+            )
+            .summary
+        )
+        .unwrap();
+
+        for (label, command) in [
+            (
+                "git registered verb",
+                json!({"command": ["git", "--no-pager", "status", "--short"]}),
+            ),
+            (
+                "cargo registered verb",
+                json!({"command": ["cargo", "+nightly", "test", "--package", "hel"]}),
+            ),
+            (
+                "gh registered namespace",
+                json!({"command": ["gh", "--hostname", "github.example", "pr", "list"]}),
+            ),
+            (
+                "docker registered namespace",
+                json!({"command": ["docker", "--context", "work", "compose", "up"]}),
+            ),
+            (
+                "podman registered namespace",
+                json!({"command": ["podman", "machine", "list"]}),
+            ),
+            (
+                "uv registered namespace",
+                json!({"command": ["uv", "--project", "app", "pip", "install", "ruff"]}),
+            ),
+            (
+                "rustup registered namespace",
+                json!({"command": ["rustup", "toolchain", "list"]}),
+            ),
+            (
+                "npm registered namespace",
+                json!({"command": ["npm", "--prefix", "web", "run", "build"]}),
+            ),
+        ] {
+            append_tool_row(
+                &mut output,
+                label,
+                &ToolCall::new("argv", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(command),
+            );
+        }
+
+        let shell = ToolCall::new("string", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": "git --no-pager status --short"}));
+        let argv = ToolCall::new("argv", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({"command": ["git", "--no-pager", "status", "--short"]}));
+        writeln!(
+            output,
+            "\n=== shell and argv invocation depth (transcript rows) ==="
+        )
+        .unwrap();
+        writeln!(output, "shell: {}", rendered_tool_row(&shell)).unwrap();
+        writeln!(output, "argv: {}", rendered_tool_row(&argv)).unwrap();
+
+        for (label, command) in [
+            ("sudo wrapper", "sudo -n git status"),
+            ("env wrapper", "env FOO=bar git status"),
+            ("command wrapper", "command git status"),
+        ] {
+            append_tool_row(
+                &mut output,
+                label,
+                &ToolCall::new("wrapper", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": command})),
+            );
+        }
+
+        for (label, command) in [
+            (
+                "unlisted build tool",
+                json!({"command": ["mytool", "build", "src"]}),
+            ),
+            (
+                "unlisted script",
+                json!({"command": ["mytool", "./script.sh"]}),
+            ),
+            ("python script", json!({"command": ["python", "script.py"]})),
+            (
+                "gh API namespace",
+                json!({"command": ["gh", "api", "graphql"]}),
+            ),
+            (
+                "docker run namespace",
+                json!({"command": ["docker", "run", "ubuntu"]}),
+            ),
+            (
+                "registered future git verb",
+                json!({"command": ["git", "future-verb"]}),
+            ),
+            (
+                "absolute git with attached directory",
+                json!({"command": ["/usr/bin/git", "-Crepo", "status"]}),
+            ),
+            (
+                "git short global option",
+                json!({"command": ["git", "-c", "core.pager=cat", "status"]}),
+            ),
+            (
+                "gh attached repository option",
+                json!({"command": ["gh", "-Rorg/repo", "pr", "list"]}),
+            ),
+            (
+                "cargo color option",
+                json!({"command": ["cargo", "--color=always", "test"]}),
+            ),
+            (
+                "cargo config option",
+                json!({"command": ["cargo", "--config", "build.jobs=2", "test"]}),
+            ),
+        ] {
+            append_tool_row(
+                &mut output,
+                label,
+                &ToolCall::new("argv", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(command),
+            );
+        }
+
+        for command in [
+            vec!["nice", "-n", "10", "python3", "script.py"],
+            vec!["nice", "--adjustment", "10", "python3", "script.py"],
+            vec!["nice", "--adjustment=10", "python3", "script.py"],
+            vec!["nice", "-10", "python3", "script.py"],
+            vec!["nice", "-n10", "python3", "script.py"],
+            vec!["nice", "--", "python3", "script.py"],
+        ] {
+            append_tool_row(
+                &mut output,
+                "nice command options",
+                &ToolCall::new("nice", "Bash")
+                    .kind(ToolKind::Execute)
+                    .raw_input(json!({"command": command})),
+            );
+        }
+        append_tool_row(
+            &mut output,
+            "nice shell command",
+            &ToolCall::new("nice-shell", "Bash")
+                .kind(ToolKind::Execute)
+                .raw_input(json!({"command": "nice -n 10 python3 script.py"})),
+        );
+        append_tool_row(
+            &mut output,
+            "non-execute tool title",
+            &ToolCall::new("read", "Read src/lib.rs").kind(ToolKind::Read),
+        );
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "transcript-tool-row-summary",
+            &output,
+        );
     }
 }

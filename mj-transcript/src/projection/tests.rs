@@ -31,6 +31,191 @@ fn apply_observation(session: &mut MaterializedSession, observation: RelayObserv
     apply(session, next);
 }
 
+fn rendered_materialized_transcript(session: &MaterializedSession) -> String {
+    let title = session
+        .resolved_title()
+        .unwrap_or_else(|| session.session_id.clone());
+    let rows = session
+        .transcript
+        .iter()
+        .map(|item| {
+            format!(
+                "{}: {}",
+                item.position,
+                crate::transcript::transcript_item_text(item)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Session: {title}\n{rows}")
+}
+
+fn append_transcript_state(output: &mut String, label: &str, session: &MaterializedSession) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} (session transcript) ===").unwrap();
+    output.push_str(&rendered_materialized_transcript(session));
+    output.push('\n');
+}
+
+#[test]
+fn golden_plan_proposal_transcript() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    let mut session = MaterializedSession::empty("session-1");
+    let request = mj_core::acp::normalized_plan_review(
+        "plan-review-3".into(),
+        &serde_json::json!({ "plan": "1. Read the code\n2. Change it" }),
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationRequested {
+            request: request.clone(),
+        },
+    );
+    append_transcript_state(&mut output, "decision pending", &session);
+    writeln!(
+        output,
+        "pending decisions: {}",
+        session.pending_elicitations.len()
+    )
+    .unwrap();
+
+    apply_observation(
+        &mut session,
+        RelayObservation::ElicitationResolved {
+            elicitation_id: "plan-review-3".into(),
+            action: "accept".into(),
+        },
+    );
+    append_transcript_state(&mut output, "proposal remains after accepting", &session);
+    writeln!(
+        output,
+        "pending decisions: {}",
+        session.pending_elicitations.len()
+    )
+    .unwrap();
+
+    let mut conversation = MaterializedSession::empty("session-1");
+    apply_observation(&mut conversation, untagged_agent_chunk("here is my plan"));
+    apply_observation(
+        &mut conversation,
+        RelayObservation::ElicitationRequested {
+            request: mj_core::acp::normalized_plan_review(
+                "plan-review-1".into(),
+                &serde_json::json!({ "plan": "do the work" }),
+            ),
+        },
+    );
+    apply_observation(&mut conversation, untagged_agent_chunk("starting now"));
+    append_transcript_state(
+        &mut output,
+        "proposal stays between its conversation",
+        &conversation,
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "plan-proposal-transcript",
+        &output,
+    );
+}
+
+#[test]
+fn golden_session_title_projection() {
+    let mut output = String::new();
+
+    let mut provisional = MaterializedSession::empty("session-1");
+    apply_observation(
+        &mut provisional,
+        RelayObservation::CommandQueued {
+            command_id: "prompt-1".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new(
+                    "  fix the flaky\nresume test  ",
+                ))],
+            },
+            created_at_ms: 100,
+        },
+    );
+    append_transcript_state(
+        &mut output,
+        "first prompt supplies provisional title",
+        &provisional,
+    );
+
+    let mut titled = MaterializedSession::empty("session-1");
+    for (command_id, text, created_at_ms) in [
+        ("prompt-1", "first prompt", 100),
+        ("prompt-2", "second prompt", 200),
+    ] {
+        apply_observation(
+            &mut titled,
+            RelayObservation::CommandQueued {
+                command_id: command_id.into(),
+                command: RelayCommand::Prompt {
+                    prompt: vec![ContentBlock::Text(TextContent::new(text))],
+                },
+                created_at_ms,
+            },
+        );
+    }
+    apply_observation(
+        &mut titled,
+        RelayObservation::SessionUpdate {
+            update: Box::new(SessionUpdate::SessionInfoUpdate(
+                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
+                    .title("Agent-generated title"),
+            )),
+        },
+    );
+    append_transcript_state(
+        &mut output,
+        "harness title replaces provisional title",
+        &titled,
+    );
+
+    let mut backfilled = MaterializedSession::empty("session-1");
+    backfilled.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "user:prompt-1".into(),
+        position: 1,
+        latest_content_event_ordinal: None,
+        created_at_ms: 100,
+        last_changed_at_ms: 100,
+        body: TranscriptBody::User {
+            content: vec![
+                serde_json::to_value(ContentBlock::Text(TextContent::new("original task")))
+                    .unwrap(),
+            ],
+        },
+    }));
+    apply_observation(
+        &mut backfilled,
+        RelayObservation::CommandQueued {
+            command_id: "prompt-2".into(),
+            command: RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("follow-up task"))],
+            },
+            created_at_ms: 200,
+        },
+    );
+    append_transcript_state(
+        &mut output,
+        "first existing prompt backfills title",
+        &backfilled,
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "session-title-projection",
+        &output,
+    );
+}
+
 // Hard-won: 60145fdb: leaving Claude Plan mode selected default Manual permissions instead of the saved policy.
 #[test]
 fn execution_mode_restoration_reports_durable_success_and_failure_to_clients() {
@@ -897,73 +1082,6 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
     assert!(prompted.last_turn_outcome.is_none());
 }
 
-#[test]
-fn a_plan_decision_also_becomes_a_durable_proposal_item() {
-    let mut session = MaterializedSession::empty("session-1");
-    let plan = "1. Read the code\n2. Change it";
-    let request = mj_core::acp::normalized_plan_review(
-        "plan-review-3".into(),
-        &serde_json::json!({ "plan": plan }),
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::ElicitationRequested {
-            request: request.clone(),
-        },
-    );
-
-    assert_eq!(session.pending_elicitations, vec![request]);
-    assert_eq!(session.transcript.len(), 1);
-    let item = &session.transcript[0];
-    assert_eq!(item.stable_id, plan_proposal_item_id(1));
-    assert_eq!(item.position, 1);
-    assert_eq!(
-        item.body,
-        TranscriptBody::PlanProposal {
-            proposal_id: "plan-review-3".into(),
-            plan: plan.into(),
-        }
-    );
-
-    // Answering the decision retires the dialog, not the record of it.
-    apply_observation(
-        &mut session,
-        RelayObservation::ElicitationResolved {
-            elicitation_id: "plan-review-3".into(),
-            action: "accept".into(),
-        },
-    );
-    assert!(session.pending_elicitations.is_empty());
-    assert_eq!(session.transcript.len(), 1);
-}
-
-#[test]
-fn a_captured_proposal_keeps_its_place_after_the_conversation_that_produced_it() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, untagged_agent_chunk("here is my plan"));
-    apply_observation(
-        &mut session,
-        RelayObservation::ElicitationRequested {
-            request: mj_core::acp::normalized_plan_review(
-                "plan-review-1".into(),
-                &serde_json::json!({ "plan": "do the work" }),
-            ),
-        },
-    );
-    apply_observation(&mut session, untagged_agent_chunk("starting now"));
-
-    let bodies = session
-        .transcript
-        .iter()
-        .map(|item| match &item.body {
-            TranscriptBody::Agent { .. } => "agent",
-            TranscriptBody::PlanProposal { .. } => "proposal",
-            _ => "other",
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(bodies, vec!["agent", "proposal", "agent"]);
-}
-
 /// An agent message chunk with no `message_id`, as Grok Build's goal mode streams them.
 fn untagged_agent_chunk(text: &str) -> RelayObservation {
     RelayObservation::SessionUpdate {
@@ -1715,28 +1833,6 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
 }
 
 #[test]
-fn first_queued_prompt_seeds_a_provisional_session_title() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-1".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::Text(TextContent::new(
-                    "  fix the flaky\nresume test  ",
-                ))],
-            },
-            created_at_ms: 100,
-        },
-    );
-
-    assert_eq!(
-        session.session_title.as_deref(),
-        Some("fix the flaky resume test")
-    );
-}
-
-#[test]
 fn session_info_update_caps_large_titles_in_the_published_projection() {
     let mut session = MaterializedSession::empty("session-1");
     apply_observation(
@@ -1753,47 +1849,6 @@ fn session_info_update_caps_large_titles_in_the_published_projection() {
     assert_eq!(session.session_title.as_deref(), Some(expected.as_str()));
     assert_eq!(session.resolved_title().as_deref(), Some(expected.as_str()));
     assert!(serde_json::to_string(&session).unwrap().len() < 10_000);
-}
-
-#[test]
-fn harness_title_replaces_the_provisional_title() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-1".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::Text(TextContent::new("first prompt"))],
-            },
-            created_at_ms: 100,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-2".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::Text(TextContent::new("second prompt"))],
-            },
-            created_at_ms: 200,
-        },
-    );
-    assert_eq!(session.session_title.as_deref(), Some("first prompt"));
-
-    apply_observation(
-        &mut session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
-                    .title("Agent-generated title"),
-            )),
-        },
-    );
-
-    assert_eq!(
-        session.session_title.as_deref(),
-        Some("Agent-generated title")
-    );
 }
 
 #[test]
@@ -1848,38 +1903,6 @@ fn explicit_session_title_clear_restores_the_prompt_fallback() {
 
     assert_eq!(session.session_title, None);
     assert_eq!(session.resolved_title().as_deref(), Some("first prompt"));
-}
-
-#[test]
-fn next_prompt_backfills_an_existing_untitled_session_from_its_first_prompt() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.transcript.push(Arc::new(TranscriptItem {
-        stable_id: "user:prompt-1".into(),
-        position: 1,
-        latest_content_event_ordinal: None,
-        created_at_ms: 100,
-        last_changed_at_ms: 100,
-        body: TranscriptBody::User {
-            content: vec![
-                serde_json::to_value(ContentBlock::Text(TextContent::new("original task")))
-                    .unwrap(),
-            ],
-        },
-    }));
-    assert_eq!(session.resolved_title().as_deref(), Some("original task"));
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-2".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::Text(TextContent::new("follow-up task"))],
-            },
-            created_at_ms: 200,
-        },
-    );
-
-    assert_eq!(session.session_title.as_deref(), Some("original task"));
 }
 
 #[test]

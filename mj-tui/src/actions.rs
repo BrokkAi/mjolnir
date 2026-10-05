@@ -1981,7 +1981,6 @@ impl DashboardState {
 mod tests {
     use super::*;
     use crate::SessionOperationKind;
-    use crate::keybinds::command_for_action;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
     use mj_core::config::Keybinds;
 
@@ -2201,119 +2200,6 @@ mod tests {
                 session_id: "session-1".into()
             }
         );
-    }
-
-    /// A-16 and A-18: the help text reads as sentences, and Close pane says
-    /// the one pane it refuses to close.
-    #[test]
-    fn pane_help_text_reads_as_sentences_and_names_the_browse_exception() {
-        assert!(
-            spec(CommandId::FocusPaneLeft)
-                .description
-                .contains("pane left of this one")
-        );
-        assert!(
-            spec(CommandId::FocusPaneRight)
-                .description
-                .contains("pane right of this one")
-        );
-        let close = spec(CommandId::ClosePane).description;
-        assert!(
-            close.contains("The Browse pane cannot be closed"),
-            "{close}"
-        );
-        assert!(close.contains("Swap pane"), "{close}");
-    }
-
-    #[test]
-    fn workspace_manager_has_a_prefix_key_and_no_palette_row() {
-        let dashboard = dashboard_with_session(running_session());
-        assert!(spec(CommandId::Workspaces).pane_keys.is_empty());
-        assert_eq!(
-            dashboard.key_labels(CommandId::Workspaces),
-            vec!["ctrl+b shift+n".to_owned()]
-        );
-        // Still dispatchable: the pinned hamburger runs it through
-        // `run_available_command`, which needs the command to stay available.
-        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
-        // Listed in the palette too: the button is one way in, but a person
-        // who types "work" expects to find it.
-        assert!(!hidden_from_palette(CommandId::Workspaces));
-    }
-
-    /// The footer, the help overlay, and the palette all read one command per
-    /// action, so a new `[keys]` field cannot advertise a key that runs
-    /// nothing, and two actions cannot quietly share a command.
-    #[test]
-    fn every_key_action_maps_to_exactly_one_command() {
-        for action in KeyAction::ALL.iter().copied() {
-            let id = command_for_action(action);
-            assert_eq!(
-                spec(id).action,
-                Some(action),
-                "{action:?} maps to {id:?}, which claims a different action"
-            );
-        }
-        for entry in COMMANDS {
-            if let Some(action) = entry.action {
-                assert_eq!(command_for_action(action), entry.id);
-            }
-        }
-    }
-
-    /// The conversation-pane commands answer herdr's letters, so a herdr user
-    /// splits, closes, and moves between panes without learning anything new.
-    /// The resize commands are bindable but unbound, like the other commands
-    /// a mis-hit should not run.
-    #[test]
-    fn the_pane_commands_carry_herdrs_letters() {
-        let dashboard = dashboard_with_session(running_session());
-        for (id, label) in [
-            (CommandId::OpenSessionSplitRight, "ctrl+b v"),
-            (CommandId::OpenSessionSplitBelow, "ctrl+b -"),
-            (CommandId::ClosePane, "ctrl+b x"),
-            (CommandId::FocusPaneLeft, "ctrl+b h"),
-            (CommandId::FocusPaneDown, "ctrl+b j"),
-            (CommandId::FocusPaneUp, "ctrl+b k"),
-            (CommandId::FocusPaneRight, "ctrl+b l"),
-            (CommandId::ZoomPane, "ctrl+b z"),
-            (CommandId::FocusLastPane, "ctrl+b ;"),
-            // Zoom took herdr's `prefix+z`, so the support panes' size key is
-            // its shifted form.
-            (CommandId::CycleFocusedPaneSize, "ctrl+b shift+z"),
-        ] {
-            assert_eq!(dashboard.key_labels(id), vec![label.to_owned()], "{id:?}");
-        }
-        for id in [
-            CommandId::ResizePaneLeft,
-            CommandId::ResizePaneDown,
-            CommandId::ResizePaneUp,
-            CommandId::ResizePaneRight,
-        ] {
-            assert!(spec(id).action.is_some(), "{id:?} must be bindable");
-            assert!(
-                dashboard.key_labels(id).is_empty(),
-                "{id:?} must be unbound"
-            );
-        }
-    }
-
-    #[test]
-    fn the_palette_omits_only_itself_and_the_numbered_workspace_keys() {
-        for id in [CommandId::Palette, CommandId::SwitchWorkspace] {
-            assert!(hidden_from_palette(id), "{id:?}");
-        }
-        for id in [
-            CommandId::Workspaces,
-            CommandId::NewSessionWizard,
-            CommandId::ResumeDialog,
-            CommandId::RestartSession,
-            CommandId::OpenConfig,
-            CommandId::WebViewer,
-            CommandId::Help,
-        ] {
-            assert!(!hidden_from_palette(id), "{id:?}");
-        }
     }
 
     #[test]

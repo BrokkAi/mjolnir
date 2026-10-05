@@ -4,7 +4,6 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::layout::Position;
 
 use mj_core::state::SessionState;
 
@@ -124,17 +123,6 @@ fn launch_failure_scrolls_long_details_and_restores_interrupted_dialog() {
     assert_eq!(dashboard.mode, previous);
 }
 
-#[test]
-fn web_qr_has_a_four_module_quiet_zone() {
-    let qr = render_qr("https://example.test/auth/login?token=secret").unwrap();
-    let lines = qr.lines().collect::<Vec<_>>();
-    assert!(lines.len() > 4);
-    assert!(lines[0].chars().all(|character| character == ' '));
-    assert!(lines[1].chars().all(|character| character == ' '));
-    assert!(lines.iter().all(|line| line.starts_with("    ")));
-    assert!(lines.iter().all(|line| line.ends_with("    ")));
-}
-
 fn draw_web_dialog(dialog: &WebDialog, width: u16, height: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
@@ -144,57 +132,6 @@ fn draw_web_dialog(dialog: &WebDialog, width: u16, height: u16) -> Vec<String> {
         })
         .expect("draw web dialog");
     buffer_lines(terminal.backend().buffer())
-}
-
-#[test]
-fn web_dialog_without_a_qr_keeps_access_details_and_close_readable() {
-    let mut dialog = WebDialog::loading();
-    dialog.loading = false;
-    dialog.viewer_url = Some("http://127.0.0.1:37650".to_owned());
-    dialog.viewer_code = Some("022160".to_owned());
-    dialog.fallback_reason = Some("automatic Tailscale detection is disabled".to_owned());
-    let rendered = draw_web_dialog(&dialog, 140, 40).join("\n");
-    assert!(rendered.contains("Web viewer"));
-    assert!(rendered.contains("http://127.0.0.1:37650"));
-    assert!(rendered.contains("Viewer code: 022160"));
-    assert!(rendered.contains("× Web viewer"));
-}
-
-#[test]
-fn web_dialog_wraps_a_long_url_without_truncating_it() {
-    // A URL wider than the QR must wrap within the box, not get cut off.
-    let url = "https://a-very-long-machine-name.some-tailnet.ts.net:37650/viewer";
-    let dialog = WebDialog {
-        loading: false,
-        viewer_url: Some(url.to_owned()),
-        viewer_code: Some("022160".to_owned()),
-        fallback_reason: None,
-        message: None,
-        qr: Some(render_qr(url).unwrap()),
-        ..WebDialog::loading()
-    };
-
-    let rendered = draw_web_dialog(&dialog, 60, 40);
-
-    // Every box row fits the terminal, so the dialog never overflows.
-    assert!(rendered.iter().all(|line| line.chars().count() <= 60));
-    // The URL survives in full once the border padding is stripped away.
-    // Drop whitespace and the box border so the URL's wrapped halves sit
-    // adjacent, then confirm none of its characters were lost.
-    let flat = rendered
-        .join("")
-        .chars()
-        .filter(|character| !character.is_whitespace() && *character != '│')
-        .collect::<String>();
-    assert!(
-        flat.contains(url),
-        "the full URL should appear (wrapped) in the dialog"
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("Viewer code: 022160"))
-    );
 }
 
 fn failed_web_dashboard() -> DashboardState {
@@ -218,29 +155,6 @@ fn activate_web(dashboard: &mut DashboardState, control: DialogControl) -> Dashb
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         dialog,
     )
-}
-
-#[test]
-fn web_port_conflict_offers_recovery_and_keeps_the_address_and_dismiss_visible() {
-    let dashboard = failed_web_dashboard();
-    let Mode::Web(dialog) = &dashboard.mode else {
-        unreachable!()
-    };
-    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
-        let rendered = draw_web_dialog(dialog, width, height);
-        let text = rendered.join("\n");
-        assert!(text.contains("Port 37650 is already in use."));
-        assert!(text.contains("Address: 127.0.0.1:37650"));
-        assert!(text.contains("  Use another port  "));
-        assert!(text.contains("  Inspect port  "));
-        assert!(text.contains("  Retry  "));
-        assert!(text.contains("× Web viewer"));
-        assert!(
-            rendered
-                .iter()
-                .all(|line| line.trim().chars().count() <= 62)
-        );
-    }
 }
 
 #[test]
@@ -380,35 +294,6 @@ fn an_unrelated_listener_has_no_enabled_stop_action() {
         unreachable!()
     };
     assert!(dialog.confirm_stop.is_none());
-}
-
-#[test]
-fn the_container_editor_names_the_build_cache_the_session_was_given() {
-    let mut session = running_session();
-    session.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "ssh:morannon".into(),
-        directory: PathBuf::from("/mnt/nvme/mbx"),
-        max_size: Some("1000GB".into()),
-        target_root: None,
-    });
-    let mut dashboard = dashboard_with_session(session);
-    open_container_editor(&mut dashboard);
-    let shown = drawn(&mut dashboard, 120, 40).join("\n");
-    assert!(
-        shown.contains("Build cache") && shown.contains("/mnt/nvme/mbx"),
-        "the session names the cache its container mounts:\n{shown}"
-    );
-}
-
-#[test]
-fn the_container_editor_says_when_a_session_has_no_build_cache() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open_container_editor(&mut dashboard);
-    let shown = drawn(&mut dashboard, 120, 40).join("\n");
-    assert!(
-        shown.contains("none for this session"),
-        "a session without a cache says so:\n{shown}"
-    );
 }
 
 /// Launch finding R3-11 (with J-24): the container editor named the session
@@ -573,19 +458,6 @@ fn container_editor_edits_a_listed_mount_in_place() {
 }
 
 #[test]
-fn container_editor_says_when_the_change_takes_effect() {
-    let mut dashboard = dashboard_with_container_session();
-    open_container_editor(&mut dashboard);
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw editor");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("Applies when the container is next recreated"));
-    assert!(rendered.contains("/srv/data"));
-}
-
-#[test]
 fn focused_text_fields_own_readline_keys_and_control_c_cancels() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.begin_rename();
@@ -684,32 +556,6 @@ fn import_safety_defaults_to_ignoring_untracked_files_and_can_include_them() {
             include_untracked: true,
         }
     );
-}
-
-#[test]
-fn import_safety_lists_scratch_repositories_left_out_of_the_workspace() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_import_bundle_confirmation(
-        Vec::new(),
-        Vec::new(),
-        vec!["/tmp/claude-1000/scratch".into()],
-        false,
-        Default::default(),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw safety warning");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(rendered.contains("temporary directories"), "{rendered}");
-    assert!(rendered.contains("/tmp/claude-1000/scratch"), "{rendered}");
 }
 
 #[test]
@@ -935,8 +781,215 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
 }
 
+fn append_dialog_render(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    lines: &[String],
+) {
+    use std::fmt::Write as _;
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").unwrap();
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+}
+
 #[test]
-fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
+fn golden_tui_web_viewer_dialog() {
+    let mut output = String::new();
+    let url = "https://example.test/auth/login?token=secret";
+    let qr = render_qr(url).expect("QR code");
+    let qr_rows = qr
+        .lines()
+        .map(|line| {
+            line.chars()
+                .map(|character| if character == ' ' { '·' } else { character })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    append_dialog_render(
+        &mut output,
+        "QR module map; · marks a light module",
+        qr_rows.first().map_or(0, |row| row.chars().count()) as u16,
+        qr_rows.len() as u16,
+        &qr_rows,
+    );
+
+    let no_qr = WebDialog {
+        loading: false,
+        viewer_url: Some("http://127.0.0.1:37650".to_owned()),
+        viewer_code: Some("022160".to_owned()),
+        fallback_reason: Some("automatic Tailscale detection is disabled".to_owned()),
+        ..WebDialog::loading()
+    };
+    append_dialog_render(
+        &mut output,
+        "access details without QR",
+        140,
+        40,
+        &draw_web_dialog(&no_qr, 140, 40),
+    );
+
+    let long_url = "https://a-very-long-machine-name.some-tailnet.ts.net:37650/viewer";
+    let wrapped = WebDialog {
+        loading: false,
+        viewer_url: Some(long_url.to_owned()),
+        viewer_code: Some("022160".to_owned()),
+        fallback_reason: None,
+        message: None,
+        qr: Some(render_qr(long_url).unwrap()),
+        ..WebDialog::loading()
+    };
+    append_dialog_render(
+        &mut output,
+        "long URL wrapped with QR",
+        60,
+        40,
+        &draw_web_dialog(&wrapped, 60, 40),
+    );
+
+    let conflict = failed_web_dashboard();
+    let Mode::Web(dialog) = &conflict.mode else {
+        unreachable!()
+    };
+    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+        append_dialog_render(
+            &mut output,
+            "port conflict and recovery actions",
+            width,
+            height,
+            &draw_web_dialog(dialog, width, height),
+        );
+    }
+
+    let output = output.trim_end_matches('\n');
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "tui-web-viewer-dialog", output);
+}
+
+#[test]
+fn golden_tui_container_editor_details() {
+    let mut output = String::new();
+
+    let mut cached_session = running_session();
+    cached_session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "ssh:morannon".into(),
+        directory: PathBuf::from("/mnt/nvme/mbx"),
+        max_size: Some("1000GB".into()),
+        target_root: None,
+    });
+    let mut cached = dashboard_with_session(cached_session);
+    open_container_editor(&mut cached);
+    append_dialog_render(
+        &mut output,
+        "session build cache",
+        120,
+        40,
+        &drawn(&mut cached, 120, 40),
+    );
+
+    let mut uncached = dashboard_with_session(running_session());
+    open_container_editor(&mut uncached);
+    append_dialog_render(
+        &mut output,
+        "session without build cache",
+        120,
+        40,
+        &drawn(&mut uncached, 120, 40),
+    );
+
+    let mut mounted = dashboard_with_container_session();
+    open_container_editor(&mut mounted);
+    append_dialog_render(
+        &mut output,
+        "mount change takes effect on recreation",
+        100,
+        40,
+        &drawn(&mut mounted, 100, 40),
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-container-editor-details",
+        &output,
+    );
+}
+
+#[test]
+fn golden_tui_import_confirmation() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.show_import_bundle_confirmation(
+        Vec::new(),
+        Vec::new(),
+        vec!["/tmp/mj-golden-scratch".into()],
+        false,
+        Default::default(),
+    );
+    let lines = drawn(&mut dashboard, 120, 30);
+    let mut output = String::new();
+    append_dialog_render(
+        &mut output,
+        "scratch repository excluded from workspace",
+        120,
+        30,
+        &lines,
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-import-confirmation",
+        &output,
+    );
+}
+
+#[test]
+fn golden_tui_checkpoint_origin_dialog() {
+    use std::fmt::Write as _;
+
+    fn append_state(
+        output: &mut String,
+        label: &str,
+        terminal: &mut Terminal<TestBackend>,
+        width: u16,
+        height: u16,
+    ) {
+        let cursor = terminal.get_cursor_position().expect("source cursor");
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        append_dialog_render(output, label, width, height, &lines);
+
+        let source_row = lines
+            .iter()
+            .position(|line| line.contains("Source:"))
+            .expect("source field row");
+        let field_x = buffer.area.x + cell_column(&lines[source_row], "Source:") + 8;
+        let source_y = buffer.area.y + source_row as u16;
+        let source_focused = Some(buffer[(field_x, source_y)].bg) == theme::field(true).bg;
+        let button_row = lines
+            .iter()
+            .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
+            .expect("origin action row");
+        let button_y = buffer.area.y + button_row as u16;
+        let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
+        let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
+        let buttons_selected = buffer[(cancel_x, button_y)].bg == theme::palette().selection
+            && buffer[(check_x, button_y)].bg == theme::palette().selection;
+        if source_focused {
+            writeln!(output, "cursor: ({}, {})", cursor.x, cursor.y).unwrap();
+        } else {
+            writeln!(output, "cursor: hidden").unwrap();
+        }
+        writeln!(output, "source field focused: {source_focused}").unwrap();
+        writeln!(output, "both actions selected: {buttons_selected}").unwrap();
+        writeln!(
+            output,
+            "Cancel action focused: {}",
+            buffer[(cancel_x, button_y)].bg == theme::palette().accent
+        )
+        .unwrap();
+    }
+
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.show_repository_origin_dialog(
         "session-1".into(),
@@ -946,59 +999,36 @@ fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
         "BrokkAi/bifrost-dev".into(),
         DashboardAction::None,
     );
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw repository origin dialog");
-
-    let cursor_position = terminal.get_cursor_position().expect("source cursor");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let source_row = lines
-        .iter()
-        .position(|line| line.contains("Source:"))
-        .expect("focused source field");
-    let source_y = buffer.area.y + source_row as u16;
-    let source_x = buffer.area.x + cell_column(&lines[source_row], "Source:");
-    let field_x = source_x + 8;
-    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(true).bg);
-    assert_eq!(
-        cursor_position,
-        Position {
-            x: field_x,
-            y: source_y,
-        }
+        .unwrap();
+    let mut output = String::new();
+    append_state(
+        &mut output,
+        "focused replacement source",
+        &mut terminal,
+        100,
+        24,
     );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Type or paste into Source"))
-    );
-
-    let button_row = lines
-        .iter()
-        .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
-        .expect("button row");
-    let button_y = buffer.area.y + button_row as u16;
-    let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-    let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-    assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().selection);
-    assert_eq!(buffer[(check_x, button_y)].bg, theme::palette().selection);
 
     dashboard.handle_key(key(KeyCode::Tab));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw repository origin dialog with cancel focused");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let button_row = lines
-        .iter()
-        .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
-        .expect("button row");
-    let button_y = buffer.area.y + button_row as u16;
-    let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-    assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().accent);
-    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(false).bg);
+        .unwrap();
+    append_state(
+        &mut output,
+        "focus moves to origin actions",
+        &mut terminal,
+        100,
+        24,
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-checkpoint-origin-dialog",
+        &output,
+    );
 }
 
 #[test]

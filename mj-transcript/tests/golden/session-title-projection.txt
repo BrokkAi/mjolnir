@@ -1,0 +1,11 @@
+=== first prompt supplies provisional title (session transcript) ===
+Session: fix the flaky resume test
+
+
+=== harness title replaces provisional title (session transcript) ===
+Session: Agent-generated title
+
+
+=== first existing prompt backfills title (session transcript) ===
+Session: original task
+1: original task

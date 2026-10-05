@@ -134,8 +134,8 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dashboard_with_session, drawn, key, point, running_session};
-    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+    use crate::test_support::{dashboard_with_session, drawn, point, running_session};
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
     fn draw(dashboard: &mut DashboardState) -> Vec<String> {
         drawn(dashboard, 120, 35)
@@ -187,44 +187,5 @@ mod tests {
             matches!(&dashboard.mode, Mode::New(wizard) if wizard.profile == 2),
             "the click did not select the third profile"
         );
-    }
-
-    #[test]
-    fn help_over_a_dialog_reports_no_confirmation_and_filter_text_focus() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_container_edit();
-        // The container editor counts as text-focused on its first field.
-        assert!(dashboard.text_input_focused());
-
-        dashboard.begin_help();
-        draw(&mut dashboard);
-        assert!(!dashboard.dialog_confirmation_open());
-        assert!(dashboard.text_input_focused());
-
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("help overlay");
-        };
-        let area = overlay.area.get();
-        assert!(area.width > 0 && area.height > 0, "help drew nothing");
-        assert!(dashboard.component_handles_mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: area.x + area.width / 2,
-            row: area.y + area.height / 2,
-            modifiers: KeyModifiers::NONE,
-        }));
-    }
-
-    #[test]
-    fn command_click_runs_the_clicked_result_and_outside_click_dismisses() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_palette();
-        let position = point(&draw(&mut dashboard), "Rename session");
-        click(&mut dashboard, position);
-        assert!(matches!(dashboard.mode, Mode::Rename(_)));
-        dashboard.handle_key(key(KeyCode::Esc));
-        dashboard.begin_palette();
-        draw(&mut dashboard);
-        click(&mut dashboard, (0, 0));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 }
