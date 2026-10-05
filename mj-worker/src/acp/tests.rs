@@ -767,7 +767,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 }
 
 #[test]
-fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
+fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -779,7 +779,10 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         args: Vec::new(),
         environment: BTreeMap::new(),
         cwd: "/workspace/app".into(),
-        additional_directories: vec!["/workspace/api".into()],
+        additional_directories: vec![
+            "/workspace/api".into(),
+            "/profile/projects/abc/memory".into(),
+        ],
         extra_mcp_servers: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
             history_socket: None,
@@ -808,20 +811,17 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         }),
         stall_policy: None,
     };
-    let servers = project_memory_mcp(&spec);
+    let servers = project_history_mcp(&spec);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("non-Claude sessions receive exactly one memory MCP server");
     };
     assert_eq!(server.name, "mj-memory");
     assert_eq!(server.command, Path::new("/worker/hel"));
+    assert_eq!(server.args, ["worker", "memory-mcp"]);
+    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
     assert_eq!(
-        server.args,
-        [
-            "worker",
-            "memory-mcp",
-            "--root",
-            "/profile/projects/abc/memory"
-        ]
+        request["additionalDirectories"],
+        serde_json::json!(["/workspace/api", "/profile/projects/abc/memory"])
     );
     assert!(
         !server
@@ -832,31 +832,31 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     );
 
     spec.project_memory.as_mut().unwrap().mcp_delivery = ProjectMemoryMcpDelivery::HarnessProfile;
-    assert!(project_memory_mcp(&spec).is_empty());
+    assert!(project_history_mcp(&spec).is_empty());
     spec.project_memory.as_mut().unwrap().mcp_delivery = ProjectMemoryMcpDelivery::Acp;
 
     let mut claude = spec;
     claude.harness = HarnessKind::Claude;
-    assert!(project_memory_mcp(&claude).is_empty());
+    assert!(project_history_mcp(&claude).is_empty());
     claude.project_memory.as_mut().unwrap().history_socket = Some("/worker/control.sock".into());
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("Claude receives history tools");
     };
-    assert!(server.args.contains(&"--native-notes".into()));
+    assert!(!server.args.contains(&"--root".into()));
     assert!(server.args.contains(&"/worker/control.sock".into()));
     claude.harness = HarnessKind::Codex;
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
-        panic!("Codex receives history and notes");
+        panic!("Codex receives history");
     };
-    assert!(!server.args.contains(&"--native-notes".into()));
+    assert!(!server.args.contains(&"--root".into()));
     claude.harness = HarnessKind::Muse;
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
-        panic!("Muse receives history and notes");
+        panic!("Muse receives history");
     };
-    assert!(!server.args.contains(&"--native-notes".into()));
+    assert!(!server.args.contains(&"--root".into()));
 }
 
 #[test]
@@ -5652,7 +5652,7 @@ for line in sys.stdin:
 /// bridge restart (#1085).
 #[cfg(unix)]
 #[tokio::test]
-async fn a_relaunched_codex_session_keeps_delegation_and_memory_tools() {
+async fn a_relaunched_codex_session_keeps_delegation_and_history_tools() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("second-bridge");
     let opens = temp.path().join("opens.txt");
@@ -5803,7 +5803,7 @@ for line in sys.stdin:
     assert_eq!(
         std::fs::read_to_string(&opens).unwrap(),
         "session/new mj-agents,mj-memory\nsession/resume mj-agents,mj-memory\n",
-        "every launch must carry delegation and memory servers"
+        "every launch must carry delegation and history servers"
     );
 }
 

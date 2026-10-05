@@ -1,6 +1,6 @@
 //! The JSON-lines stdio transport shared by the worker's MCP servers.
 //!
-//! Hel's MCP servers (project memory, review dispatch, sub-agents) are
+//! Hel's MCP servers (session history, review dispatch, sub-agents) are
 //! hand-rolled rather than built on an SDK. They differ only in their name,
 //! instructions, tools and call handler, so the JSON-RPC loop lives here once.
 

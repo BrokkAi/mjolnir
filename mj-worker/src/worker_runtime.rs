@@ -367,7 +367,13 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             *socket = base.join(&*socket);
         }
         if memory.root.is_relative() {
-            memory.root = base.join(&memory.root);
+            let relative_root = memory.root.clone();
+            memory.root = base.join(&relative_root);
+            for directory in &mut config.additional_directories {
+                if directory == &relative_root {
+                    *directory = memory.root.clone();
+                }
+            }
         }
         if memory.baseline_root.as_os_str().is_empty() {
             memory.baseline_root = memory
@@ -380,6 +386,32 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             memory.baseline_root = base.join(&memory.baseline_root);
         }
     }
+}
+
+#[cfg(unix)]
+fn reviewer_workspace_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let memory_root = config
+        .project_memory
+        .as_ref()
+        .map(|memory| memory.root.as_path());
+    config
+        .additional_directories
+        .iter()
+        .filter(|directory| memory_root.is_none_or(|root| directory.as_path() != root))
+        .cloned()
+        .collect()
+}
+
+#[cfg(unix)]
+fn acp_additional_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let mut directories = config.additional_directories.clone();
+    if !matches!(config.harness, HarnessKind::Claude | HarnessKind::Muse)
+        && let Some(memory) = &config.project_memory
+        && !directories.contains(&memory.root)
+    {
+        directories.push(memory.root.clone());
+    }
+    directories
 }
 
 #[cfg(unix)]

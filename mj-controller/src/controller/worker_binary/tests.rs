@@ -2672,6 +2672,68 @@ fn kimi_uses_runtime_aware_memory_delivery_only_on_staged_targets() {
         ProjectMemoryMcpDelivery::Acp
     );
 }
+
+#[test]
+fn project_memory_replica_is_separate_from_controller_attachment_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+        let session_id = format!("{:032x}", index + 1);
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: directory.path().join(format!("{}-home", kind.id())),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let (launch, memory, _) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &backend,
+            LaunchWorkspace {
+                session_id: &session_id,
+                container: None,
+                parent_worktree: None,
+            },
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            !launch.additional_directories.contains(&memory.root),
+            "{kind:?} keeps the target-local memory replica out of attachment directories"
+        );
+        assert_eq!(
+            launch.project_memory.as_ref().unwrap().root,
+            memory.root,
+            "{kind:?} retains its memory replica in the dedicated launch field"
+        );
+        if kind == HarnessKind::Muse {
+            assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
+            assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
+        }
+    }
+}
 /// A catalog cache backed by an isolated copy of Mjolnir's own
 /// `profile_config_cache` table, so the fallback path is exercised against
 /// the real schema without touching the live store.
@@ -4408,7 +4470,7 @@ fn stage_kimi_profile_preserves_device_identity() {
     assert!(staged.path().join("credentials/kimi-code.json").is_file());
 }
 #[test]
-fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
+fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
     let home = tempfile::tempdir().unwrap();
     let original = serde_json::json!({
         "mcpServers": {
@@ -4441,8 +4503,12 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
         mcp_delivery: ProjectMemoryMcpDelivery::HarnessProfile,
     };
 
-    configure_kimi_project_memory_mcp(staged.path(), "/var/lib/hel/workers/session", &memory)
-        .unwrap();
+    configure_kimi_history_mcp(
+        staged.path(),
+        "/var/lib/hel/workers/session",
+        memory.history_socket.as_deref(),
+    )
+    .unwrap();
 
     let configured: serde_json::Value =
         serde_json::from_slice(&std::fs::read(staged.path().join("mcp.json")).unwrap()).unwrap();
@@ -4459,8 +4525,6 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
             "args": [
                 "worker",
                 "memory-mcp",
-                "--root",
-                "/var/lib/hel/profiles/session/projects/project/memory",
                 "--history-socket",
                 "/var/lib/hel/workers/session/control.sock"
             ],
@@ -4475,7 +4539,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
 }
 
 #[test]
-fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
+fn staged_kimi_history_mcp_resolves_ssh_paths_from_target_home() {
     let staged = tempfile::tempdir().unwrap();
     let memory = ProjectMemoryLaunchConfig {
         history_socket: Some(".local/share/hel/workers/session/control.sock".into()),
@@ -4486,8 +4550,12 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
         mcp_delivery: ProjectMemoryMcpDelivery::HarnessProfile,
     };
 
-    configure_kimi_project_memory_mcp(staged.path(), ".local/share/hel/workers/session", &memory)
-        .unwrap();
+    configure_kimi_history_mcp(
+        staged.path(),
+        ".local/share/hel/workers/session",
+        memory.history_socket.as_deref(),
+    )
+    .unwrap();
 
     let configured: serde_json::Value =
         serde_json::from_slice(&std::fs::read(staged.path().join("mcp.json")).unwrap()).unwrap();
@@ -4498,10 +4566,9 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
         server["args"],
         serde_json::json!([
             "-c",
-            "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\" --history-socket \"$HOME/$3\"",
+            "exec \"$HOME/$1\" worker memory-mcp --history-socket \"$HOME/$2\"",
             "mj-memory",
             ".local/share/hel/workers/session/hel",
-            ".local/share/hel/profiles/session/projects/project/memory",
             ".local/share/hel/workers/session/control.sock"
         ])
     );

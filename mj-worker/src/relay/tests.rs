@@ -3858,11 +3858,11 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
         submit_relay(&mut relay, "memory-prompt", prompt("remember the result"));
         assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 
-        let mut call = ToolCall::new("memory", "mcp.mj-memory.write");
+        let mut call = ToolCall::new("history", "mcp.mj-memory.search_sessions");
         call.kind = ToolKind::Execute;
         call.raw_input = Some(serde_json::json!({
-            "server": "mj-memory", "tool": "write",
-            "arguments": {"path": "/MEMORY.md", "content": "done"}
+            "server": "mj-memory", "tool": "search_sessions",
+            "arguments": {"query": "remember the result"}
         }));
         let output = serde_json::json!({
             "result": {"content": [{"type": "text", "text": "saved"}]},
@@ -3875,7 +3875,7 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
                 .unwrap();
             relay
                 .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    "memory",
+                    "history",
                     ToolCallUpdateFields::new()
                         .status(ToolCallStatus::Completed)
                         .raw_output(output),

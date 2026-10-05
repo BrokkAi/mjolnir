@@ -1066,6 +1066,10 @@ line-by-line three-way merge, including deletions. If sessions change the same
 lines, an available utility model merges them; otherwise the session being
 merged wins. Mjolnir does not create a conflicts folder.
 
+Claude Code uses native project memory. Other harnesses read and write their
+session replica directly with their own file tools; startup context gives them
+its path and describes the `MEMORY.md` index convention.
+
 Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
 in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)
 before moving or deleting session archives.

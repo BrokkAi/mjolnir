@@ -5896,10 +5896,27 @@ async fn catch_up_recording_throughput() {
 #[test]
 fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
     let mut config = launch_config(".local/share/hel/profiles/session");
+    let relative_memory =
+        PathBuf::from(".local/share/hel/profiles/session/projects/project/memory");
+    config.additional_directories.push(relative_memory.clone());
+    config.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: relative_memory.clone(),
+        baseline_root: PathBuf::new(),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
     resolve_relative_harness_home(&mut config, Path::new("/home/ubuntu"));
     assert_eq!(
         config.environment["CODEX_HOME"],
         "/home/ubuntu/.local/share/hel/profiles/session"
+    );
+    assert_eq!(
+        config.additional_directories,
+        [PathBuf::from(
+            "/home/ubuntu/.local/share/hel/profiles/session/projects/project/memory"
+        )]
     );
     assert_eq!(
         resolve_relative_worker_root(
@@ -5908,6 +5925,64 @@ fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
         ),
         Path::new("/home/ubuntu/.local/share/hel/workers/session")
     );
+}
+
+#[test]
+fn reviewer_workspace_roots_exclude_the_primary_project_memory_replica() {
+    let workspace = PathBuf::from("/workspace/api");
+    let memory_root = PathBuf::from("/profile/projects/session/memory");
+    let mut config = launch_config("/profile");
+    config.additional_directories = vec![workspace.clone(), memory_root.clone()];
+    config.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: memory_root,
+        baseline_root: PathBuf::new(),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
+
+    assert_eq!(reviewer_workspace_directories(&config), [workspace]);
+}
+
+#[test]
+fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
+    let workspace = PathBuf::from("/workspace/api");
+    let memory_root = PathBuf::from("/profile/projects/session/memory");
+
+    for harness in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Grok] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.additional_directories = vec![workspace.clone()];
+        config.project_memory = Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "project".into(),
+            root: memory_root.clone(),
+            baseline_root: PathBuf::new(),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+
+        assert_eq!(
+            acp_additional_directories(&config),
+            [workspace.clone(), memory_root.clone()],
+            "{harness:?} receives its replica only in the ACP workspace roots"
+        );
+    }
+
+    for harness in [HarnessKind::Claude, HarnessKind::Muse] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.project_memory = Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "project".into(),
+            root: memory_root.clone(),
+            baseline_root: PathBuf::new(),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+        assert!(acp_additional_directories(&config).is_empty());
+    }
 }
 
 #[test]

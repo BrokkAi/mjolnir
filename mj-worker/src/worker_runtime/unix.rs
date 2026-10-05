@@ -21,7 +21,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
-use super::{AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig};
+use super::{
+    AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig,
+    acp_additional_directories, reviewer_workspace_directories,
+};
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
@@ -321,7 +324,7 @@ pub async fn run_daemon_owned(
                 .unwrap_or_default()
         } else {
             let mut workspace_roots = vec![config.cwd.clone()];
-            workspace_roots.extend(config.additional_directories.iter().cloned());
+            workspace_roots.extend(reviewer_workspace_directories(&config));
             let recorded = tokio::task::spawn_blocking(move || {
                 // Bounded: this runs before the control socket exists, so a Git
                 // command that never returns would be a session that never
@@ -571,7 +574,7 @@ pub async fn run_daemon_owned(
             worker_root: root.clone(),
             session_id: config.session_id.clone(),
             cwd: config.cwd.clone(),
-            additional_directories: config.additional_directories.clone(),
+            additional_directories: reviewer_workspace_directories(&config),
             worker_executable: worker_executable.clone(),
             harness_runtime: config.harness_runtime,
             review_capture: config.review_capture,
@@ -626,6 +629,7 @@ pub async fn run_daemon_owned(
                 })
             })),
         }));
+        let acp_additional_directories = acp_additional_directories(&config);
         let acp_spec = LaunchSpec {
             clear_context_request: None,
         context_restore: None,
@@ -641,7 +645,7 @@ pub async fn run_daemon_owned(
             environment: session_environment,
             bridge_spec_path: Some(supervisor_path.clone()),
             cwd: config.cwd,
-            additional_directories: config.additional_directories,
+            additional_directories: acp_additional_directories,
             extra_mcp_servers: Vec::new(),
             subagent_policy: if config.handback_tool {
                 mj_core::subagent::SubagentPolicy::None

@@ -96,14 +96,13 @@ enum WorkerCommand {
         #[arg(long)]
         destination: PathBuf,
     },
-    /// Serve project memory tools over MCP stdio.
+    /// Serve project history tools over MCP stdio.
     MemoryMcp {
-        #[arg(long)]
-        root: PathBuf,
+        /// Accepted for staged Kimi profiles created by older controllers.
+        #[arg(long, hide = true)]
+        _root: Option<PathBuf>,
         #[arg(long)]
         history_socket: Option<PathBuf>,
-        #[arg(long)]
-        native_notes: bool,
     },
     /// Serve the turn review's specialist-dispatch tool over MCP stdio.
     ReviewMcp {
@@ -483,12 +482,9 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
         WorkerCommand::MemoryMcp {
-            root,
+            _root: _,
             history_socket,
-            native_notes,
-        } => {
-            mj_worker::memory_mcp::run_mcp_stdio_with_history(&root, history_socket, !native_notes)
-        }
+        } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
         WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
         WorkerCommand::SubagentMcp {
             socket,
@@ -716,6 +712,26 @@ mod tests {
             Command::Worker(WorkerArgs {
                 command: WorkerCommand::PushBranch { root, repository, branch },
             }) if root == Path::new("/worker/session") && repository == Path::new("/workspace/app") && branch == "review/one"
+        ));
+    }
+
+    #[test]
+    fn memory_mcp_ignores_the_legacy_root_argument() {
+        let cli = Cli::try_parse_from([
+            "hel",
+            "worker",
+            "memory-mcp",
+            "--root",
+            "/profile/projects/session/memory",
+            "--history-socket",
+            "/worker/control.sock",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Worker(WorkerArgs {
+                command: WorkerCommand::MemoryMcp { history_socket: Some(socket), .. }
+            }) if socket == Path::new("/worker/control.sock")
         ));
     }
 

@@ -129,7 +129,11 @@ impl Controller {
             &profile_stage,
         )?;
         if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-            configure_kimi_project_memory_mcp(&profile_stage, worker_root, &project_memory)?;
+            configure_kimi_history_mcp(
+                &profile_stage,
+                worker_root,
+                project_memory.history_socket.as_deref(),
+            )?;
         }
         let worker_binary = worker_binary_for(backend, executor)?;
 

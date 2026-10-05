@@ -142,7 +142,7 @@ struct Opened {
 }
 
 /// Open a session through a fake muse-acp whose host grants session MCP,
-/// withholds it, or could not start. A session carries project memory; a
+/// withholds it, or could not start. A session carries history tools; a
 /// reviewer carries its analyzer server instead.
 async fn open_muse(host: &str, reviewer: bool) -> Opened {
     let root = tempfile::tempdir().unwrap();
