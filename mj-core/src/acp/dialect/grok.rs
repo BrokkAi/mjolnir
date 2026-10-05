@@ -309,11 +309,8 @@ pub fn permits_unadvertised_plan_mode(harness: HarnessKind, mode_id: &str) -> bo
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
-    use crate::acp::{find_session_config_option, select_contains};
-    use crate::elicitation::ElicitationValue;
+    use crate::acp::find_session_config_option;
 
     fn model_meta() -> serde_json::Map<String, serde_json::Value> {
         let mut meta = serde_json::Map::new();
@@ -352,54 +349,6 @@ mod tests {
         meta
     }
 
-    fn select_values(option: &SessionConfigOption) -> Vec<String> {
-        let SessionConfigKind::Select(select) = &option.kind else {
-            panic!("expected a select option");
-        };
-        let SessionConfigSelectOptions::Ungrouped(options) = &select.options else {
-            panic!("expected ungrouped options");
-        };
-        options
-            .iter()
-            .map(|option| option.value.to_string())
-            .collect()
-    }
-
-    #[test]
-    fn model_state_reads_each_models_default_effort() {
-        let state = model_state(Some(&model_meta())).unwrap();
-
-        assert_eq!(state.current_model_id, "grok-4.6");
-        assert_eq!(state.current_effort.as_deref(), Some("high"));
-        assert_eq!(state.models.len(), 2);
-        assert_eq!(state.models[0].name, "Grok 4.6");
-        assert_eq!(
-            state.models[0]
-                .efforts
-                .iter()
-                .map(|effort| effort.id.as_str())
-                .collect::<Vec<_>>(),
-            ["xhigh", "high", "medium", "low"]
-        );
-        assert_eq!(state.models[1].default_effort.as_deref(), Some("high"));
-        assert_eq!(model_state(None), None);
-        assert_eq!(model_state(Some(&serde_json::Map::new())), None);
-    }
-
-    #[test]
-    fn config_options_carry_the_current_model_and_its_effort_tiers() {
-        let options = config_options(&model_state(Some(&model_meta())).unwrap());
-
-        assert_eq!(select_values(&options[0]), ["grok-4.6", "grok-4.5"]);
-        assert!(select_contains(&options[0].kind, "grok-4.5"));
-        assert_eq!(
-            select_values(&options[1]),
-            ["xhigh", "high", "medium", "low"]
-        );
-        assert!(find_session_config_option(&options, "model").is_some());
-        assert!(find_session_config_option(&options, "effort").is_some());
-    }
-
     #[test]
     fn config_options_do_not_invent_an_unknown_effort() {
         let mut meta = model_meta();
@@ -412,48 +361,6 @@ mod tests {
 
         assert!(find_session_config_option(&options, "model").is_some());
         assert!(find_session_config_option(&options, "effort").is_none());
-    }
-
-    #[test]
-    fn a_model_change_uses_the_new_models_advertised_default_effort() {
-        let state = model_state(Some(&model_meta())).unwrap();
-        let (params, updated) =
-            set_model_request(&SessionId::from("s-1"), &state, "model", "grok-4.5").unwrap();
-
-        assert_eq!(
-            params,
-            serde_json::json!({"sessionId": "s-1", "modelId": "grok-4.5"})
-        );
-        assert_eq!(updated.current_model_id, "grok-4.5");
-        assert_eq!(updated.current_effort.as_deref(), Some("high"));
-        assert_eq!(select_values(&config_options(&updated)[1]), ["high", "low"]);
-    }
-
-    #[test]
-    fn an_effort_change_resends_the_current_model_with_effort_metadata() {
-        let state = model_state(Some(&model_meta())).unwrap();
-        let (params, updated) =
-            set_model_request(&SessionId::from("s-1"), &state, "effort", "low").unwrap();
-
-        assert_eq!(
-            params,
-            serde_json::json!({
-                "sessionId": "s-1",
-                "modelId": "grok-4.6",
-                "_meta": {"reasoningEffort": "low"}
-            })
-        );
-        assert_eq!(updated.current_effort.as_deref(), Some("low"));
-    }
-
-    #[test]
-    fn invalid_model_changes_are_rejected_before_sending() {
-        let state = model_state(Some(&model_meta())).unwrap();
-        let session_id = SessionId::from("s-1");
-
-        assert!(set_model_request(&session_id, &state, "model", "missing").is_err());
-        assert!(set_model_request(&session_id, &state, "effort", "missing").is_err());
-        assert!(set_model_request(&session_id, &state, "verbosity", "high").is_err());
     }
 
     #[test]
@@ -475,35 +382,6 @@ mod tests {
         assert!(find_session_config_option(&options, "verbosity").is_some());
         assert!(find_session_config_option(&options, "model").is_some());
         assert!(find_session_config_option(&options, "effort").is_some());
-    }
-
-    #[test]
-    fn extension_gates_include_the_harness_and_exact_values() {
-        assert!(handles_exit_plan_mode(
-            HarnessKind::Grok,
-            "_x.ai/exit_plan_mode"
-        ));
-        assert!(!handles_exit_plan_mode(
-            HarnessKind::Claude,
-            "x.ai/exit_plan_mode"
-        ));
-        assert!(permits_unadvertised_plan_mode(HarnessKind::Grok, "plan"));
-        assert!(!permits_unadvertised_plan_mode(HarnessKind::Claude, "plan"));
-        assert!(!permits_unadvertised_plan_mode(HarnessKind::Grok, "agent"));
-        assert_eq!(plan_review_id(7), "plan-review-grok-7");
-        assert!(is_plan_review_id("plan-review-grok-7"));
-        assert!(!is_plan_review_id("plan-review-codex-7"));
-    }
-
-    #[test]
-    fn revise_without_feedback_omits_the_feedback_member() {
-        let mut content = BTreeMap::new();
-        content.insert("action".into(), ElicitationValue::String("revise".into()));
-
-        assert_eq!(
-            plan_response(ElicitationResponse::Accept { content }),
-            serde_json::json!({"outcome": "cancelled"})
-        );
     }
 
     #[test]

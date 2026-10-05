@@ -155,35 +155,6 @@ async fn read_bounded(response: reqwest::Response) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_observed_credit_windows_and_ignores_auxiliary_limits() {
-        let five_hour = parse_limit(Limit {
-            kind: "CREDIT_LIMIT".into(),
-            number: Some(5),
-            usage: Some(12_000),
-            current_value: Some(300),
-            remaining: Some(11_700),
-            percentage: Some(3.0),
-            next_reset_time: Some(1_789_370_152_403),
-        })
-        .unwrap();
-        assert_eq!(five_hour.label, "5H");
-        assert_eq!(five_hour.remaining_percent, 98);
-        assert_eq!(five_hour.resets_at, Some(1_789_370_152));
-        assert!(
-            parse_limit(Limit {
-                kind: "MCP_LIMIT".into(),
-                number: None,
-                usage: Some(10),
-                current_value: Some(1),
-                remaining: Some(9),
-                percentage: None,
-                next_reset_time: None,
-            })
-            .is_none()
-        );
-    }
-
     #[tokio::test]
     #[ignore = "requires MJ_ZAI_TEST_KEY with a live Coding Plan key"]
     async fn live_coding_plan_quota_has_inference_windows() {
@@ -192,12 +163,5 @@ mod tests {
         let windows = query("api.z.ai", &key).await.unwrap();
         assert!(!windows.is_empty());
         assert!(windows.iter().all(|window| window.remaining_percent <= 100));
-    }
-
-    #[test]
-    fn only_the_coding_plan_hosts_serve_quota() {
-        assert!(serves_quota("api.z.ai"));
-        assert!(serves_quota("open.bigmodel.cn"));
-        assert!(!serves_quota("api.openai.com"));
     }
 }

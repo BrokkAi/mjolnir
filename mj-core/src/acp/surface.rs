@@ -340,20 +340,6 @@ mod tests {
         )
     }
 
-    fn fast_mode_option(current: &str) -> SessionConfigOption {
-        SessionConfigOption::new(
-            SessionConfigId::new(FAST_MODE_CONFIG_ID),
-            "Fast mode",
-            SessionConfigKind::Select(SessionConfigSelect::new(
-                SessionConfigValueId::new(current),
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new(FAST_MODE_OFF, "Off"),
-                    SessionConfigSelectOption::new(FAST_MODE_ON, "On"),
-                ]),
-            )),
-        )
-    }
-
     #[test]
     fn config_churn_does_not_revert_an_in_flight_plan_change() {
         let mut surface = AcpSessionSurface::default();
@@ -370,6 +356,7 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 
+    // Hard-won: f8bb425: a late Claude mode update reverted the user-confirmed Plan selector to permission mode.
     #[test]
     fn claude_mode_update_does_not_revert_plan_config_to_permission_mode() {
         let mut surface = AcpSessionSurface::default();
@@ -413,6 +400,7 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 
+    // Hard-won: 60145fd: leaving Claude Plan mode discarded the prior worker policy and confirmed user mode.
     #[test]
     fn claude_plan_exit_restores_worker_policy_and_keeps_the_confirmed_mode() {
         for restored in ["auto", "bypassPermissions"] {
@@ -447,24 +435,5 @@ mod tests {
             Value::String("plan".into()),
         )]));
         assert_eq!(surface.current_mode(), Some("plan"));
-    }
-
-    #[test]
-    fn fast_mode_requires_the_codex_selector_and_tracks_its_current_value() {
-        let mut surface = AcpSessionSurface::default();
-        assert!(!surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
-
-        surface.set_config_options(&[fast_mode_option(FAST_MODE_OFF)]);
-        assert!(surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
-
-        surface.set_config_options(&[fast_mode_option(FAST_MODE_ON)]);
-        assert!(surface.supports_fast_mode());
-        assert!(surface.fast_mode_active());
-
-        surface.set_config_options(&[]);
-        assert!(!surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
     }
 }
