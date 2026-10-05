@@ -1223,16 +1223,6 @@ mod tests {
     }
 
     #[test]
-    fn the_action_bar_starts_on_an_enabled_action_at_each_verdict_stage() {
-        let mut chat = chat();
-        chat.set_turn_review(Some(findings_view()));
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Forwarded))
-        );
-    }
-
-    #[test]
     fn an_inflight_forward_has_no_retry_or_cancel_action() {
         let mut chat = chat();
         chat.set_turn_review(Some(forwarding_view(None)));
@@ -1270,42 +1260,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_verdict_offers_dismiss_and_cancel_but_not_forward() {
-        let mut chat = chat();
-        chat.set_turn_review(Some(RuntimeReviewView {
-            verdict: Some(VerdictView {
-                kind: VerdictKind::Failed,
-                text: "bifrost exited with 1".to_owned(),
-                allowed: vec![Resolution::Dismissed, Resolution::Cancelled],
-            }),
-            ..running_view()
-        }));
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::TurnReview(TurnReviewIntent::Resolve(Resolution::Dismissed))
-        );
-    }
-
-    #[test]
-    fn updating_to_a_verdict_selects_its_first_enabled_action_and_panel() {
-        let mut chat = chat();
-        chat.set_turn_review(Some(running_view()));
-        assert_eq!(chat.turn_review().map(|review| review.action), Some(None));
-        chat.set_turn_review(Some(findings_view()));
-        let review = chat.turn_review().expect("review remains open");
-        assert_eq!(review.action, Some(ReviewAction::Forward));
-        assert!(
-            review.verdict_selected(),
-            "the new verdict is immediately shown"
-        );
-        assert!(role_strip(review).is_some_and(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.as_ref() == "Verdict")
-        }));
-    }
-
-    #[test]
     fn a_new_running_snapshot_resets_the_previous_verdict_selection() {
         let mut chat = chat();
         chat.set_turn_review(Some(findings_view()));
@@ -1316,68 +1270,6 @@ mod tests {
                 .is_some_and(TurnReview::overview_selected)
         );
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    }
-
-    #[test]
-    fn running_review_defaults_to_overview_with_progress_and_prompt_hold() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::layout::Rect;
-
-        let mut review = TurnReview::new(running_view());
-        let mut terminal = Terminal::new(TestBackend::new(64, 14)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                render_turn_review_pane(frame, Rect::new(0, 0, 64, 14), &mut review);
-            })
-            .expect("draw overview");
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(review.overview_selected());
-        assert!(screen.contains("Overview"));
-        assert!(screen.contains("Stage:"));
-        assert!(screen.contains("the reviewer is reading the change"));
-        assert!(screen.contains("General"));
-        assert!(screen.contains("running"));
-        assert!(screen.contains("Prompt paused during review"));
-        assert!(
-            !screen.contains("%"),
-            "progress has no fabricated percentage"
-        );
-    }
-
-    #[test]
-    fn short_overview_can_scroll_to_the_held_prompt() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::layout::Rect;
-
-        let mut review = TurnReview::new(running_view());
-        let mut terminal = Terminal::new(TestBackend::new(32, 6)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                render_turn_review_pane(frame, Rect::new(0, 0, 32, 6), &mut review);
-            })
-            .expect("draw short overview");
-        review.scroll_overview(isize::MAX);
-        terminal
-            .draw(|frame| {
-                render_turn_review_pane(frame, Rect::new(0, 0, 32, 6), &mut review);
-            })
-            .expect("draw scrolled overview");
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(screen.contains("Prompt paused"));
     }
 
     /// R4-13: the header of a failed review read "General done Verdictt".
@@ -1411,34 +1303,198 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clean_role_is_presented_as_done() {
-        let mut view = running_view();
-        view.roles[0].state = RoleState::Clean;
-        let review = TurnReview::new(view);
-        let strip = role_strip(&review).expect("role strip");
-        assert!(strip.spans.iter().any(|span| span.content.contains("done")));
-        assert!(
-            !strip
-                .spans
-                .iter()
-                .any(|span| span.content.contains("clean"))
-        );
+    fn review_golden_buffer(
+        chat: &mut super::super::ChatState,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| crate::chat::active::render_full_frame(frame, chat, false))
+            .expect("draw turn review");
+        terminal.backend().buffer().clone()
+    }
+
+    fn review_pane_golden_buffer(
+        review: &mut TurnReview,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_turn_review_pane(frame, frame.area(), review);
+            })
+            .expect("draw review pane");
+        terminal.backend().buffer().clone()
+    }
+
+    fn append_review_golden_state(
+        output: &mut String,
+        label: &str,
+        width: u16,
+        height: u16,
+        buffer: &ratatui::buffer::Buffer,
+        details: &[String],
+    ) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+        output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+        output.push('\n');
+        for detail in details {
+            writeln!(output, "{detail}").expect("write state detail");
+        }
     }
 
     #[test]
-    fn a_verdict_tab_keeps_role_transcripts_reachable() {
+    fn golden_turn_review_pane() {
+        use mj_core::state::{TranscriptBody, TranscriptItem};
+
+        fn fresh_chat() -> super::super::ChatState {
+            chat()
+        }
+
+        let mut output = String::new();
+
+        let mut chat = fresh_chat();
+        chat.set_turn_review(Some(findings_view()));
+        let selected = chat.turn_review().map(|review| review.action);
+        let action = chat.handle_key(key(KeyCode::Enter));
+        append_review_golden_state(
+            &mut output,
+            "findings default action",
+            64,
+            14,
+            &review_golden_buffer(&mut chat, 64, 14),
+            &[
+                format!("selected action: {selected:?}"),
+                format!("action: {action:?}"),
+            ],
+        );
+
+        let mut chat = fresh_chat();
+        chat.set_turn_review(Some(RuntimeReviewView {
+            verdict: Some(VerdictView {
+                kind: VerdictKind::Failed,
+                text: "bifrost exited with 1".to_owned(),
+                allowed: vec![Resolution::Dismissed, Resolution::Cancelled],
+            }),
+            ..running_view()
+        }));
+        let action = chat.handle_key(key(KeyCode::Enter));
+        append_review_golden_state(
+            &mut output,
+            "failed verdict allowed actions",
+            64,
+            14,
+            &review_golden_buffer(&mut chat, 64, 14),
+            &[
+                format!(
+                    "selected action: {:?}",
+                    chat.turn_review().map(|review| review.action)
+                ),
+                format!(
+                    "allowed actions: {:?}",
+                    chat.turn_review().map(|review| {
+                        [
+                            ReviewAction::Forward,
+                            ReviewAction::Dismiss,
+                            ReviewAction::Cancel,
+                        ]
+                        .map(|action| (action, review.allows(action)))
+                    })
+                ),
+                format!("action: {action:?}"),
+            ],
+        );
+
+        let mut review = TurnReview::new(running_view());
+        append_review_golden_state(
+            &mut output,
+            "review running overview",
+            64,
+            14,
+            &review_pane_golden_buffer(&mut review, 64, 14),
+            &[],
+        );
+        let mut chat = fresh_chat();
+        chat.set_turn_review(Some(running_view()));
+        chat.set_turn_review(Some(findings_view()));
+        append_review_golden_state(
+            &mut output,
+            "verdict selects first enabled action and panel",
+            64,
+            14,
+            &review_golden_buffer(&mut chat, 64, 14),
+            &[
+                format!(
+                    "selected action: {:?}",
+                    chat.turn_review().map(|review| review.action)
+                ),
+                format!(
+                    "verdict selected: {}",
+                    chat.turn_review().is_some_and(TurnReview::verdict_selected)
+                ),
+            ],
+        );
+
+        let mut review = TurnReview::new(running_view());
+        let buffer = review_pane_golden_buffer(&mut review, 64, 14);
+        let rendered = crate::golden::buffer_lines(&buffer).join("\n");
+        append_review_golden_state(
+            &mut output,
+            "running progress and held prompt",
+            64,
+            14,
+            &buffer,
+            &[format!("percentage displayed: {}", rendered.contains('%'))],
+        );
+
+        let mut review = TurnReview::new(running_view());
+        let _ = review_pane_golden_buffer(&mut review, 32, 6);
+        review.scroll_overview(isize::MAX);
+        let buffer = review_pane_golden_buffer(&mut review, 32, 6);
+        append_review_golden_state(
+            &mut output,
+            "short overview scrolled to held prompt",
+            32,
+            6,
+            &buffer,
+            &[],
+        );
+
+        let mut review = {
+            let mut clean = running_view();
+            clean.roles[0].state = RoleState::Clean;
+            TurnReview::new(clean)
+        };
+        append_review_golden_state(
+            &mut output,
+            "clean reviewer role",
+            64,
+            14,
+            &review_pane_golden_buffer(&mut review, 64, 14),
+            &[],
+        );
+
         let mut review = TurnReview::new(findings_view());
-        assert!(review.verdict_selected());
         review.pane("reviewer").restore(
             "reviewer-session",
-            vec![std::sync::Arc::new(mj_core::state::TranscriptItem {
+            vec![std::sync::Arc::new(TranscriptItem {
                 stable_id: "agent:1".to_owned(),
                 position: 1,
                 latest_content_event_ordinal: Some(1),
                 created_at_ms: 0,
                 last_changed_at_ms: 0,
-                body: mj_core::state::TranscriptBody::Agent {
+                body: TranscriptBody::Agent {
                     chunks: vec![serde_json::json!({
                         "content": {"type": "text", "text": "reviewer transcript"}
                     })],
@@ -1446,55 +1502,62 @@ mod tests {
                 },
             })],
         );
+        append_review_golden_state(
+            &mut output,
+            "verdict tab",
+            64,
+            14,
+            &review_pane_golden_buffer(&mut review, 64, 14),
+            &[],
+        );
         review.cycle_selection();
-        assert!(!review.verdict_selected());
-        assert_eq!(review.selected_role(), "reviewer");
+        append_review_golden_state(
+            &mut output,
+            "reviewer transcript tab",
+            64,
+            14,
+            &review_pane_golden_buffer(&mut review, 64, 14),
+            &[
+                format!("selected role: {:?}", review.selected_role()),
+                format!("verdict selected: {}", review.verdict_selected()),
+            ],
+        );
         review.cycle_selection();
-        assert!(review.verdict_selected());
-    }
+        append_review_golden_state(
+            &mut output,
+            "return to verdict tab",
+            64,
+            14,
+            &review_pane_golden_buffer(&mut review, 64, 14),
+            &[format!("verdict selected: {}", review.verdict_selected())],
+        );
 
-    #[test]
-    fn a_long_verdict_wraps_and_scrolls_when_no_journal_exists() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::layout::Rect;
-
-        let mut view = findings_view();
-        view.verdict.as_mut().expect("findings").text = (0..24)
+        let mut review = TurnReview::new(findings_view());
+        let mut long = findings_view();
+        long.verdict.as_mut().unwrap().text = (0..24)
             .map(|index| format!("finding line {index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut review = TurnReview::new(view);
-        let mut terminal = Terminal::new(TestBackend::new(48, 10)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                render_turn_review_pane(frame, Rect::new(0, 0, 48, 10), &mut review);
-            })
-            .expect("draw verdict");
-        let first = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(first.contains("finding line 0"));
-
+        review.update(long);
+        append_review_golden_state(
+            &mut output,
+            "long verdict top",
+            48,
+            10,
+            &review_pane_golden_buffer(&mut review, 48, 10),
+            &[],
+        );
         review.scroll_verdict(100);
-        terminal
-            .draw(|frame| {
-                render_turn_review_pane(frame, Rect::new(0, 0, 48, 10), &mut review);
-            })
-            .expect("draw scrolled verdict");
-        let last = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(last.contains("finding line 23"));
-        assert!(!last.contains("finding line 0"));
+        append_review_golden_state(
+            &mut output,
+            "long verdict scrolled",
+            48,
+            10,
+            &review_pane_golden_buffer(&mut review, 48, 10),
+            &[],
+        );
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "turn-review-pane", &output);
     }
 
     #[test]
