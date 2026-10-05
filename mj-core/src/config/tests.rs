@@ -745,6 +745,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
@@ -1133,6 +1134,40 @@ fn config_toml_round_trip_is_atomic() {
                     .to_string_lossy()
                     .ends_with(".tmp")
             })
+    );
+}
+
+#[test]
+fn github_app_configuration_is_optional_and_round_trips() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "version = 1\n").unwrap();
+    let legacy = Config::load_from(&path).unwrap();
+    assert_eq!(legacy.github, GithubConfig::default());
+    legacy.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
+
+    let mut configured = Config::default();
+    configured.github.app = Some(GithubAppConfig {
+        app_id: 1234,
+        private_key_path: PathBuf::from("/controller/keys/app.pem"),
+        installations: BTreeMap::from([("Acme".into(), 5678)]),
+    });
+    configured.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("[github.app.installations]"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), configured);
+
+    fs::write(
+        &path,
+        "version = 14\n[github.app]\napp_id = 0\nprivate_key_path = 'app.pem'\n",
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("app_id must be a positive integer"),
+        "{error}"
     );
 }
 

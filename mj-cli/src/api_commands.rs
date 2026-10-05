@@ -9,7 +9,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, ValueEnum};
+use clap::{ArgGroup, Args, ValueEnum};
 use mj_controller::server::api::{
     ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
     WaitOutcome, WaitRequest, WaitResponse,
@@ -795,6 +795,22 @@ pub(crate) struct ApiInfoArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("github_token_target")
+        .args(["owner", "repo"])
+        .required(true)
+        .multiple(false)
+))]
+pub(crate) struct GithubTokenArgs {
+    /// GitHub owner login whose installation should receive a token.
+    #[arg(long)]
+    owner: Option<String>,
+    /// Repository in OWNER/NAME form.
+    #[arg(long)]
+    repo: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1873,6 +1889,25 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
     Ok(())
 }
 
+/// Print a valid GitHub App installation token for a selected owner or repo.
+pub(crate) async fn github_token(args: GithubTokenArgs) -> Result<()> {
+    let (owner, repository) = match (args.owner, args.repo) {
+        (Some(owner), None) => (owner, None),
+        (None, Some(repo)) => {
+            let (owner, repository) = mj_core::remote_git::github_owner_repo(&repo)
+                .context("--repo must use OWNER/NAME form")?;
+            (owner, Some(repository))
+        }
+        _ => bail!("supply exactly one of --owner or --repo"),
+    };
+    let token = ApiClient::connect()
+        .await?
+        .github_token(&owner, repository.as_deref())
+        .await?;
+    println!("{token}");
+    Ok(())
+}
+
 /// Read prompt text from an argument, a file, or standard input.
 fn read_prompt(text: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
     match (text, file) {
@@ -2068,6 +2103,41 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
     use clap::Parser as _;
+
+    #[test]
+    fn github_token_requires_one_owner_or_repository_selector() {
+        let Some(Command::GithubToken(owner)) =
+            Cli::try_parse_from(["mj", "github-token", "--owner", "acme"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(owner.owner.as_deref(), Some("acme"));
+        assert_eq!(owner.repo, None);
+
+        let Some(Command::GithubToken(repo)) =
+            Cli::try_parse_from(["mj", "github-token", "--repo", "acme/project"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repo.owner, None);
+        assert_eq!(repo.repo.as_deref(), Some("acme/project"));
+        assert!(Cli::try_parse_from(["mj", "github-token"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "mj",
+                "github-token",
+                "--owner",
+                "acme",
+                "--repo",
+                "acme/project",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn review_parses_start_and_status_with_a_session() {

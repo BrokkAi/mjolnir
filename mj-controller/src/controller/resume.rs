@@ -26,8 +26,9 @@ use crate::targets::{
 };
 use mj_core::relay::RelayCommand;
 
-use super::backend::{backend_locator, controller_github_token, validate_resource_allocation};
+use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
+use super::github_app::{GithubAppTokenProvider, github_repositories};
 use super::provisioning::{
     ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
@@ -131,13 +132,34 @@ impl Controller {
     /// Prove that each configured repository source still supplies the commit
     /// boundary its checkpoint bundle expects, before provisioning anything,
     /// and describe a local checkout's conversion so a person can confirm it.
-    pub fn preflight_resume_repository_sources(
+    pub async fn preflight_resume_repository_sources(
         &self,
         session_id: &str,
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
-        self.preflight_repository_sources(session_id, target_id, true, executor)
+        let github_token = self
+            .github_token_for_repository_preflight(session_id)
+            .await?;
+        self.preflight_repository_sources(
+            session_id,
+            target_id,
+            true,
+            github_token.as_deref(),
+            executor,
+        )
+    }
+
+    /// Preflight when the caller already resolved the session's token and must
+    /// keep the remaining repository checks synchronous.
+    pub fn preflight_resume_repository_sources_with_token(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        github_token: Option<&str>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.preflight_repository_sources(session_id, target_id, true, github_token, executor)
     }
 
     /// `describe_conversion` buys the conversion preview with a read of the
@@ -149,6 +171,7 @@ impl Controller {
         session_id: &str,
         target_id: &str,
         describe_conversion: bool,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -199,6 +222,7 @@ impl Controller {
             },
             None,
             plan != ResumePlan::WorkspaceToRaw,
+            github_token,
             executor,
         )
     }
@@ -209,6 +233,7 @@ impl Controller {
         verified: ResumeRepositoryBundles,
         skip_repository_id: Option<&str>,
         use_archived_network_sources: bool,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -270,16 +295,11 @@ impl Controller {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let github_token = configured
-            .iter()
-            .any(|repository| repository.github.is_some())
-            .then(controller_github_token)
-            .flatten();
         let outcomes = verified
             .repositories
             .par_iter()
             .zip(configured.par_iter())
-            .map(|(archived, configured)| {
+            .map(move |(archived, configured)| {
                 if skip_repository_id == Some(configured.id.as_str()) {
                     return Ok(None);
                 }
@@ -291,7 +311,7 @@ impl Controller {
                         .and_then(|project| project.network_sources.get(&configured.id)),
                     archived,
                     executor,
-                    github_token.as_deref(),
+                    github_token,
                 )
                 .map(|missing_commit| {
                     missing_commit.map(|missing_commit| ResumeRepositorySourceMismatch {
@@ -355,7 +375,23 @@ impl Controller {
     /// Validate a replacement first, then atomically save it and check the
     /// remaining sources so multi-repository bundles can report the next moved
     /// repository without ever provisioning a partial target.
-    pub fn replace_resume_repository_origin(
+    pub async fn replace_resume_repository_origin(
+        &mut self,
+        session_id: &str,
+        repository_id: &str,
+        replacement: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.replace_resume_repository_origin_with_token(
+            session_id,
+            repository_id,
+            replacement,
+            executor,
+        )
+        .await
+    }
+
+    async fn replace_resume_repository_origin_with_token(
         &mut self,
         session_id: &str,
         repository_id: &str,
@@ -378,34 +414,6 @@ impl Controller {
             .as_ref()
             .map(|_| mj_core::remote_git::resolve_repository(&replacement, executor))
             .transpose()?;
-        let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
-        let verified = ResumeRepositoryBundles {
-            checkpoint_sha256: checkpoint.sha256.clone(),
-            repositories,
-        };
-        let archived = verified
-            .repositories
-            .iter()
-            .find(|repository| repository.metadata.id == repository_id)
-            .with_context(|| format!("checkpoint does not contain repository {repository_id:?}"))?;
-        if let Some(missing_commit) = checkpoint_source_missing_commit(
-            &replacement,
-            replacement_network.as_ref(),
-            archived,
-            executor,
-            controller_github_token().as_deref(),
-        )? {
-            return Ok(ResumeRepositorySourcePreflight::RepositoryMoved(
-                ResumeRepositorySourceMismatch {
-                    session_id: session_id.to_owned(),
-                    bundle_id,
-                    repository_id: repository_id.to_owned(),
-                    missing_commit,
-                    archived_origin: archived.metadata.origin.clone(),
-                    configured_origin: replacement.source_label(),
-                },
-            ));
-        }
         let previous = session.clone();
         let mut project = session.project.clone();
         if let Some(project) = &mut project {
@@ -423,6 +431,60 @@ impl Controller {
                     .clone()
                     .expect("accepted project source resolved above"),
             );
+        }
+        let github_token = if let Some(app) = self.config.github.app.as_ref() {
+            if let Some(project) = &project {
+                let bundle = project.bundle.clone();
+                let network_sources = project.network_sources.clone();
+                let repositories = tokio::task::spawn_blocking(move || {
+                    github_repositories(&bundle, Some(&network_sources), &ProcessExecutor)
+                })
+                .await
+                .context("replacement GitHub repository source task failed")??;
+                let provider = GithubAppTokenProvider::shared(app)?;
+                let installation = provider
+                    .token_for_owner_repo_pairs(&bundle_id, &repositories)
+                    .await
+                    .map_err(super::GithubBundleSelectionError::into_anyhow)?;
+                match installation {
+                    Some(installation) => {
+                        Some(provider.token_for_installation(installation).await?)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            self.github_token_for_session(session_id).await?
+        };
+        let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
+        let verified = ResumeRepositoryBundles {
+            checkpoint_sha256: checkpoint.sha256.clone(),
+            repositories,
+        };
+        let archived = verified
+            .repositories
+            .iter()
+            .find(|repository| repository.metadata.id == repository_id)
+            .with_context(|| format!("checkpoint does not contain repository {repository_id:?}"))?;
+        if let Some(missing_commit) = checkpoint_source_missing_commit(
+            &replacement,
+            replacement_network.as_ref(),
+            archived,
+            executor,
+            github_token.as_deref(),
+        )? {
+            return Ok(ResumeRepositorySourcePreflight::RepositoryMoved(
+                ResumeRepositorySourceMismatch {
+                    session_id: session_id.to_owned(),
+                    bundle_id,
+                    repository_id: repository_id.to_owned(),
+                    missing_commit,
+                    archived_origin: archived.metadata.origin.clone(),
+                    configured_origin: replacement.source_label(),
+                },
+            ));
         }
         // A merged project can use different repository IDs. Its destination
         // and identity identify the authoring entry; the session keeps its IDs.
@@ -491,6 +553,7 @@ impl Controller {
             verified,
             Some(repository_id),
             false,
+            github_token.as_deref(),
             executor,
         )
     }
@@ -1405,7 +1468,15 @@ impl Controller {
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_repository_sources(session_id, target_id, false, executor)?
+                self.preflight_repository_sources(
+                    session_id,
+                    target_id,
+                    false,
+                    self.github_token_for_repository_preflight(session_id)
+                        .await?
+                        .as_deref(),
+                    executor,
+                )?
             {
                 bail!(
                     "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
@@ -1594,7 +1665,7 @@ impl Controller {
                 materialized_session_from_canonical(session_id, &canonical)
             })
         });
-        let github_token = controller_github_token();
+        let github_token = self.github_token_for_session(session_id).await?;
 
         // The configuration gains the bundle before the record points at it, so
         // no persisted session ever names a bundle that is not there.

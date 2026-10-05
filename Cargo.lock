@@ -706,6 +706,7 @@ dependencies = [
  "rayon",
  "reedline",
  "reqwest",
+ "ring",
  "rusqlite",
  "rustls",
  "semver",

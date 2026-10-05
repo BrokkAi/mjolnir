@@ -967,6 +967,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
+            github: Default::default(),
             continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),

@@ -12,6 +12,29 @@ pub trait SubagentBackend: Send + Sync {
         Ok(None)
     }
 
+    /// Confirm before session admission that the configured bundle selects at
+    /// most one GitHub App installation.
+    fn validate_github_bundle(
+        &self,
+        _bundle_id: String,
+    ) -> BoxFuture<'_, Result<(), crate::controller::GithubBundleSelectionError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Return one currently valid App installation token for the owner or
+    /// repository named by the caller.
+    fn github_token(
+        &self,
+        _owner: String,
+        _repository: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<String>> {
+        Box::pin(async {
+            anyhow::bail!(
+                "GitHub App credentials are not configured; set [github.app] in config.toml"
+            )
+        })
+    }
+
     fn transcript_history(
         &self,
         session_id: String,

@@ -254,6 +254,11 @@ pub trait SessionHandleBackend: Send + Sync {
         response: ElicitationResponse,
     ) -> BoxFuture<'_, Result<()>>;
     fn stop_background_task(&self, background_task_id: String) -> BoxFuture<'_, Result<()>>;
+    /// Replace the worker's ephemeral GitHub token before a controller-owned
+    /// operation that needs the newest installation credential.
+    fn install_github_token(&self, _token: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { anyhow::bail!("GitHub token refresh is unavailable") })
+    }
     fn reviewer(
         &self,
         role: Option<String>,
@@ -444,6 +449,10 @@ impl SessionHandle {
 
     pub async fn stop_background_task(&self, background_task_id: String) -> Result<()> {
         self.backend.stop_background_task(background_task_id).await
+    }
+
+    pub async fn install_github_token(&self, token: String) -> Result<()> {
+        self.backend.install_github_token(token).await
     }
 
     pub async fn reviewer(&self, action: ReviewerAction) -> Result<ReviewerOutcome> {

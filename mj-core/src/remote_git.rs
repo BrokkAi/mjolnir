@@ -333,6 +333,42 @@ fn expand_github_source(source: &str) -> Result<String> {
     Ok(expanded)
 }
 
+/// Return the GitHub owner and repository named by a supported GitHub source.
+///
+/// This accepts the same HTTPS, SSH, and `owner/repository` spellings as
+/// [`resolve_repository`]. Other Git hosts return `None`.
+pub fn github_owner_repo(source: &str) -> Option<(String, String)> {
+    let source = source.trim();
+    let path = if let Some(path) = source.strip_prefix("git@github.com:") {
+        path.to_owned()
+    } else if !source.contains("://") && !source.contains('@') && !source.contains(':') {
+        source.to_owned()
+    } else {
+        let url = Url::parse(source).ok()?;
+        if url.host_str()? != "github.com" {
+            return None;
+        }
+        url.path().strip_prefix('/')?.to_owned()
+    };
+    let path = path.strip_suffix(".git").unwrap_or(&path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repository = parts.next()?;
+    if parts.next().is_some()
+        || owner.is_empty()
+        || repository.is_empty()
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    Some((owner.to_owned(), repository.to_owned()))
+}
+
 fn network_git_output(output: &CommandOutput) -> Result<(Option<String>, Option<String>)> {
     let text = String::from_utf8(output.stdout.clone()).context("decode `git ls-remote` output")?;
     let mut branch = None;
@@ -433,6 +469,28 @@ mod tests {
         let source = resolve_repository(&repository, &NoopExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
         assert_eq!(source.push_urls, ["https://github.com/BrokkAi/hel.git"]);
+    }
+
+    #[test]
+    fn github_owner_repo_understands_supported_remote_spellings() {
+        for source in [
+            "acme/widget",
+            "acme/widget.git",
+            "https://github.com/acme/widget.git",
+            "git@github.com:acme/widget.git",
+            "ssh://git@github.com/acme/widget.git",
+        ] {
+            assert_eq!(
+                github_owner_repo(source),
+                Some(("acme".into(), "widget".into())),
+                "source {source:?}"
+            );
+        }
+        assert_eq!(
+            github_owner_repo("https://gitlab.com/acme/widget.git"),
+            None
+        );
+        assert_eq!(github_owner_repo("acme/widget/child"), None);
     }
 
     #[test]

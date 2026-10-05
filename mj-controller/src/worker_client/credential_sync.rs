@@ -242,17 +242,6 @@ pub(super) async fn reconcile_profile_guarded(
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
-    // The token lookup may run `gh auth token`, a synchronous child process,
-    // so it goes to the blocking pool rather than stalling a scheduler thread.
-    let github_token = match targets.iter().any(|target| target.sync_github_token) {
-        true => tokio::task::spawn_blocking(crate::controller::controller_github_token)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!("github token lookup task stopped: {error}");
-                None
-            }),
-        false => None,
-    };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
@@ -292,11 +281,30 @@ pub(super) async fn reconcile_profile_guarded(
                         if !current {
                             return Ok(None);
                         }
+                        let github_token = if target.sync_github_token {
+                            crate::controller::github_token_for_session(target.session_id.clone())
+                                .await?
+                        } else {
+                            None
+                        };
                         reconcile_session(relays, target, &skills, github_token.as_deref()).await
                     })
                     .await
-                    .unwrap_or(Ok(None)),
-                None => reconcile_session(relays, target, &skills, github_token.as_deref()).await,
+                    .unwrap_or_else(|| Ok(None)),
+                None => {
+                    let github_token = if target.sync_github_token {
+                        crate::controller::github_token_for_session(target.session_id.clone()).await
+                    } else {
+                        Ok(None)
+                    };
+                    match github_token {
+                        Ok(github_token) => {
+                            reconcile_session(relays, target, &skills, github_token.as_deref())
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
             };
             match result {
                 // Deferral is not a successful credential check: in particular

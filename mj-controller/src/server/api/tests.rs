@@ -61,6 +61,48 @@ async fn bundle_export_distinguishes_deferral_from_failure() {
     }
 }
 
+#[tokio::test]
+async fn github_token_route_returns_the_selected_installation_token() {
+    let (app, _actions, _snapshots, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            installation_token: Some("installation-secret".into()),
+            ..Default::default()
+        }),
+        |_| {},
+    );
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/github-token?owner=acme&repo=project"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let token: GithubTokenResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(token.token, "installation-secret");
+}
+
+#[tokio::test]
+async fn github_token_route_explains_when_the_app_is_not_configured() {
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::get("/api/v1/github-token?owner=acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("[github.app]"));
+}
+
 #[test]
 fn a_session_nobody_has_named_is_published_by_its_creation_title_not_its_id() {
     // F-12: a dashboard-created session listed its hex id as its title.
@@ -520,6 +562,7 @@ struct FakeBackend {
     file: Option<Vec<u8>>,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
+    installation_token: Option<String>,
     /// When set, the diff fails outright rather than being refused.
     diff_fails: bool,
     bundle_fails: bool,
@@ -560,6 +603,21 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn github_token(
+        &self,
+        _owner: String,
+        _repository: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<String>> {
+        let token = self.installation_token.clone();
+        Box::pin(async move {
+            token.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "GitHub App credentials are not configured; set [github.app] in config.toml"
+                )
+            })
+        })
+    }
+
     fn wait_revision(&self, _: &str) -> AnyResult<Option<u64>> {
         Ok(Some(
             self.wait_revision.load(std::sync::atomic::Ordering::SeqCst),

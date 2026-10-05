@@ -140,6 +140,10 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         Box::pin(self.0.stop_background_task(background_task_id))
     }
 
+    fn install_github_token(&self, token: String) -> mj_client::session::BoxFuture<'_, Result<()>> {
+        Box::pin(self.0.install_github_token(token))
+    }
+
     fn reviewer(
         &self,
         role: Option<String>,

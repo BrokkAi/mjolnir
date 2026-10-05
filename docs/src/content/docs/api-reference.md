@@ -100,6 +100,21 @@ match on.
 
 ## Routes
 
+### Get a GitHub App installation token
+
+```text
+GET /api/v1/github-token?owner=acme
+GET /api/v1/github-token?owner=acme&repo=project
+```
+
+The authenticated daemon client receives a currently valid installation token
+for the configured GitHub App. Pass an owner to select its installation, or
+also pass a repository name to discover the installation with access to that
+repository. The response is `{ "token": "..." }`; treat it as a secret and
+never log or persist it. The route returns an error when no App is configured.
+The [`mj github-token`](/cli-reference/#github-app-token) command wraps this
+route.
+
 ### List workspaces
 
 ```text

@@ -85,6 +85,20 @@ The profile may be omitted only when exactly one is configured. Mjolnir launches
 
 See [profiles and harnesses](/profiles/) for home directories, credential handling, and runtime limitations.
 
+## GitHub App token
+
+```text
+mj github-token --owner <login>
+mj github-token --repo <owner>/<repository>
+```
+
+Print a currently valid installation token for the configured GitHub App. The
+daemon owns the shared token cache; this command does not need the private key
+on the caller's host. `--owner` selects an installation by GitHub account, and
+`--repo` discovers the installation that can access that repository. The
+command fails clearly when no GitHub App is configured. Treat its output as a
+secret. See [GitHub App credentials](/github-app/) for setup and CI usage.
+
 ## Import a native session
 
 ```text

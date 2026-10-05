@@ -2018,6 +2018,7 @@ impl Controller {
         &self,
         operation: &MoveOperation,
         preparation: Option<&MovePreparation>,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
@@ -2039,9 +2040,10 @@ impl Controller {
         if !operation.in_place
             && operation.workspace_transfer.is_none()
             && let super::ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = self
-                .preflight_resume_repository_sources(
+                .preflight_resume_repository_sources_with_token(
                     id,
                     operation.selection.target_template_id.as_deref().unwrap(),
+                    github_token,
                     executor,
                 )?
         {
