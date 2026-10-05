@@ -514,18 +514,74 @@ pub struct WaitResponse {
 pub const DEFAULT_TRANSCRIPT_LIMIT: usize = 200;
 pub const MAX_TRANSCRIPT_LIMIT: usize = 1_000;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TranscriptQuery {
-    #[serde(default)]
-    pub role: Option<mj_core::transcript::TranscriptRole>,
+    pub role: Vec<mj_core::transcript::TranscriptRole>,
     /// Return only closed agent messages and keep the cursor before any open one.
-    #[serde(default)]
     pub finished_only: bool,
     /// Resume from the highest sequence the caller has already seen.
-    #[serde(default)]
     pub after_seq: Option<u64>,
-    #[serde(default)]
     pub limit: Option<usize>,
+}
+
+impl<'de> serde::Deserialize<'de> for TranscriptQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TranscriptQueryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TranscriptQueryVisitor {
+            type Value = TranscriptQuery;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("transcript query parameters")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut role = Vec::new();
+                let mut finished_only = None;
+                let mut after_seq = None;
+                let mut limit = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "role" => role.push(map.next_value()?),
+                        "finished_only" => {
+                            if finished_only.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("finished_only"));
+                            }
+                        }
+                        "after_seq" => {
+                            if after_seq.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("after_seq"));
+                            }
+                        }
+                        "limit" => {
+                            if limit.replace(map.next_value()?).is_some() {
+                                return Err(serde::de::Error::duplicate_field("limit"));
+                            }
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(TranscriptQuery {
+                    role,
+                    finished_only: finished_only.unwrap_or_default(),
+                    after_seq,
+                    limit,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TranscriptQueryVisitor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

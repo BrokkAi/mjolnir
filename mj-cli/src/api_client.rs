@@ -449,11 +449,11 @@ impl ApiClient {
         session_id: &str,
         after_seq: Option<u64>,
         limit: Option<usize>,
-        role: Option<mj_core::transcript::TranscriptRole>,
+        roles: &[mj_core::transcript::TranscriptRole],
         finished_only: bool,
     ) -> Result<TranscriptResponse> {
         let mut query = Vec::new();
-        if let Some(role) = role {
+        for role in roles {
             query.push(format!("role={}", role.as_str()));
         }
         if finished_only {

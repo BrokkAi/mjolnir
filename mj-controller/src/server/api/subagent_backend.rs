@@ -186,7 +186,7 @@ pub trait SubagentBackend: Send + Sync {
         session_id: String,
         after_seq: u64,
         limit: usize,
-        role: Option<mj_core::transcript::TranscriptRole>,
+        roles: Vec<mj_core::transcript::TranscriptRole>,
         finished_only: bool,
     ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>>;
 

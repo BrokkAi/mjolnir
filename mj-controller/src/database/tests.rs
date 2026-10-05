@@ -4685,7 +4685,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     .unwrap();
 
     let page =
-        load_materialized_transcript_filtered_from(&database, "session-1", 0, 10, None, false)
+        load_materialized_transcript_filtered_from(&database, "session-1", 0, 10, vec![], false)
             .unwrap()
             .unwrap();
     assert_eq!(
@@ -4699,7 +4699,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     assert_eq!(page.latest_seq, 3);
 
     let resumed =
-        load_materialized_transcript_filtered_from(&database, "session-1", 2, 10, None, false)
+        load_materialized_transcript_filtered_from(&database, "session-1", 2, 10, vec![], false)
             .unwrap()
             .unwrap();
     assert_eq!(resumed.items.len(), 1);
@@ -4713,7 +4713,7 @@ fn transcript_paging_by_sequence_returns_a_rewritten_agent_message_once() {
     );
 
     assert!(
-        load_materialized_transcript_filtered_from(&database, "unknown", 0, 10, None, false)
+        load_materialized_transcript_filtered_from(&database, "unknown", 0, 10, vec![], false)
             .unwrap()
             .is_none(),
         "a session with no projection row has no transcript to page"
@@ -4788,12 +4788,46 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         Ok(())
     })
     .unwrap();
+    let mixed_first = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        0,
+        1,
+        vec![TranscriptRole::Agent, TranscriptRole::System],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mixed_first.items.len(), 1);
+    assert_eq!(mixed_first.items[0].seq(), 1);
+    assert_eq!(
+        mj_core::transcript::transcript_item_role(&mixed_first.items[0].body),
+        "system"
+    );
+    assert_eq!(mixed_first.next_after_seq, 1);
+    let mixed_next = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        mixed_first.next_after_seq,
+        1,
+        vec![TranscriptRole::Agent, TranscriptRole::System],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        mixed_next.items.len(),
+        2,
+        "a page must not split a sequence tie"
+    );
+    assert_eq!(mixed_next.next_after_seq, 2);
+
     let first = load_materialized_transcript_filtered_from(
         &path,
         "session-1",
         0,
         1,
-        Some(TranscriptRole::Agent),
+        vec![TranscriptRole::Agent],
         false,
     )
     .unwrap()
@@ -4805,7 +4839,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         "session-1",
         first.next_after_seq,
         1,
-        Some(TranscriptRole::Agent),
+        vec![TranscriptRole::Agent],
         false,
     )
     .unwrap()
@@ -4816,7 +4850,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         "session-1",
         4,
         1,
-        Some(TranscriptRole::Agent),
+        vec![TranscriptRole::Agent],
         false,
     )
     .unwrap()
@@ -4827,13 +4861,43 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
         "session-1",
         0,
         1,
-        Some(TranscriptRole::Tool),
+        vec![TranscriptRole::Tool],
         false,
     )
     .unwrap()
     .unwrap();
     assert!(empty.items.is_empty());
     assert_eq!(empty.next_after_seq, 6);
+
+    let mut later_tool = agent_message_mutation(7);
+    let TranscriptMutation::Upsert(item) = &mut later_tool.transcript[0] else {
+        unreachable!();
+    };
+    item.stable_id = "tool:call-7".into();
+    item.latest_content_event_ordinal = None;
+    item.body = TranscriptBody::Tool {
+        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}),
+        terminal_outputs: Vec::new(),
+        terminal_refs: Vec::new(),
+        presentation: None,
+    };
+    apply_projection_page_to(&path, "session-1", |page| {
+        page.apply(7, &event_digest(6), &event_digest(7), &later_tool)
+    })
+    .unwrap();
+    let resumed = load_materialized_transcript_filtered_from(
+        &path,
+        "session-1",
+        empty.next_after_seq,
+        1,
+        vec![TranscriptRole::Tool],
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed.items.len(), 1);
+    assert_eq!(resumed.items[0].seq(), 7);
+    assert_eq!(resumed.next_after_seq, 7);
 }
 
 #[test]
@@ -4873,9 +4937,10 @@ fn finished_transcript_cursor_stops_before_open_agent_and_releases_it_once_close
     })
     .unwrap();
 
-    let blocked = load_materialized_transcript_filtered_from(&path, "session-1", 0, 10, None, true)
-        .unwrap()
-        .unwrap();
+    let blocked =
+        load_materialized_transcript_filtered_from(&path, "session-1", 0, 10, vec![], true)
+            .unwrap()
+            .unwrap();
     assert!(blocked.items.is_empty());
     assert_eq!(blocked.latest_seq, 2);
     assert_eq!(
@@ -4900,7 +4965,7 @@ fn finished_transcript_cursor_stops_before_open_agent_and_releases_it_once_close
         "session-1",
         blocked.next_after_seq,
         10,
-        None,
+        vec![],
         true,
     )
     .unwrap()
@@ -4915,7 +4980,7 @@ fn finished_transcript_cursor_stops_before_open_agent_and_releases_it_once_close
         "session-1",
         released.next_after_seq,
         10,
-        None,
+        vec![],
         true,
     )
     .unwrap()
@@ -4955,7 +5020,7 @@ fn finished_transcript_cursor_advances_across_non_agent_rows() {
     })
     .unwrap();
 
-    let page = load_materialized_transcript_filtered_from(&path, "session-1", 0, 1, None, true)
+    let page = load_materialized_transcript_filtered_from(&path, "session-1", 0, 1, vec![], true)
         .unwrap()
         .unwrap();
     assert!(page.items.is_empty());

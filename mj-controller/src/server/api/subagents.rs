@@ -1103,7 +1103,7 @@ mod tests {
             _session_id: String,
             _after_seq: u64,
             _limit: usize,
-            _role: Option<mj_core::transcript::TranscriptRole>,
+            _roles: Vec<mj_core::transcript::TranscriptRole>,
             _finished_only: bool,
         ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
             Box::pin(async { Ok(None) })

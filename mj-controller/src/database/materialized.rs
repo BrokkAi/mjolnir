@@ -556,7 +556,7 @@ pub fn load_materialized_transcript_filtered(
     session_id: &str,
     after_seq: u64,
     limit: usize,
-    role: Option<mj_core::transcript::TranscriptRole>,
+    roles: Vec<mj_core::transcript::TranscriptRole>,
     finished_only: bool,
 ) -> Result<Option<TranscriptPage>> {
     load_materialized_transcript_filtered_from(
@@ -564,7 +564,7 @@ pub fn load_materialized_transcript_filtered(
         session_id,
         after_seq,
         limit,
-        role,
+        roles,
         finished_only,
     )
 }
@@ -574,7 +574,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
     session_id: &str,
     after_seq: u64,
     limit: usize,
-    role: Option<mj_core::transcript::TranscriptRole>,
+    roles: Vec<mj_core::transcript::TranscriptRole>,
     finished_only: bool,
 ) -> Result<Option<TranscriptPage>> {
     let mut reader = open_reader(path)?;
@@ -582,11 +582,12 @@ pub(super) fn load_materialized_transcript_filtered_from(
     let Some(fields) = read_materialized_session_fields(&connection, session_id)? else {
         return Ok(None);
     };
-    let role = if finished_only {
-        Some("agent")
+    let role_kinds: Vec<_> = if finished_only {
+        vec!["agent"]
     } else {
-        role.map(|r| r.storage_kind())
+        roles.iter().map(|role| role.storage_kind()).collect()
     };
+    let role_kinds_json = serde_json::to_string(&role_kinds)?;
     let open_agent_seq = if finished_only {
         connection.query_row(
             "SELECT MIN(COALESCE(latest_content_event_ordinal, position))
@@ -606,7 +607,8 @@ pub(super) fn load_materialized_transcript_filtered_from(
              SELECT *, COALESCE(latest_content_event_ordinal, position) AS seq
              FROM materialized_transcript_items WHERE session_id = ?1
              AND COALESCE(latest_content_event_ordinal, position) > ?2
-             AND (?4 IS NULL OR json_extract(body_json, '$.kind') = ?4)
+             AND (json_array_length(?4) = 0 OR json_extract(body_json, '$.kind')
+                  IN (SELECT value FROM json_each(?4)))
              AND (?5 = 0 OR (
                  json_extract(body_json, '$.kind') = 'agent'
                  AND json_extract(body_json, '$.streaming') = 0
@@ -624,7 +626,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
                 session_id,
                 after_seq,
                 limit.clamp(1, 1000) as i64,
-                role,
+                role_kinds_json,
                 i64::from(finished_only),
                 open_agent_seq,
             ],
@@ -675,7 +677,8 @@ pub(super) fn load_materialized_transcript_filtered_from(
              SELECT 1 FROM materialized_transcript_items
              WHERE session_id = ?1
                AND COALESCE(latest_content_event_ordinal, position) > ?2
-               AND (?3 IS NULL OR json_extract(body_json, '$.kind') = ?3)
+               AND (json_array_length(?3) = 0 OR json_extract(body_json, '$.kind')
+                    IN (SELECT value FROM json_each(?3)))
                AND (?4 = 0 OR (
                    json_extract(body_json, '$.kind') = 'agent'
                    AND json_extract(body_json, '$.streaming') = 0
@@ -685,7 +688,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
         params![
             session_id,
             last_seq,
-            role,
+            role_kinds_json,
             i64::from(finished_only),
             open_agent_seq
         ],

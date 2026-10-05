@@ -217,7 +217,7 @@ mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <
           [--return-on-input] [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
-             [--role <role> | --all-roles | --finished-only] [--json]
+             [--role <role>]... [--finished-only] [--json]
 mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
@@ -284,12 +284,12 @@ cannot be combined with a session that runs directly in the selected directory.
 - `--return-on-input` makes `mj prompt --wait` and `mj wait` return as soon as
   the agent asks for structured input, with the outcome `input_required`.
   Answer with `mj elicitations` and `mj respond`, then wait again.
-- By default, `mj transcript` omits `tool` and `terminal` entries. `--role`
-  limits it to one kind of entry: `user`, `agent`, `thought`, `tool`,
-  `terminal`, `plan`, `plan_proposal`, or `system`. Pass `--all-roles` to
-  include every kind; it cannot be combined with `--role`. `--finished-only`
-  asks the API for closed agent messages and cannot be combined with either
-  option; it implies the `agent` role.
+- By default, `mj transcript` omits `tool` and `terminal` entries. Repeat
+  `--role` to select several kinds of entry from `user`, `agent`, `thought`,
+  `tool`, `terminal`, `plan`, `plan_proposal`, and `system`. To include every
+  kind, list all eight roles; there is no `--all-roles` option. `--finished-only`
+  selects closed agent messages and can be combined only with `--role agent`;
+  it implies the `agent` role when no role is given.
 - `mj events` prints durable session events as line-delimited JSON, following
   new events until you stop it. `--after-seq` replays from that sequence first.
 - `mj usage` reads recorded token usage for a session.
@@ -435,10 +435,11 @@ instead. With `--json` and `--out`, `mj export` prints one object with the
 `path`, the `bytes` written, and the `format` (`patch`, `bundle`, or `file`);
 with `--json` and no `--out` the export itself is still the output. `mj transcript`
 pages by `--after-seq`; use the response's `next_after_seq` for the next page.
-The cursor advances across entries hidden by the default role filter, so even
-a page with no visible items can make progress. `latest_seq` is the newest
-sequence in the full transcript. `--limit` caps entries scanned before the
-default filter, so a displayed page can contain fewer items.
+The selected roles are filtered before the page limit. The cursor advances
+across entries outside that selection, so a page with no matching items can
+still make progress. `latest_seq` is the newest sequence in the full transcript.
+`--limit` sets a target number of matching items per page; tied entries with
+the same sequence stay together, so a page can exceed the target.
 
 With `--finished-only`, `next_after_seq` is an exclusive resume cursor for the
 finished agent prefix: it never passes the sequence of the earliest currently
@@ -453,11 +454,11 @@ at the time of the read. ACP can still append late chunks to the same
 later revision.
 
 Each command in this section except `mj events` and `mj respond` takes
-`--json` to print its JSON result. For `mj transcript`, the default `items`
-list hides tool and terminal roles locally while `next_after_seq` and
-`latest_seq` retain the API page's pagination cursors. `--finished-only`
-instead filters agent messages in the API and uses the finished-prefix cursor
-described above. `mj events` always prints JSON lines.
+`--json` to print its JSON result. For `mj transcript`, the server applies the
+default role selection or the repeated `--role` selection before paging, and
+returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
+filters agent messages and uses the finished-prefix cursor described above.
+`mj events` always prints JSON lines.
 `mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
