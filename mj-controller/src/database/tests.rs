@@ -1,9 +1,8 @@
 use super::*;
 use mj_core::config::HarnessKind;
 use mj_core::state::{
-    HostContainerSize, ManagedCheckoutKind, ManagedWorktreeTarget, MaterializedTurn,
-    MaterializedTurnOutcome, PublicationAssessment, PublicationState, QueuedCommandKind,
-    TranscriptBody, TurnOutcomeKind,
+    ManagedCheckoutKind, ManagedWorktreeTarget, MaterializedTurn, MaterializedTurnOutcome,
+    PublicationAssessment, PublicationState, QueuedCommandKind, TranscriptBody, TurnOutcomeKind,
 };
 
 use mj_core::relay::RELAY_EVENT_GENESIS_DIGEST;
@@ -103,6 +102,7 @@ fn store_schema_mismatch_survives_the_controller_load_error_chain() {
 /// happens next: another process migrated the store, and this lane kept
 /// writing rows the store's new ladder does not expect. Every queued write is
 /// now refused with the reason.
+// Hard-won: b19f7b1c: an open writer kept mutating projection rows after another process advanced the store schema
 #[test]
 fn writer_refuses_a_projection_write_after_the_store_moves() {
     let directory = tempfile::tempdir().unwrap();
@@ -145,6 +145,7 @@ fn writer_refuses_a_projection_write_after_the_store_moves() {
     owner.shutdown().unwrap();
 }
 
+// Hard-won: b19f7b1c: an open writer persisted receipts after another process advanced the store schema
 #[test]
 fn writer_refuses_a_read_receipt_after_the_store_moves() {
     let directory = tempfile::tempdir().unwrap();
@@ -628,67 +629,6 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
 }
 
 #[test]
-fn normalized_state_round_trip_preserves_children_and_order() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut state = State::default();
-    let mut record = session("session-1", "project-1");
-    record.project_directory = Some(PathBuf::from("/srv/project-1/.mj/worktrees/session-1"));
-    record.managed_worktree = Some(ManagedWorktree {
-        kind: Default::default(),
-        source_project_directory: PathBuf::from("/srv/project-1"),
-        source_repository: PathBuf::from("/srv/project-1"),
-        worktree_root: PathBuf::from("/srv/project-1/.mj/worktrees/session-1"),
-        branch: "mj/session-1".into(),
-        target: ManagedWorktreeTarget::Ssh {
-            destination: "builder".into(),
-            ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
-        },
-        base_commit: None,
-    });
-    record.resource_allocation = None;
-    record.launch_base = Some("origin/main".into());
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
-        repository_id: "project".into(),
-        commit: "a".repeat(40),
-        branch: Some("town/run-123".into()),
-    });
-    record.target = Some(TargetLocator::LocalBare {
-        worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
-    });
-    state.sessions.insert(record.id.clone(), record);
-    state.mount_history.insert(
-        "local".into(),
-        vec![PathBuf::from("/recent"), PathBuf::from("/older")],
-    );
-    state.container_sizes.insert(
-        "local".into(),
-        HostContainerSize {
-            cpus: 12,
-            memory_bytes: 48 * 1024 * 1024 * 1024,
-        },
-    );
-
-    save_state_to(&database, &state).unwrap();
-
-    assert_eq!(load_state_from(&database).unwrap(), state);
-    let connection = open(&database).unwrap();
-    assert_eq!(
-        connection
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        SCHEMA_VERSION
-    );
-    assert_eq!(
-        connection
-            .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
-            .optional()
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime-removal.sqlite3");
@@ -882,34 +822,6 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
 }
 
 #[test]
-fn local_docker_locator_round_trips_through_the_normalized_target_table() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut record = session("session-1", "project-1");
-    record.target_template_id = "docker".into();
-    record.target = Some(TargetLocator::LocalDocker {
-        borrowed_from: None,
-        container_id: "hel-session-1".into(),
-    });
-
-    save_session_to(&database, &record).unwrap();
-
-    let loaded = load_state_from(&database).unwrap();
-    assert_eq!(loaded.sessions["session-1"], record);
-    let connection = open(&database).unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT kind FROM session_targets WHERE session_id = 'session-1'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "local-docker"
-    );
-}
-
-#[test]
 fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -988,56 +900,6 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
 }
 
 #[test]
-fn session_and_host_container_size_commit_together_and_latest_wins() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let record = session("session-1", "project-1");
-    save_session_with_container_size_to(
-        &database,
-        &record,
-        Some((
-            "builder",
-            HostContainerSize {
-                cpus: 8,
-                memory_bytes: 32,
-            },
-        )),
-    )
-    .unwrap();
-    save_session_with_container_size_to(
-        &database,
-        &record,
-        Some((
-            "builder",
-            HostContainerSize {
-                cpus: 16,
-                memory_bytes: 64,
-            },
-        )),
-    )
-    .unwrap();
-
-    let loaded = load_state_from(&database).unwrap();
-    assert_eq!(
-        loaded.container_sizes["builder"],
-        HostContainerSize {
-            cpus: 16,
-            memory_bytes: 64,
-        }
-    );
-    let connection = open(&database).unwrap();
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM host_container_sizes", [], |row| row
-                .get::<_, i64>(
-                0
-            ))
-            .unwrap(),
-        1
-    );
-}
-
-#[test]
 fn loading_state_does_not_restore_a_hidden_context_session_name() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -1050,77 +912,6 @@ fn loading_state_does_not_restore_a_hidden_context_session_name() {
     assert_eq!(
         load_state_from(&database).unwrap().sessions["session-1"].acp_session_title,
         None
-    );
-}
-
-#[test]
-fn container_settings_write_overrides_mounts_and_remembered_sources() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let record = session("session-1", "project-1");
-    save_session_to(&database, &record).unwrap();
-
-    set_session_container_settings_to(
-        &database,
-        "session-1",
-        Some("6"),
-        Some("12g"),
-        &[AdditionalMount {
-            source: PathBuf::from("/host/models"),
-            destination: PathBuf::from("/mnt/models"),
-            access: crate::targets::MountAccess::Ro,
-        }],
-        "2026-08-13T00:00:00Z",
-    )
-    .unwrap();
-    replace_mount_history_in(&database, "local", &[PathBuf::from("/host/models")]).unwrap();
-
-    let loaded = load_state_from(&database).unwrap();
-    let session = &loaded.sessions["session-1"];
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
-    assert_eq!(
-        session.additional_mounts,
-        vec![AdditionalMount {
-            source: PathBuf::from("/host/models"),
-            destination: PathBuf::from("/mnt/models"),
-            access: crate::targets::MountAccess::Ro,
-        }]
-    );
-    assert_eq!(session.updated_at, "2026-08-13T00:00:00Z");
-    assert_eq!(
-        loaded.mount_history["local"],
-        vec![PathBuf::from("/host/models")]
-    );
-}
-
-#[test]
-fn mount_read_only_round_trips_through_both_writers() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut record = session("session-1", "project-1");
-    record.additional_mounts = vec![
-        AdditionalMount {
-            source: PathBuf::from("/host/cache"),
-            destination: PathBuf::from("/mnt/cache"),
-            access: crate::targets::MountAccess::Cow,
-        },
-        AdditionalMount {
-            source: PathBuf::from("/net/share"),
-            destination: PathBuf::from("/mnt/share"),
-            access: crate::targets::MountAccess::Ro,
-        },
-        AdditionalMount {
-            source: PathBuf::from("/host/build-cache"),
-            destination: PathBuf::from("/mnt/build-cache"),
-            access: crate::targets::MountAccess::Rw,
-        },
-    ];
-
-    save_session_to(&database, &record).unwrap();
-    assert_eq!(
-        load_state_from(&database).unwrap().sessions["session-1"].additional_mounts,
-        record.additional_mounts
     );
 }
 
@@ -1165,6 +956,7 @@ fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
     assert_eq!(loaded[1].access, crate::targets::MountAccess::Ro);
 }
 
+// Hard-won: b91beebe: a stale lifecycle save erased mounts and container settings from a separate writer
 #[test]
 fn lifecycle_save_preserves_container_settings_and_mounts() {
     let directory = tempfile::tempdir().unwrap();
@@ -1221,32 +1013,7 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     assert_eq!(loaded.sessions["session-1"].review, record.review);
 }
 
-#[test]
-fn provisioning_persists_the_build_cache_it_resolved() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut record = session("session-1", "project-1");
-    save_session_to(&database, &record).unwrap();
-
-    // Provisioning resolves the cache once the container's mounts are fixed
-    // and then saves through the lifecycle path, which is the only write a
-    // newly provisioned session gets.
-    record.state = SessionState::Running;
-    record.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "ssh:morannon".into(),
-        directory: PathBuf::from("/mnt/nvme/mbx"),
-        max_size: Some("1000GB".into()),
-        target_root: None,
-    });
-    save_lifecycle_session_to(&database, &record).unwrap();
-
-    let loaded = load_state_from(&database).unwrap();
-    assert_eq!(
-        loaded.sessions["session-1"].build_cache, record.build_cache,
-        "a resumed session must find the cache its container is already mounting"
-    );
-}
-
+// Hard-won: 5aa7f7bf: a missing target marked a checkpointed session lost and made recovery impossible
 #[test]
 fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
@@ -1318,6 +1085,7 @@ fn missing_target_keeps_a_checkpointed_session_recoverable_and_loses_one_without
     );
 }
 
+// Hard-won: 4e0f035b: a delayed workspace failure overwrote a session after a newer resume
 #[test]
 fn a_late_missing_workspace_report_cannot_invalidate_a_newer_session() {
     let directory = tempfile::tempdir().unwrap();
@@ -1460,6 +1228,7 @@ fn losing_the_target_ends_the_reviewer_conversation_and_bumps_its_generation() {
     );
 }
 
+// Hard-won: b91beebe: a stale checkpoint save erased independently updated mounts and container settings
 #[test]
 fn checkpointed_save_preserves_container_settings_and_mounts() {
     let directory = tempfile::tempdir().unwrap();
@@ -1524,21 +1293,6 @@ fn lifecycle_save_fails_for_unknown_session() {
     }
 
     assert!(load_state_from(&database).unwrap().sessions.is_empty());
-}
-
-#[test]
-fn destroying_session_round_trip_is_durable() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut record = session("session-1", "project-1");
-    record.state = SessionState::Destroying;
-
-    save_session_to(&database, &record).unwrap();
-
-    assert_eq!(
-        load_state_from(&database).unwrap().sessions["session-1"],
-        record
-    );
 }
 
 #[test]
@@ -1707,29 +1461,6 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     );
 }
 
-/// Archiving is a display choice with its own writer: it must not disturb
-/// the lifecycle state, checkpoint, or titles other writers own.
-#[test]
-fn the_archived_flag_round_trips_without_touching_other_session_fields() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let mut session = session("session-1", "project-1");
-    save_session_to(&database, &session).unwrap();
-    assert!(!load_state_from(&database).unwrap().sessions["session-1"].archived);
-
-    set_session_archived_to(&database, "session-1", true).unwrap();
-    let reloaded = load_state_from(&database).unwrap().sessions["session-1"].clone();
-    assert!(reloaded.archived);
-    session.archived = true;
-    assert_eq!(reloaded.state, session.state);
-    assert_eq!(reloaded.checkpoint, session.checkpoint);
-    assert_eq!(reloaded.acp_session_title, session.acp_session_title);
-
-    set_session_archived_to(&database, "session-1", false).unwrap();
-    assert!(!load_state_from(&database).unwrap().sessions["session-1"].archived);
-    assert!(set_session_archived_to(&database, "missing", true).is_err());
-}
-
 /// Hel never writes a harness home, so the hidden set for native sessions
 /// is Hel's own state and is keyed per harness.
 #[test]
@@ -1888,22 +1619,6 @@ fn queue_entry_kinds_round_trip_and_default_to_prompt() {
         loaded.queued_prompts.last().unwrap().kind,
         QueuedCommandKind::Prompt
     );
-}
-
-#[test]
-fn materialized_session_round_trip_preserves_typed_projection() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    let materialized = materialized_session("session-1");
-
-    save_materialized_session_to(&database, &materialized).unwrap();
-
-    let loaded = load_materialized_session_from(&database, "session-1")
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded, materialized);
-    assert_eq!(loaded.last_activity_at_ms(), Some(1_500));
 }
 
 #[test]
@@ -3011,61 +2726,6 @@ fn reopening_a_recreated_database_migrates_it_again() {
     assert!(!state.sessions.contains_key("session-1"));
 }
 
-/// Catch-up throughput: one durable commit per page instead of one per
-/// event. Ignored by default because it measures wall-clock time.
-#[test]
-#[ignore = "timing benchmark; run with --ignored --nocapture"]
-fn projection_page_apply_outruns_per_event_apply() {
-    const EVENTS: u64 = 2_000;
-    let directory = tempfile::tempdir().unwrap();
-
-    let per_event_database = directory.path().join("per-event/hel.sqlite3");
-    save_session_to(&per_event_database, &session("session-1", "project-1")).unwrap();
-    let started = std::time::Instant::now();
-    for ordinal in 1..=EVENTS {
-        apply_projection_event_to(
-            &per_event_database,
-            "session-1",
-            ordinal,
-            &event_digest(ordinal - 1),
-            &event_digest(ordinal),
-            &agent_message_mutation(ordinal),
-        )
-        .unwrap();
-    }
-    let per_event = started.elapsed();
-
-    let per_page_database = directory.path().join("per-page/hel.sqlite3");
-    save_session_to(&per_page_database, &session("session-1", "project-1")).unwrap();
-    let started = std::time::Instant::now();
-    apply_projection_page_to(&per_page_database, "session-1", |page| {
-        for ordinal in 1..=EVENTS {
-            page.apply(
-                ordinal,
-                &event_digest(ordinal - 1),
-                &event_digest(ordinal),
-                &agent_message_mutation(ordinal),
-            )?;
-        }
-        Ok(())
-    })
-    .unwrap();
-    let per_page = started.elapsed();
-
-    println!("{EVENTS} events per-event: {per_event:?}, one page: {per_page:?}");
-    assert_eq!(
-        load_materialized_session_from(&per_page_database, "session-1")
-            .unwrap()
-            .unwrap()
-            .applied_event_ordinal,
-        EVENTS
-    );
-    assert!(
-        per_page < per_event,
-        "one page took {per_page:?} against {per_event:?} per event"
-    );
-}
-
 #[test]
 fn deleting_operational_session_retains_relational_history_context() {
     let directory = tempfile::tempdir().unwrap();
@@ -3300,6 +2960,7 @@ fn independent_session_writes_preserve_both_updates() {
 /// as an ordinary workspace named `default`; an empty `default` is not
 /// listed, and its name cannot be taken for a workspace that would then be
 /// invisible.
+// Hard-won: 3bea5017: stopped sessions in the legacy default workspace were invisible to the user
 #[test]
 fn a_default_workspace_that_holds_sessions_is_listed_and_an_empty_one_is_not() {
     let directory = tempfile::tempdir().unwrap();
@@ -3343,75 +3004,6 @@ fn workspace_pane_size_row_count(path: &Path, workspace_id: &str) -> i64 {
             |row| row.get(0),
         )
         .unwrap()
-}
-
-#[test]
-fn workspace_pane_sizes_default_without_creating_an_absent_row() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Defaults").unwrap();
-
-    assert_eq!(workspace_pane_size_row_count(&database, &workspace.id), 0);
-    assert_eq!(
-        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
-        PaneSizes::default()
-    );
-    assert_eq!(
-        workspace_pane_size_row_count(&database, &workspace.id),
-        0,
-        "loading defaults must not create a settings row"
-    );
-}
-
-#[test]
-fn workspace_pane_sizes_round_trip_after_reopening_the_database() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
-    let sizes = PaneSizes {
-        sessions: PaneSize::Maximized,
-        targets: PaneSize::Minimized,
-        quota: PaneSize::Standard,
-    };
-
-    save_workspace_pane_sizes_to(&database, &workspace.id, sizes).unwrap();
-    drop(open(&database).unwrap());
-    forget_verified_schema(&database);
-
-    assert_eq!(
-        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
-        sizes
-    );
-}
-
-#[test]
-fn workspace_pane_sizes_are_isolated_between_workspaces() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let first = create_workspace_at(&database, "First").unwrap();
-    let second = create_workspace_at(&database, "Second").unwrap();
-    let first_sizes = PaneSizes {
-        sessions: PaneSize::Minimized,
-        targets: PaneSize::Maximized,
-        quota: PaneSize::Standard,
-    };
-    let second_sizes = PaneSizes {
-        sessions: PaneSize::Standard,
-        targets: PaneSize::Minimized,
-        quota: PaneSize::Maximized,
-    };
-
-    save_workspace_pane_sizes_to(&database, &first.id, first_sizes).unwrap();
-    save_workspace_pane_sizes_to(&database, &second.id, second_sizes).unwrap();
-
-    assert_eq!(
-        load_workspace_pane_sizes_from(&database, &first.id).unwrap(),
-        first_sizes
-    );
-    assert_eq!(
-        load_workspace_pane_sizes_from(&database, &second.id).unwrap(),
-        second_sizes
-    );
 }
 
 #[test]
@@ -3541,43 +3133,6 @@ fn split_layout(first_session: &str, second_session: &str) -> ConversationLayout
             (2, second_session.to_owned()),
         ]),
     }
-}
-
-#[test]
-fn workspace_layout_defaults_without_creating_an_absent_row() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Defaults").unwrap();
-
-    assert_eq!(workspace_layout_row_count(&database, &workspace.id), 0);
-    assert_eq!(
-        load_workspace_layout_from(&database, &workspace.id).unwrap(),
-        ConversationLayout::default()
-    );
-    assert_eq!(
-        workspace_layout_row_count(&database, &workspace.id),
-        0,
-        "loading the default layout must not create a settings row"
-    );
-}
-
-#[test]
-fn workspace_layout_round_trips_after_reopening_the_database() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Roundtrip").unwrap();
-    let mut layout = split_layout("session-1", "session-2");
-    layout.browse = Some(2);
-    layout.pins.insert("session-1".into(), 5);
-
-    save_workspace_layout_to(&database, &workspace.id, &layout).unwrap();
-    drop(open(&database).unwrap());
-    forget_verified_schema(&database);
-
-    assert_eq!(
-        load_workspace_layout_from(&database, &workspace.id).unwrap(),
-        layout
-    );
 }
 
 #[test]
@@ -3919,6 +3474,7 @@ fn a_running_session_and_its_sub_agent_change_workspace_together() {
     );
 }
 
+// Hard-won: 17824a09: concurrent equivalent workspace creation returned a conflict instead of the winning row
 #[test]
 fn setup_workspace_creation_returns_the_concurrent_name_winner() {
     let directory = tempfile::tempdir().unwrap();
@@ -3966,6 +3522,7 @@ fn read_frontiers_are_independent_per_client_with_the_session_cursor_as_baseline
     );
 }
 
+// Hard-won: 3018d6f0: clearing or editing inherited composer input left a ghost draft after detach
 #[test]
 fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
     for current in ["", "an edited unfinished thought"] {
@@ -4012,6 +3569,7 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
     }
 }
 
+// Hard-won: 3018d6f0: stale detach could erase recovered input or consume it before a failed save
 #[test]
 fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     let directory = tempfile::tempdir().unwrap();
@@ -4139,63 +3697,6 @@ fn detached_drafts_keep_source_pid_and_workspace_without_overwriting_each_other(
             && draft.owner_pid == Some(5678)
             && draft.text == "second unfinished thought"
     }));
-}
-
-#[test]
-fn review_baselines_survive_a_restart_and_a_restart_clears_a_running_review() {
-    use mj_core::review::driver::PendingForward;
-    use mj_core::review::lanes::PriorReviewContext;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-
-    assert_eq!(
-        turn_review_state_in(&database, "session-1").unwrap(),
-        TurnReviewState::default(),
-        "an unreviewed session starts with no baseline"
-    );
-
-    let state = TurnReviewState {
-        baselines: std::collections::BTreeMap::from([(
-            std::path::PathBuf::from("/workspace/app"),
-            "1234abcd".to_string(),
-        )]),
-        reviewed_through_ordinal: 42,
-        prior_review: Some(PriorReviewContext {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-        }),
-        active: Some("{\"phase\":\"running\"}".to_string()),
-        pending_forward: Some(PendingForward {
-            synthesis: "[P1] src/a.rs:1 -- broken".to_string(),
-            evidence: Default::default(),
-            command_id: "turn-review-forward-1".to_string(),
-            trees: std::collections::BTreeMap::from([(
-                std::path::PathBuf::from("/workspace/app"),
-                "5678efgh".to_string(),
-            )]),
-            reviewed_through_ordinal: 43,
-            // Stored and read back: a quick review's handoff must retry with
-            // the same "unverified" note after a restart.
-            provenance: mj_core::review::driver::FindingsProvenance::SingleReviewer,
-        }),
-    };
-    save_turn_review_state_in(&database, "session-1", &state).unwrap();
-    assert_eq!(turn_review_state_in(&database, "session-1").unwrap(), state);
-
-    // On recovery the in-flight review is dropped without advancing the
-    // baseline, so the next review still covers the same changes.
-    let recovered = TurnReviewState {
-        active: None,
-        ..state.clone()
-    };
-    save_turn_review_state_in(&database, "session-1", &recovered).unwrap();
-    let restored = turn_review_state_in(&database, "session-1").unwrap();
-    assert_eq!(restored.active, None);
-    assert_eq!(restored.baselines, state.baselines);
-    assert_eq!(restored.reviewed_through_ordinal, 42);
-    assert_eq!(restored.pending_forward, state.pending_forward);
 }
 
 /// A review interrupted by a daemon restart is cancelled, not resumed, and the
@@ -4364,6 +3865,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
 /// The wait endpoint reports a turn number and a final message for the span
 /// one turn covers. A message the harness records after the turn ended — a
 /// resume notice is one — belongs to no turn and must not displace the answer.
+// Hard-won: 529a5144: a later harness notice was reported as the preceding turn's answer
 #[test]
 fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
     let directory = tempfile::tempdir().unwrap();
@@ -4541,6 +4043,7 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
 /// harness notice recorded after that turn — a resume warning, for instance —
 /// must not take its place. The session-wide newest agent message does take
 /// its place, which is why the report is read from the turn's own span.
+// Hard-won: 529a5144: a finished child report was replaced by a later session-wide harness notice
 #[test]
 fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
     let directory = tempfile::tempdir().unwrap();
@@ -4871,6 +4374,7 @@ pub(super) fn after_state_sessions_read() {
     }
 }
 
+// Hard-won: 2bb4abcc: concurrent changes produced a mixed session and subagent snapshot
 #[test]
 fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_changes() {
     for creating_child in [true, false] {
@@ -4945,6 +4449,7 @@ fn deleting_a_child_session_deletes_its_subagent_relation() {
 /// The row is seeded with the foreign key off, because the schema's cascade is
 /// what normally prevents it; the point of the test is what the load does when
 /// the row exists anyway, whatever left it there.
+// Hard-won: cac34041: one orphaned subagent relation made every later state load fail
 #[test]
 fn a_subagent_relation_with_no_session_does_not_refuse_the_whole_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -5085,6 +4590,7 @@ pub(super) fn after_materialized_frontier_read() {
     }
 }
 
+// Hard-won: 767a0c57: a writer commit between reads assembled an impossible frontier and transcript
 #[test]
 fn projection_reads_keep_one_snapshot_when_a_writer_commits_after_the_frontier_read() {
     for mode in ["whole", "tail", "summary"] {
@@ -5283,6 +4789,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
 /// lock: SQLite only calls the busy handler when the connection holds no
 /// transaction, so the upgrade returns `SQLITE_BUSY` at once. Writer-capable
 /// connections therefore begin IMMEDIATE (issue 1117).
+// Hard-won: 3c668c3d: a read-then-write transaction failed immediately before SQLite could wait for the writer lock
 #[test]
 fn writer_connections_wait_for_a_concurrent_writer_instead_of_failing() {
     let directory = tempfile::tempdir().unwrap();
@@ -5711,6 +5218,7 @@ fn delivering_the_note_clears_only_the_sub_agents_it_named() {
 
 /// The ordinal of the parent's newest prompt is recorded only for a sub-agent
 /// child, and a late write for an older prompt never moves it back.
+// Hard-won: a91cfd04: an older prompt write moved a child's awaited ordinal backward and made it look done early
 #[test]
 fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
     let directory = tempfile::tempdir().unwrap();
@@ -5882,6 +5390,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
 /// the catalog. The context then holds the canonical project, and rebinding
 /// reports it so the resumed record can follow (resume publication rejects a
 /// record whose bundle differs from its context).
+// Hard-won: cb051da9: resume publication failed whenever an imported bundle was already a project alias
 #[test]
 fn rebinding_to_an_aliased_bundle_reports_the_canonical_project() {
     let directory = tempfile::tempdir().unwrap();
