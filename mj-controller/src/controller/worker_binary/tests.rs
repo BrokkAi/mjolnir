@@ -183,6 +183,58 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
     assert_eq!(path, warmed);
 }
 
+/// Test-and-fix M-4: the daemon log named neither the worker it chose for a
+/// target nor where it came from.
+// Hard-won: deb1c66: shipped startup logs omitted the selected worker source and build diagnostics
+#[test]
+fn pinning_logs_each_selected_worker_with_its_source_and_build() {
+    // Other tests install subscribers that make tracing cache "no interest"
+    // in this event, so it is checked alone, in a child with a global one.
+    const CHILD: &str = "MJ_PINNING_LOG_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "pinning_logs_each_selected_worker_with_its_source_and_build",
+        ))
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let worker = directory.path().join("worker");
+    std::fs::write(&worker, stamped_worker(b"logged bytes")).unwrap();
+    let cache = directory.path().join("cache");
+    let log = crate::test_log::CapturedLog::default();
+    tracing::subscriber::set_global_default(log.clone()).expect("the only global subscriber");
+    WorkerBinarySourceSnapshot::capture(&cache, |arch, requirement| {
+        if arch == "x86_64" && requirement == WorkerBinaryRequirement::PortableLinux {
+            Ok(WorkerBinaryAvailability::Local {
+                path: worker.clone(),
+                source: "beside the mj binary".into(),
+            })
+        } else {
+            bail!("no worker")
+        }
+    });
+    let selected: Vec<String> = log
+        .at_or_above(tracing::Level::INFO)
+        .into_iter()
+        .filter(|event| event.contains("worker source selected"))
+        .collect();
+    assert_eq!(selected.len(), 1, "{selected:#?}");
+    let line = &selected[0];
+    for expected in [
+        "beside the mj binary",
+        "x86_64-unknown-linux-musl",
+        &worker.display().to_string(),
+        BUILD_ID,
+    ] {
+        assert!(line.contains(expected), "missing {expected:?} in {line}");
+    }
+}
+
 #[test]
 fn pinning_rejects_stale_sources_before_publication() {
     let directory = tempfile::tempdir().unwrap();
@@ -2887,6 +2939,92 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     );
     assert_eq!(launch.environment["INITIAL_AGENT_MODE"], "agent");
     assert!(profile.supports_guardian_approvals());
+}
+
+fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
+    let staged = tempfile::tempdir().unwrap();
+    let path = staged.path().join("settings.json");
+    std::fs::write(&path, body).unwrap();
+    (staged, path)
+}
+
+fn stage_muse_settings(profile_stage: &Path) {
+    apply_staged_execution_setting(
+        HarnessKind::Muse,
+        ExecutionPolicy::Unconstrained,
+        profile_stage,
+    )
+    .unwrap();
+}
+
+// Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile
+#[test]
+fn muse_staged_settings_select_the_unrestricted_profile() {
+    let (staged, path) = staged_muse_settings(
+        r#"{
+            "schema_version": 1,
+            "provider": "anthropic",
+            "model": "muse-1",
+            "tui": {"theme": "dark"},
+            "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
+        }"#,
+    );
+
+    stage_muse_settings(staged.path());
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(document["provider"], "anthropic");
+    assert_eq!(document["model"], "muse-1");
+    assert_eq!(document["tui"]["theme"], "dark");
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["permissions"]["schema_version"], 1);
+    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+}
+
+/// Muse has no guardian mode, so even a raw local target launches it
+/// unconstrained.
+// Hard-won: 4a9dcb5: raw local Muse sessions used a permission profile Muse serve refused
+#[test]
+fn raw_local_muse_launches_unconstrained() {
+    let project = tempfile::tempdir().unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session("session-muse");
+    session.harness_kind = HarnessKind::Muse;
+    session.last_profile = "muse".into();
+    session.target_template_id = "localhost".into();
+    session.project_directory = Some(project.path().to_path_buf());
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
+    });
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Muse,
+        home: PathBuf::from("/profiles/muse"),
+        environment: Default::default(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+
+    let (launch, _, _) = worker_launch_config(
+        &session,
+        &profile,
+        None,
+        &targets::TargetLocator::LocalBare {
+            worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
+        },
+        LaunchWorkspace {
+            session_id: &session.id,
+            container: None,
+            parent_worktree: None,
+        },
+        &mj_core::state::TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare),
+    )
+    .unwrap();
+
+    assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
+    assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "allowAll");
+    assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
 }
 
 #[test]

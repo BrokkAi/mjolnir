@@ -12,6 +12,7 @@ use crate::controller::test_support::{
     managed_worktree_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
     test_git, test_name,
 };
+use mj_checkpoint::archive::RepositoryMetadata;
 use mj_core::config::{Config, ProjectRepository, TargetTemplate};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
@@ -425,6 +426,117 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
 }
 
 #[test]
+fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
+    struct OriginExecutor;
+    impl CommandExecutor for OriginExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(
+                command.args,
+                [
+                    "-C",
+                    "/home/dev/project",
+                    "config",
+                    "--get",
+                    "remote.origin.url",
+                ]
+            );
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"git@github.com:example/project.git\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let session = managed_raw_session(ManagedWorktreeTarget::Local);
+    let session_id = session.id.clone();
+    let controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session_id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let source = controller
+        .resolve_session_project_source(&session_id, &OriginExecutor)
+        .unwrap();
+
+    assert_eq!(source.key, "github:example/project");
+}
+
+#[test]
+fn raw_no_origin_uses_the_canonical_main_repository_root() {
+    struct NoOriginExecutor {
+        commands: RefCell<Vec<CommandSpec>>,
+    }
+    impl CommandExecutor for NoOriginExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.borrow_mut().push(command.clone());
+            if command.args.iter().any(|argument| argument == "config") {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            let stdout = if command
+                .args
+                .iter()
+                .any(|argument| argument == "--show-toplevel")
+            {
+                "/worktrees/project-side\n"
+            } else if command
+                .args
+                .iter()
+                .any(|argument| argument == "--git-common-dir")
+            {
+                "/projects/project/.git\n"
+            } else if command
+                .args
+                .iter()
+                .any(|argument| argument == "--show-prefix")
+            {
+                "\n"
+            } else {
+                panic!("unexpected command {:?}", command.args);
+            };
+            Ok(CommandOutput {
+                status: 0,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let session = raw_session_on("localhost", "/worktrees/project-side");
+    let session_id = session.id.clone();
+    let controller = Controller {
+        config,
+        state: State {
+            sessions: [(session_id.clone(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let executor = NoOriginExecutor {
+        commands: RefCell::new(Vec::new()),
+    };
+
+    let source = controller
+        .resolve_session_project_source(&session_id, &executor)
+        .unwrap();
+
+    assert_eq!(source.key, "path:/projects/project");
+    assert_eq!(source.short, "project");
+    assert_eq!(source.full, "/projects/project");
+    assert_eq!(executor.commands.borrow().len(), 4);
+}
+
+#[test]
 fn raw_non_git_directory_keeps_its_local_path_source() {
     struct NonGitExecutor {
         commands: RefCell<Vec<CommandSpec>>,
@@ -496,6 +608,155 @@ fn project_root_lookup_reports_git_failures_instead_of_treating_them_as_non_git(
     )
     .unwrap_err();
     assert!(error.to_string().contains("dubious ownership"));
+}
+
+/// Answers the two Git reads that locate a checkout, and nothing else.
+struct CheckoutPositionExecutor {
+    head_commit: String,
+    branch: Option<String>,
+}
+impl CommandExecutor for CheckoutPositionExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let stdout = if command.args.iter().any(|argument| argument == "rev-parse") {
+            self.head_commit.clone()
+        } else if command
+            .args
+            .iter()
+            .any(|argument| argument == "symbolic-ref")
+        {
+            match &self.branch {
+                Some(branch) => branch.clone(),
+                None => {
+                    return Ok(CommandOutput {
+                        status: 1,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
+        } else {
+            panic!("unexpected command {:?}", command.args);
+        };
+        Ok(CommandOutput {
+            status: 0,
+            stdout: format!("{stdout}\n").into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
+    RepositoryMetadata {
+        saved_refs: Default::default(),
+        stash_stack: Vec::new(),
+        push_urls: Vec::new(),
+        remote_workspace: false,
+        id: "project".into(),
+        relative_destination: PathBuf::from("project"),
+        checkout_subdirectory: None,
+        origin: "mj-local:project".into(),
+        base_commit: String::new(),
+        head_commit: head_commit.into(),
+        branch: branch.map(str::to_owned),
+    }
+}
+
+// A raw checkout can advance while stopped; that stale position must be reported on resume.
+#[test]
+fn a_raw_checkout_that_moved_while_stopped_gets_a_conversation_line() {
+    let config = resume_compatibility_config();
+    let session = managed_raw_session(ManagedWorktreeTarget::Local);
+    let directory = session.project_directory.clone().unwrap();
+    let executor = CheckoutPositionExecutor {
+        head_commit: "b".repeat(40),
+        branch: Some("mj/0123456789abcdef0123456789abcdef".into()),
+    };
+
+    let live = raw_checkout_position(&session, &config, &directory, &executor).unwrap();
+    let notice = raw_checkout_divergence_notice(
+        &directory,
+        Some(&recorded_repository(&"a".repeat(40), Some("main"))),
+        &live,
+    )
+    .expect("a moved checkout is reported");
+
+    assert!(
+        notice.contains(&directory.display().to_string()),
+        "{notice}"
+    );
+    assert!(notice.contains("aaaaaaaaaaaa (main)"), "{notice}");
+    assert!(
+        notice.contains("bbbbbbbbbbbb (mj/0123456789abcdef0123456789abcdef)"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("while this session was stopped"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn a_raw_checkout_that_stayed_put_gets_no_conversation_line() {
+    let config = resume_compatibility_config();
+    let session = managed_raw_session(ManagedWorktreeTarget::Local);
+    let directory = session.project_directory.clone().unwrap();
+    let executor = CheckoutPositionExecutor {
+        head_commit: "a".repeat(40),
+        branch: Some("main".into()),
+    };
+
+    let live = raw_checkout_position(&session, &config, &directory, &executor).unwrap();
+
+    assert_eq!(
+        raw_checkout_divergence_notice(
+            &directory,
+            Some(&recorded_repository(&"a".repeat(40), Some("main"))),
+            &live,
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_checkpoint_without_recorded_git_identity_reports_nothing() {
+    let live = CheckoutPosition {
+        head_commit: "b".repeat(40),
+        branch: None,
+    };
+
+    assert_eq!(
+        raw_checkout_divergence_notice(Path::new("/home/dev/project"), None, &live),
+        None
+    );
+    assert_eq!(
+        raw_checkout_divergence_notice(
+            Path::new("/home/dev/project"),
+            Some(&recorded_repository("", None)),
+            &live,
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_detached_checkout_is_named_as_detached() {
+    let config = resume_compatibility_config();
+    let session = managed_raw_session(ManagedWorktreeTarget::Local);
+    let directory = session.project_directory.clone().unwrap();
+    let executor = CheckoutPositionExecutor {
+        head_commit: "c".repeat(40),
+        branch: None,
+    };
+
+    let live = raw_checkout_position(&session, &config, &directory, &executor).unwrap();
+    let notice = raw_checkout_divergence_notice(
+        &directory,
+        Some(&recorded_repository(&"a".repeat(40), Some("main"))),
+        &live,
+    )
+    .expect("a moved checkout is reported");
+
+    assert!(notice.contains("cccccccccccc (detached)"), "{notice}");
 }
 
 #[test]
