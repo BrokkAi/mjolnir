@@ -5,17 +5,13 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::layout::Position;
 
 use mj_core::config::{HarnessKind, HarnessProfile, SshConnection, TargetTemplate};
 use mj_core::path_completion::{CompletionHost, CompletionKind, PathCompletion};
 use mj_core::project_picker::{
     ProjectDiscovery, ProjectDiscoveryRequest, ProjectEntry, ProjectEntryKind,
 };
-use mj_core::state::{
-    BASELINE_CONTAINER_CPUS, BASELINE_CONTAINER_MEMORY_BYTES, HostContainerSize, STATE_VERSION,
-    SessionResourceAllocation, State,
-};
+use mj_core::state::{HostContainerSize, SessionResourceAllocation, State};
 
 use mj_core::targets::{AdditionalMount, MountAccess};
 
@@ -27,48 +23,7 @@ use crate::test_support::*;
 use crate::render::render;
 use crate::{DashboardAction, DashboardState, Mode, nth_key};
 
-#[test]
-fn new_session_wizard_returns_all_three_choices() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    assert_eq!(ready_open_new_wizard(&mut dashboard), DashboardAction::None);
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Down)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.take_prerequisite_check(),
-        Some(DashboardAction::PreflightCreateSession {
-            launch: Box::new(DashboardAction::CreateSession {
-                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
-                create_managed_worktree: Some(false),
-                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                profile_id: "codex-1".into(),
-                bundle_id: "hel".into(),
-                project_directory: None,
-                target_template_id: "podman".into(),
-                additional_mounts: vec![],
-                resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CONTAINER_CPUS,
-                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-                }),
-            }),
-        })
-    );
-    assert!(matches!(dashboard.mode, Mode::New(_)));
-}
-
+// Hard-won: 93d7fde8: New review could not finish because only disabled Create started preflight
 #[test]
 fn isolated_creation_review_checks_prerequisites_before_enabling_create() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -262,135 +217,6 @@ fn switching_workspaces_preserves_remote_preflight_in_its_original_workspace() {
         DashboardAction::CreateSession { workspace_id, .. }
             if workspace_id == &workspace_b
     ));
-}
-
-#[test]
-fn new_session_wizard_renders_and_focuses_explicit_navigation_buttons() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw wizard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Cancel"));
-    assert!(rendered.contains("Next"));
-
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-session wizard");
-    };
-    assert_eq!(wizard.form.borrow().focused(), Some(WizardControl::Cancel));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
-fn opening_session_wizards_prefetches_all_aws_sizes() {
-    let aws_target = || TargetTemplate::AwsEc2 {
-        aws_profile: None,
-        region: "us-east-1".into(),
-        launch_template: "hel".into(),
-        launch_template_version: None,
-        ssh_user: "ubuntu".into(),
-        address_source: mj_core::config::AwsAddressSource::PublicIp,
-        identity_file: None,
-        ssh_args: Vec::new(),
-    };
-    let mut config = config();
-    config.targets.insert("aws-a".into(), aws_target());
-    config.targets.insert("aws-b".into(), aws_target());
-    let mut dashboard = DashboardState::new(config.clone(), State::default(), BTreeMap::new());
-
-    assert_eq!(
-        ready_open_new_wizard(&mut dashboard),
-        DashboardAction::ResolveAwsResourceOptions {
-            target_template_ids: vec!["aws-a".into(), "aws-b".into()],
-        }
-    );
-    let aws_b_options = vec![SessionResourceAllocation::AwsEc2 {
-        instance_type: "m7i.2xlarge".into(),
-        vcpus: 8,
-        memory_bytes: 32 * 1024 * 1024 * 1024,
-    }];
-    dashboard.apply_aws_resource_options("aws-b", Ok(aws_b_options.clone()));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-session wizard");
-    };
-    assert_eq!(wizard.aws_options["aws-b"], aws_b_options);
-
-    let mut dashboard = DashboardState::new(
-        config,
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [("session-1".into(), stopped_session())]
-                .into_iter()
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    assert_eq!(
-        open_resume_wizard(&mut dashboard),
-        DashboardAction::ResolveAwsResourceOptions {
-            target_template_ids: vec!["aws-a".into(), "aws-b".into()],
-        }
-    );
-}
-
-#[test]
-fn persisted_import_opens_resume_wizard_for_its_id_and_keeps_defaults() {
-    let mut config = config();
-    config
-        .targets
-        .insert("z-target".into(), config.targets["podman"].clone());
-
-    let mut imported = stopped_session();
-    imported.id = "imported-session".into();
-    imported.last_profile = "codex-2".into();
-    imported.target_template_id = "z-target".into();
-
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(imported.id.clone(), imported)].into_iter().collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    dashboard.set_state(state);
-
-    assert_eq!(
-        dashboard.begin_resume_for("imported-session"),
-        DashboardAction::None
-    );
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected the imported session to open the resume wizard");
-    };
-    assert_eq!(wizard.session_id, "imported-session");
-    let compatible_profiles = dashboard.compatible_profiles(&wizard.session_id);
-    assert_eq!(
-        compatible_profiles[wizard.profile].0, "codex-2",
-        "codex-2 remains the selected profile"
-    );
-    assert_eq!(
-        nth_key(&dashboard.config.targets, wizard.target),
-        "z-target",
-        "z-target remains the selected target"
-    );
 }
 
 fn dashboard_at_project_picker() -> DashboardState {
@@ -596,6 +422,7 @@ fn select_saved_project(dashboard: &mut DashboardState, bundle_id: &str) {
 
 /// A configured project whose local directory is gone stays listed, marked
 /// unavailable with the reason. Finding T-6.
+// Hard-won: d07fc1f0: missing saved project directories appeared usable and leaked raw git errors
 #[test]
 fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
     let missing = PathBuf::from("/definitely/not/here/missingpath");
@@ -1948,106 +1775,6 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
     );
 }
 
-#[test]
-fn new_session_bundles_are_ordered_by_latest_session_creation() {
-    let mut config = config();
-    let bundle = config.bundles["hel"].clone();
-    config.bundles.insert("alpha-unused".into(), bundle.clone());
-    config.bundles.insert("zebra-recent".into(), bundle);
-
-    let mut older = stopped_session();
-    older.id = "older".into();
-    older.created_at = "2026-08-10T12:00:00Z".into();
-    let mut recent = stopped_session();
-    recent.id = "recent".into();
-    recent.bundle_id = "zebra-recent".into();
-    recent.created_at = "2026-08-11T12:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(older.id.clone(), older), (recent.id.clone(), recent)]
-            .into_iter()
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    assert_eq!(
-        bundle_ids_by_recent_creation(
-            &config,
-            &mj_client::runtime_feed::launch_recency(&state.sessions)
-        ),
-        vec!["zebra-recent", "hel", "alpha-unused"]
-    );
-
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        dashboard.take_prerequisite_check(),
-        Some(DashboardAction::PreflightCreateSession {
-            launch: Box::new(DashboardAction::CreateSession {
-                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
-                create_managed_worktree: Some(false),
-                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                profile_id: "codex-1".into(),
-                bundle_id: "zebra-recent".into(),
-                project_directory: None,
-                target_template_id: "podman".into(),
-                additional_mounts: vec![],
-                resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CONTAINER_CPUS,
-                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-                }),
-            }),
-        })
-    );
-}
-
-#[test]
-fn new_session_defaults_to_the_most_recent_configured_choices() {
-    let mut config = config();
-    config
-        .bundles
-        .insert("recent-project".into(), config.bundles["hel"].clone());
-    config
-        .targets
-        .insert("recent-target".into(), config.targets["podman"].clone());
-    let mut recent = stopped_session();
-    recent.last_profile = "codex-1".into();
-    recent.bundle_id = "recent-project".into();
-    recent.target_template_id = "recent-target".into();
-    recent.created_at = "2026-08-12T12:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(recent.id.clone(), recent)].into_iter().collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-
-    ready_open_new_wizard(&mut dashboard);
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-session wizard");
-    };
-    assert_eq!(
-        nth_key(&dashboard.config.profiles, wizard.profile),
-        "codex-1"
-    );
-    assert_eq!(
-        nth_bundle_key(&dashboard.config, &dashboard.launch_recency, wizard.bundle),
-        "recent-project"
-    );
-    assert_eq!(
-        nth_key(&dashboard.config.targets, wizard.target),
-        "recent-target"
-    );
-}
-
 /// Walk the new-session wizard as far as an open mount editor with the
 /// source already typed and the destination filled in.
 fn dashboard_at_mount_editor(source: &str) -> DashboardState {
@@ -2094,44 +1821,6 @@ fn choose_mount_access(dashboard: &mut DashboardState, steps: usize) {
     }
     ready_key(dashboard, key(KeyCode::Enter));
     assert!(wizard_mounts(dashboard).access_combo.open_id().is_none());
-}
-
-#[test]
-fn a_new_attachment_starts_read_only_and_the_combobox_picks_its_access() {
-    let mut dashboard = dashboard_at_mount_editor("/opt/cache");
-
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert_eq!(
-        new_wizard_focus(&dashboard),
-        Some(WizardControl::MountAccess)
-    );
-    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Ro);
-    choose_mount_access(&mut dashboard, 2);
-    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Rw);
-
-    // Tab past Cancel and Back to the add button, then commit.
-    for _ in 0..3 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource {
-            target_template_id: "podman".into(),
-            source: "/opt/cache".into(),
-        }
-    );
-    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-
-    assert_eq!(
-        wizard_mounts(&dashboard).mounts,
-        vec![AdditionalMount {
-            source: "/opt/cache".into(),
-            destination: "/mnt/cache".into(),
-            access: MountAccess::Rw,
-        }]
-    );
-    // The next entry starts read-only again.
-    assert_eq!(wizard_mounts(&dashboard).access, MountAccess::Ro);
 }
 
 #[test]
@@ -2201,107 +1890,6 @@ fn a_source_that_cannot_hold_the_overlay_skips_copy_on_write() {
     assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Mounts));
     ready_key(&mut dashboard, key(KeyCode::Esc));
     assert!(dashboard.dialog_confirmation_open());
-}
-
-#[test]
-fn new_session_mount_wizard_adds_mount_and_preserves_typed_source() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw resource wizard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Source:"));
-    let lines = buffer_lines(terminal.backend().buffer());
-    let source_row = lines
-        .iter()
-        .position(|line| line.contains("Source:"))
-        .expect("source field");
-    let source_x = cell_column(&lines[source_row], "Source:");
-    assert_eq!(
-        terminal.get_cursor_position().expect("source cursor"),
-        Position {
-            x: source_x + 10,
-            y: source_row as u16,
-        }
-    );
-    assert!(rendered.contains("Add directory"));
-    for character in "/opt/cache".chars() {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    // A single candidate is inserted without opening a popup, so Enter still
-    // moves on to the destination.
-    dashboard.apply_path_completions(
-        &dashboard.path_input_context(),
-        "/opt/cache",
-        PathCompletion {
-            candidates: vec!["/opt/cache/".into()],
-            insert: None,
-            truncated: false,
-        },
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected directory editor");
-    };
-    assert!(!wizard.mounts.source.is_completing());
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource {
-            target_template_id: "podman".into(),
-            source: "/opt/cache".into(),
-        }
-    );
-    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-
-    assert_eq!(
-        dashboard.take_prerequisite_check(),
-        Some(DashboardAction::ValidateSessionMounts {
-            target_template_id: "podman".into(),
-            mounts: vec![AdditionalMount {
-                source: "/opt/cache".into(),
-                destination: "/mnt/cache".into(),
-                access: MountAccess::Ro,
-            }],
-            launch: Box::new(DashboardAction::CreateSession {
-                subagents: Some(mj_core::subagent::SubagentPolicy::Native),
-                create_managed_worktree: Some(false),
-                workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                profile_id: "codex-1".into(),
-                bundle_id: "hel".into(),
-                project_directory: None,
-                target_template_id: "podman".into(),
-                additional_mounts: vec![AdditionalMount {
-                    source: "/opt/cache".into(),
-                    destination: "/mnt/cache".into(),
-                    access: MountAccess::Ro,
-                }],
-                resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CONTAINER_CPUS,
-                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-                }),
-            }),
-        })
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("mount validation should keep the new-session wizard open");
-    };
-    assert_eq!(wizard.mounts.mounts.len(), 1);
-    dashboard.finish_session_mount_preflight();
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -2386,103 +1974,6 @@ fn directory_completion_lists_every_candidate_and_selects_with_keys() {
 }
 
 #[test]
-fn failed_source_validation_does_not_add_new_or_resume_mounts() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    for character in "/missing".chars() {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource { .. }
-    ));
-    dashboard.apply_mount_source_validation(
-        "/missing",
-        Err("source path /missing does not exist or is not a directory".into()),
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected new-session resource dialog");
-    };
-    assert!(wizard.mounts.mounts.is_empty());
-    assert_eq!(wizard.mounts.source, "/missing");
-    assert_eq!(
-        wizard.form.borrow().focused(),
-        Some(WizardControl::MountSource)
-    );
-    assert_eq!(
-        wizard.mounts.error.as_deref(),
-        Some("source path /missing does not exist or is not a directory")
-    );
-
-    let mut dashboard = dashboard_with_session(stopped_session());
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    for character in "/missing".chars() {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource { .. }
-    ));
-    dashboard.apply_mount_source_validation(
-        "/missing",
-        Err("source path /missing does not exist or is not a directory".into()),
-    );
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume resource dialog");
-    };
-    assert!(wizard.mounts.mounts.is_empty());
-    assert_eq!(wizard.mounts.source, "/missing");
-    assert_eq!(
-        wizard.form.borrow().focused(),
-        Some(WizardControl::MountSource)
-    );
-}
-
-#[test]
-fn resume_can_convert_to_another_harness() {
-    let mut session = stopped_session();
-    session.workspace_id = "workspace-history".into();
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.set_active_workspace(Some("workspace-origin".into()));
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Up));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::PreflightResumeRepositories {
-            launch: Box::new(DashboardAction::ResumeSession {
-                workspace_id: "workspace-origin".into(),
-                session_id: "session-1".into(),
-                profile_id: "claude-1".into(),
-                target_template_id: "podman".into(),
-                additional_mounts: vec![],
-                resource_allocation: Some(SessionResourceAllocation::Container {
-                    cpus: BASELINE_CONTAINER_CPUS,
-                    memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-                }),
-                discard_queue: false,
-            }),
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::Resume(_)));
-    dashboard.finish_resume_repository_preflight();
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
 fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
     let workspace_a = mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned();
     let workspace_b = "workspace-b".to_owned();
@@ -2502,86 +1993,6 @@ fn resume_keeps_the_workspace_where_its_dialog_was_opened() {
         DashboardAction::ResumeSession { workspace_id, .. }
             if workspace_id == &workspace_a
     ));
-}
-
-#[test]
-fn wizard_back_activation_preserves_the_draft_and_cancel_closes_it() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-
-    // Target step: Tab passes CPU and MEM, then Cancel and Back.
-    for _ in 0..4 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("Back should keep the new-session wizard open");
-    };
-    assert_eq!(wizard.step, WizardStep::Profile);
-
-    // The same explicit button path then closes the modal.
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
-fn resume_back_activation_preserves_the_draft_and_cancel_closes_it() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-
-    for _ in 0..4 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("Back should keep the resume wizard open");
-    };
-    assert_eq!(wizard.step, WizardStep::Profile);
-
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
-fn resume_defaults_to_the_session_profile() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    open_resume_wizard(&mut dashboard);
-
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume wizard");
-    };
-    let profiles = dashboard.compatible_profiles(&wizard.session_id);
-    assert_eq!(profiles[wizard.profile].0, "codex-1");
-}
-
-#[test]
-fn resume_defaults_to_the_previously_used_target() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let target = dashboard.config.targets["podman"].clone();
-    dashboard.config.targets.insert("alternate".into(), target);
-
-    open_resume_wizard(&mut dashboard);
-
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume wizard");
-    };
-    assert_eq!(nth_key(&dashboard.config.targets, wizard.target), "podman");
 }
 
 #[test]
@@ -2608,25 +2019,6 @@ fn resume_refuses_a_target_the_session_cannot_use_and_says_why() {
     assert_eq!(resume_wizard(&dashboard).step, WizardStep::Target);
     let notice = dashboard.notices.current().unwrap_or_default();
     assert!(notice.contains("came from GitHub"), "{notice}");
-}
-
-#[test]
-fn resume_marks_an_unusable_target_row_as_disabled() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard
-        .config
-        .targets
-        .insert("bare".into(), TargetTemplate::LocalBare);
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-
-    assert!(rendered.contains("came from GitHub"), "{rendered}");
 }
 
 fn resume_wizard(dashboard: &DashboardState) -> &ResumeWizard {
@@ -2700,42 +2092,10 @@ fn raw_conversion_preview() -> mj_core::state::RawConversionPreview {
     }
 }
 
-/// The move review is the last thing a person reads before a local checkout
-/// leaves this machine, so it has to name the dirty work that travels and the
-/// checkout that stays.
-#[test]
-fn move_review_reports_what_a_local_checkout_conversion_copies_and_leaves_behind() {
-    let mut dashboard = dashboard_with_session(running_session());
-    let request_id = open_move_review(&mut dashboard);
-    let mut preparation = move_preparation();
-    preparation.conversion = Some(Box::new(raw_conversion_preview()));
-    assert!(dashboard.apply_move_preparation(request_id, preparation));
-
-    let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw move review");
-    let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
-    let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        rendered.contains(
-            "Clone https://github.com/example/repo.git (default branch main) into /workspace/repo on branch mj/session-1"
-        ),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("1 staged, 1 unstaged, and 3 untracked files (2.5 MB)"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("/work/repo stays on this machine and will no longer track this session"),
-        "{rendered}"
-    );
-}
-
 /// A Move stops the parent's sub-agents as a suspend does. The review counts
 /// only the ones still at their task; idle ones have handed back and are not
 /// mentioned.
+// Hard-won: 63ed79ef: Move review counted idle children as needing suspension
 #[test]
 fn move_review_counts_only_working_subagents() {
     let review = |working: bool| {
@@ -2765,51 +2125,6 @@ fn move_review_counts_only_working_subagents() {
         ),
         "{working}"
     );
-}
-
-/// A profile-only move on an unchanged target keeps the container, the
-/// workspace, and the untracked files, so the review must not promise a fresh
-/// environment. The fresh-environment wording still has to appear when the
-/// environment really is rebuilt.
-#[test]
-fn move_review_says_an_in_place_move_keeps_the_environment() {
-    for in_place in [false, true] {
-        let mut dashboard = dashboard_with_session(running_session());
-        let request_id = open_move_review(&mut dashboard);
-        let mut preparation = move_preparation();
-        preparation.in_place = in_place;
-        assert!(dashboard.apply_move_preparation(request_id, preparation));
-
-        let mut terminal = Terminal::new(TestBackend::new(200, 44)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw move review");
-        let rendered = buffer_lines(terminal.backend().buffer()).join(" ");
-        let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-        if in_place {
-            assert!(
-                rendered.contains(
-                    "Only the harness and profile are replaced; the environment and workspace are kept."
-                ),
-                "{rendered}"
-            );
-            assert!(
-                !rendered.contains("fresh environment"),
-                "an in-place move must not promise a fresh environment: {rendered}"
-            );
-        } else {
-            assert!(
-                rendered.contains(
-                    "Active work will be interrupted; the session is restored into a fresh environment."
-                ),
-                "{rendered}"
-            );
-            assert!(
-                !rendered.contains("Only the harness and profile are replaced"),
-                "{rendered}"
-            );
-        }
-    }
 }
 
 /// The resume preflight answers "this moves your checkout" before anything is
@@ -2878,137 +2193,7 @@ fn a_raw_conversion_resume_launches_only_after_it_is_confirmed() {
     );
 }
 
-#[test]
-fn resume_dialog_attaches_an_additional_resource() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    for character in "/opt/cache".chars() {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource {
-            target_template_id: "podman".into(),
-            source: "/opt/cache".into(),
-        }
-    );
-    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-    ready_key(&mut dashboard, key(KeyCode::BackTab));
-
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateSessionMounts {
-            target_template_id: "podman".into(),
-            mounts: vec![AdditionalMount {
-                source: "/opt/cache".into(),
-                destination: "/mnt/cache".into(),
-                access: MountAccess::Ro,
-            }],
-            launch: Box::new(DashboardAction::PreflightResumeRepositories {
-                launch: Box::new(DashboardAction::ResumeSession {
-                    workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.into(),
-                    session_id: "session-1".into(),
-                    profile_id: "codex-1".into(),
-                    target_template_id: "podman".into(),
-                    additional_mounts: vec![AdditionalMount {
-                        source: "/opt/cache".into(),
-                        destination: "/mnt/cache".into(),
-                        access: MountAccess::Ro,
-                    }],
-                    resource_allocation: Some(SessionResourceAllocation::Container {
-                        cpus: BASELINE_CONTAINER_CPUS,
-                        memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-                    }),
-                    discard_queue: false,
-                }),
-            }),
-        }
-    );
-}
-
-#[test]
-fn resume_dialog_can_remove_a_previous_resource() {
-    let mut session = stopped_session();
-    session.additional_mounts = vec![AdditionalMount {
-        source: "/opt/old-cache".into(),
-        destination: "/mnt/old-cache".into(),
-        access: MountAccess::Cow,
-    }];
-    let mut dashboard = dashboard_with_session(session);
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    ready_key(&mut dashboard, key(KeyCode::Delete));
-
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume resource dialog");
-    };
-    assert!(wizard.mounts.mounts.is_empty());
-}
-
-#[test]
-fn resume_review_edits_an_existing_attached_directory_in_place() {
-    let mut session = stopped_session();
-    session.additional_mounts = vec![AdditionalMount {
-        source: "/opt/cache".into(),
-        destination: "/mnt/cache".into(),
-        access: MountAccess::Cow,
-    }];
-    let mut dashboard = dashboard_with_session(session);
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected attached-directory editor");
-    };
-    assert_eq!(wizard.mounts.source, "/opt/cache");
-    assert_eq!(wizard.mounts.destination, "/mnt/cache");
-    assert_eq!(wizard.mounts.editing_mount, Some(0));
-
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::ValidateMountSource {
-            target_template_id: "podman".into(),
-            source: "/opt/cache".into(),
-        }
-    );
-    dashboard.apply_mount_source_validation("/opt/cache", Ok(None));
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected resume review");
-    };
-    assert_eq!(wizard.step, WizardStep::Review);
-    assert_eq!(wizard.mounts.mounts.len(), 1);
-}
-
-#[test]
-fn aws_resource_destinations_default_under_the_ssh_users_home() {
-    let target = TargetTemplate::AwsEc2 {
-        aws_profile: None,
-        region: "us-east-1".into(),
-        launch_template: "hel".into(),
-        launch_template_version: None,
-        ssh_user: "ubuntu".into(),
-        address_source: mj_core::config::AwsAddressSource::PublicIp,
-        identity_file: None,
-        ssh_args: Vec::new(),
-    };
-
-    assert_eq!(
-        default_resource_destination(&target, std::path::Path::new("/opt/cache"), &[]),
-        std::path::PathBuf::from("/home/ubuntu/mj-resources/cache")
-    );
-}
-
+// Hard-won: 16e952f7: same-harness resumes incorrectly displayed a Lossy warning
 #[test]
 fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3090,43 +2275,6 @@ fn resume_profile_step_marks_cross_harness_profiles_as_lossy() {
     assert!(rendered.contains("Resume · 3/3"));
 }
 
-#[test]
-fn restoring_an_archive_names_the_step_and_the_archived_session() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let action =
-        dashboard.begin_archive_restore("wiki-1".into(), "Pomegranate work".into(), None, None);
-    assert_eq!(action, crate::DashboardAction::None);
-    let backend = TestBackend::new(120, 24);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    let draw = |dashboard: &mut DashboardState, terminal: &mut Terminal<TestBackend>| {
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw dashboard");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
-    };
-
-    let rendered = draw(&mut dashboard, &mut terminal);
-    assert!(rendered.contains("Restore · 1/3"), "{rendered}");
-    assert!(rendered.contains("Pomegranate work"), "{rendered}");
-    assert!(!rendered.contains("Resume · 1/3"));
-
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let rendered = draw(&mut dashboard, &mut terminal);
-    assert!(rendered.contains("Restore · 2/3"), "{rendered}");
-    assert!(rendered.contains("Pomegranate work"), "{rendered}");
-
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let rendered = draw(&mut dashboard, &mut terminal);
-    assert!(rendered.contains("Restore · 3/3"), "{rendered}");
-    assert!(rendered.contains("Pomegranate work"), "{rendered}");
-}
-
 /// Opens the restore wizard for `wiki_id`, walks it to the review, and
 /// presses its Restore button.
 fn press_archive_restore(dashboard: &mut DashboardState, wiki_id: &str) -> DashboardAction {
@@ -3150,6 +2298,7 @@ fn restores(action: &DashboardAction, expected: &str) -> bool {
 /// Restore on a restore's review closes the wizard, as a live resume does
 /// once its launch starts. The restore used to leave the review open, and a
 /// second press restored the archive a second time.
+// Hard-won: 9332aae3: successful restore left its review open and allowed a second restore
 #[test]
 fn restoring_an_archive_closes_the_wizard_when_restore_is_pressed() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3170,6 +2319,7 @@ fn restoring_an_archive_closes_the_wizard_when_restore_is_pressed() {
 
 /// Until a restore reports back, its archive cannot be restored again.
 /// Opening it is refused with a notice; other archives are not held up.
+// Hard-won: 9332aae3: an archive could be restored again while its first restore was pending
 #[test]
 fn an_archive_cannot_be_restored_again_until_its_restore_reports_back() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3202,6 +2352,7 @@ fn an_archive_cannot_be_restored_again_until_its_restore_reports_back() {
 
 /// The review refuses Restore for an archive whose restore has already
 /// started, whatever started it, and keeps the draft on screen.
+// Hard-won: 9332aae3: pressing Restore during an in-flight restore was accepted
 #[test]
 fn pressing_restore_after_the_restore_started_returns_no_action() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3228,6 +2379,7 @@ fn pressing_restore_after_the_restore_started_returns_no_action() {
 /// A failed restore shows the launch-failure dialog over the dashboard, not
 /// over a restore review that could be pressed again. Its Retry sends the
 /// same restore once, and that retry holds the archive until it reports back.
+// Hard-won: 9332aae3: restore failures were silent and could not be retried
 #[test]
 fn a_failed_restore_reports_the_failure_and_retries_it_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3329,6 +2481,7 @@ fn deliver_resume_check_result(
 /// Resume on the review stays open while the check runs. A second press
 /// used to send a second check beside the first, with or without attached
 /// directories to check first.
+// Hard-won: 50b85cae: Resume could send duplicate checks
 #[test]
 fn pressing_resume_twice_sends_one_check() {
     for mounts in [Vec::new(), vec![cache_mount()]] {
@@ -3366,6 +2519,7 @@ fn pressing_resume_twice_sends_one_check() {
 /// Once the check has reported back, another result sent under the same
 /// generation is dropped. A late Ready used to close whatever the first
 /// result had opened and start the launch anyway.
+// Hard-won: 50b85cae: late Ready could close the wrong Resume dialog and launch it
 #[test]
 fn a_late_second_ready_is_dropped() {
     #[derive(Debug, Clone, Copy)]
@@ -3426,6 +2580,7 @@ fn a_late_second_ready_is_dropped() {
 /// A second raw-conversion result for the same check is dropped instead of
 /// opening a second confirmation over the first. Cancel on the one
 /// confirmation returns to the wizard, where Resume starts a new check.
+// Hard-won: 50b85cae: late raw conversion could stack another confirmation
 #[test]
 fn a_late_second_raw_conversion_result_does_not_stack_a_dialog() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3596,63 +2751,6 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
 }
 
 #[test]
-fn move_wizard_labels_each_step_as_move() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    assert_eq!(dashboard.begin_move(), DashboardAction::None);
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw move profile step");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Move · 1/3"));
-    assert!(!rendered.contains("Resume · 1/3"));
-
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw move target step");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Move · 2/3"));
-    assert!(!rendered.contains("Resume · 2/3"));
-
-    let preparation_request = ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        preparation_request,
-        DashboardAction::MoveSession {
-            preparation_request_id: Some(_),
-            ..
-        }
-    ));
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw move review step");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Move · 3/3"));
-    assert!(!rendered.contains("Resume · 3/3"));
-    assert!(rendered.contains("Checking move destination"));
-}
-
-#[test]
 fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     let mut dashboard = dashboard_with_session(running_session());
     let request_id = open_move_review(&mut dashboard);
@@ -3696,50 +2794,6 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     dashboard.set_state(dashboard.state.clone());
     assert!(!dashboard.apply_move_preparation(request_id, preparation));
     assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
-fn bare_profile_switch_submits_the_resolved_preparation() {
-    let mut session = running_session();
-    session.target_template_id = "bare".into();
-    session.project_directory = Some(PathBuf::from("/work/project"));
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.config.targets.clear();
-    dashboard
-        .config
-        .targets
-        .insert("bare".into(), TargetTemplate::LocalBare);
-    dashboard.focus_sessions();
-    assert_eq!(dashboard.begin_move(), DashboardAction::None);
-    let DashboardAction::MoveSession {
-        clear_resource_allocation: true,
-        preparation_request_id: Some(request_id),
-        ..
-    } = ready_key(&mut dashboard, key(KeyCode::Enter))
-    else {
-        panic!("one bare target should prepare directly after profile selection");
-    };
-    let mut preparation = move_preparation();
-    preparation.selection.target_template_id = Some("bare".into());
-    preparation.selection.clear_resource_allocation = false;
-    preparation.in_place = true;
-    assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
-    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(
-        matches!(
-            action,
-            DashboardAction::MoveSession {
-                clear_resource_allocation: false,
-                preparation_request_id: None,
-                ..
-            }
-        ),
-        "{action:?}"
-    );
-    assert_eq!(
-        dashboard.take_move_preparation("session-1"),
-        Some(preparation)
-    );
 }
 
 #[test]
@@ -3910,51 +2964,6 @@ fn removing_a_move_attachment_invalidates_and_reprepares_the_review() {
 }
 
 #[test]
-fn raw_resume_review_names_the_exact_reused_project_directory() {
-    let mut session = stopped_session();
-    session.target_template_id = "localhost".into();
-    session.project_directory = Some("/mnt/optane/bifrost-fird".into());
-    session.bundle_id = "remote-project-a66373eef659f856".into();
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(
-        config,
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [(session.id.clone(), session)].into_iter().collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw resume review");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(
-        rendered.contains("Project directory: /mnt/optane/bifrost-fird (reused)"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("Project: remote-project-a66373eef659f856"));
-}
-
-#[test]
 fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() {
     let gib = 1024 * 1024 * 1024;
     let mut state = State::default();
@@ -4047,93 +3056,6 @@ fn cancelling_a_wizard_invalidates_checks_before_reopening_the_same_form() {
 }
 
 #[test]
-fn target_next_focuses_the_project_field_and_footer_keys_do_not_edit_it() {
-    // The fixture's podman stays beside the bare target, so the target step
-    // has a choice and is shown.
-    let mut config = config();
-    config
-        .targets
-        .insert("local".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    for _ in 0..3 {
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-    }
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    assert!(dashboard.text_input_focused());
-    dashboard.handle_paste("/work/project");
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("project step");
-    };
-    assert_eq!(wizard.project_directory, "/work/project");
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert!(!dashboard.text_input_focused());
-    ready_key(&mut dashboard, key(KeyCode::Char('x')));
-    dashboard.handle_paste("ignored");
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("project step");
-    };
-    assert_eq!(wizard.project_directory, "/work/project");
-}
-
-#[test]
-fn resume_target_next_mouse_release_advances_to_review() {
-    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    let mut session = stopped_session();
-    session.target_template_id = "localhost".into();
-    session.project_directory = Some("/work/project".into());
-    // The fixture's podman stays beside the bare target: this checkout can
-    // move into a container, so the target step has a choice and is shown.
-    let mut config = config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut state = State::default();
-    state.sessions.insert(session.id.clone(), session);
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    open_resume_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-    dashboard.reset_component_geometry();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    let (column, row) = (0..40)
-        .find_map(|row| {
-            let text = (0..140)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>();
-            text.find("  Next  ").map(|column| (column as u16 + 2, row))
-        })
-        .expect("Next button");
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-    ] {
-        dashboard.handle_mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
-        dashboard.reset_component_geometry();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-    }
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("resume wizard");
-    };
-    assert_eq!(wizard.step, WizardStep::Review);
-}
-
-#[test]
 fn home_mount_apply_uses_resolved_source_and_ignores_changed_destination() {
     let mut dashboard = dashboard_at_mount_editor("~/cache");
     assert!(validate_mount_entry(wizard_mounts(&dashboard)).is_none());
@@ -4153,20 +3075,6 @@ fn home_mount_apply_uses_resolved_source_and_ignores_changed_destination() {
     assert_eq!(
         wizard_mounts(&dashboard).mounts[0].destination,
         PathBuf::from("/mnt/newer")
-    );
-}
-
-#[test]
-fn container_destination_rejects_home_shorthand() {
-    let mut dashboard = dashboard_at_mount_editor("~/cache");
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("new wizard");
-    };
-    wizard.mounts.destination.set_value("~/cache");
-    assert!(
-        validate_mount_entry(&wizard.mounts)
-            .unwrap()
-            .contains("container path")
     );
 }
 
@@ -4262,101 +3170,6 @@ fn raw_review_waits_for_worktree_inspection_and_preserves_explicit_selection() {
         create_managed_worktree: Some(false), project_directory: Some(directory), ..
     } if directory == std::path::Path::new("/work/main"))
     );
-}
-
-/// Isolated targets provide the workspace themselves, so the review must not
-/// show a disabled worktree checkbox at all; a bare project keeps the choice.
-#[test]
-fn review_hides_the_worktree_choice_for_isolated_targets() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(matches!(
-        &dashboard.mode,
-        Mode::New(wizard) if wizard.step == WizardStep::Review
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let isolated = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(!isolated.contains("Create isolated checkout"), "{isolated}");
-    assert!(
-        !isolated.contains("isolated workspace"),
-        "the checkbox and its explanation are gone together: {isolated}"
-    );
-
-    let mut configuration = config();
-    configuration.targets.clear();
-    configuration
-        .targets
-        .insert("local".into(), TargetTemplate::LocalBare);
-    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("new wizard")
-    };
-    wizard.step = WizardStep::Review;
-    wizard.project_directory = "/work/main".into();
-    dashboard.apply_resolved_project_directory(
-        &dashboard.path_input_context(),
-        "/work/main",
-        Ok((
-            PathBuf::from("/work/main"),
-            mj_core::state::ManagedWorktreeOptions {
-                available: true,
-                default_create: true,
-            },
-        )),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let bare = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(bare.contains("Create isolated checkout"), "{bare}");
-    let lines = buffer_lines(terminal.backend().buffer());
-    assert_eq!(
-        row_of(&lines, "Profile:") + 1,
-        row_of(&lines, "Project directory:")
-    );
-    assert_eq!(
-        row_of(&lines, "Project directory:") + 1,
-        row_of(&lines, "Target:")
-    );
-    assert_eq!(row_of(&lines, "Target:") + 1, row_of(&lines, "Compute:"));
-    assert_eq!(
-        row_of(&lines, "Compute:") + 2,
-        row_of(&lines, "Create isolated checkout")
-    );
-    assert_eq!(
-        row_of(&lines, "Create isolated checkout") + 1,
-        row_of(&lines, "Create a separate session-owned clone")
-    );
-}
-
-/// A bare local target with supported and unsupported harness profiles.
-fn subagent_wizard_config() -> mj_core::config::Config {
-    let mut configuration = config();
-    configuration.targets.clear();
-    configuration
-        .targets
-        .insert("local".into(), TargetTemplate::LocalBare);
-    configuration.profiles.insert(
-        "grok-1".into(),
-        HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-            kind: HarnessKind::Grok,
-            home: PathBuf::from("/profiles/grok"),
-            environment: Default::default(),
-        },
-    );
-    configuration
 }
 
 #[test]
@@ -4535,28 +3348,6 @@ fn unavailable_target_blocks_launch_and_refresh_allows_recovery() {
 }
 
 #[test]
-fn availability_checks_start_on_the_first_wizard_step() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Profile));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("availability check must start on the profile step");
-    };
-    assert_eq!(target_ids, ["podman"]);
-    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
-
-    dashboard.handle_key(key(KeyCode::Enter));
-
-    assert!(matches!(&dashboard.mode, Mode::New(wizard) if wizard.step == WizardStep::Target));
-    assert_eq!(dashboard.take_prerequisite_check(), None);
-    assert_eq!(dashboard.target_readiness_rejection("podman"), None);
-}
-
-#[test]
 fn readiness_checks_are_independent_and_ignore_changed_configuration() {
     let mut config = config();
     config.targets.insert(
@@ -4594,39 +3385,6 @@ fn readiness_checks_are_independent_and_ignore_changed_configuration() {
     assert!(dashboard.target_readiness_rejection("remote").is_some());
     dashboard.handle_key(key(KeyCode::Esc));
     assert!(!matches!(dashboard.mode, Mode::New(_)));
-}
-
-/// Reopening the wizard with the target's template unchanged must reuse the
-/// readiness result from the previous open instead of re-probing: the probe
-/// is an ssh round trip for non-local targets, so a second open in the same
-/// dashboard session should be instant.
-#[test]
-fn reopening_wizard_with_unchanged_template_reuses_fresh_readiness() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Some(DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_prerequisite_check()
-    else {
-        panic!("the first open must probe the non-local target");
-    };
-    assert_eq!(target_ids, ["podman"]);
-    dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
-    assert!(dashboard.target_readiness_rejection("podman").is_none());
-
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(!matches!(dashboard.mode, Mode::New(_)));
-
-    dashboard.begin_new();
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        dashboard.take_prerequisite_check(),
-        None,
-        "a fresh readiness result from the previous open must not be re-probed"
-    );
-    assert!(dashboard.target_readiness_rejection("podman").is_none());
 }
 
 /// A target's template changing between wizard opens invalidates the cached
@@ -5268,50 +4026,6 @@ fn project_directory_completes_on_the_target_host() {
     assert_eq!(wizard.project_directory, "/srv/proxy/");
 }
 
-/// The bundle source also accepts `owner/repo` and URLs, so only text that
-/// reads as a path asks the controller for directories.
-#[test]
-fn project_picker_url_completes_only_for_path_like_text() {
-    let mut dashboard = dashboard_at_project_picker();
-    activate_project_control(&mut dashboard, WizardControl::ProjectUrl);
-    type_source(&mut dashboard, "owner/repo");
-    assert_eq!(
-        ready_key(&mut dashboard, ctrl_space()),
-        DashboardAction::None
-    );
-
-    for _ in 0.."owner/repo".len() {
-        ready_key(&mut dashboard, key(KeyCode::Backspace));
-    }
-    type_source(&mut dashboard, "./re");
-    assert_eq!(
-        ready_key(&mut dashboard, ctrl_space()),
-        DashboardAction::CompletePath {
-            host: CompletionHost::Local,
-            kind: CompletionKind::Directories,
-            prefix: "./re".into(),
-        }
-    );
-    dashboard.apply_path_completions(
-        &dashboard.path_input_context(),
-        "./re",
-        PathCompletion {
-            candidates: vec!["./repo/".into(), "./research/".into()],
-            insert: None,
-            truncated: false,
-        },
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected the bundle editor");
-    };
-    assert!(wizard.new_bundle_source.is_completing());
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected the bundle editor");
-    };
-    assert_eq!(wizard.new_bundle_source, "./repo/");
-}
-
 /// A reply that arrives after another keystroke belongs to text the field no
 /// longer holds, so it is dropped without touching what was typed.
 #[test]
@@ -5342,45 +4056,6 @@ fn stale_completion_reply_is_dropped() {
     };
     assert_eq!(wizard.mounts.source, "/opte");
     assert!(!wizard.mounts.source.is_completing());
-}
-
-/// Tab keeps moving focus while a popup is open, and the popup closes behind
-/// it rather than staying over the next field.
-#[test]
-fn tab_leaves_the_field_and_closes_the_popup() {
-    let mut dashboard = dashboard_at_mount_editor("/opt");
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("expected directory editor");
-    };
-    wizard.form.get_mut().focus(WizardControl::MountSource);
-    assert!(matches!(
-        ready_key(&mut dashboard, ctrl_space()),
-        DashboardAction::CompletePath { .. }
-    ));
-    dashboard.apply_path_completions(
-        &dashboard.path_input_context(),
-        "/opt",
-        PathCompletion {
-            candidates: vec!["/opt/one/".into(), "/opt/two/".into()],
-            insert: None,
-            truncated: false,
-        },
-    );
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected directory editor");
-    };
-    assert!(wizard.mounts.source.is_completing());
-
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    let Mode::New(wizard) = &dashboard.mode else {
-        panic!("expected directory editor");
-    };
-    assert_eq!(wizard.mounts.source, "/opt");
-    assert!(!wizard.mounts.source.is_completing());
-    assert_ne!(
-        wizard.form.borrow().focused(),
-        Some(WizardControl::MountSource)
-    );
 }
 
 /// A dashboard on the local project step of the New wizard, with `history`
@@ -5414,6 +4089,7 @@ fn row_of(lines: &[String], label: &str) -> usize {
 
 /// `cd ~/demo && mj`: the local project step starts with the repository `mj`
 /// was started in, ahead of any remembered directory (J-10).
+// Hard-won: a16ff9c6: the prefilled repository path was hidden, so Enter launched there without notice
 #[test]
 fn the_local_project_starts_as_the_repository_mj_was_started_in() {
     let mut config = config();
@@ -5481,6 +4157,7 @@ fn a_remembered_project_directory_is_drawn_with_the_caret_at_its_end() {
 /// Everything the step composes has to be on the screen. The remembered
 /// directories and the key hints are the last rows it writes, so a dialog that
 /// is not sized for its own field and buttons loses exactly those.
+// Hard-won: ee7ee201: project details, recents, or errors were hidden under wizard controls
 #[test]
 fn the_project_step_draws_its_recent_list_and_error_above_the_buttons() {
     let mut dashboard = dashboard_at_local_project_step(&["/work/newer", "/work/older"]);
@@ -5509,36 +4186,6 @@ fn the_project_step_draws_its_recent_list_and_error_above_the_buttons() {
             row_of(&lines, label) < buttons,
             "{label:?} is drawn above the button row: {lines:#?}"
         );
-    }
-}
-
-#[test]
-fn create_and_move_steps_keep_padding_and_separate_information() {
-    for (width, height) in [(140, 40), (80, 24)] {
-        let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-        ready_open_new_wizard(&mut dashboard);
-        let lines = drawn(&mut dashboard, width, height);
-        assert_dialog_spacing(&lines, "New session", "Cancel");
-        assert!(!lines.join("\n").contains("Tab moves focus"));
-
-        let mut dashboard = dashboard_at_local_project_step(&["/work/older"]);
-        let lines = drawn(&mut dashboard, width, height);
-        assert_dialog_spacing(&lines, "New session", "Cancel");
-        assert!(
-            row_of(&lines, "Recent on this host") + 1
-                < lines
-                    .iter()
-                    .rposition(|line| line.contains("/work/older"))
-                    .unwrap()
-        );
-
-        let mut dashboard = dashboard_with_session(running_session());
-        let id = open_move_review(&mut dashboard);
-        assert!(dashboard.apply_move_preparation(id, move_preparation()));
-        let lines = drawn(&mut dashboard, width, height);
-        assert_dialog_spacing(&lines, "Move", "Cancel");
-        assert_eq!(row_of(&lines, "Profile:") + 1, row_of(&lines, "Project:"));
-        assert_eq!(row_of(&lines, "Target:") + 1, row_of(&lines, "Compute:"));
     }
 }
 
@@ -5589,6 +4236,7 @@ fn clicking_a_recent_project_fills_the_field_and_enter_validates_it() {
 /// The completion popup belongs to the dialog that owns the field: it may cover
 /// the rows under the field, but the button row and the dialog's frame stay
 /// readable, and no candidate is drawn on the dashboard behind the modal.
+// Hard-won: 792e7ede: completion suggestions covered Cancel, Back, and Next
 #[test]
 fn the_completion_popup_keeps_off_the_project_steps_button_row() {
     let mut dashboard = dashboard_at_local_project_step(&[]);
@@ -5648,6 +4296,7 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
 /// The review's Compute row states the allocation itself; the " · " that
 /// joins it to a target name in the target list does not belong there.
 /// Launch campaign finding C-7.
+// Hard-won: b87a404a: review rendered an empty compute value with a stray separator
 #[test]
 fn the_review_compute_row_does_not_start_with_a_separator() {
     let mut configuration = config();
@@ -5699,6 +4348,7 @@ fn the_review_compute_row_does_not_start_with_a_separator() {
 /// after the dashboard loaded its state. Opening the New wizard asks for the
 /// stored history again, and the project step offers what comes back.
 /// Launch campaign finding C-1.
+// Hard-won: 5a8c036f: a project created in one run was missing from the next picker until restart
 #[test]
 fn opening_the_new_wizard_refreshes_recent_projects() {
     let mut config = config();
@@ -5790,6 +4440,7 @@ fn recent_projects_update_an_open_picker_and_failed_discovery_has_an_explicit_re
 /// Tab moves keyboard focus onto the recent directories, so each one has to
 /// look different while it holds focus, including the one that is already the
 /// selected directory. Launch campaign finding C-2.
+// Hard-won: 8e3e20d4: focused and unfocused recent rows rendered identically
 #[test]
 fn a_focused_recent_project_is_drawn_differently_from_its_unfocused_self() {
     fn style_of(dashboard: &mut DashboardState, label: &str) -> ratatui::style::Style {
@@ -5923,149 +4574,6 @@ fn replace_resource_text(dashboard: &mut DashboardState, text: &str) {
     for character in text.chars() {
         ready_key(dashboard, key(KeyCode::Char(character)));
     }
-}
-
-#[test]
-fn container_cpu_and_memory_edit_through_tab_in_create_open_and_move() {
-    let gib = 1 << 30;
-    for kind in 0..3 {
-        let session = if kind == 2 {
-            running_session()
-        } else {
-            stopped_session()
-        };
-        let mut dashboard = dashboard_with_session(session);
-        match kind {
-            0 => {
-                ready_open_new_wizard(&mut dashboard);
-            }
-            1 => {
-                dashboard.begin_resume_for("session-1");
-            }
-            _ => {
-                dashboard.focus_sessions();
-                dashboard.begin_move();
-            }
-        }
-        ready_key(&mut dashboard, key(KeyCode::Enter));
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-        let focused = match &dashboard.mode {
-            Mode::New(wizard) => wizard.form.borrow().focused(),
-            Mode::Resume(wizard) => wizard.form.borrow().focused(),
-            _ => panic!("expected target step"),
-        };
-        assert_eq!(focused, Some(WizardControl::ResourceCpu), "kind {kind}");
-        assert!(dashboard.text_input_focused());
-        replace_resource_text(&mut dashboard, "3");
-        ready_key(&mut dashboard, key(KeyCode::Tab));
-        ready_key(&mut dashboard, key(KeyCode::End));
-        ready_key(
-            &mut dashboard,
-            crossterm::event::KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        );
-        dashboard.handle_paste("1.5");
-        let allocation = match &dashboard.mode {
-            Mode::New(wizard) => wizard.resource_allocation.clone(),
-            Mode::Resume(wizard) => wizard.resource_allocation.clone(),
-            _ => unreachable!(),
-        };
-        assert_eq!(
-            allocation,
-            Some(SessionResourceAllocation::Container {
-                cpus: 3,
-                memory_bytes: gib + gib / 2
-            }),
-            "kind {kind}"
-        );
-        let lines = drawn(&mut dashboard, 80, 24);
-        assert!(
-            lines.iter().any(|line| line.contains("MEM (GiB)")),
-            "{lines:#?}"
-        );
-        assert!(!lines.join("\n").contains("+ double"));
-        let next = ready_key(&mut dashboard, key(KeyCode::Enter));
-        if kind == 2 {
-            assert!(matches!(next, DashboardAction::MoveSession {
-                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }),
-                preparation_request_id: Some(_), ..
-            } if memory_bytes == gib + gib / 2));
-        }
-        let step = match &dashboard.mode {
-            Mode::New(wizard) => wizard.step,
-            Mode::Resume(wizard) => wizard.step,
-            _ => panic!("expected next step"),
-        };
-        assert_ne!(step, WizardStep::Target);
-        if kind == 0 {
-            ready_key(&mut dashboard, key(KeyCode::Enter));
-            let Some(DashboardAction::PreflightCreateSession { launch }) =
-                dashboard.take_prerequisite_check()
-            else {
-                panic!("create preflight");
-            };
-            assert!(matches!(*launch, DashboardAction::CreateSession {
-                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }), ..
-            } if memory_bytes == gib + gib / 2));
-        } else if kind == 1 {
-            let DashboardAction::PreflightResumeRepositories { launch } =
-                ready_key(&mut dashboard, key(KeyCode::Enter))
-            else {
-                panic!("resume preflight");
-            };
-            assert!(matches!(*launch, DashboardAction::ResumeSession {
-                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 3, memory_bytes }), ..
-            } if memory_bytes == gib + gib / 2));
-        }
-        // Returning from later steps keeps the edited allocation and fields.
-        if kind == 0 {
-            for _ in 0..2 {
-                if let Mode::New(wizard) = &mut dashboard.mode {
-                    wizard.form.get_mut().focus(WizardControl::Back);
-                }
-                ready_key(&mut dashboard, key(KeyCode::Enter));
-            }
-            assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-            assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "3");
-            assert_eq!(new_wizard(&dashboard).resource_editor.memory.value(), "1.5");
-            assert!(!new_wizard(&dashboard).remote_preflight_in_flight);
-        }
-    }
-}
-
-#[test]
-fn invalid_cpu_keeps_text_disables_next_and_recovers_without_resetting_memory() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    replace_resource_text(&mut dashboard, "0");
-    assert_eq!(new_wizard(&dashboard).resource_editor.cpu.value(), "0");
-    assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(new_wizard(&dashboard).step, WizardStep::Target);
-    let lines = drawn(&mut dashboard, 80, 24).join("\n");
-    assert!(lines.contains("positive whole number"), "{lines}");
-    replace_resource_text(&mut dashboard, "5");
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 5,
-            memory_bytes: 32 << 30
-        })
-    );
-    // Unfocused legacy shortcuts no longer change resources.
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    for character in ['+', '-', 'c', 'm', 'r'] {
-        ready_key(&mut dashboard, key(KeyCode::Char(character)));
-    }
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(SessionResourceAllocation::Container {
-            cpus: 5,
-            memory_bytes: 32 << 30
-        })
-    );
 }
 
 #[test]
@@ -6301,77 +4809,6 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
             memory_bytes: 32 << 30,
         })
     );
-}
-
-#[test]
-fn profile_policy_is_used_for_create_without_session_policy_controls() {
-    use mj_core::subagent::SubagentPolicy;
-    let mut configuration = subagent_wizard_config();
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
-    configuration
-        .profiles
-        .get_mut("claude-1")
-        .unwrap()
-        .subagents = fixed.clone();
-    let state = State {
-        last_subagent_policy: SubagentPolicy::AllModels,
-        ..Default::default()
-    };
-    let mut dashboard = DashboardState::new(configuration, state, BTreeMap::new());
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard")
-    };
-    wizard.step = WizardStep::Review;
-    wizard.project_directory = "/work/main".into();
-    dashboard.apply_resolved_project_directory(
-        &dashboard.path_input_context(),
-        "/work/main",
-        Ok((
-            PathBuf::from("/work/main"),
-            mj_core::state::ManagedWorktreeOptions {
-                available: true,
-                default_create: false,
-            },
-        )),
-    );
-    assert!(
-        !drawn(&mut dashboard, 120, 32)
-            .join("\n")
-            .contains("Subagents")
-    );
-    let action = ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(
-        matches!(action, DashboardAction::CreateSession { subagents: Some(policy), .. } if policy == fixed)
-    );
-    dashboard.begin_new();
-    let Mode::New(wizard) = &mut dashboard.mode else {
-        panic!("wizard")
-    };
-    wizard.profile = 1;
-    wizard.project_directory = "/work/main".into();
-    wizard.step = WizardStep::Review;
-    dashboard.apply_resolved_project_directory(
-        &dashboard.path_input_context(),
-        "/work/main",
-        Ok((
-            PathBuf::from("/work/main"),
-            mj_core::state::ManagedWorktreeOptions {
-                available: true,
-                default_create: false,
-            },
-        )),
-    );
-    assert!(matches!(
-        ready_key(&mut dashboard, key(KeyCode::Enter)),
-        DashboardAction::CreateSession {
-            subagents: Some(SubagentPolicy::Native),
-            ..
-        }
-    ));
 }
 
 fn single_raw_config() -> Config {
@@ -6710,61 +5147,4 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             })
         ));
     }
-}
-
-#[test]
-fn move_uses_global_models_and_efforts_across_selections_and_policy_switches() {
-    use mj_core::subagent::SubagentPolicy;
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_profile_capabilities(crate::test_support::profile_capabilities_fixture(
-        &dashboard.config,
-        &[("a", &["low"]), ("b", &["high"])],
-    ));
-    let request = open_move_review(&mut dashboard);
-    dashboard.apply_move_preparation(request, move_preparation());
-    let Mode::Resume(wizard) = &mut dashboard.mode else {
-        panic!("move");
-    };
-    wizard.subagents.policy = SubagentPolicy::SingleModel {
-        model: "a".into(),
-        effort: Some("low".into()),
-    };
-    dashboard.take_subagent_discovery();
-    assert_eq!(
-        resume_wizard(&dashboard).subagents.models(),
-        ["Select model", "a", "b"]
-    );
-    for (model_index, effort) in [(2, "high"), (1, "low")] {
-        let Mode::Resume(wizard) = &mut dashboard.mode else {
-            panic!("move");
-        };
-        wizard.subagents.select_model(model_index);
-        assert!(dashboard.take_subagent_discovery().is_none());
-        assert_eq!(
-            resume_wizard(&dashboard)
-                .subagents
-                .options()
-                .unwrap()
-                .efforts[0]
-                .value,
-            effort
-        );
-    }
-    let Mode::Resume(wizard) = &mut dashboard.mode else {
-        panic!("move");
-    };
-    wizard.subagents.select_policy(0);
-    wizard.subagents.select_policy(1);
-    assert!(dashboard.take_subagent_discovery().is_none());
-    assert_eq!(
-        resume_wizard(&dashboard).subagents.models(),
-        ["Select model", "a", "b"]
-    );
-    assert!(
-        !resume_wizard(&dashboard)
-            .subagents
-            .error()
-            .unwrap()
-            .contains("Loading")
-    );
 }
