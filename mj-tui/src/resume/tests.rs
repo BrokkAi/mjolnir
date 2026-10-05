@@ -54,6 +54,33 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
     }
 }
 
+fn append_golden_state(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    lines: &[String],
+) {
+    output.push_str(&format!("=== {label} ({width}x{height}) ===\n"));
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+}
+
+fn append_golden_value(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+    output.push_str(&format!("{label}: {value:?}\n"));
+}
+
+fn append_resume_golden(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    dashboard: &mut DashboardState,
+) {
+    let lines = drawn(dashboard, width, height);
+    append_golden_state(output, label, width, height, &lines);
+}
+
 /// C-25: a long title gives way to the "[unavailable]" marker, so the marker
 /// is always shown in full.
 // Hard-won: 72f1adfb: Finding C-25 showed a long import title clipped the [unavailable] marker to [unavaila].
@@ -451,76 +478,6 @@ fn a_hel_record_replaces_the_native_session_it_was_imported_from() {
     assert_eq!(native_only.origin, "local/hel");
 }
 
-#[test]
-fn resume_and_import_targets_include_the_project_like_live_summaries() {
-    let mut local = stopped_session();
-    local.id = "local-session".into();
-    local.native_session_id = None;
-    local.target_template_id = "localhost".into();
-    local.project_directory = Some("/mnt/optane/bifrost-fird".into());
-
-    let mut remote = stopped_session();
-    remote.id = "remote-session".into();
-    remote.native_session_id = None;
-    remote.target_template_id = "precision-3260".into();
-    remote.project_directory = Some("/home/jonathan/Projects/bifrost".into());
-
-    let mut config = config();
-    config.targets.insert(
-        "localhost".into(),
-        mj_core::config::TargetTemplate::LocalBare,
-    );
-    config.targets.insert(
-        "precision-3260".into(),
-        mj_core::config::TargetTemplate::SshBare {
-            ssh: mj_core::config::SshConnection {
-                host: "precision-3260".into(),
-                user: None,
-                identity_file: None,
-                extra_args: Vec::new(),
-            },
-            permissions: mj_core::config::PermissionMode::Yolo,
-            workspace_prefix: ".local/share/hel/workspaces".into(),
-        },
-    );
-    let mut dashboard =
-        DashboardState::new(config, state_with(vec![local, remote]), BTreeMap::new());
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![native(
-            "native-only",
-            "Native project",
-            NEWER_THAN_THE_CHECKPOINT,
-        )])],
-    );
-    switch_to_hel(&mut dashboard);
-
-    let targets = rows(&dashboard)
-        .into_iter()
-        .map(|row| row.origin)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        targets,
-        BTreeSet::from([
-            "localhost/bifrost-fird".to_owned(),
-            "precision-3260/bifrost".to_owned(),
-        ])
-    );
-
-    let mut terminal = Terminal::new(TestBackend::new(140, 34)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the resume dialog");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    for target in ["localhost/bifrost-fird", "precision-3260/bifrost"] {
-        assert!(rendered.contains(target), "{rendered}");
-    }
-
-    switch_to_import(&mut dashboard);
-    assert_eq!(rows(&dashboard)[0].origin, "local/hel");
-}
-
 /// The native session behind a live Hel session must not be offered as an
 /// import: that would start a second Hel session on the same conversation.
 #[test]
@@ -599,108 +556,15 @@ fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
 
 /// A record whose target was renamed or removed from config still reports
 /// the target it actually ran on.
-#[test]
-fn the_origin_chip_shows_the_stored_target_even_when_config_forgot_it() {
-    let mut session = stopped_session();
-    session.target_template_id = "retired-target".into();
-    let mut config = config();
-    config.targets.clear();
-    let merged = merged_rows(&config, &state_with(vec![session]), &[], &[]);
-    assert_eq!(merged[0].origin, "retired-target");
-}
-
 /// One order across the merged list: newest activity first, whichever
 /// source the row came from. Hel records date from their checkpoint,
 /// native sessions from the file's modification time.
-#[test]
-fn rows_sort_by_last_activity_descending_across_both_sources() {
-    let mut old_record = stopped_session();
-    old_record.id = "old-record".into();
-    old_record.native_session_id = None;
-    old_record.checkpoint.as_mut().unwrap().created_at = "2026-01-01T00:00:00Z".into();
-    let mut new_record = stopped_session();
-    new_record.id = "new-record".into();
-    new_record.native_session_id = None;
-    new_record.acp_session_title = Some("Newest record".into());
-    new_record.checkpoint.as_mut().unwrap().created_at = "2026-06-01T00:00:00Z".into();
-
-    let january = 1_767_225_600_000; // 2026-01-01T00:00:00Z
-    let march = 1_772_409_600_000; // 2026-03-01T00:00:00Z
-    let july = 1_782_950_400_000; // 2026-07-01T00:00:00Z
-    let merged = merged_rows(
-        &config(),
-        &state_with(vec![old_record, new_record]),
-        &[codex_profile(vec![
-            native("native-mid", "Native March", march),
-            native("native-new", "Native July", july),
-        ])],
-        &[],
-    );
-
-    assert_eq!(
-        titles(&merged),
-        [
-            "Native July",
-            "Newest record",
-            "Native March",
-            "ACP pretty name",
-        ]
-    );
-    assert_eq!(merged[3].last_activity_ms, january);
-}
-
 /// A record archived by an older Mjolnir version remains part of stopped
 /// history. Archive state is retained in storage for compatibility, but
 /// it no longer separates rows in the resume dialog.
-#[test]
-fn previously_archived_history_remains_visible() {
-    let mut archived_record = stopped_session();
-    archived_record.id = "archived-record".into();
-    archived_record.native_session_id = None;
-    archived_record.acp_session_title = Some("Archived record".into());
-    archived_record.archived = true;
-    let mut current_record = stopped_session();
-    current_record.id = "current-record".into();
-    current_record.native_session_id = None;
-    current_record.acp_session_title = Some("Current record".into());
-
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![archived_record, current_record]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    switch_to_hel(&mut dashboard);
-
-    assert_eq!(
-        titles(&rows(&dashboard)),
-        ["Archived record", "Current record"]
-    );
-}
-
 /// Native archive metadata is retained on the row for display consumers,
 /// while the resume dialog always lists the row and never writes back to
 /// the provider.
-#[test]
-fn native_archive_metadata_is_informational() {
-    let mut natively_archived = native("native-codex", "Archived in Codex", 1);
-    natively_archived.natively_archived = true;
-    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![natively_archived])],
-    );
-    switch_to_import(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
-    assert!(rows(&dashboard)[0].natively_archived);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('a'))),
-        DashboardAction::None
-    );
-    assert_eq!(titles(&rows(&dashboard)), ["Archived in Codex"]);
-}
-
 /// A lost or force-destroyed session cannot be resumed; deleting its
 /// record is the only thing left to do with it.
 #[test]
@@ -746,61 +610,6 @@ fn lost_and_destroyed_rows_are_marked_and_refuse_to_resume() {
 
 /// The letter key used to destroy; that job now belongs to the Destroy
 /// button, which reaches the same confirmation by keyboard or mouse.
-#[test]
-fn the_destroy_button_replaces_the_d_key() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    switch_to_hel(&mut dashboard);
-
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('d'))),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 34)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the resume dialog");
-    let lines = buffer_lines(terminal.backend().buffer());
-    let (row, line) = lines
-        .iter()
-        .enumerate()
-        .find(|(_, line)| line.contains("  Destroy  "))
-        .expect("Destroy button between Cancel and Resume");
-    let cancel = cell_column(line, "Cancel");
-    let destroy = cell_column(line, "Destroy");
-    let resume = cell_column(line, "Resume");
-    assert!(cancel < destroy && destroy < resume, "{line}");
-    for kind in [
-        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
-    ] {
-        dashboard.handle_mouse(crossterm::event::MouseEvent {
-            kind,
-            column: destroy,
-            row: row as u16,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-        });
-    }
-    let Mode::Confirm(confirm) = &dashboard.mode else {
-        panic!(
-            "expected the destroy confirmation, got {:?}",
-            dashboard.mode
-        );
-    };
-    assert!(matches!(
-        confirm.confirmation,
-        Confirmation::DestroyStopped { .. }
-    ));
-    // Launch finding B-3: the dialog names a titled session by its title.
-    assert_eq!(confirm.session_name.as_deref(), Some("ACP pretty name"));
-}
-
 /// Launch finding R6-4: the Mjolnir tab listed a suspended session its
 /// harness had not named by its id (tmux/022), while the Destroy dialog and
 /// the notices called it "project via fake". The Mjolnir and Live tabs now
@@ -1066,54 +875,6 @@ fn tagged_wiki_row(id: &str, target: &str, profile: &str) -> WikiRow {
 /// guessing `mjolnir` and a local origin. A bare target is named with the
 /// project it opened; a container target names itself; a target the
 /// configuration no longer holds is shown verbatim.
-#[test]
-fn archived_row_shows_indexed_target_and_profile() {
-    let config = config_with_bare_target();
-    let state = state_with(Vec::new());
-
-    let archived = |hit: WikiRow| {
-        merged_rows(&config, &state, &[], &[hit])
-            .into_iter()
-            .find(|row| matches!(row.key, ResumeRowKey::Archive(_)))
-            .expect("the indexed session becomes an archived row")
-    };
-
-    let bare = archived(tagged_wiki_row("bare", "localhost", "codex-2"));
-    assert_eq!(
-        bare.profile_id, "codex-2",
-        "the indexed profile, not the tool"
-    );
-    assert_eq!(bare.origin, "localhost/project");
-
-    // C-14: a session that ran in a managed worktree is named by the project
-    // it worked on, not by the worktree's session-id directory.
-    let worktree = archived(WikiRow {
-        project: "/home/dev/project/.mj/worktrees/556ebcbaee181".into(),
-        ..tagged_wiki_row("worktree", "localhost", "codex-2")
-    });
-    assert_eq!(worktree.origin, "localhost/project");
-    let nested = archived(WikiRow {
-        project: "/home/dev/project/.mj/worktrees/556ebcbaee181/sub".into(),
-        target: None,
-        ..tagged_wiki_row("nested", "localhost", "codex-2")
-    });
-    assert_eq!(nested.origin, "local/sub");
-
-    let container = archived(tagged_wiki_row("container", "podman", "codex-2"));
-    assert_eq!(container.origin, "podman");
-
-    let retired = archived(tagged_wiki_row("retired", "was-a-target", "codex-2"));
-    assert_eq!(
-        retired.origin, "was-a-target",
-        "a target the configuration lost is shown as it was recorded"
-    );
-
-    // A row the index carries nothing for keeps what it always showed.
-    let untagged = archived(wiki_row("untagged", true));
-    assert_eq!(untagged.profile_id, "mjolnir");
-    assert_eq!(untagged.origin, "local/project");
-}
-
 /// Put the dialog on the Archived tab with its one row selected, which is
 /// where the arrow keys leave it. The test that follows is about what Enter
 /// does, not about reaching the tab.
@@ -1199,91 +960,8 @@ fn typing_asks_for_a_search_and_stale_answers_are_dropped() {
     assert_eq!(dialog.wiki[0].id, "fresh");
 }
 
-#[test]
-fn tabs_separate_hel_records_from_importable_native_sessions() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![native(
-            "native-2",
-            "Native",
-            NEWER_THAN_THE_CHECKPOINT,
-        )])],
-    );
-    switch_to_hel(&mut dashboard);
-
-    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Hel);
-    assert_eq!(dialog.selected, Some(ResumeRowKey::Hel("session-1".into())));
-
-    switch_to_import(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["Native"]);
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(
-        dialog.selected,
-        Some(ResumeRowKey::Native(HarnessKind::Codex, "native-2".into()))
-    );
-
-    dashboard.handle_key(key(KeyCode::Left));
-    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-}
-
 /// Selecting a row dispatches to the flow that suits its source: the
 /// resume wizard for a Hel record, the import flow for a native session.
-#[test]
-fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![native(
-            "native-2",
-            "Native",
-            NEWER_THAN_THE_CHECKPOINT,
-        )])],
-    );
-    switch_to_hel(&mut dashboard);
-
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Resume(_)));
-
-    open_resume_dialog(
-        &mut dashboard,
-        2,
-        vec![codex_profile(vec![native(
-            "native-2",
-            "Native",
-            NEWER_THAN_THE_CHECKPOINT,
-        )])],
-    );
-    switch_to_import(&mut dashboard);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ImportSession {
-            profile_id: "codex-1".into(),
-            native_session_id: "native-2".into(),
-            display_title: "Native".into(),
-        }
-    );
-}
-
 /// Enter on the focused Mjolnir row starts its resume, which is what the tab's
 /// own hint promises and what the Resume button already does.
 // Hard-won: c82060f6: Enter on a Mjolnir row did nothing after arrow navigation left focus on the tab strip.
@@ -1349,56 +1027,532 @@ fn dashboard_with_live_sessions_in_two_workspaces() -> DashboardState {
 /// The Live tab lists the running sessions of every workspace, and its search
 /// box narrows them by name while the index is still building.
 #[test]
-fn the_live_tab_lists_running_sessions_everywhere_and_searches_them_by_name() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Live, "the dialog opens on Live");
+fn golden_resume_dialog_table() {
+    let mut output = String::new();
 
-    let listed = rows(&dashboard)
-        .into_iter()
-        .map(|row| match row.key {
-            ResumeRowKey::Live(session_id) => session_id,
-            other => panic!("the Live tab listed {other:?}"),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(listed.len(), 3, "every running session is listed");
-    assert_eq!(
-        listed
-            .iter()
-            .map(|session_id| dashboard.state.sessions[session_id].workspace_id.clone())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["default".to_owned(), "other".to_owned()]),
-        "the list spans both workspaces"
+    let mut local = stopped_session();
+    local.id = "local-session".into();
+    local.native_session_id = None;
+    local.target_template_id = "localhost".into();
+    local.project_directory = Some("/mnt/optane/bifrost-fird".into());
+    let mut remote = stopped_session();
+    remote.id = "remote-session".into();
+    remote.native_session_id = None;
+    remote.target_template_id = "precision-3260".into();
+    remote.project_directory = Some("/home/jonathan/Projects/bifrost".into());
+    let mut project_config = config();
+    project_config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    project_config.targets.insert(
+        "precision-3260".into(),
+        mj_core::config::TargetTemplate::SshBare {
+            ssh: mj_core::config::SshConnection {
+                host: "precision-3260".into(),
+                user: None,
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            permissions: mj_core::config::PermissionMode::Yolo,
+            workspace_prefix: ".local/share/hel/workspaces".into(),
+        },
+    );
+    let mut dashboard = DashboardState::new(
+        project_config,
+        state_with(vec![local, remote]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(
+        &mut dashboard,
+        1,
+        vec![codex_profile(vec![native(
+            "native-only",
+            "Native project",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "Hel records with project targets",
+        140,
+        34,
+        &mut dashboard,
+    );
+    switch_to_import(&mut dashboard);
+    append_resume_golden(&mut output, "native import target", 140, 34, &mut dashboard);
+
+    let mut session = stopped_session();
+    session.target_template_id = "retired-target".into();
+    let mut retired_config = config();
+    retired_config.targets.clear();
+    let mut dashboard =
+        DashboardState::new(retired_config, state_with(vec![session]), BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "stored target after config removal",
+        120,
+        34,
+        &mut dashboard,
     );
 
-    // Live is the leftmost tab, so from the list Left wraps around to the last
-    // one rather than landing in the middle of the strip.
-    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
-    dashboard.handle_key(key(KeyCode::Left));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Archive);
-    switch_to_tab(&mut dashboard, ResumeTab::Live);
+    let mut old_record = stopped_session();
+    old_record.id = "old-record".into();
+    old_record.native_session_id = None;
+    old_record.checkpoint.as_mut().unwrap().created_at = "2026-01-01T00:00:00Z".into();
+    let mut new_record = stopped_session();
+    new_record.id = "new-record".into();
+    new_record.native_session_id = None;
+    new_record.acp_session_title = Some("Newest record".into());
+    new_record.checkpoint.as_mut().unwrap().created_at = "2026-06-01T00:00:00Z".into();
+    let merged = merged_rows(
+        &config(),
+        &state_with(vec![old_record, new_record]),
+        &[codex_profile(vec![
+            native("native-mid", "Native March", 1_772_409_600_000),
+            native("native-new", "Native July", 1_782_950_400_000),
+        ])],
+        &[],
+    );
+    append_golden_value(
+        &mut output,
+        "ordered resume titles",
+        merged
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>(),
+    );
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![
+            {
+                let mut row = stopped_session();
+                row.id = "old-record".into();
+                row.native_session_id = None;
+                row.checkpoint.as_mut().unwrap().created_at = "2026-01-01T00:00:00Z".into();
+                row
+            },
+            {
+                let mut row = stopped_session();
+                row.id = "new-record".into();
+                row.native_session_id = None;
+                row.acp_session_title = Some("Newest record".into());
+                row.checkpoint.as_mut().unwrap().created_at = "2026-06-01T00:00:00Z".into();
+                row
+            },
+        ]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(
+        &mut dashboard,
+        1,
+        vec![codex_profile(vec![
+            native("native-mid", "Native March", 1_772_409_600_000),
+            native("native-new", "Native July", 1_782_950_400_000),
+        ])],
+    );
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "cross-source activity order",
+        140,
+        34,
+        &mut dashboard,
+    );
 
-    // Drawing registers the dialog's controls, so `/` reaches the box the way
-    // it does in the running dashboard, with the index still building.
-    drawn(&mut dashboard, 120, 40);
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    focus_resume_control(&mut dashboard, ResumeFocus::Search);
-    for character in "mast".chars() {
-        assert!(
-            matches!(
-                dashboard.handle_key(key(KeyCode::Char(character))),
-                DashboardAction::SearchArchivedSessions { .. }
-            ),
-            "the Live list answers immediately while the index searches the other tabs"
+    let mut archived = stopped_session();
+    archived.id = "archived-record".into();
+    archived.native_session_id = None;
+    archived.acp_session_title = Some("Archived record".into());
+    archived.archived = true;
+    let mut current = stopped_session();
+    current.id = "current-record".into();
+    current.native_session_id = None;
+    current.acp_session_title = Some("Current record".into());
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![archived, current]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "history including older archived records",
+        120,
+        34,
+        &mut dashboard,
+    );
+
+    let mut natively_archived = native("native-codex", "Archived in Codex", 1);
+    natively_archived.natively_archived = true;
+    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
+    open_resume_dialog(
+        &mut dashboard,
+        1,
+        vec![codex_profile(vec![natively_archived])],
+    );
+    switch_to_import(&mut dashboard);
+    append_golden_value(
+        &mut output,
+        "native archive metadata",
+        rows(&dashboard)[0].natively_archived,
+    );
+    append_resume_golden(
+        &mut output,
+        "native archived conversation",
+        120,
+        34,
+        &mut dashboard,
+    );
+    let action = dashboard.handle_key(key(KeyCode::Char('a')));
+    append_golden_value(&mut output, "archive shortcut action", action);
+    append_resume_golden(
+        &mut output,
+        "native archived conversation remains listed",
+        120,
+        34,
+        &mut dashboard,
+    );
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    switch_to_hel(&mut dashboard);
+    let action = dashboard.handle_key(key(KeyCode::Char('d')));
+    append_golden_value(&mut output, "d key action", action);
+    append_resume_golden(
+        &mut output,
+        "resume dialog before destroy button",
+        120,
+        34,
+        &mut dashboard,
+    );
+    let lines = drawn(&mut dashboard, 120, 34);
+    let destroy = point(&lines, "Destroy");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), destroy));
+    let action = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), destroy));
+    append_golden_value(&mut output, "Destroy button action", action);
+    append_resume_golden(&mut output, "destroy confirmation", 120, 34, &mut dashboard);
+
+    let archive_config = config_with_bare_target();
+    let state = state_with(Vec::new());
+    let wiki_rows = vec![
+        tagged_wiki_row("bare", "localhost", "codex-2"),
+        WikiRow {
+            project: "/home/dev/project/.mj/worktrees/556ebcbaee181".into(),
+            ..tagged_wiki_row("worktree", "localhost", "codex-2")
+        },
+        WikiRow {
+            project: "/home/dev/project/.mj/worktrees/556ebcbaee181/sub".into(),
+            target: None,
+            ..tagged_wiki_row("nested", "localhost", "codex-2")
+        },
+        tagged_wiki_row("container", "podman", "codex-2"),
+        tagged_wiki_row("retired", "was-a-target", "codex-2"),
+        wiki_row("untagged", true),
+    ];
+    let archive_rows = merged_rows(&archive_config, &state, &[], &wiki_rows);
+    for row in &archive_rows {
+        append_golden_value(
+            &mut output,
+            &format!("archived row {} profile/origin", row.title),
+            (&row.profile_id, &row.origin),
         );
     }
-    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
+    let mut dashboard = DashboardState::new(archive_config, state, BTreeMap::new());
+    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
+    switch_to_archive(&mut dashboard);
+    apply_ready_rows(&mut dashboard, wiki_rows);
+    append_resume_golden(
+        &mut output,
+        "archived rows with indexed profile and target",
+        140,
+        40,
+        &mut dashboard,
+    );
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(
+        &mut dashboard,
+        1,
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])],
+    );
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(&mut output, "Hel tab", 120, 34, &mut dashboard);
+    switch_to_import(&mut dashboard);
+    append_resume_golden(&mut output, "Import tab", 120, 34, &mut dashboard);
+    dashboard.handle_key(key(KeyCode::Left));
+    append_resume_golden(&mut output, "Left returns to Hel", 120, 34, &mut dashboard);
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    let profiles = || {
+        vec![codex_profile(vec![native(
+            "native-2",
+            "Native",
+            NEWER_THAN_THE_CHECKPOINT,
+        )])]
+    };
+    open_resume_dialog(&mut dashboard, 1, profiles());
+    switch_to_hel(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "select resumable Hel row",
+        120,
+        34,
+        &mut dashboard,
+    );
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    append_golden_value(&mut output, "resume selection action", action);
+    append_golden_value(&mut output, "mode after selecting Hel row", "Resume wizard");
+    append_resume_golden(&mut output, "resume wizard", 120, 34, &mut dashboard);
+
+    open_resume_dialog(&mut dashboard, 2, profiles());
+    switch_to_import(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "select importable native row",
+        120,
+        34,
+        &mut dashboard,
+    );
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    append_golden_value(&mut output, "native import action", action);
+    append_resume_golden(
+        &mut output,
+        "dashboard after importing native row",
+        120,
+        34,
+        &mut dashboard,
+    );
+
+    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
+    open_resume_dialog(&mut dashboard, 1, Vec::new());
+    append_resume_golden(
+        &mut output,
+        "Live tab across workspaces",
+        120,
+        40,
+        &mut dashboard,
+    );
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    dashboard.handle_key(key(KeyCode::Left));
+    append_resume_golden(
+        &mut output,
+        "left wraps to Archived tab",
+        120,
+        40,
+        &mut dashboard,
+    );
+    switch_to_tab(&mut dashboard, ResumeTab::Live);
+    let _ = drawn(&mut dashboard, 120, 40);
+    let search_action = dashboard.handle_key(key(KeyCode::Char('/')));
+    append_golden_value(&mut output, "focus Live search action", search_action);
+    focus_resume_control(&mut dashboard, ResumeFocus::Search);
+    for character in "mast".chars() {
+        let action = dashboard.handle_key(key(KeyCode::Char(character)));
+        append_golden_value(
+            &mut output,
+            &format!("search key {character} action"),
+            action,
+        );
+    }
+    let request = dashboard.resume_search_request_id().unwrap();
+    dashboard.apply_resume_text_search_result(request, Ok(Vec::new()));
+    append_resume_golden(&mut output, "Live search result", 120, 40, &mut dashboard);
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "resume-dialog-table", &output);
+}
+
+#[test]
+fn golden_resume_dialog_preview() {
+    let mut output = String::new();
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(
+        &mut dashboard,
+        1,
+        vec![codex_profile(vec![
+            native("native-2", "Native alpha", NEWER_THAN_THE_CHECKPOINT),
+            native("native-3", "Native beta", NEWER_THAN_THE_CHECKPOINT - 1),
+        ])],
+    );
+    switch_to_hel(&mut dashboard);
+    replace_search(&mut dashboard, "the phrase");
+    apply_ready_rows(
+        &mut dashboard,
+        vec![
+            WikiRow {
+                tool: "codex".into(),
+                native_id: Some("native-2".into()),
+                ..wiki_row("alpha-hit", false)
+            },
+            WikiRow {
+                tool: "codex".into(),
+                native_id: Some("native-3".into()),
+                ..wiki_row("beta-hit", false)
+            },
+            WikiRow {
+                hel_session_id: Some("session-1".into()),
+                ..wiki_row("record-hit", false)
+            },
+            wiki_row("gone", true),
+        ],
+    );
+    append_resume_golden(
+        &mut output,
+        "search hits on each tab",
+        120,
+        40,
+        &mut dashboard,
+    );
+    append_golden_value(&mut output, "tab hit counts", dashboard.resume_hit_counts);
+    apply_ready_rows(
+        &mut dashboard,
+        vec![WikiRow {
+            tool: "codex".into(),
+            native_id: Some("native-2".into()),
+            ..wiki_row("alpha-hit", false)
+        }],
+    );
+    append_resume_golden(
+        &mut output,
+        "search result on another tab",
+        120,
+        40,
+        &mut dashboard,
+    );
+    append_golden_value(
+        &mut output,
+        "tab hit counts after refresh",
+        dashboard.resume_hit_counts,
+    );
+    if let Mode::ResumeDialog(dialog) = &dashboard.mode {
+        append_golden_value(
+            &mut output,
+            "empty tab message",
+            empty_search_message(&dashboard, dialog),
+        );
+    }
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
+    apply_ready_rows(&mut dashboard, archived_rows(3));
+    switch_to_archive(&mut dashboard);
+    replace_search(&mut dashboard, "needle");
+    apply_ready_rows(&mut dashboard, archived_rows(3));
+    let selected = match &dashboard.mode {
+        Mode::ResumeDialog(dialog) => dialog
+            .preview_wiki_id(dashboard.resume_rows())
+            .unwrap()
+            .to_owned(),
+        _ => unreachable!(),
+    };
+    dashboard.apply_wiki_hits(
+        selected,
+        "needle".into(),
+        Some(WikiHitTranscript {
+            blocks: vec![hit_block("user", 0), hit_block("assistant", 60)],
+            omitted_after: 2,
+        }),
+    );
+    append_resume_golden(
+        &mut output,
+        "preview opens at first matching passage",
+        120,
+        40,
+        &mut dashboard,
+    );
+    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
+    dashboard.handle_key(key(KeyCode::Char('n')));
+    append_resume_golden(
+        &mut output,
+        "n selects and scrolls to second match",
+        120,
+        40,
+        &mut dashboard,
+    );
+    let lines = drawn(&mut dashboard, 120, 40);
+    let previous = point(&lines, "[↑]");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), previous));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), previous));
+    append_resume_golden(&mut output, "previous-hit arrow", 120, 40, &mut dashboard);
+    let lines = drawn(&mut dashboard, 120, 40);
+    let next = point(&lines, "[↓]");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), next));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), next));
+    append_resume_golden(&mut output, "next-hit arrow", 120, 40, &mut dashboard);
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        state_with(vec![stopped_session()]),
+        BTreeMap::new(),
+    );
+    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    switch_to_archive(&mut dashboard);
+    append_resume_golden(
+        &mut output,
+        "archived briefing without a query",
+        120,
+        40,
+        &mut dashboard,
+    );
+    let action = dashboard.next_wiki_preview();
+    append_golden_value(&mut output, "briefing request action", action);
+    replace_search(&mut dashboard, "needle");
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    append_resume_golden(&mut output, "archived hit query", 120, 40, &mut dashboard);
+    let action = dashboard.next_wiki_preview();
+    append_golden_value(&mut output, "hit request action", action);
+    let duplicate = dashboard.next_wiki_preview();
+    append_golden_value(&mut output, "duplicate hit request", duplicate);
+    dashboard.apply_wiki_hits(
+        "archive-0".into(),
+        "needle".into(),
+        Some(WikiHitTranscript::default()),
+    );
+    let cached = dashboard.next_wiki_preview();
+    append_golden_value(&mut output, "cached hit request", cached);
+    replace_search(&mut dashboard, "other");
+    apply_ready_rows(&mut dashboard, archived_rows(1));
+    let action = dashboard.next_wiki_preview();
+    append_golden_value(&mut output, "new query request action", action);
+    append_resume_golden(
+        &mut output,
+        "new archived hit query",
+        120,
+        40,
+        &mut dashboard,
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "resume-dialog-preview", &output);
 }
 
 fn type_resume_query(dashboard: &mut DashboardState, query: &str) -> u64 {
@@ -2149,79 +2303,6 @@ fn sub_agents_are_never_offered_for_resume() {
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
 }
 
-#[test]
-fn search_counts_hits_on_every_tab() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![
-            native("native-2", "Native alpha", NEWER_THAN_THE_CHECKPOINT),
-            native("native-3", "Native beta", NEWER_THAN_THE_CHECKPOINT - 1),
-        ])],
-    );
-    switch_to_hel(&mut dashboard);
-    replace_search(&mut dashboard, "the phrase");
-    apply_ready_rows(
-        &mut dashboard,
-        vec![
-            WikiRow {
-                tool: "codex".into(),
-                native_id: Some("native-2".into()),
-                ..wiki_row("alpha-hit", false)
-            },
-            WikiRow {
-                tool: "codex".into(),
-                native_id: Some("native-3".into()),
-                ..wiki_row("beta-hit", false)
-            },
-            WikiRow {
-                hel_session_id: Some("session-1".into()),
-                ..wiki_row("record-hit", false)
-            },
-            wiki_row("gone", true),
-        ],
-    );
-
-    assert_eq!(
-        dashboard.resume_hit_counts,
-        [0, 1, 2, 1],
-        "every tab's hits are counted, whichever tab is showing"
-    );
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(
-        resume_tab_labels(&dashboard, dialog),
-        [" Live ", " Mjolnir · 1 ", " Import · 2 ", " Archived · 1 "]
-    );
-
-    // A query only the Import rows match leaves the other tabs empty, and
-    // they say where the hits are instead of moving the person.
-    apply_ready_rows(
-        &mut dashboard,
-        vec![WikiRow {
-            tool: "codex".into(),
-            native_id: Some("native-2".into()),
-            ..wiki_row("alpha-hit", false)
-        }],
-    );
-    assert_eq!(dashboard.resume_hit_counts, [0, 0, 1, 0]);
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert!(rows(&dashboard).is_empty(), "the Mjolnir tab has no hits");
-    assert_eq!(
-        empty_search_message(&dashboard, dialog),
-        "No matches here · 1 on Import"
-    );
-    assert_eq!(dialog.tab, ResumeTab::Hel, "the dialog never switches tabs");
-}
-
 /// One archived row per index, so the preview pane has a row to sit under and
 /// the list has enough rows to scroll.
 fn archived_rows(count: usize) -> Vec<WikiRow> {
@@ -2404,163 +2485,9 @@ fn hit_block(role: &str, filler: usize) -> WikiHitBlock {
 
 /// `n` moves the preview pane onto the next match, which sits far enough down
 /// the excerpt that it was off screen before the keystroke.
-#[test]
-fn n_moves_the_preview_pane_to_the_next_hit() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    apply_ready_rows(&mut dashboard, archived_rows(3));
-    switch_to_archive(&mut dashboard);
-    replace_search(&mut dashboard, "needle");
-    apply_ready_rows(&mut dashboard, archived_rows(3));
-    let selected = match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog
-            .preview_wiki_id(dashboard.resume_rows())
-            .expect("an archived row previews its own transcript")
-            .to_owned(),
-        _ => panic!("expected the resume dialog"),
-    };
-    dashboard.apply_wiki_hits(
-        selected,
-        "needle".to_owned(),
-        Some(WikiHitTranscript {
-            blocks: vec![hit_block("user", 0), hit_block("assistant", 60)],
-            omitted_after: 2,
-        }),
-    );
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the resume dialog");
-
-    // Where each hit lands once the pane has wrapped the excerpt to its own
-    // width, and which of those rows the pane is showing.
-    let hits_and_view = |dashboard: &DashboardState| {
-        let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-            panic!("expected the resume dialog");
-        };
-        let (lines, hit_lines) = dialog
-            .preview_body(dashboard.resume_rows())
-            .expect("the pane shows the matching passages");
-        let surface = dashboard
-            .frame_surfaces()
-            .surface(SurfaceId::ResumePreview)
-            .copied()
-            .expect("the preview pane registers a scrollable surface");
-        let width = usize::from(surface.rect.width);
-        let rows = hit_lines
-            .iter()
-            .map(|&logical| wrap_preview_lines(&lines[..logical], width).len())
-            .collect::<Vec<_>>();
-        let view = dialog.preview_scroll..dialog.preview_scroll + usize::from(surface.rect.height);
-        (rows, view)
-    };
-
-    let (hit_rows, view) = hits_and_view(&dashboard);
-    assert_eq!(hit_rows.len(), 2, "the fixture has two matches");
-    assert!(
-        view.contains(&hit_rows[0]),
-        "the pane opens on the first hit"
-    );
-    assert!(
-        !view.contains(&hit_rows[1]),
-        "the second match is below the pane"
-    );
-
-    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
-    dashboard.handle_key(key(KeyCode::Char('n')));
-    let (hit_rows, view) = hits_and_view(&dashboard);
-    assert!(view.contains(&hit_rows[1]), "n moved the pane to the match");
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.preview_hit, 1);
-    assert!(dialog.preview_scroll > 0, "the pane scrolled to get there");
-
-    let lines = drawn(&mut dashboard, 120, 40);
-    let previous = point(&lines, "[↑]");
-    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), previous));
-    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), previous));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(
-        dialog.preview_hit, 0,
-        "the up arrow selects the preceding hit"
-    );
-
-    let lines = drawn(&mut dashboard, 120, 40);
-    let next = point(&lines, "[↓]");
-    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), next));
-    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), next));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.preview_hit, 1, "the down arrow selects the next hit");
-}
-
 /// The pane asks for what it shows: the query's matching passages while a
 /// query is active, the briefing when there is none, and a fresh answer for
 /// each new query.
-#[test]
-fn a_query_asks_for_hits_and_no_query_asks_for_a_brief() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    apply_ready_rows(&mut dashboard, archived_rows(1));
-    switch_to_archive(&mut dashboard);
-    let pending = match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog.preview_pending.clone(),
-        _ => panic!("expected the resume dialog"),
-    };
-    assert_eq!(
-        pending,
-        Some("archive-0".to_owned()),
-        "with nothing typed the pane asks for the briefing"
-    );
-
-    replace_search(&mut dashboard, "needle");
-    apply_ready_rows(&mut dashboard, archived_rows(1));
-    let hits = DashboardAction::LoadArchivedHits {
-        wiki_id: "archive-0".to_owned(),
-        query: "needle".to_owned(),
-    };
-    assert_eq!(dashboard.next_wiki_preview(), hits);
-    assert_eq!(
-        dashboard.next_wiki_preview(),
-        DashboardAction::None,
-        "one request per query, not one per answer"
-    );
-    dashboard.apply_wiki_hits(
-        "archive-0".to_owned(),
-        "needle".to_owned(),
-        Some(WikiHitTranscript::default()),
-    );
-    assert_eq!(
-        dashboard.next_wiki_preview(),
-        DashboardAction::None,
-        "a cached answer is not asked for again"
-    );
-
-    replace_search(&mut dashboard, "other");
-    apply_ready_rows(&mut dashboard, archived_rows(1));
-    assert_eq!(
-        dashboard.next_wiki_preview(),
-        DashboardAction::LoadArchivedHits {
-            wiki_id: "archive-0".to_owned(),
-            query: "other".to_owned(),
-        },
-        "a new query is a new answer"
-    );
-}
-
 /// One message with no match, so a fixture can place plain blocks of a given
 /// role around the ones that match.
 fn plain_block(role: &str, text: &str) -> WikiHitBlock {

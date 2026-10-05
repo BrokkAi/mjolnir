@@ -729,6 +729,22 @@ mod tests {
         (lines, popup)
     }
 
+    fn append_golden_state(
+        output: &mut String,
+        label: &str,
+        width: u16,
+        height: u16,
+        lines: &[String],
+    ) {
+        output.push_str(&format!("=== {label} ({width}x{height}) ===\n"));
+        output.push_str(&lines.join("\n"));
+        output.push('\n');
+    }
+
+    fn append_golden_value(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        output.push_str(&format!("{label}: {value:?}\n"));
+    }
+
     /// The cell of a menu entry's first letter: inside the border, one row
     /// per entry.
     fn entry(popup: Rect, index: u16) -> (u16, u16) {
@@ -771,166 +787,19 @@ mod tests {
         ),
     ];
 
-    /// Asserts that `d` shows Setup on `page`, the page `command` opens.
-    fn assert_setup_page(d: &DashboardState, command: CommandId, page: &str) {
-        let mut expected = dashboard_with_session(running_session());
-        expected.dispatch_command(command);
-        assert!(matches!(d.mode, Mode::Setup(_)), "{page}");
-        assert_eq!(d.dialog_layer_key(), expected.dialog_layer_key(), "{page}");
-        assert!(
-            d.dialog_layer_key().contains(&format!("[{page:?}]")),
-            "{page}: {}",
-            d.dialog_layer_key()
-        );
-    }
-
     /// User request 2026-09-25: the Targets and Profiles titles are
     /// dropdowns. Clicking one opens a small menu hanging under that title,
     /// with Refresh and then Runtimes… and Machines… (Targets) or Settings…
     /// (Profiles), and leaves the keyboard where it was.
-    #[test]
-    fn clicking_a_support_pane_title_opens_its_menu_under_the_title() {
-        for (_, index, name, _, settings) in TITLE_MENUS {
-            let mut d = dashboard_with_session(running_session());
-            d.focus_prompt();
-            let lines = drawn(&mut d, 140, 40);
-            let pane = d.pane_areas.expect("pane areas")[index];
-            let title = point(&lines, &format!("{name} ▾"));
-            assert_eq!(title.1, pane.y, "{name}: the dropdown mark is on the title");
-
-            assert_eq!(click(&mut d, title), DashboardAction::None);
-            assert!(d.pane_menu.is_some(), "{name}");
-            assert_eq!(d.focus(), Focus::Prompt, "{name}");
-
-            let (lines, popup) = drawn_menu(&mut d);
-            assert_eq!(
-                (popup.x, popup.y),
-                (pane.x + 1, pane.y + 1),
-                "{name}: {lines:#?}"
-            );
-            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
-            let labels: Vec<&str> = d
-                .pane_menu
-                .as_ref()
-                .expect("the menu is open")
-                .entries
-                .iter()
-                .map(|(label, _)| label.as_str())
-                .collect();
-            let mut expected: Vec<&str> = std::iter::once("Refresh")
-                .chain(settings.iter().map(|(label, _, _)| *label))
-                .collect();
-            if name == "Targets" {
-                expected.push("CPU by session…");
-            }
-            assert_eq!(labels, expected, "{name}");
-            for (row, label) in (0..).zip(&expected) {
-                let (x, y) = entry(popup, row);
-                assert_eq!(
-                    cell_text(&lines, x, y, label.chars().count()),
-                    *label,
-                    "{lines:#?}"
-                );
-            }
-        }
-    }
-
     /// Refresh runs the refresh `prefix+shift+r` runs. Each later entry opens
     /// Setup on the page its command opens: Runtimes… as "Manage runtimes"
     /// and Machines… as "Manage machines" (Targets), Settings… as "Manage
     /// agent profiles" (Profiles).
-    #[test]
-    fn a_title_menu_refreshes_and_opens_each_setup_page() {
-        for (_, _, name, _, settings) in TITLE_MENUS {
-            let mut d = dashboard_with_session(running_session());
-            let lines = drawn(&mut d, 140, 40);
-            let title = point(&lines, &format!("{name} ▾"));
-            click(&mut d, title);
-            let (_, popup) = drawn_menu(&mut d);
-            assert_eq!(
-                click(&mut d, entry(popup, 0)),
-                DashboardAction::RefreshAll,
-                "{name}"
-            );
-            assert!(d.pane_menu.is_none());
-            assert!(matches!(d.mode, Mode::Dashboard));
-
-            for (row, (_, command, page)) in (1..).zip(settings) {
-                let mut d = dashboard_with_session(running_session());
-                drawn(&mut d, 140, 40);
-                click(&mut d, title);
-                let (_, popup) = drawn_menu(&mut d);
-                assert_eq!(click(&mut d, entry(popup, row)), DashboardAction::None);
-                assert!(d.pane_menu.is_none(), "{name}");
-                assert_setup_page(&d, *command, page);
-            }
-        }
-    }
-
     /// The number keys pick a title-menu entry directly: 1 is Refresh, and
     /// 2 and 3 are Runtimes… and Machines… on Targets.
-    #[test]
-    fn number_keys_pick_a_title_menu_entry() {
-        for (_, _, name, focus, settings) in TITLE_MENUS {
-            let mut d = dashboard_with_session(running_session());
-            drawn(&mut d, 140, 40);
-            d.focus = focus;
-            d.handle_key(key(KeyCode::Char('.')));
-            assert_eq!(
-                d.handle_key(key(KeyCode::Char('1'))),
-                DashboardAction::RefreshAll,
-                "{name}"
-            );
-            assert!(d.pane_menu.is_none(), "{name}");
-
-            for ((_, command, page), digit) in settings.iter().zip('2'..) {
-                let mut d = dashboard_with_session(running_session());
-                drawn(&mut d, 140, 40);
-                d.focus = focus;
-                d.handle_key(key(KeyCode::Char('.')));
-                assert_eq!(
-                    d.handle_key(key(KeyCode::Char(digit))),
-                    DashboardAction::None
-                );
-                assert!(d.pane_menu.is_none(), "{name}");
-                assert_setup_page(&d, *command, page);
-            }
-        }
-    }
-
     /// The keyboard path: `.` on the focused pane opens the same menu, Enter
     /// runs the entry under the cursor, and Esc closes it without running
     /// anything.
-    #[test]
-    fn dot_opens_the_focused_pane_menu_and_esc_closes_it() {
-        for (_, index, name, focus, settings) in TITLE_MENUS {
-            let mut d = dashboard_with_session(running_session());
-            drawn(&mut d, 140, 40);
-            d.focus = focus;
-            assert_eq!(d.handle_key(key(KeyCode::Char('.'))), DashboardAction::None);
-            let (lines, popup) = drawn_menu(&mut d);
-            let pane = d.pane_areas.expect("pane areas")[index];
-            assert_eq!((popup.x, popup.y), (pane.x + 1, pane.y + 1), "{name}");
-            assert!(lines[usize::from(popup.y)].contains(name), "{lines:#?}");
-            assert_eq!(d.handle_key(key(KeyCode::Esc)), DashboardAction::None);
-            assert!(d.pane_menu.is_none(), "{name}");
-            assert!(matches!(d.mode, Mode::Dashboard));
-            assert_eq!(d.focus(), focus);
-
-            d.handle_key(key(KeyCode::Char('.')));
-            assert_eq!(
-                d.handle_key(key(KeyCode::Enter)),
-                DashboardAction::RefreshAll,
-                "{name}"
-            );
-            d.handle_key(key(KeyCode::Char('.')));
-            d.handle_key(key(KeyCode::Down));
-            assert_eq!(d.handle_key(key(KeyCode::Enter)), DashboardAction::None);
-            let (_, command, page) = settings[0];
-            assert_setup_page(&d, command, page);
-        }
-    }
-
     /// Minimized, Targets and Profiles are the last two rows above the
     /// footer, so neither has room for the menu under its title and the
     /// menu opens upward, still starting at the title's first column.
@@ -957,22 +826,201 @@ mod tests {
     /// The size chips share the title row with the dropdown and keep their
     /// own clicks: a chip resizes the pane and opens no menu.
     #[test]
-    fn the_size_controls_on_a_menu_title_still_resize_the_pane() {
-        for (pane_id, _, name, _, _) in TITLE_MENUS {
-            let mut d = dashboard_with_session(running_session());
-            drawn(&mut d, 140, 40);
-            for size in [crate::PaneSize::Minimized, crate::PaneSize::Standard] {
-                let chip = d
-                    .pane_size_control_areas
-                    .iter()
-                    .find(|(pane, chip, _)| *pane == pane_id && *chip == size)
-                    .map(|(_, _, area)| *area)
-                    .expect("the size chip is drawn");
-                click(&mut d, (chip.x + 1, chip.y));
-                assert_eq!(d.pane_size(pane_id), size, "{name}");
-                assert!(d.pane_menu.is_none(), "{name}");
-                drawn(&mut d, 140, 40);
+    fn golden_support_pane_title_menu() {
+        let mut output = String::new();
+
+        for (_, index, name, _, _) in TITLE_MENUS {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.focus_prompt();
+            let lines = drawn(&mut dashboard, 140, 40);
+            let pane = dashboard.pane_areas.expect("pane areas")[index];
+            let title = point(&lines, &format!("{name} ▾"));
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), title));
+            let action =
+                dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), title));
+            append_golden_value(&mut output, "title click action", action);
+            append_golden_value(&mut output, "focus after title click", dashboard.focus());
+            let (lines, popup) = drawn_menu(&mut dashboard);
+            append_golden_value(
+                &mut output,
+                "menu anchor",
+                (popup.x, popup.y, pane.x + 1, pane.y + 1),
+            );
+            append_golden_state(&mut output, &format!("{name} title menu"), 140, 40, &lines);
+        }
+
+        for (_, _index, name, _, settings) in TITLE_MENUS {
+            let mut dashboard = dashboard_with_session(running_session());
+            let lines = drawn(&mut dashboard, 140, 40);
+            let title = point(&lines, &format!("{name} ▾"));
+            click(&mut dashboard, title);
+            let (_, popup) = drawn_menu(&mut dashboard);
+            let action = click(&mut dashboard, entry(popup, 0));
+            append_golden_value(&mut output, &format!("{name} Refresh action"), action);
+            let lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} after Refresh"),
+                140,
+                40,
+                &lines,
+            );
+
+            for (row, (label, _command, page)) in (1..).zip(settings) {
+                let mut dashboard = dashboard_with_session(running_session());
+                let lines = drawn(&mut dashboard, 140, 40);
+                let title = point(&lines, &format!("{name} ▾"));
+                click(&mut dashboard, title);
+                let (_, popup) = drawn_menu(&mut dashboard);
+                let action = click(&mut dashboard, entry(popup, row));
+                append_golden_value(&mut output, &format!("{name} {label} action"), action);
+                let lines = drawn(&mut dashboard, 140, 40);
+                append_golden_state(
+                    &mut output,
+                    &format!("{name} {page} setup page"),
+                    140,
+                    40,
+                    &lines,
+                );
             }
         }
+
+        for (_, _, name, focus, settings) in TITLE_MENUS {
+            let mut dashboard = dashboard_with_session(running_session());
+            let _ = drawn(&mut dashboard, 140, 40);
+            dashboard.focus = focus;
+            let action = dashboard.handle_key(key(KeyCode::Char('.')));
+            append_golden_value(&mut output, &format!("{name} dot action"), action);
+            let lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} opened by dot"),
+                140,
+                40,
+                &lines,
+            );
+            for (digit, (label, _, page)) in ('2'..).zip(settings) {
+                let mut dashboard = dashboard_with_session(running_session());
+                let _ = drawn(&mut dashboard, 140, 40);
+                dashboard.focus = focus;
+                dashboard.handle_key(key(KeyCode::Char('.')));
+                let action = dashboard.handle_key(key(KeyCode::Char(digit)));
+                append_golden_value(
+                    &mut output,
+                    &format!("{name} number {digit} action"),
+                    action,
+                );
+                let lines = drawn(&mut dashboard, 140, 40);
+                append_golden_state(
+                    &mut output,
+                    &format!("{name} number {digit}: {label}, {page}"),
+                    140,
+                    40,
+                    &lines,
+                );
+            }
+
+            let mut dashboard = dashboard_with_session(running_session());
+            let _ = drawn(&mut dashboard, 140, 40);
+            dashboard.focus = focus;
+            dashboard.handle_key(key(KeyCode::Char('.')));
+            let open_lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} keyboard menu"),
+                140,
+                40,
+                &open_lines,
+            );
+            let action = dashboard.handle_key(key(KeyCode::Esc));
+            append_golden_value(&mut output, &format!("{name} Escape action"), action);
+            append_golden_value(
+                &mut output,
+                &format!("{name} focus after Escape"),
+                dashboard.focus(),
+            );
+            append_golden_value(
+                &mut output,
+                &format!("{name} menu after Escape"),
+                dashboard.pane_menu.is_some(),
+            );
+            let lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} after Escape"),
+                140,
+                40,
+                &lines,
+            );
+
+            dashboard.handle_key(key(KeyCode::Char('.')));
+            let refresh = dashboard.handle_key(key(KeyCode::Enter));
+            append_golden_value(
+                &mut output,
+                &format!("{name} Enter Refresh action"),
+                refresh,
+            );
+            let lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} after Enter Refresh"),
+                140,
+                40,
+                &lines,
+            );
+
+            dashboard.handle_key(key(KeyCode::Char('.')));
+            dashboard.handle_key(key(KeyCode::Down));
+            let open_setup = dashboard.handle_key(key(KeyCode::Enter));
+            append_golden_value(
+                &mut output,
+                &format!("{name} Enter setup action"),
+                open_setup,
+            );
+            let lines = drawn(&mut dashboard, 140, 40);
+            append_golden_state(
+                &mut output,
+                &format!("{name} setup from keyboard"),
+                140,
+                40,
+                &lines,
+            );
+        }
+
+        for (pane, _, name, _, _) in TITLE_MENUS {
+            let mut dashboard = dashboard_with_session(running_session());
+            let _ = drawn(&mut dashboard, 140, 40);
+            for size in [crate::PaneSize::Minimized, crate::PaneSize::Standard] {
+                let chip = dashboard
+                    .pane_size_control_areas
+                    .iter()
+                    .find(|(candidate, candidate_size, _)| {
+                        *candidate == pane && *candidate_size == size
+                    })
+                    .map(|(_, _, area)| *area)
+                    .expect("the size chip is drawn");
+                let action = click(&mut dashboard, (chip.x + 1, chip.y));
+                append_golden_value(&mut output, &format!("{name} {size:?} size action"), action);
+                append_golden_value(
+                    &mut output,
+                    &format!("{name} menu after size click"),
+                    dashboard.pane_menu.is_some(),
+                );
+                let lines = drawn(&mut dashboard, 140, 40);
+                append_golden_state(
+                    &mut output,
+                    &format!("{name} {size:?} pane"),
+                    140,
+                    40,
+                    &lines,
+                );
+            }
+        }
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "support-pane-title-menu",
+            &output,
+        );
     }
 }
