@@ -155,6 +155,90 @@ async fn read_bounded(response: reqwest::Response) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn golden_zai_usage_windows_follow_the_provider_quota_payload() {
+        // The complete rows are captured from Z.ai's monitor endpoint
+        // (`/api/monitor/usage/quota/limit`):
+        // https://github.com/steipete/CodexBar/issues/2724
+        // The last rows retain its shape while omitting optional and unusable
+        // provider fields.
+        let payload = serde_json::json!({
+            "code": 200,
+            "msg": "Operation successful",
+            "data": {
+                "limits": [
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "usage": 2000,
+                        "currentValue": 71,
+                        "remaining": 1929,
+                        "percentage": 3,
+                        "nextResetTime": 1786073946574_i64
+                    },
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "unit": 6,
+                        "number": 1,
+                        "usage": 10000,
+                        "currentValue": 71,
+                        "remaining": 9929,
+                        "percentage": 1,
+                        "nextResetTime": 1786660486998_i64
+                    },
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "percentage": 79.5,
+                        "nextResetTime": 1786073946574_i64
+                    },
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "number": 1,
+                        "currentValue": 0,
+                        "remaining": 0
+                    },
+                    {
+                        "type": "TIME_LIMIT",
+                        "number": 5,
+                        "usage": 100,
+                        "currentValue": 10,
+                        "remaining": 90
+                    }
+                ],
+                "level": "lite"
+            },
+            "success": true
+        });
+        let limits: Vec<Limit> =
+            serde_json::from_value(payload["data"]["limits"].clone()).expect("provider limit rows");
+        let windows = limits
+            .into_iter()
+            .filter_map(parse_limit)
+            .collect::<Vec<_>>();
+        let rendered = windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} remaining={} used={} limit={} resets_at={}",
+                    window.label,
+                    window.remaining_percent,
+                    window
+                        .used
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                    window
+                        .limit
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                    window
+                        .resets_at
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "zai-usage-windows", &rendered);
+    }
+
     #[tokio::test]
     #[ignore = "requires MJ_ZAI_TEST_KEY with a live Coding Plan key"]
     async fn live_coding_plan_quota_has_inference_windows() {

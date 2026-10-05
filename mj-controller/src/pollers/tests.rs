@@ -619,6 +619,68 @@ fn quota_refresh_requests_exclude_disabled_profiles() {
     );
 }
 
+#[test]
+fn golden_aws_capacity_aggregates_real_probe_rows_and_rejects_overflow() {
+    // These are the key/value rows emitted by the EC2 capacity probe script.
+    let first = crate::targets::parse_aws_allocated_capacity(
+        b"memory.total=17179869184\nlogical.cores=4\ndisk.total=42949672960\n",
+        "i-0123456789abcdef0",
+    )
+    .expect("first EC2 probe row");
+    let second = crate::targets::parse_aws_allocated_capacity(
+        b"memory.total=34359738368\nlogical.cores=8\ndisk.total=85899345920\n",
+        "i-0abcdef0123456789",
+    )
+    .expect("second EC2 probe row");
+    let aggregate = aggregate_aws_capacity(&[first, second]).expect("fleet capacity totals");
+    let rendered = format!(
+        "Fleet memory: {} bytes\nFleet logical cores: {}\nFleet disk: {} bytes\nCPU usage: {}\nMemory used: {} bytes\nStorage samples: {}",
+        aggregate.memory_total_bytes,
+        aggregate.logical_cores,
+        aggregate.disk_total_bytes.unwrap_or_default(),
+        aggregate
+            .cpu_percent
+            .map_or_else(|| "unknown".to_owned(), |value| format!("{value}%")),
+        aggregate.memory_used_bytes,
+        aggregate.storage.len(),
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "aws-capacity-aggregate",
+        &rendered,
+    );
+
+    let usage = |memory_total_bytes, logical_cores, disk_total_bytes| DeploymentCapacityUsage {
+        cpu_percent: None,
+        memory_used_bytes: 0,
+        memory_total_bytes,
+        logical_cores,
+        disk_total_bytes: Some(disk_total_bytes),
+        storage: Vec::new(),
+    };
+    for (samples, expected) in [
+        (
+            vec![usage(u64::MAX, 0, 0), usage(1, 0, 0)],
+            "aggregate EC2 RAM overflow",
+        ),
+        (
+            vec![usage(0, u64::MAX, 0), usage(0, 1, 0)],
+            "aggregate EC2 core count overflow",
+        ),
+        (
+            vec![usage(0, 0, u64::MAX), usage(0, 0, 1)],
+            "aggregate EC2 disk overflow",
+        ),
+    ] {
+        assert_eq!(
+            aggregate_aws_capacity(&samples)
+                .expect_err("overflow must not wrap")
+                .to_string(),
+            expected
+        );
+    }
+}
+
 struct PendingCapacityProbe {
     target: DeploymentCapacityTarget,
     finish: tokio::sync::oneshot::Sender<Result<Option<DeploymentCapacityUsage>>>,

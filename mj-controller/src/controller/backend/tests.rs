@@ -18,6 +18,119 @@ use crate::targets::{
 
 use super::*;
 
+struct AwsCliFixtureExecutor {
+    commands: RefCell<Vec<CommandSpec>>,
+    responses: RefCell<std::collections::VecDeque<CommandOutput>>,
+}
+
+impl AwsCliFixtureExecutor {
+    fn new(responses: impl IntoIterator<Item = &'static [u8]>) -> Self {
+        Self {
+            commands: RefCell::new(Vec::new()),
+            responses: RefCell::new(
+                responses
+                    .into_iter()
+                    .map(|stdout| CommandOutput {
+                        status: 0,
+                        stdout: stdout.to_vec(),
+                        stderr: Vec::new(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl CommandExecutor for AwsCliFixtureExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        Ok(self
+            .responses
+            .borrow_mut()
+            .pop_front()
+            .expect("one AWS CLI response per command"))
+    }
+}
+
+fn aws_options_controller(
+    launch_template: &str,
+    profile: Option<&str>,
+    version: Option<&str>,
+) -> Controller {
+    Controller {
+        config: Config {
+            targets: BTreeMap::from([(
+                "ec2".to_owned(),
+                TargetTemplate::AwsEc2 {
+                    aws_profile: profile.map(str::to_owned),
+                    region: "us-west-2".to_owned(),
+                    launch_template: launch_template.to_owned(),
+                    launch_template_version: version.map(str::to_owned),
+                    ssh_user: "ec2-user".to_owned(),
+                    address_source: Default::default(),
+                    identity_file: None,
+                    ssh_args: Vec::new(),
+                },
+            )]),
+            ..Config::default()
+        },
+        state: State::default(),
+    }
+}
+
+fn render_aws_allocations(allocations: &[SessionResourceAllocation]) -> String {
+    allocations
+        .iter()
+        .map(|allocation| match allocation {
+            SessionResourceAllocation::AwsEc2 {
+                instance_type,
+                vcpus,
+                memory_bytes,
+            } => format!("{instance_type}: {vcpus} vCPUs, {memory_bytes} bytes"),
+            SessionResourceAllocation::Container { .. } => {
+                panic!("AWS discovery returned a container allocation")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn golden_aws_resource_options_read_documented_cli_responses() {
+    // These fixtures follow the AWS CLI v2 response shapes:
+    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-launch-template-versions.html
+    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instance-types.html
+    const RESPONSES: [&[u8]; 4] = [
+        br#"{"LaunchTemplateVersions":[{"LaunchTemplateId":"lt-0123456789abcdef0","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"m7i.large"}}]}"#,
+        br#"{"InstanceTypes":[{"InstanceType":"m7i.4xlarge","VCpuInfo":{"DefaultVCpus":16},"MemoryInfo":{"SizeInMiB":65536}},{"InstanceType":"m7i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":32768}},{"InstanceType":"m7i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":8192}},{"InstanceType":"m7i.xlarge","VCpuInfo":{"DefaultVCpus":4},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"m7i.malformed","VCpuInfo":{"DefaultVCpus":4}},{"InstanceType":"m7i.overflow","VCpuInfo":{"DefaultVCpus":32},"MemoryInfo":{"SizeInMiB":18446744073709551615}}]}"#,
+        br#"{"LaunchTemplateVersions":[{"LaunchTemplateName":"legacy","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"c6i.large"}}]}"#,
+        br#"{"InstanceTypes":[{"InstanceType":"c6i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"c6i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":4096}}]}"#,
+    ];
+    let executor = AwsCliFixtureExecutor::new(RESPONSES);
+    let by_id = aws_options_controller("lt-0123456789abcdef0", Some("build"), Some("7"))
+        .resolve_aws_resource_options("ec2", &executor)
+        .expect("resolve ID-addressed launch template");
+    let by_name = aws_options_controller("legacy", None, None)
+        .resolve_aws_resource_options("ec2", &executor)
+        .expect("resolve name-addressed launch template");
+
+    let mut rendered = String::new();
+    rendered.push_str("=== launch-template id ===\n");
+    rendered.push_str(&render_aws_allocations(&by_id));
+    rendered.push_str("\n\n=== launch-template name ===\n");
+    rendered.push_str(&render_aws_allocations(&by_name));
+    rendered.push_str("\n\n=== AWS CLI commands ===\n");
+    for command in executor.commands.borrow().iter() {
+        rendered.push_str(&format!("{} {}\n", command.program, command.args.join(" ")));
+    }
+    rendered.pop();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "aws-resource-options",
+        &rendered,
+    );
+}
+
 #[test]
 fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes() {
     struct NoProbe;

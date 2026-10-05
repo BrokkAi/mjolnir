@@ -1,0 +1,3 @@
+5H remaining=96 used=71 limit=2000 resets_at=1786073946
+Week remaining=99 used=71 limit=10000 resets_at=1786660486
+Credits remaining=21 used=unknown limit=unknown resets_at=1786073946

@@ -1,5 +1,132 @@
 use super::*;
 
+fn fake_update_executable(path: &Path) -> PathBuf {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("executable directory");
+    std::fs::write(path, b"test executable").expect("executable file");
+    path.to_path_buf()
+}
+
+fn update_command_text(command: &Command) -> String {
+    std::iter::once(command.get_program().to_string_lossy().into_owned())
+        .chain(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
+    let root = tempfile::tempdir().expect("install roots");
+    let version = env!("CARGO_PKG_VERSION");
+    let source =
+        format!("brokk-mjolnir {version} (registry+https://github.com/rust-lang/crates.io-index)");
+    let voice_source = format!(
+        "brokk-mj-voice-worker {version} (registry+https://github.com/rust-lang/crates.io-index)"
+    );
+
+    // Cargo's documented v1 install record shape, as written to .crates2.json.
+    let cargo_json = root.path().join("cargo-json");
+    std::fs::create_dir_all(cargo_json.join("bin")).expect("Cargo JSON bin directory");
+    std::fs::write(
+        cargo_json.join(".crates2.json"),
+        serde_json::json!({
+            "v1": 1,
+            "installs": {
+                (source.clone()): {"version": version, "bins": ["mj"], "features": []},
+                (voice_source.clone()): {"version": version, "bins": ["mj-voice-worker"], "features": []}
+            }
+        })
+        .to_string(),
+    )
+    .expect("Cargo JSON install record");
+    let cargo_json_exe = fake_update_executable(&cargo_json.join("bin/mj"));
+
+    // Cargo's compatibility v1 TOML install record, including a stale version
+    // that must not be mistaken for the executable at the current version.
+    let cargo_toml = root.path().join("cargo-toml");
+    std::fs::create_dir_all(cargo_toml.join("bin")).expect("Cargo TOML bin directory");
+    std::fs::write(
+        cargo_toml.join(".crates.toml"),
+        format!(
+            "[v1]\n\"{source}\" = [\"mj\"]\n\"{voice_source}\" = [\"mj-voice-worker\"]\n\"brokk-mjolnir 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n"
+        ),
+    )
+    .expect("Cargo TOML install record");
+    let cargo_toml_exe = fake_update_executable(&cargo_toml.join("bin/mj"));
+
+    let homebrew_exe =
+        fake_update_executable(&root.path().join("homebrew/Cellar/mjolnir/2.4.0/bin/mj"));
+    let npm_exe =
+        fake_update_executable(&root.path().join("npm/node_modules/@brokkai/mjolnir/bin/mj"));
+    let direct_exe = fake_update_executable(&root.path().join("direct/mj"));
+
+    let variables = |entries: &[(&str, &str)]| {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let cases = [
+        (
+            "npx marker takes precedence",
+            direct_exe.clone(),
+            variables(&[
+                (NPX_MANAGED_ENV, "1"),
+                (NPM_MANAGED_ENV, "1"),
+                (HOMEBREW_MANAGED_ENV, "1"),
+            ]),
+        ),
+        (
+            "npm marker",
+            direct_exe.clone(),
+            variables(&[(NPM_MANAGED_ENV, "1")]),
+        ),
+        (
+            "Homebrew marker",
+            direct_exe.clone(),
+            variables(&[(HOMEBREW_MANAGED_ENV, "1")]),
+        ),
+        ("Homebrew Cellar layout", homebrew_exe, variables(&[])),
+        ("npm bundle layout", npm_exe, variables(&[])),
+        ("Cargo .crates2.json", cargo_json_exe, variables(&[])),
+        ("Cargo .crates.toml", cargo_toml_exe, variables(&[])),
+        ("unrecorded executable", direct_exe, variables(&[])),
+    ];
+
+    let mut rendered = String::new();
+    for (label, executable, environment) in cases {
+        let method =
+            InstallMethod::detect(|name| environment.get(name).cloned(), Some(&executable));
+        rendered.push_str(&format!(
+            "=== {label} ===\nmethod: {method:?}\nupgrade: {}\n\n",
+            method
+                .update_command()
+                .unwrap_or_else(|| "(none)".to_owned())
+        ));
+    }
+    rendered.push_str("=== package-manager commands ===\n");
+    rendered.push_str(&format!(
+        "npm: {}\n",
+        update_command_text(&npm_upgrade_command())
+    ));
+    rendered.push_str(&format!(
+        "brew update: {}\n",
+        update_command_text(&brew_update_command())
+    ));
+    rendered.push_str(&format!(
+        "brew upgrade: {}",
+        update_command_text(&brew_upgrade_command())
+    ));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "install-method-detection",
+        &rendered,
+    );
+}
+
 #[test]
 fn cargo_index_uses_latest_non_yanked_version() {
     let index = concat!(

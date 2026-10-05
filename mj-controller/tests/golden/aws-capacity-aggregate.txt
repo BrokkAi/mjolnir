@@ -1,0 +1,6 @@
+Fleet memory: 51539607552 bytes
+Fleet logical cores: 12
+Fleet disk: 128849018880 bytes
+CPU usage: unknown
+Memory used: 0 bytes
+Storage samples: 0

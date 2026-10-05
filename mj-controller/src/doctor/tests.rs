@@ -57,6 +57,160 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
+#[test]
+fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
+    // Fixture shapes follow aws-cli v2, EC2 JSON, OpenSSH, and Docker CLI
+    // output; the Podman-limit lines match the production remote probe.
+    let aws = FakeExecutor::new([
+        Ok(output(
+            b"aws-cli/2.15.40 Python/3.11.6 Linux/5.10.205 exe/x86_64 prompt/off\n",
+        )),
+        Ok(output(
+            br#"{"UserId":"AIDAEXAMPLE","Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/doctor"}"#,
+        )),
+        Ok(output(
+            br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
+        )),
+    ]);
+    let aws_check = aws_target_check(
+        "production",
+        None,
+        "us-east-2",
+        "lt-0123456789abcdef0",
+        &aws,
+    );
+    let aws_commands = aws.commands.borrow();
+    assert_eq!(
+        aws_commands[1]
+            .args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "--profile",
+            "default",
+            "--region",
+            "us-east-2",
+            "sts",
+            "get-caller-identity",
+            "--output",
+            "json",
+        ]
+    );
+    assert!(
+        aws_commands[2]
+            .args
+            .contains(&"--launch-template-ids".to_owned())
+    );
+    drop(aws_commands);
+
+    let ssh = RuntimeSshTarget {
+        destination: "dev@docker.example.test".to_owned(),
+        ssh_args: Vec::new(),
+    };
+    let docker = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(b"27.5.1 linux\n")),
+        Ok(output(
+            br#"[{"Id":"sha256:0123456789abcdef","RepoTags":["ghcr.io/example/dev:1.2.3"]}]"#,
+        )),
+    ]);
+    let docker_check = ssh_docker_check(
+        "remote-docker",
+        &ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &docker,
+        false,
+    );
+    let docker_commands = docker.commands.borrow();
+    assert_eq!(docker_commands.len(), 3);
+    assert!(
+        docker_commands
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+    assert_eq!(
+        docker_commands[0].args.last().map(String::as_str),
+        Some("'true'")
+    );
+    assert!(
+        docker_commands[1]
+            .args
+            .last()
+            .is_some_and(|command| command.contains("'docker' 'version' '--format'"))
+    );
+    assert!(
+        docker_commands[2]
+            .args
+            .last()
+            .is_some_and(|command| command.contains("'docker' 'image' 'inspect'"))
+    );
+    drop(docker_commands);
+
+    let podman = FakeExecutor::new([Ok(output(
+        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\nmaxstartups=10:30:100\n",
+    ))]);
+    let podman_check = ssh_podman_limits_check("remote-podman", &ssh, &podman);
+    let podman_commands = podman.commands.borrow();
+    assert_eq!(podman_commands[0].purpose, "read ssh-podman host limits");
+    assert_eq!(podman_commands[0].program, "ssh");
+    assert!(
+        podman_commands[0].args.last().is_some_and(
+            |script| script.contains("/proc/key-users") && script.contains("maxstartups")
+        )
+    );
+    drop(podman_commands);
+
+    let missing_ssh = FakeExecutor::new([Err(anyhow!(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "ssh executable is unavailable",
+    )))]);
+    let missing_ssh_check = ssh_podman_limits_check("missing-ssh", &ssh, &missing_ssh);
+    let bifrost = FakeExecutor::new([Ok(output(format!(
+        "bifrost {}\n",
+        mj_review::bifrost::REQUIRED_BIFROST_VERSION
+    )))]);
+    let bifrost_check = bifrost_check_for(Path::new("/usr/local/bin/bifrost"), &bifrost);
+    assert_eq!(bifrost.commands.borrow()[0].args, ["--version"]);
+
+    let mut config = Config::default();
+    config.subagents.max_concurrent = 3;
+    config
+        .subagents
+        .eligible_profiles
+        .insert("disabled-reviewer".to_owned(), true);
+    config.profiles.insert(
+        "disabled-reviewer".to_owned(),
+        HarnessProfile {
+            enabled: false,
+            kind: HarnessKind::Codex,
+            home: PathBuf::from("/home/example/.codex"),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        },
+    );
+    let subagent_checks = subagent_eligibility_checks(Ok(&config));
+    let mut checks = vec![
+        aws_check,
+        docker_check,
+        podman_check,
+        missing_ssh_check,
+        bifrost_check,
+    ];
+    checks.extend(subagent_checks);
+
+    let mut rendered = Vec::new();
+    render_human(&checks, &mut rendered).expect("render doctor checks");
+    let rendered = String::from_utf8(rendered).expect("doctor output is UTF-8");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-external-runtime-checks",
+        &rendered,
+    );
+}
+
 fn container(image: &str) -> ContainerTemplate {
     ContainerTemplate {
         build_cache: None,
