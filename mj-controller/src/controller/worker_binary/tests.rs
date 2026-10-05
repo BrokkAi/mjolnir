@@ -85,7 +85,7 @@ fn install_mbx_files_uses_the_worker_container_layout_and_shared_config_links() 
                         )?;
                     }
                 }
-                "assign the mbx binary to the worker user" => {}
+                "match the mbx binary to the worker directory owner" => {}
                 purpose => anyhow::bail!("unexpected container install command: {purpose}"),
             }
             Ok(crate::targets::CommandOutput {
@@ -171,7 +171,7 @@ fn install_mbx_files_uses_the_worker_container_layout_and_shared_config_links() 
         [
             "create the session binary directory",
             "upload the mbx build cache binary",
-            "assign the mbx binary to the worker user",
+            "match the mbx binary to the worker directory owner",
             "install the mbx Cargo shim",
             "make the mbx build cache executable",
             "link the shared machine mbx configuration",
