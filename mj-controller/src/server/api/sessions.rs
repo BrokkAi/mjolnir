@@ -112,10 +112,34 @@ pub(super) async fn start_session(
     if let Some(prompt) = &request.prompt {
         validate_prompt_text(prompt, false)?;
     }
-    let (profile_id, target_id) = resolve_launch(&state, &request)?;
+    let (default_profile_id, target_id) = resolve_launch(&state, &request)?;
+    // An unnamed profile plus a named model is the CLI's model-first path.
+    // Use the saved profile as the same eligibility anchor a sub-agent spawn
+    // uses, then let the shared selector rank its eligible profiles by quota.
+    let model_selection = if request.profile_id.is_none() {
+        match request.model.as_deref() {
+            Some(model) => Some(
+                crate::server::api::resolve_model_profile_selection(
+                    &backend,
+                    &default_profile_id,
+                    None,
+                    model,
+                    request.effort.as_deref(),
+                    None,
+                )
+                .await?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let profile_id = model_selection
+        .as_ref()
+        .map_or(default_profile_id, |selection| selection.profile_id.clone());
     let resource_allocation =
         new_session_allocation(&state, &target_id, request.cpus, request.memory_bytes)?;
-    if request.model.is_some() || request.effort.is_some() {
+    if model_selection.is_none() && (request.model.is_some() || request.effort.is_some()) {
         let mut choices = backend
             .profile_config(profile_id.clone(), request.model.clone(), false)
             .await

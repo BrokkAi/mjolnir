@@ -254,6 +254,11 @@ cannot be combined with a session that runs directly in the selected directory.
 
 - `mj new` without `--profile` or `--target` uses the saved default for the
   missing one (the pair `GET /api/v1/options` reports as `default`).
+- `mj new --model <name>` chooses the highest-quota eligible profile offering
+  that exact model and starts the session on it. It conflicts with `--profile`;
+  the saved default profile anchors the eligible-profile list. If `--effort` is
+  supplied, the selected profile must offer that exact effort for the model or
+  the request fails.
 - `mj new --subagents native|single-model|none` selects delegation
   for Claude and Codex. Without this option, it uses the selected profile’s creation default,
   which defaults to Native.

@@ -503,6 +503,8 @@ struct FakeBackend {
     summary: Option<TurnSummary>,
     /// Follow-ups the start handler asked for.
     followups: Mutex<Vec<(String, StartFollowup)>>,
+    /// A custom quota-ranked candidate set for new-session model selection.
+    model_candidates: Option<SubagentCandidates>,
     start_status: Option<StartStatus>,
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
@@ -636,7 +638,11 @@ impl SubagentBackend for FakeBackend {
         &self,
         parent_profile: String,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        let model_candidates = self.model_candidates.clone();
         Box::pin(async move {
+            if let Some(candidates) = model_candidates {
+                return Ok(candidates);
+            }
             let choices = self
                 .profile_config(parent_profile.clone(), None, false)
                 .await?;
@@ -1616,6 +1622,40 @@ fn start_body(extra: &str) -> String {
     format!(r#"{{"profile_id":"codex-1","target_id":"podman","bundle_id":"hel"{extra}}}"#)
 }
 
+fn model_candidate(profile_id: &str, remaining_percent: u8, model: &str) -> SubagentCandidate {
+    model_candidate_with_efforts(profile_id, remaining_percent, model, &["high"])
+}
+
+fn model_candidate_with_efforts(
+    profile_id: &str,
+    remaining_percent: u8,
+    model: &str,
+    effort_values: &[&str],
+) -> SubagentCandidate {
+    SubagentCandidate {
+        profile_id: profile_id.into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        choices: mj_core::worker_launch::ProfileConfig {
+            model: Some(model.into()),
+            models: vec![mj_core::acp::SessionConfigChoice {
+                value: model.into(),
+                name: model.into(),
+                description: None,
+            }],
+            efforts: effort_values
+                .iter()
+                .map(|effort| mj_core::acp::SessionConfigChoice {
+                    value: (*effort).into(),
+                    name: (*effort).into(),
+                    description: None,
+                })
+                .collect(),
+            observed_at: 1,
+        },
+        remaining_percent: Some(remaining_percent),
+    }
+}
+
 fn start_request(body: String) -> Request<Body> {
     bearer(Request::post("/api/v1/sessions"))
         .header(CONTENT_TYPE, "application/json")
@@ -1673,6 +1713,141 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
         Some("add a README line"),
         "the first prompt is the backend's to submit once the harness is ready"
     );
+}
+
+#[tokio::test]
+async fn start_without_a_profile_uses_the_named_model_quota_selector() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let candidates = SubagentCandidates {
+        offered: vec![
+            model_candidate("codex-1", 5, "luna"),
+            model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
+            model_candidate("quota-winner", 92, "luna"),
+        ],
+        unavailable: Vec::new(),
+    };
+    let backend = Arc::new(FakeBackend {
+        model_candidates: Some(candidates),
+        ..FakeBackend::default()
+    });
+    let selector_backend: Arc<dyn SubagentBackend> = backend.clone();
+    let expected = crate::server::api::resolve_subagent_selection(
+        &selector_backend,
+        "parent-session",
+        "codex-1",
+        None,
+        Some("luna"),
+        Some("high"),
+    )
+    .await
+    .unwrap()
+    .profile_id;
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend.clone(),
+        |snapshot| {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "quota-winner".into(),
+                harness_kind: "codex".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+        },
+        preferences,
+    );
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","model":"luna","effort":"high","prompt":"go"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { profile_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, &expected);
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+    let followups = backend.followups.lock().unwrap();
+    assert_eq!(followups[0].1.model.as_deref(), Some("luna"));
+    assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
+    assert_eq!(followups[0].1.prompt.as_deref(), Some("go"));
+}
+
+#[tokio::test]
+async fn start_without_a_profile_refuses_a_model_no_eligible_profile_offers() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 5, "luna")],
+            unavailable: vec![("broken-login".into(), "login was rejected".into())],
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"missing"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        body.contains("no eligible profile offers model \"missing\""),
+        "{body}"
+    );
+    assert!(body.contains("broken-login (login was rejected)"), "{body}");
+    assert!(actions.try_recv().is_err(), "nothing was launched");
+}
+
+#[tokio::test]
+async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_offer() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 80, "luna")],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"luna","effort":"ultra"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        body.contains("no eligible profile offers model \"luna\" with effort \"ultra\""),
+        "{body}"
+    );
+    assert!(body.contains("codex-1 offers efforts: high"), "{body}");
+    assert!(actions.try_recv().is_err(), "nothing was launched");
 }
 
 #[tokio::test]

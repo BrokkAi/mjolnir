@@ -163,11 +163,14 @@ pub struct CreateWorkspaceResponse {
 ///
 /// `profile_id` and `target_id` may be omitted, and each resolves
 /// independently: a caller may name a profile and take the saved default
-/// target. An omitted identifier comes from the pair the user last saved with
-/// the `mj go` workflow, which the first setup also becomes, so a caller that
-/// has never read `config.toml` can create a session by naming neither. The
-/// controller still receives two explicit identifiers, because a session whose
-/// profile was implicit would be a session nobody can explain later.
+/// target. When `model` is supplied without `profile_id`, the saved default
+/// profile anchors the eligible-profile set and the daemon chooses a profile
+/// that offers the model (and any requested effort) by quota. An omitted
+/// identifier otherwise comes from the pair the user last saved with the
+/// `mj go` workflow, which the first setup also becomes, so a caller that has
+/// never read `config.toml` can create a session by naming neither. The
+/// controller still receives two explicit identifiers, because a session
+/// whose profile was implicit would be a session nobody can explain later.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartSessionRequest {
@@ -193,7 +196,8 @@ pub struct StartSessionRequest {
     pub review: Option<mj_core::config::SessionReview>,
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Omitted follows the saved default. See the type's own documentation.
+    /// Omitted follows the saved default, or anchors model-based profile
+    /// selection when `model` is supplied.
     #[serde(default)]
     pub profile_id: Option<String>,
     /// Omitted follows the saved default. See the type's own documentation.

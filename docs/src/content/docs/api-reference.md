@@ -335,6 +335,13 @@ default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bund
 `project_directory`, or both: a directory with no bundle is bundled the way the
 viewer's own form does it.
 
+When `model` is supplied without `profile_id`, the saved default profile
+anchors the eligible-profile set. Mjolnir chooses the profile with the most
+quota that offers the exact model and, when named, the exact effort. If no
+eligible profile supports that selection, the request fails without changing
+the requested model or effort. Supplying both `profile_id` and `model` pins the
+profile and validates the model and effort on it.
+
 Three fields choose where the session starts:
 
 - `at`: a full commit object ID to start the workspace at. Before the first
@@ -898,8 +905,10 @@ about the settings they actually accept.
 
 `POST /sessions` automatically discovers and validates requested `model` and
 `effort` before bundling or provisioning. An unknown selector returns `400` with
-available values, after refreshing cached choices. Settings are applied model
-first, then effort using the model's updated choices. A later target-side
+available values, after refreshing cached choices. With an omitted `profile_id`,
+the daemon uses the saved default profile as the eligibility anchor and ranks
+profiles that offer the requested selection by quota. Settings are applied
+model first, then effort using the model's updated choices. A later target-side
 configuration failure leaves the session available for repair and is reported
 by `wait`. It does not consume a prompt turn.
 

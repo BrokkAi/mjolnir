@@ -130,8 +130,8 @@ pub(crate) struct NewArgs {
     /// Title shown in session lists. Defaults to the project and profile.
     #[arg(long)]
     title: Option<String>,
-    /// Harness model to select before the first prompt.
-    #[arg(long)]
+    /// Choose a quota-ranked eligible profile for this model and optional effort.
+    #[arg(long, conflicts_with = "profile")]
     model: Option<String>,
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
@@ -2477,6 +2477,40 @@ mod tests {
     }
 
     #[test]
+    fn new_model_selects_by_model_and_conflicts_with_profile() {
+        let cli = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--bundle",
+            "product",
+            "--model",
+            "gpt-6-luna",
+            "--effort",
+            "high",
+        ])
+        .unwrap();
+        let Some(Command::New(args)) = cli.command else {
+            panic!("expected the new command");
+        };
+        assert_eq!(args.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(args.effort.as_deref(), Some("high"));
+        assert!(args.profile.is_none());
+
+        let error = Cli::try_parse_from([
+            "mj",
+            "new",
+            "--bundle",
+            "product",
+            "--profile",
+            "codex",
+            "--model",
+            "gpt-6-luna",
+        ])
+        .expect_err("a model-based profile choice cannot be combined with --profile");
+        assert!(error.to_string().contains("--profile"), "{error}");
+    }
+
+    #[test]
     fn new_at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
         let commit = "0123456789abcdef0123456789abcdef01234567";
         let parse = |extra: &[&str]| {
@@ -2992,8 +3026,6 @@ mod tests {
             "--workspace",
             "work",
             "new",
-            "--profile",
-            "codex",
             "--target",
             "local",
             "--project-directory",
@@ -3009,7 +3041,7 @@ mod tests {
         let Some(Command::New(args)) = cli.command else {
             panic!("expected the new subcommand");
         };
-        assert_eq!(args.profile.as_deref(), Some("codex"));
+        assert!(args.profile.is_none());
         assert_eq!(args.target.as_deref(), Some("local"));
         assert_eq!(args.project_directory, Some(PathBuf::from(".")));
         assert_eq!(args.model.as_deref(), Some("gpt-5"));

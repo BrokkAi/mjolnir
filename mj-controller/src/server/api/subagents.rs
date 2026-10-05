@@ -116,55 +116,29 @@ pub(crate) async fn resolve_subagent_policy_selection(
                     "single-model spawn does not accept profile_id, model, or effort",
                 ));
             }
-            let mut candidates = backend
-                .subagent_candidates(parent_profile.to_owned())
-                .await?;
-            rank_candidates(&mut candidates.offered, parent_profile);
-            let mut errors = candidates
-                .unavailable
-                .into_iter()
-                .map(|(id, reason)| format!("{id}: {reason}"))
-                .collect::<Vec<_>>();
-            for candidate in candidates.offered {
-                if !offers_model(&candidate, fixed_model) {
-                    continue;
+            let effort_requirement = fixed_effort
+                .as_deref()
+                .map(EffortRequirement::Exact)
+                .unwrap_or(EffortRequirement::NoChoices);
+            resolve_model_profile_selection_matching(
+                backend,
+                parent_profile,
+                None,
+                fixed_model,
+                effort_requirement,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                if error.status == StatusCode::BAD_REQUEST {
+                    ApiFailure::conflict(format!(
+                        "No eligible profile offers the fixed subagent model {fixed_model:?} with effort {fixed_effort:?}. {}",
+                        error.message
+                    ))
+                } else {
+                    error
                 }
-                let choices = match backend
-                    .profile_config(
-                        candidate.profile_id.clone(),
-                        Some(fixed_model.clone()),
-                        false,
-                    )
-                    .await
-                {
-                    Ok(choices) => choices,
-                    Err(error) => {
-                        errors.push(format!("{}: {error:#}", candidate.profile_id));
-                        continue;
-                    }
-                };
-                let supported = match fixed_effort {
-                    Some(effort) => choices.efforts.iter().any(|choice| &choice.value == effort),
-                    None => choices.efforts.is_empty(),
-                };
-                if supported
-                    && choices
-                        .models
-                        .iter()
-                        .any(|choice| &choice.value == fixed_model)
-                {
-                    return Ok(SubagentSelection {
-                        profile_id: candidate.profile_id,
-                        model: fixed_model.clone(),
-                        effort: fixed_effort.clone(),
-                        fast_mode: mj_core::codex_catalog::is_luna_model(fixed_model),
-                    });
-                }
-            }
-            Err(ApiFailure::conflict(format!(
-                "No eligible profile offers the fixed subagent model {fixed_model:?} with effort {fixed_effort:?}. {}",
-                errors.join("; ")
-            )))
+            })
         }
         _ => Err(ApiFailure::conflict(
             "this session does not allow Mjolnir sub-agents",
@@ -216,40 +190,201 @@ pub(crate) async fn resolve_subagent_selection(
     } else {
         model.to_owned()
     };
+    resolve_model_profile_selection(
+        backend,
+        parent_profile,
+        profile_id,
+        &model,
+        effort,
+        parent_config.get("effort").map(String::as_str),
+    )
+    .await
+}
+
+/// Choose the eligible profile for an exact model and validate its effort.
+/// New sessions and named-model sub-agent spawns share this quota-ranked path.
+pub(crate) async fn resolve_model_profile_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_profile: &str,
+    profile_id: Option<&str>,
+    model: &str,
+    effort: Option<&str>,
+    inherited_effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
+    let requirement = effort
+        .map(EffortRequirement::Exact)
+        .unwrap_or(EffortRequirement::Any);
+    resolve_model_profile_selection_matching(
+        backend,
+        parent_profile,
+        profile_id,
+        model,
+        requirement,
+        inherited_effort,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum EffortRequirement<'a> {
+    Any,
+    NoChoices,
+    Exact(&'a str),
+}
+
+async fn resolve_model_profile_selection_matching(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_profile: &str,
+    profile_id: Option<&str>,
+    model: &str,
+    requirement: EffortRequirement<'_>,
+    inherited_effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
     let candidates = backend
         .subagent_candidates(parent_profile.to_owned())
         .await?;
-    let chosen = choose_subagent_profile(candidates, profile_id, parent_profile, &model)?;
-    // A candidate's choices describe its default model. Efforts differ by
-    // model, and some models (Claude Haiku) offer none, so any other model's
-    // efforts are asked for.
-    let efforts = if chosen.choices.model.as_deref() == Some(model.as_str()) {
-        chosen.choices.efforts
+    if matches!(requirement, EffortRequirement::Any) {
+        let chosen = choose_subagent_profile(candidates, profile_id, parent_profile, model)?;
+        let efforts = model_efforts(backend, &chosen, model).await?;
+        let effort = child_effort(model, &efforts, None, inherited_effort)?;
+        return Ok(selection(chosen.profile_id, model, effort));
+    }
+
+    let SubagentCandidates {
+        mut offered,
+        unavailable,
+    } = candidates;
+    if let Some(requested) = profile_id {
+        if let Some((_, reason)) = unavailable.iter().find(|(id, _)| id == requested) {
+            return Err(ApiFailure::conflict(format!(
+                "profile {requested:?} is unavailable: {reason}"
+            )));
+        }
+        offered.retain(|candidate| candidate.profile_id == requested);
+        if offered.is_empty() {
+            return Err(ApiFailure::bad_request(format!(
+                "profile {requested:?} is not eligible for sub-agent use from this session"
+            )));
+        }
+    } else {
+        rank_candidates(&mut offered, parent_profile);
+    }
+    let all_offered = offered.clone();
+    let mut matching_model = false;
+    let mut offered_any_effort = false;
+    let mut selection_errors = Vec::new();
+    for candidate in offered {
+        if !offers_model(&candidate, model) {
+            continue;
+        }
+        matching_model = true;
+        let efforts = match model_efforts(backend, &candidate, model).await {
+            Ok(efforts) => efforts,
+            Err(error) => {
+                selection_errors.push(format!("{}: {error:#}", candidate.profile_id));
+                continue;
+            }
+        };
+        offered_any_effort |= !efforts.is_empty();
+        let effort = match requirement {
+            EffortRequirement::Exact(requested)
+                if efforts.iter().any(|choice| choice.value == requested) =>
+            {
+                Some(requested.to_owned())
+            }
+            EffortRequirement::NoChoices if efforts.is_empty() => None,
+            EffortRequirement::Exact(_) => {
+                selection_errors.push(format!(
+                    "{} offers efforts: {}",
+                    candidate.profile_id,
+                    effort_names(&efforts)
+                ));
+                continue;
+            }
+            EffortRequirement::NoChoices => {
+                selection_errors.push(format!(
+                    "{} offers efforts: {}",
+                    candidate.profile_id,
+                    effort_names(&efforts)
+                ));
+                continue;
+            }
+            EffortRequirement::Any => unreachable!("handled above"),
+        };
+        return Ok(selection(candidate.profile_id, model, effort));
+    }
+    if !matching_model {
+        return Err(ApiFailure::bad_request(no_profile_offers(
+            model,
+            &all_offered,
+            &unavailable,
+        )));
+    }
+    let required = match requirement {
+        EffortRequirement::Exact(effort) => format!("effort {effort:?}"),
+        EffortRequirement::NoChoices => "no effort choices".to_owned(),
+        EffortRequirement::Any => unreachable!("handled above"),
+    };
+    let unavailable_effort = match requirement {
+        EffortRequirement::Exact(effort) if !offered_any_effort => format!(
+            "model {model:?} offers no effort choices; requested effort {effort:?} is unavailable. "
+        ),
+        _ => format!("no eligible profile offers model {model:?} with {required}. "),
+    };
+    Err(ApiFailure::bad_request(format!(
+        "{unavailable_effort}{}",
+        selection_errors
+            .into_iter()
+            .chain(
+                unavailable
+                    .iter()
+                    .map(|(id, reason)| format!("{id}: {reason}")),
+            )
+            .collect::<Vec<_>>()
+            .join("; ")
+    )))
+}
+
+async fn model_efforts(
+    backend: &Arc<dyn SubagentBackend>,
+    candidate: &SubagentCandidate,
+    model: &str,
+) -> Result<Vec<mj_core::acp::SessionConfigChoice>, ApiFailure> {
+    if candidate.choices.model.as_deref() == Some(model) && !candidate.choices.efforts.is_empty() {
+        Ok(candidate.choices.efforts.clone())
     } else {
         backend
-            .profile_config(chosen.profile_id.clone(), Some(model.clone()), false)
+            .profile_config(candidate.profile_id.clone(), Some(model.to_owned()), false)
             .await
+            .map(|choices| choices.efforts)
             .map_err(|error| {
                 ApiFailure::unavailable(format!(
                     "could not read the efforts profile {:?} offers for model {model:?}: {error:#}",
-                    chosen.profile_id
+                    candidate.profile_id
                 ))
-            })?
-            .efforts
-    };
-    let effort = child_effort(
-        &model,
-        &efforts,
+            })
+    }
+}
+
+fn selection(profile_id: String, model: &str, effort: Option<String>) -> SubagentSelection {
+    SubagentSelection {
+        profile_id,
+        model: model.to_owned(),
         effort,
-        parent_config.get("effort").map(String::as_str),
-    )?;
-    let fast_mode = mj_core::codex_catalog::is_luna_model(&model);
-    Ok(SubagentSelection {
-        profile_id: chosen.profile_id,
-        model,
-        effort,
-        fast_mode,
-    })
+        fast_mode: mj_core::codex_catalog::is_luna_model(model),
+    }
+}
+
+fn effort_names(efforts: &[mj_core::acp::SessionConfigChoice]) -> String {
+    if efforts.is_empty() {
+        "none".to_owned()
+    } else {
+        efforts
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The effort a child starts with, from the efforts its model offers. A
