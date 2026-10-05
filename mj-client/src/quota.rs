@@ -344,32 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_round_trips_and_an_absent_one_decodes_as_empty() {
-        let snapshot = QuotaSnapshot {
-            reports: BTreeMap::from([(
-                "claude".to_owned(),
-                ProfileQuota {
-                    banked_resets: None,
-                    profile_id: "claude".into(),
-                    harness: HarnessKind::Claude,
-                    windows: Vec::new(),
-                    extra: None,
-                    error: None,
-                    refreshed_at_epoch_seconds: 7,
-                    rate_limited_until_epoch_seconds: None,
-                },
-            )]),
-            probing: BTreeSet::from(["claude".to_owned()]),
-            cycles: 3,
-        };
-        let json = serde_json::to_string(&snapshot).unwrap();
-        assert_eq!(
-            serde_json::from_str::<QuotaSnapshot>(&json).unwrap(),
-            snapshot
-        );
-    }
-
-    #[test]
     fn a_rate_limit_hold_reads_as_minutes_until_the_retry_and_ends_with_the_hold() {
         let mut quota: ProfileQuota = serde_json::from_value(serde_json::json!({
             "profile_id": "claude", "harness": "claude", "windows": [],

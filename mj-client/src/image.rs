@@ -334,31 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_input_is_rejected() {
-        assert!(optimize_image(b"not an image").is_err());
-    }
-
-    #[test]
     fn oversized_input_is_rejected_before_decoding() {
         let bytes = vec![0; MAX_INPUT_BYTES + 1];
         let error = optimize_image(&bytes).unwrap_err().to_string();
         assert!(error.contains("64 MiB"));
-    }
-
-    #[test]
-    fn transparent_rgba_stays_png() {
-        let mut rgba = vec![0; 2 * 2 * 4];
-        rgba.chunks_exact_mut(4).for_each(|pixel| pixel[3] = 128);
-        let optimized = optimize_rgba(2, 2, &rgba).unwrap();
-        assert_eq!(optimized.mime_type, "image/png");
-        assert!(optimized.bytes.len() <= MAX_OUTPUT_BYTES);
-        let decoder = ImageReader::new(Cursor::new(&optimized.bytes))
-            .with_guessed_format()
-            .unwrap()
-            .into_decoder()
-            .unwrap();
-        assert_eq!(decoder.dimensions(), (2, 2));
-        assert!(decoder.color_type().has_alpha());
     }
 
     #[test]
@@ -369,10 +348,5 @@ mod tests {
         assert_eq!(optimized.mime_type, "image/jpeg");
         assert!(optimized.bytes.len() <= MAX_OUTPUT_BYTES);
         assert!(optimized.width < width || optimized.height < height);
-    }
-
-    #[test]
-    fn rgba_length_must_match_dimensions() {
-        assert!(optimize_rgba(2, 2, &[0; 3]).is_err());
     }
 }

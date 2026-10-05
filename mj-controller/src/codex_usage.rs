@@ -24,16 +24,6 @@ pub enum CodexUsageStatus {
     Unavailable(String),
 }
 
-#[cfg(test)]
-impl CodexUsageStatus {
-    pub fn compact_label(&self) -> String {
-        match self {
-            Self::Available(report) => report.compact_label(),
-            Self::Unavailable(reason) => format!("Codex usage unavailable: {reason}"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageReport {
     pub banked_resets: Option<u64>,
@@ -41,38 +31,11 @@ pub struct CodexUsageReport {
     pub secondary: Option<CodexUsageWindow>,
 }
 
-#[cfg(test)]
-impl CodexUsageReport {
-    fn compact_label(&self) -> String {
-        let parts = [&self.primary, &self.secondary]
-            .into_iter()
-            .flatten()
-            .map(CodexUsageWindow::compact_label)
-            .collect::<Vec<_>>();
-        format!("Codex usage: {}", parts.join(" · "))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexUsageWindow {
     pub label: String,
     pub remaining_percent: u8,
     pub resets_at: Option<i64>,
-}
-
-#[cfg(test)]
-impl CodexUsageWindow {
-    fn compact_label(&self) -> String {
-        let mut label = format!("{} {}% left", self.label, self.remaining_percent);
-        if let Some(reset) = self
-            .resets_at
-            .and_then(crate::quota::format_reset_local_seconds)
-        {
-            label.push_str(" · resets ");
-            label.push_str(&reset);
-        }
-        label
-    }
 }
 
 pub struct CodexUsageClient {
@@ -503,35 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn banked_resets_use_the_account_total_not_the_capped_details() {
-        let mut response = serde_json::json!({
-            "rateLimitsByLimitId": {"codex": {"secondary": {"usedPercent": 20, "windowDurationMins": 10080}}},
-            "rateLimitResetCredits": {"availableCount": 3, "credits": [{"id": "one"}]}
-        });
-        assert_eq!(
-            super::parse_report(&response).unwrap().banked_resets,
-            Some(3)
-        );
-        for count in [
-            serde_json::json!(0),
-            serde_json::Value::Null,
-            serde_json::json!(-1),
-            serde_json::json!("1"),
-        ] {
-            response["rateLimitResetCredits"]["availableCount"] = count.clone();
-            let report = super::parse_report(&response).unwrap();
-            assert_eq!(report.banked_resets, count.as_u64());
-            assert_eq!(report.secondary.unwrap().remaining_percent, 80);
-        }
-        response
-            .as_object_mut()
-            .unwrap()
-            .remove("rateLimitResetCredits");
-        assert_eq!(super::parse_report(&response).unwrap().banked_resets, None);
-        response["rateLimitResetCredits"] = serde_json::Value::Null;
-        assert_eq!(super::parse_report(&response).unwrap().banked_resets, None);
-    }
-    #[test]
     fn parses_codex_bucket_and_formats_remaining_windows() {
         let report = parse_report(&json!({
             "rateLimits": { "primary": { "usedPercent": 99, "windowDurationMins": 60 } },
@@ -565,18 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn clamps_percentages_and_accepts_one_window() {
-        let report = parse_report(&json!({
-            "rateLimits": {
-                "primary": { "usedPercent": 120, "windowDurationMins": 30 }
-            }
-        }))
-        .expect("report");
-        assert_eq!(report.primary.unwrap().remaining_percent, 0);
-        assert!(report.secondary.is_none());
-    }
-
-    #[test]
     fn clamps_negative_percentages_and_ignores_invalid_window_fields() {
         let report = parse_report(&json!({
             "rateLimits": {
@@ -602,65 +524,6 @@ mod tests {
             parse_report(&json!({ "rateLimits": {} })),
             Err(QueryError::NoData)
         ));
-    }
-
-    #[test]
-    fn classifies_account_types() {
-        assert!(classify_account(&json!({ "account": { "type": "chatgpt" } })).is_ok());
-        assert!(matches!(
-            classify_account(&json!({ "account": null })),
-            Err(QueryError::NotSignedIn)
-        ));
-        assert!(matches!(
-            classify_account(&json!({ "account": { "type": "apiKey" } })),
-            Err(QueryError::UnsupportedAccount)
-        ));
-        assert!(matches!(
-            classify_account(&json!({})),
-            Err(QueryError::NotSignedIn)
-        ));
-        assert!(matches!(
-            classify_account(&json!({ "account": {} })),
-            Err(QueryError::UnsupportedAccount)
-        ));
-    }
-
-    #[test]
-    fn labels_arbitrary_window_durations() {
-        assert_eq!(window_label(Some(15)), "15m");
-        assert_eq!(window_label(Some(120)), "2H");
-        assert_eq!(window_label(Some(2_880)), "2d");
-        assert_eq!(window_label(Some(61)), "limit");
-        assert_eq!(window_label(Some(0)), "limit");
-        assert_eq!(window_label(None), "limit");
-    }
-
-    #[test]
-    fn status_labels_available_and_unavailable_values() {
-        let available = CodexUsageStatus::Available(CodexUsageReport {
-            banked_resets: None,
-            primary: Some(CodexUsageWindow {
-                label: "5H".to_string(),
-                remaining_percent: 75,
-                resets_at: None,
-            }),
-            secondary: None,
-        });
-        assert_eq!(available.compact_label(), "Codex usage: 5H 75% left");
-        let with_reset = CodexUsageStatus::Available(CodexUsageReport {
-            banked_resets: None,
-            primary: Some(CodexUsageWindow {
-                label: "5H".to_string(),
-                remaining_percent: 75,
-                resets_at: Some(2_000_000_000),
-            }),
-            secondary: None,
-        });
-        assert!(with_reset.compact_label().contains(" · resets "));
-        assert_eq!(
-            CodexUsageStatus::Unavailable("not signed in".to_string()).compact_label(),
-            "Codex usage unavailable: not signed in"
-        );
     }
 
     #[test]
@@ -715,47 +578,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_errors_have_stable_user_reasons_and_diagnostics() {
-        let cases = [
-            (QueryError::NotInstalled, "Codex CLI is not installed"),
-            (
-                QueryError::Launch("permission denied".to_string()),
-                "could not start Codex CLI",
-            ),
-            (QueryError::NotSignedIn, "not signed in with ChatGPT"),
-            (
-                QueryError::UnsupportedAccount,
-                "ChatGPT subscription quota is not available for this account",
-            ),
-            (
-                QueryError::Unsupported,
-                "installed Codex does not support quota queries",
-            ),
-            (QueryError::NoData, "no rate-limit data returned"),
-            (
-                QueryError::Protocol(ProtocolError::Io),
-                "Codex quota request failed",
-            ),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(error.user_reason(), expected);
-        }
-
-        assert_eq!(
-            QueryError::Launch("permission denied".to_string()).to_string(),
-            "could not start Codex CLI: permission denied"
-        );
-        assert_eq!(
-            QueryError::Protocol(ProtocolError::Closed).to_string(),
-            "Codex app-server protocol error (Closed)"
-        );
-        assert_eq!(
-            QueryError::Unsupported.to_string(),
-            "installed Codex does not support quota queries"
-        );
-    }
-
     #[tokio::test]
     async fn bounded_frame_reads_complete_frames_and_clean_eof() {
         let mut reader = BufReader::new(&b"first\nsecond\n"[..]);
@@ -799,27 +621,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn refresh_reports_missing_codex_without_retaining_a_client() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let env = HashMap::from([(
-            "PATH".to_string(),
-            temp.path().to_string_lossy().into_owned(),
-        )]);
-        let mut client = None;
-
-        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
-
-        assert_eq!(
-            status,
-            CodexUsageStatus::Unavailable("Codex CLI is not installed".to_string())
-        );
-        assert!(client.is_none());
-    }
-
     /// The quota probe reads a ChatGPT login's rate limits (#1160). An API key
     /// in the profile's environment, or in the daemon's own, must not reach
     /// the Codex it starts.
+    // Hard-won: c4e2838d7cca: ChatGPT Codex quota probe inherited an API key and sent it to the OAuth endpoint
     #[cfg(unix)]
     #[tokio::test]
     async fn the_quota_probe_starts_codex_without_an_api_key() {

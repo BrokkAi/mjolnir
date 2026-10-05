@@ -1183,6 +1183,7 @@ mod tests {
     /// A browser polling with `after_seq` is sent an entry again only when
     /// that entry changed, for every item kind: here a tool call and a thought
     /// that did not change stay behind while a new message is sent.
+    // Hard-won: 8891aa9adda7: browser polls resent unchanged thought, tool, plan, and terminal entries every time
     #[test]
     fn a_browser_is_sent_only_the_entries_that_changed() {
         let mut session = MaterializedSession::empty("exact-cursors");

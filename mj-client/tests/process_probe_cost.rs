@@ -8,6 +8,7 @@ fn thread_count() -> usize {
     std::fs::read_dir("/proc/self/task").unwrap().count()
 }
 
+// Hard-won: 0317441d9980: H-1: daemon liveness probes spawned 241 threads and drove CPU to 1881 percent
 #[cfg(target_os = "linux")]
 #[test]
 fn repeated_liveness_probes_start_no_threads_and_stay_cheap() {

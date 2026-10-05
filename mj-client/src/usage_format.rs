@@ -956,6 +956,7 @@ mod tests {
     /// This is a report, not a warning. Mjolnir does not end a turn for
     /// silence (#1017), so the row's job is to let a person see "nothing for
     /// eleven minutes" and decide for themselves whether to cancel.
+    // Hard-won: 6e3a14fe2db0: #1017: a silent harness was invisible in the default session row
     #[test]
     fn a_quiet_running_session_gains_a_quiet_column() {
         let quiet = SessionActivity {

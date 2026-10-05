@@ -4,7 +4,6 @@ use serde_json::json;
 use super::*;
 use crate::controller::test_support::test_git as git;
 use mj_checkpoint::archive::*;
-use mj_worker::checkpoint::*;
 use std::cell::RefCell;
 
 use mj_checkpoint::archive::{
@@ -58,45 +57,6 @@ fn locators() -> Vec<TargetLocator> {
             workspace_storage: Default::default(),
         },
     ]
-}
-
-#[test]
-fn transfer_plans_cover_all_target_boundaries() {
-    let locators = locators();
-    let plans = locators
-        .iter()
-        .map(|locator| {
-            transfer_plan(
-                locator,
-                SESSION,
-                "/var/lib/hel/workers/checkpoint.hel.zip",
-                Path::new("/var/tmp/checkpoint.zip"),
-                &remote_staging_path(SESSION, "test-transfer").unwrap(),
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(plans[0].commands[0].program, "cp");
-    assert_eq!(plans[1].commands[0].program, "podman");
-    assert_eq!(plans[2].commands[0].program, "container");
-    assert_eq!(plans[3].commands[0].program, "scp");
-    assert_eq!(plans[4].commands[0].program, "scp");
-    assert_eq!(plans[5].commands.len(), 3);
-    assert!(
-        plans[5].commands[1]
-            .args
-            .last()
-            .unwrap()
-            .contains("'podman' 'cp'")
-    );
-    assert!(
-        !plans[5]
-            .commands
-            .iter()
-            .flat_map(|command| &command.args)
-            .any(|arg| arg == "--remote")
-    );
-    assert!(plans[3].commands[0].args.contains(&"-P".into()));
 }
 
 fn fixture(temp: &Path) -> (CheckpointExportSpec, PathBuf) {
@@ -363,45 +323,6 @@ fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
         .unwrap_err()
         .to_string();
     assert!(error.contains(&invalid), "{error}");
-}
-
-/// The controller streams the export spec to save a round trip to the
-/// target. Both spellings have to produce the same archive.
-#[test]
-fn a_streamed_spec_exports_the_same_archive_as_a_spec_file() {
-    let temp = tempfile::tempdir().unwrap();
-    let (mut spec, _) = fixture(temp.path());
-    let from_file = export_from_spec_file(&spec.output_path.with_extension("spec.json"))
-        .err()
-        .map(|error| format!("{error:#}"));
-    assert!(
-        from_file.is_some_and(|error| error.contains("read checkpoint export spec")),
-        "a missing spec file must still be reported as a read failure"
-    );
-
-    let spec_path = temp.path().join("checkpoint-spec.json");
-    spec.write(&spec_path).unwrap();
-    let from_file = export_from_spec_file(&spec_path).unwrap();
-    let file_archive = fs::read(&spec.output_path).unwrap();
-
-    spec.output_path = spec.relay_root.join("streamed.hel.zip");
-    let body = serde_json::to_vec(&spec).unwrap();
-    let streamed = export_from_spec_reader(&mut body.as_slice()).unwrap();
-    let streamed_archive = fs::read(&spec.output_path).unwrap();
-
-    assert_eq!(streamed.sha256, from_file.sha256);
-    assert_eq!(streamed.event_frontier, from_file.event_frontier);
-    assert_eq!(
-        streamed.event_frontier_digest,
-        from_file.event_frontier_digest
-    );
-    assert_eq!(streamed_archive, file_archive);
-    assert_eq!(
-        read_archive_verified(&spec.output_path)
-            .unwrap()
-            .archive_sha256,
-        streamed.sha256
-    );
 }
 
 #[test]

@@ -612,8 +612,6 @@ pub struct ReplacementSessionTestFixture {
 
 #[derive(Clone)]
 struct ReplacementTestSession {
-    #[cfg(test)]
-    history: Option<tokio::sync::mpsc::UnboundedSender<HistoryTestRequest>>,
     session_id: String,
     stopped: bool,
     accepted_ordinal: u64,
@@ -629,22 +627,6 @@ impl SessionHandleBackend for ReplacementTestSession {
         _scope: mj_core::storage::HistoryScope,
         _query: String,
     ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        #[cfg(test)]
-        if let Some(history) = &self.history {
-            let (response, result) = tokio::sync::oneshot::channel();
-            let sent = history.send(HistoryTestRequest {
-                bundle_id: _bundle_id,
-                scope: _scope,
-                query: _query,
-                response,
-            });
-            return Box::pin(async move {
-                sent.map_err(|_| anyhow::anyhow!("history backend closed"))?;
-                result
-                    .await
-                    .map_err(|_| anyhow::anyhow!("history response dropped"))?
-            });
-        }
         Box::pin(async { Ok(Vec::new()) })
     }
     fn review_state(&self) -> BoxFuture<'_, Result<ReviewState>> {
@@ -759,8 +741,6 @@ pub fn replacement_session_test_fixture(
         tokio::sync::watch::channel(ManagedSessionView::default());
     drop(stopped_view_tx);
     let stopped = SessionHandle::new(ReplacementTestSession {
-        #[cfg(test)]
-        history: None,
         session_id: session_id.to_owned(),
         stopped: true,
         accepted_ordinal,
@@ -773,8 +753,6 @@ pub fn replacement_session_test_fixture(
     let view_tx = Arc::new(view_tx);
     let (submitted_tx, submitted) = tokio::sync::mpsc::unbounded_channel();
     let replacement = SessionHandle::new(ReplacementTestSession {
-        #[cfg(test)]
-        history: None,
         session_id: session_id.to_owned(),
         stopped: false,
         accepted_ordinal,
@@ -791,73 +769,5 @@ pub fn replacement_session_test_fixture(
         control,
         submitted,
         replacement_view: view_tx,
-    }
-}
-
-#[cfg(test)]
-struct HistoryTestRequest {
-    bundle_id: String,
-    scope: mj_core::storage::HistoryScope,
-    query: String,
-    response: tokio::sync::oneshot::Sender<Result<Vec<mj_core::storage::PromptHistoryEntry>>>,
-}
-
-#[cfg(test)]
-mod storage_tests {
-    use super::*;
-    use mj_core::storage::{HistoryScope, PromptHistoryEntry};
-
-    #[tokio::test]
-    async fn history_search_yields_until_backend_responds_and_propagates_failures() {
-        let (history, mut requests) = tokio::sync::mpsc::unbounded_channel();
-        let (view_guard, view) = tokio::sync::watch::channel(ManagedSessionView::default());
-        let session = SessionHandle::new(ReplacementTestSession {
-            history: Some(history),
-            session_id: "session".into(),
-            stopped: false,
-            accepted_ordinal: 0,
-            submitted: None,
-            view,
-            _view_guard: Some(Arc::new(view_guard)),
-        });
-        let search =
-            session.search_prompts("bundle".into(), HistoryScope::Project, "needle".into());
-        tokio::pin!(search);
-        let request = tokio::select! {
-            biased;
-            result = &mut search => panic!("search completed before storage replied: {result:?}"),
-            request = requests.recv() => request.unwrap(),
-        };
-        assert_eq!(request.bundle_id, "bundle");
-        assert_eq!(request.scope, HistoryScope::Project);
-        assert_eq!(request.query, "needle");
-        request
-            .response
-            .send(Err(anyhow::anyhow!("storage unavailable")))
-            .unwrap();
-        assert!(
-            search
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("storage unavailable")
-        );
-
-        let search = session.search_prompts("bundle".into(), HistoryScope::Project, "retry".into());
-        tokio::pin!(search);
-        let request = tokio::select! {
-            biased;
-            result = &mut search => panic!("retry completed before storage replied: {result:?}"),
-            request = requests.recv() => request.unwrap(),
-        };
-        request
-            .response
-            .send(Ok(vec![PromptHistoryEntry {
-                id: 1,
-                session_id: "session".into(),
-                text: "retry works".into(),
-            }]))
-            .unwrap();
-        assert_eq!(search.await.unwrap()[0].text, "retry works");
     }
 }

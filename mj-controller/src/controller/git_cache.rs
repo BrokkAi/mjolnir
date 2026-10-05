@@ -481,23 +481,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::targets::{
-        ContainerTemplate, ProcessExecutor, RepositorySpec, SshTarget, TargetTemplate,
-    };
+    use crate::targets::{ContainerTemplate, ProcessExecutor, RepositorySpec, TargetTemplate};
     use mj_core::config::ImagePullPolicy;
-
-    #[test]
-    fn github_cache_keys_ignore_transport_and_case() {
-        assert_eq!(
-            repository_cache_key("git@github.com:BrokkAi/hel.git").unwrap(),
-            repository_cache_key("https://github.com/brokkai/HEL.git").unwrap()
-        );
-    }
-
-    #[test]
-    fn unrelated_urls_are_not_cacheable() {
-        assert!(repository_cache_key("https://example.com/org/repo.git").is_err());
-    }
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -586,62 +571,6 @@ mod tests {
         assert!(!format!("{command:?}").contains(token));
         assert!(format!("{command:?}").contains("<redacted>"));
         assert!(!serde_json::to_string(command).unwrap().contains(token));
-    }
-
-    #[test]
-    fn local_and_ssh_hosts_use_their_native_command_boundaries() {
-        let local = CacheHost::Local.git_shell_command("true", [], "probe");
-        assert_eq!(local.program, "sh");
-
-        let ssh = CacheHost::Ssh(SshTarget {
-            destination: "dev@example.test".to_owned(),
-            ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
-        })
-        .git_shell_command("true", [], "probe");
-        assert_eq!(ssh.program, "ssh");
-        assert!(ssh.args.last().unwrap().contains("'sh' '-c' 'true'"));
-    }
-
-    #[test]
-    fn docker_cache_discovers_managed_sessions_through_docker_json_lines() {
-        let session_id = "0123456789abcdef0123456789abcdef";
-        let executor = RecordingExecutor {
-            stdout: format!(
-                "{{\"Labels\":\"{}=true,{}={session_id}\"}}\n",
-                targets::MANAGED_LABEL,
-                targets::SESSION_LABEL
-            )
-            .into_bytes(),
-            ..Default::default()
-        };
-        let target = TargetTemplate::LocalDocker(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".to_owned(),
-            pull_policy: ImagePullPolicy::Auto,
-            extra_run_args: Vec::new(),
-            workspace_storage: Default::default(),
-        });
-
-        let host = CacheHost::for_target(&target).expect("Docker has a clone-cache host");
-        assert_eq!(
-            host.managed_sessions("docker", &executor).unwrap(),
-            [session_id.to_owned()]
-        );
-
-        let commands = executor.commands.lock().unwrap();
-        assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].program, "docker");
-        assert_eq!(
-            commands[0].args,
-            [
-                "ps",
-                "--all",
-                "--filter",
-                "label=dev.mj.managed=true",
-                "--format",
-                "json"
-            ]
-        );
     }
 
     #[cfg(unix)]

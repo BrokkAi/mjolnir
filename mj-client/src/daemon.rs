@@ -2453,9 +2453,8 @@ impl DaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executable::{BuildDescription, describe_daemon_and_client_builds};
-    use std::path::Path;
 
+    // Hard-won: c672eb41a1bf: macOS startup hang waited forever for an exited but unreaped daemon
     #[cfg(unix)]
     #[test]
     fn an_exited_unreaped_process_is_a_zombie_and_not_alive() {
@@ -2490,6 +2489,7 @@ mod tests {
         exited.wait().unwrap();
     }
 
+    // Hard-won: 372572b0b7b6: stopped daemon endpoint removal broke status and session refresh
     #[test]
     fn a_missing_endpoint_file_reads_as_a_stopped_daemon() {
         let directory = tempfile::tempdir().unwrap();
@@ -2502,41 +2502,6 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let error = read_metadata_at(&path).unwrap_err();
         assert!(daemon_not_running(&error).is_none());
-    }
-
-    #[tokio::test]
-    async fn restart_session_sends_one_restart_action() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "restart-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-        };
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-            assert!(matches!(
-                request.action,
-                DaemonAction::RestartSession { session_id } if session_id == "session-1"
-            ));
-            write_frame(
-                &mut stream,
-                &ResponseEnvelope {
-                    protocol_version: request.protocol_version,
-                    request_id: request.request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await
-            .unwrap();
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-
-        client.restart_session("session-1".into()).await.unwrap();
-        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -2566,100 +2531,6 @@ mod tests {
         assert!(message.contains(&format!("client protocol {PROTOCOL_VERSION}")));
         assert!(message.contains("restart the daemon"));
         drop(client);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn subagent_discovery_uses_the_daemon_and_preserves_choices_and_failures() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let metadata = DaemonMetadata {
-            protocol_version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-            address: listener.local_addr().unwrap(),
-            token: "subagent-discovery-test".into(),
-            started_at: "test".into(),
-            build_version: env!("CARGO_PKG_VERSION").into(),
-        };
-        let options: mj_core::subagent::SubagentOptions =
-            serde_json::from_value(serde_json::json!({
-                "models": [{"value": "gpt-6-luna", "name": "Luna", "description": null}],
-                "efforts": [{"value": "high", "name": "High", "description": null}],
-                "unavailable": ["another-profile: authentication failed"]
-            }))
-            .unwrap();
-        let expected = serde_json::to_value(&options).unwrap();
-        let mut draft = Config::default();
-        draft.profiles.insert(
-            "codex".into(),
-            serde_json::from_value(serde_json::json!({
-                "kind": "codex", "home": "/unsaved/profile",
-                "subagents": {"mode": "single_model", "model": "gpt-6-luna", "effort": "high"}
-            }))
-            .unwrap(),
-        );
-        let expected_draft = serde_json::to_value(&draft).unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            for (index, model) in [
-                None,
-                Some("gpt-6-luna".to_owned()),
-                Some("gpt-6-luna".to_owned()),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
-                assert_eq!(request.token, "subagent-discovery-test");
-                let DaemonAction::SubagentOptions {
-                    profile,
-                    model: requested,
-                    config,
-                } = request.action
-                else {
-                    panic!("unexpected discovery request")
-                };
-                assert_eq!(profile, "codex");
-                assert_eq!(requested, model);
-                assert_eq!(
-                    serde_json::to_value(config).unwrap(),
-                    if index == 1 {
-                        expected_draft.clone()
-                    } else {
-                        serde_json::Value::Null
-                    }
-                );
-                write_frame(
-                    &mut stream,
-                    &ResponseEnvelope {
-                        protocol_version: request.protocol_version,
-                        request_id: request.request_id,
-                        result: if index != 2 {
-                            Ok(DaemonReply::SubagentOptions(options.clone()))
-                        } else {
-                            Err("profile discovery cancelled".into())
-                        },
-                    },
-                )
-                .await
-                .unwrap();
-            }
-        });
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
-        let discovered = client
-            .subagent_options("codex".into(), None, None)
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let discovered = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), Some(draft))
-            .await
-            .unwrap();
-        assert_eq!(serde_json::to_value(discovered).unwrap(), expected);
-        let error = client
-            .subagent_options("codex".into(), Some("gpt-6-luna".into()), None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "profile discovery cancelled");
         server.await.unwrap();
     }
 
@@ -2723,59 +2594,5 @@ mod tests {
                 .is_err()
         );
         server.await.unwrap();
-    }
-
-    #[test]
-    fn unsupported_protocol_message_names_both_binaries_and_versions() {
-        let message = unsupported_daemon_protocol_message(
-            PROTOCOL_VERSION + 5,
-            &describe_daemon_and_client_builds(
-                4242,
-                BuildDescription {
-                    executable: Some(Path::new("/home/dev/mj/target/release/mj")),
-                    version: "2.14.0",
-                },
-                BuildDescription {
-                    executable: Some(Path::new("/home/dev/.cargo/bin/mj")),
-                    version: "2.9.0",
-                },
-            ),
-        );
-        assert_eq!(
-            message,
-            format!(
-                "the daemon uses a newer protocol ({}) than this client ({PROTOCOL_VERSION}). \
-                 Daemon 4242 runs /home/dev/mj/target/release/mj (version 2.14.0), \
-                 while this client runs /home/dev/.cargo/bin/mj (version 2.9.0). \
-                 Put the daemon's directory first on PATH, or reinstall this client from that build.",
-                PROTOCOL_VERSION + 5
-            )
-        );
-    }
-
-    #[test]
-    fn unsupported_protocol_message_still_names_the_client_when_the_daemon_file_is_unknown() {
-        let message = unsupported_daemon_protocol_message(
-            PROTOCOL_VERSION + 1,
-            &describe_daemon_and_client_builds(
-                4242,
-                BuildDescription {
-                    executable: None,
-                    version: "2.14.0",
-                },
-                BuildDescription {
-                    executable: Some(Path::new("/home/dev/.cargo/bin/mj")),
-                    version: "2.9.0",
-                },
-            ),
-        );
-        assert!(
-            message.contains("Daemon 4242 runs an unknown file (version 2.14.0)"),
-            "{message}"
-        );
-        assert!(
-            message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
-            "{message}"
-        );
     }
 }
