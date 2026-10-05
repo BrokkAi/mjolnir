@@ -1187,6 +1187,131 @@ fn prestage_catch_up_recaptures_native_history_that_changed_before_the_barrier()
 }
 
 #[test]
+#[ignore = "timing measurement against MJ_CHECKPOINT_BENCH_ARCHIVE"]
+fn checkpoint_packaging_throughput() {
+    let source = std::env::var_os("MJ_CHECKPOINT_BENCH_ARCHIVE")
+        .map(PathBuf::from)
+        .expect("set MJ_CHECKPOINT_BENCH_ARCHIVE");
+    let read_started = std::time::Instant::now();
+    let archive = read_archive_verified(&source).unwrap();
+    let canonical_session = archive.canonical_session().unwrap();
+    let native_artifacts = archive
+        .manifest
+        .payloads
+        .iter()
+        .filter_map(|descriptor| {
+            let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
+                return None;
+            };
+            Some(NativeArtifact {
+                relative_path: relative_path.clone(),
+                data: archive.payload(descriptor).unwrap().to_vec(),
+                mode: descriptor.mode,
+            })
+        })
+        .collect::<Vec<_>>();
+    let repositories = archive
+        .manifest
+        .repositories
+        .iter()
+        .map(|repository| archived_repository_snapshot(&archive, repository).unwrap())
+        .collect::<Vec<_>>();
+    let payload_bytes = native_artifacts
+        .iter()
+        .map(|artifact| artifact.data.len() as u64)
+        .chain(repositories.iter().flat_map(|repository| {
+            [
+                repository.committed_bundle.len() as u64,
+                repository.staged_patch.len() as u64,
+                repository.unstaged_patch.len() as u64,
+                repository.untracked_tar.len() as u64,
+            ]
+        }))
+        .sum::<u64>()
+        + serde_json::to_vec(&canonical_session).unwrap().len() as u64;
+    let read_elapsed = read_started.elapsed();
+    let stage_fixture = tempfile::tempdir().unwrap();
+    let relay_root = stage_fixture.path().join("worker");
+    let harness_home = stage_fixture.path().join("harness");
+    let workspace_root = stage_fixture.path().join("workspace");
+    let repository_root = workspace_root.join("app");
+    fs::create_dir_all(&relay_root).unwrap();
+    fs::create_dir_all(&harness_home).unwrap();
+    fs::create_dir_all(&repository_root).unwrap();
+    for artifact in &native_artifacts {
+        write_private_file(
+            &harness_home,
+            &artifact.relative_path,
+            &artifact.data,
+            artifact.mode,
+        )
+        .unwrap();
+    }
+    git(&repository_root, &["init"]);
+    git(
+        &repository_root,
+        &["config", "user.email", "hel@example.test"],
+    );
+    git(&repository_root, &["config", "user.name", "Hel Test"]);
+    fs::write(repository_root.join("README.md"), b"benchmark").unwrap();
+    git(&repository_root, &["add", "."]);
+    git(&repository_root, &["commit", "-m", "benchmark"]);
+    let capture_spec = CheckpointCaptureSpec {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        session: archive.manifest.session.clone(),
+        target: archive.manifest.target.clone(),
+        bundle: archive.manifest.bundle.clone(),
+        relay_root,
+        harness_home,
+        workspace_root,
+        repositories: vec![CheckpointRepositorySpec {
+            id: "app".into(),
+            relative_destination: "app".into(),
+            capture: CheckpointRepositoryCapture::MetadataOnly,
+            origin_override: None,
+        }],
+        allow_empty_native: false,
+        stage_path: stage_fixture.path().join("worker/checkpoint-stage"),
+        refresh_existing: false,
+    };
+    let prestage_started = std::time::Instant::now();
+    capture_checkpoint(&capture_spec, &SystemGit).unwrap();
+    let prestage_elapsed = prestage_started.elapsed();
+    let catch_up_started = std::time::Instant::now();
+    capture_checkpoint(
+        &CheckpointCaptureSpec {
+            refresh_existing: true,
+            ..capture_spec
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let catch_up_elapsed = catch_up_started.elapsed();
+    let output_directory = tempfile::tempdir().unwrap();
+    let output = output_directory.path().join("benchmark.hel.zip");
+    let pack_started = std::time::Instant::now();
+    write_archive_hashed(
+        &output,
+        &ArchiveInput {
+            session: archive.manifest.session,
+            target: archive.manifest.target,
+            bundle: archive.manifest.bundle,
+            canonical_session,
+            native_artifacts,
+            repositories,
+        },
+    )
+    .unwrap();
+    eprintln!(
+        "checkpoint benchmark: payload_bytes={payload_bytes} read_ms={} prestage_ms={} catch_up_ms={} pack_ms={}",
+        read_elapsed.as_millis(),
+        prestage_elapsed.as_millis(),
+        catch_up_elapsed.as_millis(),
+        pack_started.elapsed().as_millis()
+    );
+}
+
+#[test]
 #[ignore = "timing measurement against a real Codex archive and harness home"]
 fn codex_root_archive_throughput() {
     const BASELINE_MS: u128 = 46_124;

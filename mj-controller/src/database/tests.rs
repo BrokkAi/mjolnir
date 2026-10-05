@@ -3018,6 +3018,58 @@ fn reopening_a_recreated_database_migrates_it_again() {
 
 /// Catch-up throughput: one durable commit per page instead of one per
 /// event. Ignored by default because it measures wall-clock time.
+#[test]
+#[ignore = "timing benchmark; run with --ignored --nocapture"]
+fn projection_page_apply_outruns_per_event_apply() {
+    const EVENTS: u64 = 2_000;
+    let directory = tempfile::tempdir().unwrap();
+
+    let per_event_database = directory.path().join("per-event/hel.sqlite3");
+    save_session_to(&per_event_database, &session("session-1", "project-1")).unwrap();
+    let started = std::time::Instant::now();
+    for ordinal in 1..=EVENTS {
+        apply_projection_event_to(
+            &per_event_database,
+            "session-1",
+            ordinal,
+            &event_digest(ordinal - 1),
+            &event_digest(ordinal),
+            &agent_message_mutation(ordinal),
+        )
+        .unwrap();
+    }
+    let per_event = started.elapsed();
+
+    let per_page_database = directory.path().join("per-page/hel.sqlite3");
+    save_session_to(&per_page_database, &session("session-1", "project-1")).unwrap();
+    let started = std::time::Instant::now();
+    apply_projection_page_to(&per_page_database, "session-1", |page| {
+        for ordinal in 1..=EVENTS {
+            page.apply(
+                ordinal,
+                &event_digest(ordinal - 1),
+                &event_digest(ordinal),
+                &agent_message_mutation(ordinal),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let per_page = started.elapsed();
+
+    println!("{EVENTS} events per-event: {per_event:?}, one page: {per_page:?}");
+    assert_eq!(
+        load_materialized_session_from(&per_page_database, "session-1")
+            .unwrap()
+            .unwrap()
+            .applied_event_ordinal,
+        EVENTS
+    );
+    assert!(
+        per_page < per_event,
+        "one page took {per_page:?} against {per_event:?} per event"
+    );
+}
 
 #[test]
 fn deleting_operational_session_retains_relational_history_context() {

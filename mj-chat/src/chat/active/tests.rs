@@ -141,6 +141,112 @@ fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
     assert!(!chat.needs_animation());
 }
 
+/// Captures the real conversation renderer for visual review. The caller
+/// chooses an artifact path; ordinary test runs never write screenshots.
+#[test]
+#[ignore = "writes a terminal-cell capture to MJ_CHAT_CAPTURE_PATH"]
+fn capture_chat_preview() {
+    let path = std::env::var_os("MJ_CHAT_CAPTURE_PATH")
+        .expect("set MJ_CHAT_CAPTURE_PATH to the preview JSON path");
+    let dimension = |name, fallback| {
+        std::env::var_os(name)
+            .map(|value| {
+                value
+                    .to_str()
+                    .expect("capture dimensions must be Unicode")
+                    .parse::<u16>()
+                    .expect("capture dimensions must be unsigned integers")
+            })
+            .unwrap_or(fallback)
+    };
+    let columns = dimension("MJ_CHAT_CAPTURE_COLUMNS", 110);
+    let rows = dimension("MJ_CHAT_CAPTURE_ROWS", 40);
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("local / mjolnir", "Claude · Sonnet", "");
+    chat.mark_prompt_submitted("Make the terminal feel beautifully crafted.");
+    chat.turn_started_at_epoch_seconds = Some(mj_core::clock::epoch_seconds().saturating_sub(42));
+    chat.set_current_step_start(Some(mj_core::clock::epoch_millis().saturating_sub(7_000)));
+    chat.set_session_activity(mj_client::usage_format::SessionActivity {
+        pursuing_goal: Default::default(),
+        checking_response: false,
+        execution: Some(mj_core::relay::RelayExecutionState::Running),
+        ..Default::default()
+    });
+    let tool = |seq, title: &str, summary: &str, status| {
+        let mut entry = ChatEntry::tool(seq, title, None, status);
+        entry.tool_summary = Some(summary.to_owned());
+        entry
+    };
+    chat.entries = vec![
+        ChatEntry::plain(
+            1,
+            ChatRole::User,
+            "Make the terminal feel beautifully crafted. Keep it fast, readable, and calm.",
+        ),
+        ChatEntry::plain(
+            2,
+            ChatRole::Agent,
+            "I’m bringing the interface together around a midnight palette, clear hierarchy, and the original animated activity indicators.\n\n### A little more room to think\n\n- Focus follows a soft teal border\n- **Your conversation stays readable** while tools work\n- Code and keyboard shortcuts have their own quiet surfaces",
+        ),
+        tool(
+            3,
+            "cd dir && python x.py | cat | wc ; print ok",
+            "cd && python | cat | wc ; print",
+            mj_core::transcript::ToolStatus::Completed,
+        ),
+        tool(
+            4,
+            "cargo test -p brokk-mj-chat",
+            "cargo test",
+            mj_core::transcript::ToolStatus::Completed,
+        ),
+        ChatEntry::plain(
+            5,
+            ChatRole::Agent,
+            "The shared theme is in place. Here’s the panel style used throughout the app:\n\n```rust\nlet panel = theme::panel(focused)\n    .title(\" Conversation \");\n```\n\nI’m checking the narrow layouts and selection behavior now.",
+        ),
+        tool(
+            6,
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo clippy",
+            mj_core::transcript::ToolStatus::Running,
+        ),
+    ];
+    // Keep the capture representative of the in-place tool expansion:
+    // the first completed call opens to its provider title and splits the
+    // surrounding completed streak.
+    chat.expanded_tool_calls.insert(3);
+    let mut terminal = Terminal::new(TestBackend::new(columns, rows)).expect("terminal");
+    terminal
+        .draw(|frame| render_full_frame(frame, &mut chat, false))
+        .expect("render preview");
+    let buffer = terminal.backend().buffer();
+    let color = |color, fallback| match color {
+        ratatui::style::Color::Rgb(r, g, b) => [r, g, b],
+        _ => fallback,
+    };
+    let rows = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| {
+                    let cell = &buffer[(x, y)];
+                    serde_json::json!({
+                        "text": cell.symbol(),
+                        "fg": color(cell.fg, [223, 235, 244]),
+                        "bg": color(cell.bg, [11, 18, 32]),
+                        "bold": cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                        "italic": cell.modifier.contains(ratatui::style::Modifier::ITALIC),
+                        "underline": cell.modifier.contains(ratatui::style::Modifier::UNDERLINED),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let capture = serde_json::json!({ "width": buffer.area.width, "height": buffer.area.height, "rows": rows });
+    std::fs::write(path, serde_json::to_vec(&capture).expect("encode preview"))
+        .expect("write preview");
+}
+
 fn prepare_storage_test_chat() -> PreparedChat {
     let fixture = mj_client::session::replacement_session_test_fixture("review-storage", 1);
     ActiveChat::prepare_with_persistence(
