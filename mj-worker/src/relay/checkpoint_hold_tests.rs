@@ -58,6 +58,7 @@ fn configured(temp: &tempfile::TempDir) -> DurableRelay {
 /// I2-3: the harness spoke after the close's cut and the worker refused the
 /// Close. Output that changes no work now waits, so the Close matches its cut,
 /// and a sealed relay drops what waited instead of writing it past the seal.
+// Hard-won: 634af0a3: late harness output moved the journal past the daemon's close cut and made Close fail.
 #[test]
 fn a_close_seals_its_cut_although_the_harness_spoke_after_it() {
     let temp = tempfile::tempdir().unwrap();

@@ -155,6 +155,7 @@ proptest! {
     /// exactly the records the fault could not have destroyed, reports the
     /// corrupt ones as gaps, and never yields a record that is not in the truth
     /// set or that fails its own digest.
+    // Hard-won: 27e5da78: recovery returned valid-JSON records whose digest had been corrupted by a byte flip.
     #[test]
     fn recover_reader_isolates_a_single_active_fault(
         message_sizes in prop::collection::vec(0usize..48, 1..12),
@@ -245,6 +246,7 @@ proptest! {
     /// passes as its original self. (The raw reader is a parser; digest
     /// validation is the caller's job, so we apply it here as real serve paths
     /// like `read_events_after` do.)
+    // Hard-won: 27e5da78: recovery returned valid-JSON records whose digest had been corrupted by a byte flip.
     #[test]
     fn corruption_is_detected_and_never_fabricated(
         message_sizes in prop::collection::vec(0usize..48, 2..10),

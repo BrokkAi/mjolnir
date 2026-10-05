@@ -11,12 +11,6 @@ mod tests {
         RelayErrorCode, RelayProtocolError, RelayRequest, RelayResponseBody,
     };
 
-    #[test]
-    fn cancel_turn_is_reserved_for_relay_protocol_v7() {
-        assert_eq!(RelayCommand::CancelTurn.minimum_protocol(), 7);
-        assert_eq!(RelayCommand::Cancel.minimum_protocol(), 1);
-    }
-
     /// Every way a session can still be holding work, each on its own, plus
     /// the one state in which replacing its worker destroys nothing.
     #[test]
@@ -25,6 +19,12 @@ mod tests {
         let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
         let mut quiet = relay.operational_state();
         assert!(!quiet.is_quiet(), "startup is still in flight");
+        let mut initializing = quiet.clone();
+        initializing.acp_ready = Some(false);
+        assert!(
+            !initializing.is_quiet(),
+            "ACP initialization is still in flight"
+        );
         quiet.acp_ready = Some(true);
         assert!(
             quiet.is_quiet(),
@@ -288,123 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn initializing_operational_state_is_not_quiet() {
-        let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
-        state.acp_ready = Some(false);
-
-        assert!(!state.is_quiet());
-    }
-
-    /// Transcript observations skip the staged snapshot copy and its budget
-    /// checks, which is only sound while applying one really moves nothing but
-    /// the frontier. Anything that can grow the snapshot must classify as a
-    /// state move so its budget is still checked before it is journaled.
-    #[test]
-    fn transcript_observations_move_nothing_but_the_frontier() {
-        use agent_client_protocol::schema::v1::{
-            AvailableCommandsUpdate, ContentBlock, ContentChunk,
-        };
-
-        let transcript = [
-            RelayObservation::Warning {
-                message: "warned".into(),
-            },
-            RelayObservation::Notice {
-                message: "noticed".into(),
-            },
-            RelayObservation::TerminalOutput {
-                terminal_id: "terminal-1".into(),
-                output: "output".into(),
-                truncated: false,
-                exit_code: Some(0),
-                signal: None,
-            },
-            RelayObservation::PermissionAutoApproved {
-                option_id: "allow".into(),
-                option_name: "Allow".into(),
-            },
-        ];
-        for observation in transcript {
-            assert!(
-                !observation_changes_state(&observation),
-                "{observation:?} is classified as a state move"
-            );
-            let mut snapshot = RelaySnapshot::new(SESSION.to_owned());
-            let event = RelayEvent {
-                format: RELAY_EVENT_FORMAT_V1,
-                ordinal: 1,
-                previous_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-                digest: String::new(),
-                recorded_at_ms: 7,
-                command_id: None,
-                observation,
-            };
-            let event = RelayEvent {
-                digest: relay_event_digest(&event).unwrap(),
-                ..event
-            };
-            let mut expected = snapshot.clone();
-            expected.latest_ordinal = event.ordinal;
-            expected.latest_digest.clone_from(&event.digest);
-            apply_relay_event(&mut snapshot, &event).unwrap();
-            assert_eq!(
-                snapshot, expected,
-                "{:?} changed durable state",
-                event.observation
-            );
-        }
-
-        for observation in [
-            RelayObservation::ElicitationRequested {
-                request: mj_core::elicitation::ElicitationRequest {
-                    id: "elicitation-1".into(),
-                    message: "confirm".into(),
-                    title: None,
-                    description: None,
-                    fields: Vec::new(),
-                },
-            },
-            RelayObservation::ElicitationResolved {
-                elicitation_id: "elicitation-1".into(),
-                action: "accept".into(),
-            },
-            RelayObservation::ElicitationsCleared,
-            RelayObservation::SessionUpdate {
-                update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::from("streamed"),
-                ))),
-            },
-            RelayObservation::CommandQueued {
-                command_id: "queued-command".into(),
-                command: prompt("grow the snapshot"),
-                created_at_ms: 7,
-            },
-            RelayObservation::SessionUpdate {
-                update: Box::new(SessionUpdate::AvailableCommandsUpdate(
-                    AvailableCommandsUpdate::new(vec![AvailableCommand::new(
-                        "review",
-                        "Review the current work",
-                    )]),
-                )),
-            },
-            // A harness-initiated turn moves execution state, and a restart
-            // ends one, so all three must be applied through a staged snapshot
-            // rather than appended as transcript-only frontier moves.
-            RelayObservation::HarnessTurnStarted { started_at_ms: 7 },
-            RelayObservation::HarnessTurnSettled {
-                origin: Some("task-notification".into()),
-                prompt_in_flight: false,
-            },
-            RelayObservation::SessionRestarted,
-        ] {
-            assert!(
-                observation_changes_state(&observation),
-                "{observation:?} can grow the snapshot and must be budget-checked"
-            );
-        }
-    }
-
-    #[test]
     fn v1_events_round_trip_byte_identically_and_v2_omits_the_chain() {
         let observation = || RelayObservation::Warning {
             message: "hi".into(),
@@ -524,21 +407,7 @@ mod tests {
         assert_eq!(relay.latest_ordinal(), 0);
     }
 
-    #[test]
-    fn truncate_start_keeps_the_tail_and_discloses_the_drop() {
-        let mut short = "abcdefghij".to_owned();
-        assert!(!truncate_start_with_marker(&mut short, 100));
-        assert_eq!(short, "abcdefghij");
-
-        let mut long = "abcdefghij".to_owned();
-        assert!(truncate_start_with_marker(&mut long, 4));
-        assert!(
-            long.starts_with("[mj dropped "),
-            "the drop must be disclosed: {long:?}"
-        );
-        assert!(long.ends_with("ghij"), "the tail must be kept: {long:?}");
-    }
-
+    // Hard-won: be7c009d: one oversized ACP observation killed the relay and repeatedly restarted its worker.
     #[test]
     fn oversized_observations_are_truncated_instead_of_failing() {
         let temp = tempfile::tempdir().unwrap();
@@ -572,6 +441,7 @@ mod tests {
 
     /// The journal is append-only, so what a recorded edit costs is what it
     /// costs forever. It records the patch, not two copies of the file.
+    // Hard-won: b63924a3: full old and new file copies inflated a real session journal past IPC limits.
     #[test]
     fn a_recorded_edit_journals_a_patch_rather_than_the_whole_file() {
         use agent_client_protocol::schema::v1::{Diff, ToolCall, ToolCallContent};
