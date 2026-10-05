@@ -688,6 +688,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn golden_encode_mono_pcm16_wav() {
+        // The golden is the RIFF/WAVE chunk layout with little-endian PCM16 samples.
+        let wav = encode_wav(&[-2.0, -0.5, 0.0, 0.5, 2.0], 16_000).expect("encode WAV");
+        let bytes = wav
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let actual = format!("=== mono PCM16 WAV ({} bytes) ===\n{bytes}", wav.len());
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mono-pcm16-wav", &actual);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn encode_wav_rejects_audio_beyond_the_riff_size_limit() {
+        const SAMPLE_COUNT: usize = 2_147_483_630;
+        let layout =
+            std::alloc::Layout::array::<f32>(SAMPLE_COUNT).expect("sample allocation layout");
+        // The zeroed virtual allocation is valid as an f32 slice. encode_wav
+        // must reject its length before reading samples or allocating output.
+        let allocation = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(
+            !allocation.is_null(),
+            "reserve virtual memory for RIFF boundary"
+        );
+        // SAFETY: `alloc_zeroed` returns `layout.size()` initialized bytes with
+        // the requested alignment, which is exactly SAMPLE_COUNT f32 values.
+        let samples = unsafe { std::slice::from_raw_parts(allocation.cast::<f32>(), SAMPLE_COUNT) };
+        let result = encode_wav(samples, 16_000);
+        // SAFETY: this pointer was allocated with the same layout above.
+        unsafe { std::alloc::dealloc(allocation, layout) };
+
+        assert_eq!(
+            result
+                .expect_err("RIFF length cannot represent this audio")
+                .to_string(),
+            "audio capture exceeds RIFF size limit"
+        );
+    }
+
+    #[test]
     fn capture_queue_reports_overload_without_blocking_the_audio_callback() {
         let (tx, rx) = mpsc::sync_channel(4);
         let state = Arc::new(AudioQueueState::default());

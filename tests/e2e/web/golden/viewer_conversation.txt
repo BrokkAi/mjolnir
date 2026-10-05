@@ -107,6 +107,53 @@ Tasks 1 · Shells 1 · Queue 1
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
 action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":760,"width":370,"height":40},"summary":{"x":11,"y":761,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":761,"composer":{"x":10,"y":804,"width":370,"height":67},"composerText":{"x":10,"y":813,"width":370,"height":42},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":609,"scrollHeight":609},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== help lists Mjolnir and harness commands (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+─
+Mjolnir
+Available commands:
+!<command> — run a shell command in this session [mj]
+/help — Show available commands [mj]
+/plan — Toggle plan mode [mj]
+/implement — Leave plan mode and implement [mj]
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+/help
+Show available commands
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+=== review status describes automatic review (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+
+Reviewing every completed turn with [review] profile "reviewer" (extended tier)
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 === long phone elicitation form (320x568) ===
 Plan mode browser test
 Live

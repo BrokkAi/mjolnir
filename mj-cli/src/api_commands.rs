@@ -2867,4 +2867,91 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn golden_api_usage_tree() {
+        let tree: mj_core::storage::UsageTree = serde_json::from_value(serde_json::json!({
+            "parent_session_id": "session-parent",
+            "sessions": [
+                {
+                    "session_id": "session-parent",
+                    "parent_session_id": null,
+                    "task_name": null,
+                    "operational_session_present": true,
+                    "totals": {},
+                    "coverage": {
+                        "recorded_turns": 0,
+                        "full_turn_reports": 0,
+                        "last_request_reports": 0,
+                        "unspecified_reports": 0,
+                        "missing_reports": 0,
+                        "unfinished_turns": 0
+                    },
+                    "by_model": [],
+                    "provider_session_cost": {
+                        "amount": 0.0123,
+                        "currency": "USD",
+                        "observed_at_ms": 1
+                    }
+                },
+                {
+                    "session_id": "session-reviewer",
+                    "parent_session_id": "session-parent",
+                    "task_name": "Review the migration plan",
+                    "operational_session_present": false,
+                    "totals": {},
+                    "coverage": {
+                        "recorded_turns": 0,
+                        "full_turn_reports": 0,
+                        "last_request_reports": 0,
+                        "unspecified_reports": 0,
+                        "missing_reports": 0,
+                        "unfinished_turns": 0
+                    },
+                    "by_model": [],
+                    "provider_session_cost": {
+                        "amount": 0.0045,
+                        "currency": "USD",
+                        "observed_at_ms": 2
+                    }
+                }
+            ],
+            "totals": {
+                "input_tokens": { "tokens": 2400, "reported_turns": 3 },
+                "output_tokens": { "tokens": 650, "reported_turns": 3 }
+            },
+            "coverage": {
+                "recorded_turns": 5,
+                "full_turn_reports": 3,
+                "last_request_reports": 1,
+                "unspecified_reports": 0,
+                "missing_reports": 1,
+                "unfinished_turns": 1
+            },
+            "by_model": [
+                {
+                    "model": "gpt-5.4",
+                    "effort": "high",
+                    "totals": {
+                        "input_tokens": { "tokens": 1800, "reported_turns": 2 },
+                        "output_tokens": { "tokens": 500, "reported_turns": 2 }
+                    }
+                },
+                {
+                    "model": null,
+                    "effort": null,
+                    "totals": {
+                        "cache_read_tokens": { "tokens": 600, "reported_turns": 1 }
+                    }
+                }
+            ]
+        }))
+        .expect("usage tree fixture");
+
+        let output = format!(
+            "=== parent session usage tree (CLI text) ===\n{}",
+            usage_tree_lines(&tree).join("\n")
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
+    }
 }

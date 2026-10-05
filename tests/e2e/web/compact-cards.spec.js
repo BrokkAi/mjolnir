@@ -325,7 +325,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
 
   const orderedPage = await context.newPage();
   await fixGoldenTime(orderedPage);
-  await mount(orderedPage, [
+  const orderedState = await mount(orderedPage, [
     session('gamma-message', 'project-gamma', 'Gamma', { message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
     session('alpha-created', 'project-alpha', 'Alpha', { createdAt: '2030-06-14T00:00:00Z' }),
     session('stopped', 'project-stopped', 'Stopped', { lifecycle: 'suspended', message: SERVER_TIME_MS + 20_000 }),
@@ -340,6 +340,32 @@ test('golden_viewer_dashboard', async ({ context }) => {
       meta: node.querySelector('.session-meta')?.innerText,
     })),
   })));
+  orderedState.snapshot.targets = [
+    { id: 'container', default_candidate: true, runtime_missing: false },
+    { id: 'configured-remote', default_candidate: false, runtime_missing: true },
+    { id: 'missing-local', default_candidate: true, runtime_missing: true },
+  ];
+  orderedState.snapshot.capacity = [{
+    id: 'local-host',
+    label: 'Local workstation',
+    target_ids: ['container', 'configured-remote', 'missing-local'],
+    sampled_at_epoch_seconds: SERVER_TIME_MS / 1000,
+    cpu_percent: 32,
+    memory_total_bytes: 16 * 1024 ** 3,
+    memory_used_bytes: 8 * 1024 ** 3,
+    logical_cores: 8,
+    disk_total_bytes: 512 * 1024 ** 3,
+    storage: [],
+  }];
+  await refresh(orderedPage, orderedState);
+  await orderedPage.getByRole('button', { name: 'Menu' }).click();
+  await orderedPage.getByRole('menuitem', { name: 'Targets' }).click();
+  await expect(orderedPage.locator('#targets-page')).toBeVisible();
+  await expect(orderedPage.locator('#targets')).toContainText('container, configured-remote');
+  await expect(orderedPage.locator('#targets')).not.toContainText('missing-local');
+  await captureGoldenState(output, orderedPage, 'target capacity omits a missing default candidate', {
+    listedTargets: await orderedPage.locator('#targets article p.dim').first().innerText(),
+  });
   await orderedPage.close();
 
   const insertionPage = await context.newPage();

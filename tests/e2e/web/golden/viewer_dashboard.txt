@@ -659,6 +659,24 @@ codex
 
 Idle
 layout: {"cards":[{"title":"beta-activity","meta":"Beta\n·\n/work/project\n·\ncodex"},{"title":"gamma-message","meta":"Gamma\n·\n/work/project\n·\ncodex"},{"title":"delta-tie","meta":"Delta\n·\n/work/project\n·\ncodex"},{"title":"echo-tie","meta":"Echo\n·\n/work/project\n·\ncodex"},{"title":"alpha-created","meta":"Alpha\n·\n/work/project\n·\ncodex"}]}
+=== target capacity omits a missing default candidate (390x844) ===
+Browser tests
+Other workspace
+Targets
+Local workstation
+
+container, configured-remote
+
+CPU
+32%
+Memory
+50% of 16 GiB
+Cores
+8
+Disk
+512 GiB
+Refresh
+layout: {"listedTargets":"container, configured-remote"}
 === initial activity order (390x844) ===
 Browser tests
 Other workspace
