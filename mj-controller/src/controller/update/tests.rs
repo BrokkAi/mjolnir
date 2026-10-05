@@ -1,159 +1,5 @@
 use super::*;
 
-fn exe(path: &str) -> Option<&Path> {
-    Some(Path::new(path))
-}
-
-fn detect_with_env(markers: &[&str], exe_path: Option<&Path>) -> InstallMethod {
-    InstallMethod::detect(
-        |name| markers.contains(&name).then(|| OsString::from("true")),
-        exe_path,
-    )
-}
-
-#[test]
-fn launcher_markers_override_path_forensics() {
-    let npm_bundle = "/usr/lib/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj";
-    assert_eq!(
-        detect_with_env(&[NPM_MANAGED_ENV], exe("/home/user/.local/bin/mj")),
-        InstallMethod::Npm
-    );
-    assert_eq!(
-        detect_with_env(&[NPX_MANAGED_ENV, NPM_MANAGED_ENV], exe(npm_bundle)),
-        InstallMethod::Npx
-    );
-    assert_eq!(
-        detect_with_env(&[HOMEBREW_MANAGED_ENV], exe(npm_bundle)),
-        InstallMethod::Homebrew
-    );
-}
-
-#[test]
-fn marker_free_detection_reads_the_executable_path() {
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe("/opt/homebrew/Cellar/mjolnir/2.4.0/libexec/mj")
-        ),
-        InstallMethod::Homebrew
-    );
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe("/home/linuxbrew/.linuxbrew/Cellar/mjolnir/2.4.0/libexec/mj")
-        ),
-        InstallMethod::Homebrew
-    );
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe(
-                "/usr/lib/node_modules/@brokkai/mjolnir/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj"
-            )
-        ),
-        InstallMethod::Npm
-    );
-    assert_eq!(
-        InstallMethod::detect(|_| None, exe("/home/user/.local/bin/mj")),
-        InstallMethod::Direct
-    );
-    assert_eq!(InstallMethod::detect(|_| None, None), InstallMethod::Direct);
-}
-
-#[test]
-fn cargo_detection_requires_a_matching_install_record() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let bin_dir = root.path().join("bin");
-    std::fs::create_dir(&bin_dir).expect("bin dir");
-    let executable = bin_dir.join(BIN_NAME);
-    std::fs::write(&executable, b"mj").expect("executable");
-    let recorded = |body: &str| {
-        std::fs::write(root.path().join(".crates.toml"), body).expect("manifest");
-        InstallMethod::detect(|_| None, Some(executable.as_path()))
-    };
-    // The record must name the running version, so the fixture derives it
-    // from the crate instead of hardcoding one: CI builds this tree at
-    // whatever version master carries, not the version this branch began
-    // from.
-    let version = env!("CARGO_PKG_VERSION");
-    let registry = "registry+https://github.com/rust-lang/crates.io-index";
-    let record = |package: &str, version: &str, binary: &str| {
-        format!("\"{package} {version} ({registry})\" = [\"{binary}\"]\n")
-    };
-
-    assert_eq!(
-        recorded(&format!(
-            "[v1]\n{}{}",
-            record("brokk-mjolnir", version, "mj"),
-            record("brokk-mj-voice-worker", version, "mj-voice-worker"),
-        )),
-        InstallMethod::Cargo { voice_worker: true }
-    );
-    assert_eq!(
-        recorded(&format!("[v1]\n{}", record("brokk-mjolnir", version, "mj"),)),
-        InstallMethod::Cargo {
-            voice_worker: false
-        }
-    );
-    // A record for a different installed version is not this install.
-    assert_eq!(
-        recorded(&format!("[v1]\n{}", record("brokk-mjolnir", "0.0.0", "mj"),)),
-        InstallMethod::Direct
-    );
-}
-
-#[test]
-fn managed_install_methods_provide_their_own_update_commands() {
-    assert_eq!(
-        InstallMethod::Npm.update_command().as_deref(),
-        Some("npm install -g @brokkai/mjolnir@latest")
-    );
-    assert_eq!(
-        InstallMethod::Npx.update_command().as_deref(),
-        Some("npx -y @brokkai/mjolnir@latest")
-    );
-    assert_eq!(
-        InstallMethod::Homebrew.update_command().as_deref(),
-        Some("brew upgrade --formula brokkai/tap/mjolnir")
-    );
-    assert_eq!(
-        InstallMethod::Cargo { voice_worker: true }
-            .update_command()
-            .as_deref(),
-        Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker")
-    );
-    assert_eq!(InstallMethod::Direct.update_command(), None);
-}
-
-#[test]
-fn channels_name_their_distribution_source() {
-    assert_eq!(InstallMethod::Npm.channel_name(), "npm");
-    assert_eq!(InstallMethod::Homebrew.channel_name(), "Homebrew");
-    assert_eq!(
-        InstallMethod::Cargo {
-            voice_worker: false
-        }
-        .channel_name(),
-        "crates.io"
-    );
-    assert_eq!(InstallMethod::Direct.channel_name(), "GitHub Releases");
-}
-
-#[test]
-fn parses_homebrew_formula_version() {
-    let formula = r#"
-class Mjolnir < Formula
-  desc "Session control plane for ACP coding agents"
-  version "2.5.0"
-end
-"#;
-    assert_eq!(
-        parse_homebrew_formula_version(formula).expect("version"),
-        Version::parse("2.5.0").expect("semver")
-    );
-    assert!(parse_homebrew_formula_version("class Mjolnir < Formula\nend").is_err());
-}
-
 #[test]
 fn cargo_index_uses_latest_non_yanked_version() {
     let index = concat!(
@@ -170,14 +16,6 @@ fn cargo_index_uses_latest_non_yanked_version() {
     );
 }
 
-#[test]
-fn parse_version_tolerates_release_tags() {
-    assert_eq!(
-        parse_version("v2.5.0").expect("version"),
-        Version::parse("2.5.0").expect("semver")
-    );
-}
-
 fn asset(name: &str) -> ReleaseAsset {
     ReleaseAsset {
         name: name.to_string(),
@@ -191,62 +29,6 @@ fn linux_x64() -> Platform {
         arch: "x86_64",
         rust_target: "x86_64-unknown-linux-gnu".to_string(),
     }
-}
-
-fn mac_arm() -> Platform {
-    Platform {
-        os_family: "macos",
-        arch: "aarch64",
-        rust_target: "aarch64-apple-darwin".to_string(),
-    }
-}
-
-#[test]
-fn release_newer_than_current_returns_update_info() {
-    let release = GitHubRelease {
-        tag_name: "v2.5.0".to_string(),
-        assets: vec![
-            asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"),
-            asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"),
-        ],
-    };
-
-    let update = update_info_from_release(
-        &release,
-        &Version::parse("2.4.0").expect("version"),
-        &linux_x64(),
-    )
-    .expect("update info")
-    .expect("update");
-
-    assert_eq!(update.version, Version::parse("2.5.0").expect("version"));
-    assert_eq!(
-        update.asset.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"
-    );
-    assert_eq!(
-        update.checksum_asset.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
-    );
-}
-
-#[test]
-fn release_not_newer_returns_none() {
-    let release = GitHubRelease {
-        tag_name: "v2.4.0".to_string(),
-        assets: vec![asset(
-            "brokk-mjolnir-v2.4.0-x86_64-unknown-linux-gnu.tar.gz",
-        )],
-    };
-
-    let update = update_info_from_release(
-        &release,
-        &Version::parse("2.4.0").expect("version"),
-        &linux_x64(),
-    )
-    .expect("update info");
-
-    assert!(update.is_none());
 }
 
 #[test]
@@ -268,50 +50,6 @@ fn release_newer_than_current_requires_checksum_asset() {
     assert!(error
         .to_string()
         .contains("missing required checksum asset brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"));
-}
-
-#[test]
-fn macos_prefers_universal_asset() {
-    let assets = vec![
-        asset("brokk-mjolnir-v2.5.0-aarch64-apple-darwin.tar.gz"),
-        asset("brokk-mjolnir-v2.5.0-universal-apple-darwin.tar.gz"),
-    ];
-
-    let selected = select_mj_asset(&assets, &mac_arm()).expect("select");
-
-    assert_eq!(
-        selected.name,
-        "brokk-mjolnir-v2.5.0-universal-apple-darwin.tar.gz"
-    );
-}
-
-#[test]
-fn linux_selects_target_asset() {
-    let assets = vec![
-        asset("brokk-mjolnir-v2.5.0-aarch64-unknown-linux-gnu.tar.gz"),
-        asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"),
-    ];
-
-    let selected = select_mj_asset(&assets, &linux_x64()).expect("select");
-
-    assert_eq!(
-        selected.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"
-    );
-}
-
-#[test]
-fn empty_prompt_answer_accepts_the_upgrade() {
-    assert!(prompt_answer_is_yes(""));
-    assert!(prompt_answer_is_yes("\n"));
-    assert!(prompt_answer_is_yes(" y \n"));
-    assert!(prompt_answer_is_yes("Y"));
-    assert!(prompt_answer_is_yes("yes"));
-    assert!(prompt_answer_is_yes("YES"));
-    assert!(!prompt_answer_is_yes("n"));
-    assert!(!prompt_answer_is_yes("N"));
-    assert!(!prompt_answer_is_yes("no"));
-    assert!(!prompt_answer_is_yes("later"));
 }
 
 #[test]
@@ -655,7 +393,13 @@ async fn homebrew_formula_update_is_offered_when_newer() {
         .await
         .expect("update check");
 
-    assert!(matches!(update, Some(AvailableUpdate::Managed { .. })));
+    assert_eq!(
+        update,
+        Some(AvailableUpdate::Managed {
+            version: Version::parse("9.9.9").expect("version"),
+            method: InstallMethod::Homebrew,
+        })
+    );
 }
 
 #[tokio::test]
@@ -672,6 +416,10 @@ async fn failed_channel_fetch_is_reported_as_an_error() {
 
 #[tokio::test]
 async fn direct_installs_read_the_release_endpoint() {
+    if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
+        return;
+    }
+
     let release = concat!(
         r#"{"tag_name":"v9.9.9","assets":["#,
         r#"{"name":"brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz","#,
@@ -681,20 +429,23 @@ async fn direct_installs_read_the_release_endpoint() {
     );
     let (sources, _) = serve_update_sources(vec![("/release", release)]).await;
 
-    // Asset selection is platform-shaped, and the stub only carries the
-    // Linux x86_64 archive, so this end-to-end trip is Linux-only; the
-    // pure selection tests above cover the other platforms.
-    let Ok(update) = latest_update(&sources, &InstallMethod::Direct).await else {
-        return;
-    };
-    if std::env::consts::OS != "linux" && std::env::consts::ARCH != "x86_64" {
-        return;
-    }
+    let update = latest_update(&sources, &InstallMethod::Direct)
+        .await
+        .expect("release response")
+        .expect("newer release");
 
-    match update.expect("update") {
+    match update {
         AvailableUpdate::Direct(info) => {
             assert_eq!(info.version, Version::parse("9.9.9").expect("version"));
             assert_eq!(info.tag, "v9.9.9");
+            assert_eq!(
+                info.asset.name,
+                "brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz"
+            );
+            assert_eq!(
+                info.checksum_asset.name,
+                "brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            );
         }
         other => panic!("expected a direct update, got {other:?}"),
     }

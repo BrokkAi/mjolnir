@@ -886,6 +886,25 @@ fn cross_harness_lane_failure_cancels_and_joins_the_peer() {
 }
 
 #[test]
+fn local_bare_restore_reuses_verified_absolute_archive_without_upload() {
+    let archive = Path::new("/var/lib/hel/archives/session.hel.zip");
+    let remote = Path::new("/var/lib/hel/workers/session/restore.hel.zip");
+    let local = targets::TargetLocator::LocalBare {
+        worker_root: "/var/lib/hel/workers/session".into(),
+    };
+    let container = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "container".into(),
+        workspace_storage: Default::default(),
+    };
+
+    assert_eq!(restore_archive_path(&local, archive, remote), archive);
+    assert!(!should_upload_restore_archive(&local));
+    assert_eq!(restore_archive_path(&container, archive, remote), remote);
+    assert!(should_upload_restore_archive(&container));
+}
+
+#[test]
 fn a_projection_standing_at_the_archived_frontier_is_reused() {
     let digest = "a".repeat(64);
     let other = "b".repeat(64);
@@ -1589,6 +1608,26 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
         "{leftover:?} in {}",
         sessions.display()
     );
+}
+
+/// Resuming into a different harness cannot reload the archived native
+/// session, so the transcript is handed over as the first context instead.
+#[test]
+fn only_the_same_harness_keeps_native_continuity_on_resume() {
+    use mj_core::config::HarnessKind;
+
+    assert!(super::native_continuity_preserved(
+        HarnessKind::Codex,
+        HarnessKind::Codex
+    ));
+    assert!(super::native_continuity_preserved(
+        HarnessKind::Claude,
+        HarnessKind::Claude
+    ));
+    assert!(!super::native_continuity_preserved(
+        HarnessKind::Claude,
+        HarnessKind::Codex
+    ));
 }
 
 #[cfg(unix)]

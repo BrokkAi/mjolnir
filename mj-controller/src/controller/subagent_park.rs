@@ -634,4 +634,34 @@ mod tests {
         );
         channels.shutdown.shutdown().await.unwrap();
     }
+
+    // Hard-won: 6927da2ba976: Issue #1161 exhausted a shipped container's process slots and left users with a Cannot fork failure.
+    #[test]
+    fn only_a_full_target_is_rewritten_and_a_bare_one_reads_no_container_counts() {
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: "/tmp/workers/child".into(),
+        };
+        let unrelated =
+            explain_process_exhaustion(anyhow::anyhow!("the harness exited"), &backend, "child");
+        assert_eq!(format!("{unrelated:#}"), "the harness exited");
+
+        let full = explain_process_exhaustion(
+            anyhow::anyhow!("sh: 1: Cannot fork").context("start the parked sub-agent's worker"),
+            &backend,
+            "child",
+        );
+        let message = format!("{full:#}");
+        assert!(
+            message.starts_with("the target machine ran out of process slots"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Close sub-agents you no longer need"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Cannot fork"),
+            "the original error stays: {message}"
+        );
+    }
 }
