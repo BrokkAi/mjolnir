@@ -71,6 +71,42 @@ pub mod tile_layout;
 mod welcome;
 mod widgets;
 mod wizards;
+
+#[cfg(test)]
+thread_local! {
+    static NO_COLOR_OVERRIDE_FOR_TESTS: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Use the host value in production and a scoped fixed value in golden renders.
+pub(crate) fn no_color_requested() -> bool {
+    #[cfg(test)]
+    if let Some(no_color) = NO_COLOR_OVERRIDE_FOR_TESTS.with(Cell::get) {
+        return no_color;
+    }
+
+    mj_chat::theme::no_color_requested()
+}
+
+#[cfg(test)]
+pub(crate) fn with_no_color_override_for_test<R>(no_color: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.set(self.0));
+        }
+    }
+
+    let previous = NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.replace(Some(no_color)));
+    let _restore = Restore(previous);
+    run()
+}
+
+#[cfg(test)]
+pub(crate) fn pin_no_color_override_for_test(no_color: bool) {
+    NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.set(Some(no_color)));
+}
+
 pub(crate) mod workspaces;
 
 #[cfg(test)]

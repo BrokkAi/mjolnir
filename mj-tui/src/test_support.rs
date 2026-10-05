@@ -221,6 +221,8 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 }
 
 pub(crate) fn config() -> Config {
+    // SetupDialog sizes itself from the NO_COLOR-aware summary before drawing.
+    crate::pin_no_color_override_for_test(true);
     Config {
         keys: Default::default(),
         jev: Default::default(),

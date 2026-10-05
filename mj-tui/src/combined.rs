@@ -344,13 +344,20 @@ pub(crate) fn render_combined_for_test(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    render_combined_with_theme(
+    // Golden output defaults to Unicode; cases can request ASCII in config.
+    let symbols = dashboard
+        .config
+        .advanced
+        .symbols
+        .unwrap_or(theme::SymbolSet::Unicode);
+    render_combined_with_theme_and_symbols(
         frame,
         dashboard,
         chats,
         opening_panes,
         transcript_selected,
         dashboard.config.theme,
+        symbols,
     )
 }
 
@@ -366,8 +373,28 @@ pub fn render_combined_with_theme(
     transcript_selected: bool,
     selected_theme: theme::UiTheme,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
     let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
+    render_combined_with_theme_and_symbols(
+        frame,
+        dashboard,
+        chats,
+        opening_panes,
+        transcript_selected,
+        selected_theme,
+        symbols,
+    )
+}
+
+fn render_combined_with_theme_and_symbols(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+    selected_theme: theme::UiTheme,
+    symbols: theme::SymbolSet,
+) -> Vec<String> {
+    dashboard.drawn_failures.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
@@ -2392,13 +2419,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal
             .draw(|frame| {
-                crate::render_combined(
-                    frame,
-                    &mut go,
-                    &mut std::collections::BTreeMap::new(),
-                    &std::collections::BTreeMap::new(),
-                    false,
-                );
+                crate::render::render(frame, &mut go);
             })
             .unwrap();
         let lines = buffer_lines(terminal.backend().buffer());
