@@ -2431,6 +2431,129 @@ async fn a_review_the_worker_still_holds_continues_after_a_restart() {
     new.shutdown().await.unwrap();
 }
 
+/// A review someone asked for delivers its findings: a findings verdict is
+/// forwarded to the primary agent as soon as it is reached, without waiting
+/// for a surface to choose Forward.
+#[tokio::test]
+async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
+    let session = session_id("autoforward");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    finish_a_turn(&manager, &host).await;
+
+    // Each reviewing role is started, prompted, and then reports one finding
+    // in its own journal, completing the command it was given.
+    let mut commands: BTreeMap<String, String> = BTreeMap::new();
+    let mut answered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let (command_id, prompt) = loop {
+        match manager.next().await {
+            RemoteSessionRequest::Reviewer {
+                role,
+                action,
+                reply,
+                ..
+            } => {
+                let role = role.unwrap_or_default();
+                let outcome = match &action {
+                    ReviewerAction::CaptureDelta { .. } => Ok(ReviewerOutcome::Delta {
+                        repositories: vec![mj_core::relay::RepoDelta {
+                            root: std::path::PathBuf::from("/workspace/app"),
+                            baseline_tree: Some("base".to_owned()),
+                            current_tree: "new".to_owned(),
+                            patch: "diff --git a/a b/a\n@@\n+retry()\n".to_owned(),
+                            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+                            changed_lines: 1,
+                            files: Vec::new(),
+                        }],
+                    }),
+                    ReviewerAction::Start { .. } => Ok(ReviewerOutcome::Started(Box::new(
+                        crate::worker_client::StartedReviewer {
+                            native_session_id: None,
+                            config_options: Vec::new(),
+                            reused: false,
+                            state: operational(),
+                        },
+                    ))),
+                    ReviewerAction::Submit { command_id, .. } => {
+                        commands.insert(role.clone(), command_id.clone());
+                        Ok(ReviewerOutcome::Accepted { ordinal: 1 })
+                    }
+                    ReviewerAction::Attach {
+                        after_ordinal,
+                        after_digest,
+                    } => {
+                        let fresh = commands
+                            .get(&role)
+                            .filter(|_| *after_ordinal == 0 && !answered.contains(&role));
+                        if let Some(command_id) = fresh {
+                            answered.insert(role.clone());
+                            let answer = agent_event(
+                                1,
+                                mj_core::relay::RELAY_EVENT_GENESIS_DIGEST,
+                                "[P1] src/lib.rs:1 -- unbounded retry loop",
+                            );
+                            let completion = completion_event(2, &answer.digest, command_id);
+                            let through_digest = completion.digest.clone();
+                            Ok(ReviewerOutcome::Attached(Box::new(
+                                crate::worker_client::RelayAttachment {
+                                    state: operational(),
+                                    events: vec![answer, completion],
+                                    through_ordinal: 2,
+                                    through_digest,
+                                },
+                            )))
+                        } else {
+                            Ok(ReviewerOutcome::Attached(Box::new(
+                                crate::worker_client::RelayAttachment {
+                                    state: operational(),
+                                    events: Vec::new(),
+                                    through_ordinal: *after_ordinal,
+                                    through_digest: after_digest.clone(),
+                                },
+                            )))
+                        }
+                    }
+                    other => answer_for(other),
+                };
+                let _ = reply.send(outcome);
+            }
+            RemoteSessionRequest::Submit {
+                command_id,
+                command,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(Ok(42));
+                break (command_id, format!("{command:?}"));
+            }
+            other => panic!("unexpected request {}", other.session_id()),
+        }
+    };
+    assert!(
+        command_id.starts_with("review-forward"),
+        "the primary receives the review's corrective prompt: {command_id}"
+    );
+    assert!(
+        prompt.contains("unbounded retry loop"),
+        "the corrective prompt carries the finding"
+    );
+    assert!(
+        prompt.contains("not independently verified"),
+        "a quick review's findings reach the primary as one reviewer's, unverified: {prompt}"
+    );
+    assert!(
+        host.resolve(session, Resolution::Forwarded).await.is_err(),
+        "the findings were already forwarded"
+    );
+    host.shutdown().await.expect("shutdown the host");
+}
+
 /// A running review waits out a foreground operation that briefly holds the
 /// worker. Here the reviewer's launch is refused once the way a checkpoint
 /// (an export, a recovery copy) refuses it; the review asks again and goes on
