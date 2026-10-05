@@ -604,10 +604,6 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
-            // The image's user is a property of the host's copy of the image,
-            // so it is read here, once per image per daemon, and handed to the
-            // plan rather than stored on the session.
-            let image_user = podman_image_user(&target, executor);
             let mut bundle = if session.project_directory.is_some() {
                 None
             } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
@@ -672,7 +668,6 @@ impl Controller {
                             session_id,
                             bundle,
                             &runtime_mounts,
-                            image_user,
                             session.container_workspace.as_deref(),
                             &resource_name,
                         )
@@ -1495,65 +1490,6 @@ pub(super) fn enforce_overlay_capable_mounts(
     notices
 }
 
-/// The image users already probed, keyed by container host and image
-/// reference. An image's
-/// configured user does not change under a fixed reference, and reading it
-/// costs a container start, so each daemon asks a host once.
-static IMAGE_USERS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, targets::ImageUser>>> =
-    std::sync::LazyLock::new(std::sync::Mutex::default);
-
-/// The uid and gid a Podman session container maps onto the host user.
-///
-/// Only Podman is asked: Docker and Apple's `container` engine are left with
-/// their own defaults. A probe that cannot answer is not a launch failure —
-/// the container falls back to plain `--userns=keep-id`, which maps the
-/// image's default user, and the user is told what happened.
-pub(super) fn podman_image_user(
-    target: &targets::TargetTemplate,
-    executor: &impl CommandExecutor,
-) -> Option<targets::ImageUser> {
-    let (ssh, container) = match target {
-        targets::TargetTemplate::LocalPodman(container) => (None, container),
-        targets::TargetTemplate::SshPodman { ssh, container } => (Some(ssh), container),
-        _ => return None,
-    };
-    let image = container.image.as_str();
-    let key = format!(
-        "{}|{image}",
-        ssh.map_or("local", |ssh| ssh.destination.as_str())
-    );
-    if let Some(cached) = IMAGE_USERS.lock().expect("image user cache").get(&key) {
-        return Some(*cached);
-    }
-    // The probe starts a container, so on Podman this is where a missing image
-    // is actually downloaded. Wait for the daemon's own download instead of
-    // starting a second one.
-    match crate::image_pull_gate::with_image_ready(target, executor, || {
-        targets::probe_image_user(ssh, container, executor)
-    }) {
-        Ok(user) => {
-            IMAGE_USERS
-                .lock()
-                .expect("image user cache")
-                .insert(key, user);
-            Some(user)
-        }
-        Err(error) => {
-            tracing::warn!(
-                image,
-                error = format!("{error:#}"),
-                "could not read the container image user; keeping Podman's default user mapping"
-            );
-            executor.notify_notice(&format!(
-                "Could not read the user of image {image}, so the container runs with Podman's \
-                 default user mapping and may not be able to write to an attached directory: \
-                 {error:#}"
-            ));
-            None
-        }
-    }
-}
-
 /// Reports every command an installer issues as one launch stage, so progress
 /// stays accurate without threading the stage through each `CommandSpec`.
 /// A command that already names a stage keeps it.
@@ -1661,18 +1597,19 @@ fn inherited_git_setting_commands(
     settings
         .into_iter()
         .map(|(key, value)| {
+            let args = vec![
+                "git".into(),
+                "config".into(),
+                "--global".into(),
+                "--replace-all".into(),
+                "--".into(),
+                key.clone(),
+                value,
+            ];
             targets::command_on_locator(
                 locator,
                 session_id,
-                vec![
-                    "git".into(),
-                    "config".into(),
-                    "--global".into(),
-                    "--replace-all".into(),
-                    "--".into(),
-                    key.clone(),
-                    value,
-                ],
+                args,
                 format!("inherit Git setting {key}"),
             )
         })

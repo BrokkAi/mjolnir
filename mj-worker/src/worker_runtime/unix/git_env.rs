@@ -96,6 +96,8 @@ pub fn attach_session_git_environment(
 pub fn configure_github_cli(
     root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
+    saved_home: Option<&std::path::Path>,
+    extra_global_include: Option<&std::path::Path>,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -191,7 +193,7 @@ fi
         }
     }
     environment.insert("BASH_ENV".into(), shell_environment_text);
-    configure_git_config_file(root, environment, &paths)?;
+    configure_git_config_file(root, environment, &paths, saved_home, extra_global_include)?;
     Ok(())
 }
 
@@ -238,6 +240,8 @@ pub(crate) fn configure_git_config_file(
     root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
     paths: &GithubCliPaths,
+    saved_home: Option<&std::path::Path>,
+    extra_global_include: Option<&std::path::Path>,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -265,19 +269,44 @@ pub(crate) fn configure_git_config_file(
         }
         None => {
             environment.remove(ORIGINAL_GIT_CONFIG_GLOBAL);
-            // Git's own order for the files this replaces: the XDG file first,
-            // then `~/.gitconfig`, which therefore wins. A missing include
-            // path is ignored, so both can be named unconditionally.
-            let xdg = match environment.get("XDG_CONFIG_HOME") {
-                Some(home) if !home.is_empty() => format!("{home}/git/config"),
-                _ => "~/.config/git/config".to_owned(),
+            // Git expands `~` in include paths when each command runs. Pin the
+            // config paths now, using the worker's saved HOME, so a harness
+            // login shell that changes HOME cannot redirect these includes.
+            let home = saved_home
+                .map(std::path::Path::to_path_buf)
+                .or_else(|| environment.get("HOME").map(std::path::PathBuf::from))
+                .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+                .context("resolve HOME for session Git configuration")?;
+            let home = std::path::absolute(home).context("make session HOME absolute")?;
+            let xdg_home = match environment.get("XDG_CONFIG_HOME") {
+                Some(config_home) if !config_home.is_empty() => {
+                    std::path::absolute(config_home).context("make XDG_CONFIG_HOME absolute")?
+                }
+                _ => home.join(".config"),
             };
             vec![
-                ("include.path".to_owned(), xdg),
-                ("include.path".to_owned(), "~/.gitconfig".to_owned()),
+                (
+                    "include.path".to_owned(),
+                    xdg_home.join("git/config").to_string_lossy().into_owned(),
+                ),
+                (
+                    "include.path".to_owned(),
+                    home.join(".gitconfig").to_string_lossy().into_owned(),
+                ),
             ]
         }
     };
+    if let Some(include) = extra_global_include {
+        let include = std::path::absolute(include)
+            .context("make extra session Git config include absolute")?;
+        let include = include.to_string_lossy().into_owned();
+        if !entries
+            .iter()
+            .any(|(key, value)| key == "include.path" && value == &include)
+        {
+            entries.push(("include.path".to_owned(), include));
+        }
+    }
     // Inherited entries get their own included file. Folding them into this
     // one would lose them the next time it is written, because by then they
     // are gone from the environment. A missing include is ignored, so the

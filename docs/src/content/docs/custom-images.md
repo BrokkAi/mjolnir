@@ -82,23 +82,29 @@ relay binary and a staged, allowlisted copy of the harness profile
 container — for example `/var/lib/hel/workers/<session-id>` and
 `/var/lib/hel/profiles/<session-id>`.
 
-mj creates these directories with `mkdir -p` as the image's configured user.
-Container copies can produce root-owned files, so mj assigns uploaded workers
-and profiles to the directory's owner before restricting their permissions.
-Only this ownership adjustment runs with `exec --user 0`; the worker and
-harness still run as the image's configured user. Images need `chown` and
-`stat -c '%u:%g'` (GNU coreutils and BusyBox both provide these). A rootless
-Podman container defaults to root inside when no
-`USER` is set, which can write anywhere. If your image sets a non-root
-`USER`, as the reference image does with its `hel` user, that user needs
-write access to `/workspace` and `/var/lib/hel` — the reference image grants
-it by creating both directories and `chown`-ing them to `hel:hel` before
-switching to that user.
+New Podman session containers run as uid and gid `0:0` in the default rootless
+user namespace. Container uid 0 maps to the host account running Mjolnir, and
+Mjolnir sets `HOME=/home/hel` when it creates the container to keep Git and
+home-based tools on the reference image's existing home path. Harness profiles
+remain staged under `/var/lib/hel/profiles/<session>`. Uploaded workers and
+profiles are owned by the container's configured user before their permissions
+are restricted. Existing containers keep their recorded image user and HOME
+when resumed; Podman exec inherits both from the container configuration.
+Docker and Apple Container continue to run as the image's configured user; on
+those engines, that user needs write access to `/workspace` and `/var/lib/hel`.
+
+Images need `chown` and `stat -c '%u:%g'` (GNU coreutils and BusyBox both
+provide these). The reference image creates `/workspace` and `/var/lib/hel`
+before switching to its `hel` user; rootless Podman's uid-0 mapping makes these
+directories writable to new Podman sessions without changing image-layer
+owners.
 
 ## Browser tests and profiling tools
 
 Nothing in the container contract requires either, but the reference image bakes
-both in because a session's unprivileged user cannot install them later.
+both in for consistent availability. This avoids depending on runtime package
+installation, which may be unavailable with Docker or Apple Container's
+configured image user.
 
 Playwright's Chromium needs a set of X11, GTK, and font shared libraries that
 most base images omit. The reference image installs them with

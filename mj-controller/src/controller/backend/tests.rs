@@ -866,7 +866,7 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("Retry launch"));
-    assert!(error.contains("Podman 4.3.0"));
+    assert!(error.contains("Podman 4.0.0"));
 }
 #[test]
 fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
@@ -907,7 +907,7 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
         .to_string();
     assert!(error.contains("Retry launch"));
     assert!(error.contains("dev@example.test"));
-    assert!(error.contains("Podman 4.3.0"));
+    assert!(error.contains("Podman 4.0.0"));
 }
 #[test]
 fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {

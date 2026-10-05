@@ -62,7 +62,13 @@ impl PushFixture {
             }))
             .unwrap();
         config.write(&fixture.root.join("launch.json")).unwrap();
-        mj_worker::worker_runtime::configure_github_cli(&fixture.root, &mut environment).unwrap();
+        mj_worker::worker_runtime::configure_github_cli(
+            &fixture.root,
+            &mut environment,
+            None,
+            None,
+        )
+        .unwrap();
         mj_core::credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
         mj_core::test_hooks::install_fake_command(
             &bin,
@@ -186,6 +192,160 @@ test "$credentials" = "$(printf 'protocol=https\nhost=github.com\nusername=x-acc
         BoundedProcessExecutor::new(Duration::from_secs(15))
             .execute(&command)
             .unwrap()
+    }
+}
+
+#[test]
+fn session_git_config_uses_saved_home_after_harness_home_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("worker");
+    let home = directory.path().join("container-home");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = Session User\n\temail = session@example.invalid\n[pull]\n\trebase = false\n",
+    )
+    .unwrap();
+
+    let mut environment = std::collections::BTreeMap::from([
+        ("HOME".into(), "/root".into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+    ]);
+    mj_worker::worker_runtime::configure_github_cli(&root, &mut environment, Some(&home), None)
+        .unwrap();
+
+    let global_config = environment.get("GIT_CONFIG_GLOBAL").unwrap().clone();
+    let mut resumed_environment = std::collections::BTreeMap::from([
+        ("HOME".into(), "/root".into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GIT_CONFIG_GLOBAL".into(), global_config.clone()),
+    ]);
+    mj_worker::worker_runtime::configure_github_cli(
+        &root,
+        &mut resumed_environment,
+        Some(&home),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed_environment.get("GIT_CONFIG_GLOBAL"),
+        Some(&global_config)
+    );
+
+    let generated = std::fs::read_to_string(&global_config).unwrap();
+    assert!(generated.contains(&home.join(".gitconfig").to_string_lossy().to_string()));
+    assert!(!generated.contains("~/.gitconfig"));
+    assert!(!generated.contains("~/.config/git/config"));
+
+    for (key, expected) in [
+        ("user.name", "Session User"),
+        ("user.email", "session@example.invalid"),
+        ("pull.rebase", "false"),
+    ] {
+        let mut command = CommandSpec::new("git", ["config", "--get", key]);
+        command.cwd = Some(directory.path().into());
+        command.clear_env = true;
+        command.env.extend([
+            ("HOME".into(), "/root".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_GLOBAL".into(), global_config.clone()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        let output = BoundedProcessExecutor::new(Duration::from_secs(15))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
+    }
+}
+
+#[test]
+fn session_git_config_includes_explicit_container_config_after_home_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("worker");
+    let home = directory.path().join("container-home");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let inherited_config = home.join(".gitconfig");
+    std::fs::write(
+        &inherited_config,
+        "[user]\n\tname = Session User\n\temail = session@example.invalid\n[pull]\n\trebase = false\n",
+    )
+    .unwrap();
+    let original_global = directory.path().join("original-global.gitconfig");
+    std::fs::write(&original_global, "[pull]\n\trebase = true\n").unwrap();
+
+    let mut environment = std::collections::BTreeMap::from([
+        ("HOME".into(), "/root".into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            original_global.to_string_lossy().into_owned(),
+        ),
+    ]);
+    mj_worker::worker_runtime::configure_github_cli(
+        &root,
+        &mut environment,
+        Some(std::path::Path::new("/root")),
+        Some(&inherited_config),
+    )
+    .unwrap();
+
+    let global_config = environment.get("GIT_CONFIG_GLOBAL").unwrap().clone();
+    let mut resumed_environment = std::collections::BTreeMap::from([
+        ("HOME".into(), "/root".into()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GIT_CONFIG_GLOBAL".into(), global_config.clone()),
+        (
+            "MJ_ORIGINAL_GIT_CONFIG_GLOBAL".into(),
+            original_global.to_string_lossy().into_owned(),
+        ),
+    ]);
+    mj_worker::worker_runtime::configure_github_cli(
+        &root,
+        &mut resumed_environment,
+        Some(std::path::Path::new("/root")),
+        Some(&inherited_config),
+    )
+    .unwrap();
+    assert_eq!(
+        resumed_environment.get("GIT_CONFIG_GLOBAL"),
+        Some(&global_config)
+    );
+
+    let generated = std::fs::read_to_string(&global_config).unwrap();
+    assert!(generated.contains(&inherited_config.to_string_lossy().to_string()));
+
+    for (key, expected) in [
+        ("user.name", "Session User"),
+        ("user.email", "session@example.invalid"),
+        ("pull.rebase", "false"),
+    ] {
+        let mut command = CommandSpec::new("git", ["config", "--get", key]);
+        command.cwd = Some(directory.path().into());
+        command.clear_env = true;
+        command.env.extend([
+            ("HOME".into(), "/root".into()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_GLOBAL".into(), global_config.clone()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        let output = BoundedProcessExecutor::new(Duration::from_secs(15))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
     }
 }
 

@@ -46,6 +46,8 @@ pub(crate) fn has_managed_temporary_volume(
         == container_temporary_volume_name(container))
 }
 
+// Podman exec leaves `--user` unset, so each container's stored configured user
+// controls initialization as well as later worker commands.
 // Shared by all Podman workspace policies and Docker attachment launches.
 // Storage is released only after its owning container has been removed.
 pub(super) const TEMPORARY_VOLUME_FUNCTIONS: &str = r#"
@@ -87,13 +89,20 @@ remove_failed_container() {
 start_container() {
     "$@"
     if [ -n "$temporary_volume" ]; then
-        "$engine" exec --user 0 "$container" sh -c 'set -eu; chown 0:0 /tmp; chmod 1777 /tmp'
+        if [ -n "$exec_user" ]; then
+            "$engine" exec --user "$exec_user" "$container" sh -c 'set -eu; chown 0:0 /tmp; chmod 1777 /tmp'
+        else
+            "$engine" exec "$container" sh -c 'set -eu; chown 0:0 /tmp; chmod 1777 /tmp'
+        fi
     fi
 }
 "#;
 
 fn container_launch_script(engine: &str, script: &str) -> String {
-    format!("set -eu\nengine={engine}\n{TEMPORARY_VOLUME_FUNCTIONS}\n{script}")
+    let exec_user = if engine == "docker" { "0" } else { "" };
+    format!(
+        "set -eu\nengine={engine}\nexec_user={exec_user}\n{TEMPORARY_VOLUME_FUNCTIONS}\n{script}"
+    )
 }
 
 fn temporary_volume_argument(name: &str, mounts: &[AdditionalMount]) -> String {
@@ -123,7 +132,6 @@ pub(super) fn container_run(
             name,
             session_id,
             additional_mounts,
-            None,
             None,
             workspace_root,
         )?,
@@ -222,7 +230,6 @@ pub(super) fn podman_container_run(
     name: &str,
     session_id: &str,
     additional_mounts: &[AdditionalMount],
-    image_user: Option<ImageUser>,
     ssh: Option<&SshTarget>,
     workspace_root: &str,
 ) -> Result<CommandSpec> {
@@ -234,7 +241,6 @@ pub(super) fn podman_container_run(
         session_id,
         additional_mounts,
         Some(&workspace),
-        image_user,
         workspace_root,
     )?;
     let mut wrapped = match &workspace {
@@ -429,7 +435,6 @@ pub(super) fn docker_container_run(
         session_id,
         additional_mounts,
         None,
-        None,
         workspace_root,
     )?;
     let overlaid = additional_mounts
@@ -472,8 +477,7 @@ pub(super) fn docker_container_run(
 
 /// Podman's `--pull` flag for this template, or `None` when the resolved
 /// policy is Podman's own default. Every `podman run` Hel issues for a
-/// template — the session container and the image-user probe alike — uses this
-/// one answer, so a probe never pulls an image the launch would not.
+/// template uses this one answer.
 pub(super) fn podman_pull_argument(template: &ContainerTemplate) -> Option<String> {
     let pull_policy = template.pull_policy.at_launch(&template.image);
     (pull_policy != ImagePullPolicy::Missing)
@@ -523,7 +527,6 @@ pub(super) fn container_run_args(
     session_id: &str,
     additional_mounts: &[AdditionalMount],
     podman_workspace: Option<&PodmanWorkspaceLocator>,
-    image_user: Option<ImageUser>,
     workspace_root: &str,
 ) -> Result<Vec<String>> {
     validate_additional_mounts(additional_mounts)?;
@@ -534,12 +537,6 @@ pub(super) fn container_run_args(
         // outlives its parent leaves a zombie behind. Apple's `container`
         // engine is left alone: its support for the flag is unverified.
         args.push("--init".to_owned());
-        // Rootless Podman otherwise runs the container's user as a
-        // subordinate id, which cannot write to anything the host user owns
-        // and leaves unreadable files behind where it can. Every container
-        // whose image user is known maps that user back to the host user,
-        // whatever its mounts are.
-        args.extend(podman_userns_option(image_user));
     } else if engine == "docker" {
         let pull = docker_pull_policy(template);
         args.push(format!("--pull={pull}"));
@@ -552,6 +549,18 @@ pub(super) fn container_run_args(
         session_id,
     ));
     args.extend(template.extra_run_args.clone());
+    if engine == "podman" {
+        // Rootless Podman maps container uid 0 to the host user. Keeping the
+        // image user's uid mapping would force Podman to chown every image
+        // layer on storage drivers that cannot shift ids. Keep these after
+        // custom args so the session identity and HOME remain deliberate.
+        args.extend([
+            "--user".to_owned(),
+            "0:0".to_owned(),
+            "--env".to_owned(),
+            "HOME=/home/hel".to_owned(),
+        ]);
+    }
     let temporary_volume = temporary_volume_argument(name, additional_mounts);
     if !temporary_volume.is_empty() {
         match engine {
@@ -569,14 +578,14 @@ pub(super) fn container_run_args(
     if engine == "podman" {
         match podman_workspace.unwrap_or(&PodmanWorkspaceLocator::ContainerLayer) {
             PodmanWorkspaceLocator::ContainerLayer => {}
-            // `:U` chowns the volume to the container user, so the session's
-            // workspace is writable wherever it is mounted.
+            // `:U` chowns the volume to container root, which maps to the host
+            // user in rootless Podman's default namespace.
             PodmanWorkspaceLocator::Volume { name } => args.extend([
                 "--volume".to_owned(),
                 format!("{name}:{workspace_root}:rw,U"),
             ]),
-            // The host directory belongs to the host user, which
-            // `--userns=keep-id` maps to the container user.
+            // The host directory belongs to the host user, which rootless
+            // Podman's default namespace maps to container uid 0.
             PodmanWorkspaceLocator::HostPath { path, .. } => {
                 args.extend(["--volume".to_owned(), format!("{path}:{workspace_root}:rw")])
             }
@@ -708,7 +717,6 @@ mod pids_limit_tests {
                 "0123456789abcdef0123456789abcdef",
                 &[],
                 None,
-                None,
                 "/workspace",
             )
             .unwrap();
@@ -728,7 +736,6 @@ mod pids_limit_tests {
             "mj-test",
             "0123456789abcdef0123456789abcdef",
             &[],
-            None,
             None,
             "/workspace",
         )

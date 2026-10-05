@@ -12,7 +12,6 @@ pub fn provision_plan(
     session_id: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
-    image_user: Option<ImageUser>,
     container_workspace: Option<&Path>,
 ) -> Result<CommandPlan> {
     provision_plan_named(
@@ -20,7 +19,6 @@ pub fn provision_plan(
         session_id,
         bundle,
         additional_mounts,
-        image_user,
         container_workspace,
         &resource_name(session_id)?,
     )
@@ -31,7 +29,6 @@ pub fn provision_plan_named(
     session_id: &str,
     bundle: &ProjectBundleSpec,
     additional_mounts: &[AdditionalMount],
-    image_user: Option<ImageUser>,
     container_workspace: Option<&Path>,
     name: &str,
 ) -> Result<CommandPlan> {
@@ -60,7 +57,6 @@ pub fn provision_plan_named(
             session_id,
             bundle,
             additional_mounts,
-            image_user,
             container_workspace,
             name,
         )?;
@@ -83,7 +79,6 @@ pub fn provision_plan_named(
                 name,
                 session_id,
                 additional_mounts,
-                image_user,
                 None,
                 &workspace,
             )?);
@@ -174,7 +169,6 @@ pub fn provision_plan_named(
                 name,
                 session_id,
                 additional_mounts,
-                image_user,
                 Some(ssh),
                 &workspace,
             )?);
@@ -250,15 +244,7 @@ pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<Com
 
     let (run, locator) = match engine {
         "podman" => (
-            podman_container_run(
-                container,
-                &name,
-                smoke_id,
-                &[],
-                None,
-                None,
-                CONTAINER_WORKSPACE,
-            )?,
+            podman_container_run(container, &name, smoke_id, &[], None, CONTAINER_WORKSPACE)?,
             TargetLocator::LocalPodman {
                 borrowed_from: None,
                 container_id: name.clone(),

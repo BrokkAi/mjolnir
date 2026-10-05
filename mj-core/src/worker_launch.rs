@@ -118,6 +118,10 @@ fn default_worker_workspace_id() -> String {
     crate::workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
 
+/// Internal launch directive: include this absolute Git config file in the
+/// worker-owned session global config, then remove the key before harness use.
+pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH";
+
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

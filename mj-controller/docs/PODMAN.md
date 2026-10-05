@@ -7,12 +7,31 @@ of `mj doctor --json` to the coding agent. The host is ready only when every
 postcondition in the Verification section below passes for the same unprivileged
 user that will run `mj`.
 
-Mjolnir supports Podman **4.3.0 or newer**. 4.3.0 is the minimum because Mjolnir
-maps each session container's image user onto your host user with
-`--userns=keep-id:uid=<uid>,gid=<gid>`, which that release added, and because the local
-target relies on the mature rootless user-namespace behavior and CLI interfaces
-that Mjolnir probes (`podman unshare`). Podman 3.x and Podman
-4.0 through 4.2 are not supported Mjolnir runtimes.
+Mjolnir supports rootless Podman **4.0.0 or newer**. Podman 4 is the minimum
+because Mjolnir relies on the rootless user-namespace behavior and CLI
+interfaces that it probes (`podman unshare`). Podman 3.x is not a supported
+Mjolnir runtime.
+
+New session containers run as uid and gid `0:0` in Podman's default rootless
+mapping. Container uid 0 maps to the account running Mjolnir, so files written
+to host bind mounts belong to that account. Mjolnir sets `HOME=/home/hel` when
+creating these containers, matching the reference image's configured home.
+Harness credentials and profiles remain staged under
+`/var/lib/hel/profiles/<session>`. It does not remap or chown the image layers.
+Claude's root login shell can resolve `HOME=/root` from the root passwd entry.
+Provisioning stores inherited Git settings in `/home/hel/.gitconfig`. The
+worker's session-global `GIT_CONFIG_GLOBAL` file includes that path absolutely,
+so Git sees the settings in both shell contexts regardless of HOME. Mjolnir
+stores the include path with the worker's launch settings, so it is applied
+again when a worker restarts, resumes, or upgrades.
+
+Stopped containers created by older releases keep their original user
+namespace, configured image user, and HOME. Mjolnir leaves `--user` off normal
+`podman exec` commands so Podman uses that saved container user when resuming
+them. Their inherited Git settings remain in the configured user's global Git
+config. Their worker config includes `/home/hel/.gitconfig` by absolute path,
+so Claude's root login shell can still read those settings. Only new containers
+use the default-map root identity.
 
 ## How Mjolnir uses Podman
 
@@ -190,10 +209,10 @@ sudo apt update
 sudo apt install -y podman uidmap slirp4netns ca-certificates
 ```
 
-Older distribution releases can package Podman 3.x or an early Podman 4. The
-verification command below is authoritative: if it reports less than 4.3.0,
-upgrade to a currently supported Debian/Ubuntu release or install a
-distribution-supported Podman 4.3+ package before using Mjolnir.
+Older distribution releases can package Podman 3.x. The verification command
+below is authoritative: if it reports less than 4.0.0, upgrade to a currently
+supported Debian/Ubuntu release or install a distribution-supported Podman 4+
+package before using Mjolnir.
 
 ### Fedora
 
@@ -242,9 +261,9 @@ with an exact remediation.
 podman --version
 ```
 
-Expected: the reported version is 4.3.0 or newer. For example,
-`podman version 5.4.2` and `podman version 4.3.1` pass. `3.x` and 4.0 through
-4.2 fail; upgrade Podman as described above.
+Expected: the reported version is 4.0.0 or newer. For example,
+`podman version 5.4.2` and `podman version 4.0.3` pass; `3.x` fails. Upgrade
+Podman as described above.
 
 ### 2. Rootless mode and subordinate mappings work
 

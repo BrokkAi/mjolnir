@@ -253,8 +253,14 @@ pub async fn run_daemon_owned(
     mut config: WorkerLaunchConfig,
 ) -> Result<()> {
     let root = owner.root().to_owned();
+    let session_git_config_include = config
+        .target_environment
+        .get(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH)
+        .map(PathBuf::from);
     let mut target_environment = config.target_environment.clone();
+    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     target_environment.extend(config.environment);
+    target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = target_environment;
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
@@ -470,10 +476,20 @@ pub async fn run_daemon_owned(
     }
 
     super::record_startup_step(&root, "login-resolve");
+    // Keep non-Podman Git includes pinned to the worker's original home.
+    // Podman supplies its provisioned config path separately because root
+    // worker processes can have HOME=/root.
+    let worker_home = std::env::var_os("HOME").map(PathBuf::from);
     let base_environment = mj_core::login_environment::resolve().await?;
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
-    configure_github_cli(&root, &mut session_environment)?;
+    session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    configure_github_cli(
+        &root,
+        &mut session_environment,
+        worker_home.as_deref(),
+        session_git_config_include.as_deref(),
+    )?;
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment
         .iter()
@@ -547,9 +563,11 @@ pub async fn run_daemon_owned(
     // The reviewer shares this session's target and working directory and
     // nothing else. It stays idle until a controller asks for a second
     // opinion, so constructing it costs nothing.
+    let mut reviewer_target_environment = config.target_environment.clone();
+    reviewer_target_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     let reviewer = Arc::new(ReviewerSidecar::new(
         ReviewerPlacement {
-            target_environment: config.target_environment.clone(),
+            target_environment: reviewer_target_environment,
             worker_root: root.clone(),
             session_id: config.session_id.clone(),
             cwd: config.cwd.clone(),
@@ -805,7 +823,9 @@ pub async fn run_daemon_owned(
 /// and the supervisor that later uses the same runtime never overlap.
 pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<()> {
     let mut environment = config.target_environment.clone();
+    environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     environment.extend(config.environment);
+    environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = environment;
     if config.requires_harness_preparation() {
         super::prepare_harness_launch(

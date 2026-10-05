@@ -622,6 +622,16 @@ pub(super) fn worker_launch_config(
     }
     let (bridge_command, bridge_args) = bridge_launch(profile.kind, execution_policy);
     let mut target_environment = target.environment.clone();
+    let podman_container = backend.container_engine() == Some("podman");
+    if podman_container {
+        // Provisioning writes inherited settings to this file under the
+        // container's configured home. A root Podman worker can have
+        // HOME=/root, so the session Git config includes the file by path.
+        target_environment.insert(
+            mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH.into(),
+            "/home/hel/.gitconfig".into(),
+        );
+    }
     // The turn bounds are read by the worker process, which re-execs with a
     // cleared environment, so a value set for the daemon cannot reach it by
     // inheritance. Carry the two knobs explicitly when the daemon was started
@@ -730,6 +740,13 @@ pub(super) fn worker_launch_config(
     );
     let excluded_environment =
         exclude_harness_environment(&session.last_profile, profile, &mut environment);
+    if podman_container && profile.kind == mj_core::config::HarnessKind::Claude {
+        // Claude Code rejects bypassPermissions under uid 0 unless it is
+        // told the process is already running in an isolated sandbox.
+        // Podman container exec inherits HOME and the configured user from
+        // the container, preserving both for stopped legacy sessions.
+        environment.insert("IS_SANDBOX".into(), "1".into());
+    }
     Ok((
         WorkerLaunchConfig {
             goal_resume_request: None,

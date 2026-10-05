@@ -219,18 +219,20 @@ pub(super) fn copy_profile_entry_within(
     Ok(())
 }
 
-// Container copies can create root-owned files even when exec defaults to a
-// non-root image user. The worker directory was created by that user, so use
-// its ownership for uploaded files before restricting their permissions.
+// Container copies may be root-owned while the worker directory belongs to a
+// different user. Run this ownership-only operation as container root; normal
+// Podman execs inherit the user recorded when each container was created.
 pub(in crate::controller) fn container_upload_ownership_args(
+    engine: &str,
     container_id: &str,
     worker_root: &str,
     paths: &[&str],
 ) -> Vec<String> {
+    let root_user = if engine == "podman" { "0:0" } else { "0" };
     let mut args = vec![
         "exec".into(),
         "--user".into(),
-        "0".into(),
+        root_user.into(),
         container_id.into(),
         "sh".into(),
         "-c".into(),
@@ -349,12 +351,13 @@ pub(super) fn install_mbx_files(
         (
             std::iter::once(engine.to_owned())
                 .chain(container_upload_ownership_args(
+                    engine,
                     container_id,
                     worker_root,
                     &[&bin],
                 ))
                 .collect(),
-            "assign the mbx binary to the worker user",
+            "match the mbx binary to the worker directory owner",
         ),
         (
             vec![
@@ -579,6 +582,7 @@ pub(super) fn install_worker_files(
                 CommandSpec::new(
                     engine,
                     container_upload_ownership_args(
+                        engine,
                         container_id,
                         worker_root,
                         &[
@@ -589,7 +593,7 @@ pub(super) fn install_worker_files(
                         ],
                     ),
                 )
-                .purpose("assign uploaded files to the worker user"),
+                .purpose("match uploaded files to the worker directory owner"),
                 CommandSpec::new(
                     engine,
                     [
@@ -715,6 +719,7 @@ pub(super) fn install_worker_files(
                 ],
                 std::iter::once(engine.to_owned())
                     .chain(container_upload_ownership_args(
+                        engine,
                         container_id,
                         worker_root,
                         &[

@@ -262,6 +262,31 @@ impl CommandSpec {
     }
 }
 
+#[cfg(test)]
+mod podman_exec_tests {
+    use super::*;
+
+    #[test]
+    fn podman_exec_keeps_the_container_configured_user() {
+        assert_eq!(
+            CommandSpec::new("podman", ["exec", "--detach", "session", "true"]).args,
+            ["exec", "--detach", "session", "true"]
+        );
+        assert_eq!(
+            CommandSpec::new("podman", ["exec", "--user", "1000:1000", "session", "id"]).args,
+            ["exec", "--user", "1000:1000", "session", "id"]
+        );
+        assert_eq!(
+            CommandSpec::new("podman", ["exec", "session", "tool", "--user", "42"]).args,
+            ["exec", "session", "tool", "--user", "42"]
+        );
+        assert_eq!(
+            CommandSpec::new("docker", ["exec", "session", "id"]).args,
+            ["exec", "session", "id"]
+        );
+    }
+}
+
 /// A command ready to spawn, together with the SSH session lease it runs on.
 /// Keep this value alive until the child has exited: dropping it frees the
 /// session slot.
@@ -383,28 +408,6 @@ impl MountAccess {
             .filter(|access| overlay_available || access.without_overlay() == *access)
             .collect()
     }
-}
-
-/// The numeric identity of a container image's configured user, read from the
-/// image on the host that runs it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageUser {
-    pub uid: u32,
-    pub gid: u32,
-}
-
-/// Podman's user-namespace option for a session container, or `None` when the
-/// container keeps Podman's default mapping.
-///
-/// A rootless Podman container maps the image's user onto the host user
-/// running the daemon, so a file the container writes into an attached
-/// directory is owned by that host user instead of a subordinate id. The
-/// mapping has to name the image's own ids: plain `keep-id` maps the host user
-/// onto uid 1000 inside the container and demotes an image that runs as root,
-/// which is a change in how the container runs. Without the ids there is no
-/// safe option to pass, so the container runs the way it did before.
-pub fn podman_userns_option(image_user: Option<ImageUser>) -> Option<String> {
-    image_user.map(|ImageUser { uid, gid }| format!("--userns=keep-id:uid={uid},gid={gid}"))
 }
 
 /// The persisted shape. Read-only and copy-on-write mounts keep the original
