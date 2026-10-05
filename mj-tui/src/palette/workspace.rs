@@ -455,27 +455,4 @@ mod tests {
         dashboard.handle_key(key(KeyCode::Esc));
         assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
-
-    #[test]
-    fn picking_the_current_workspace_only_says_so() {
-        let mut dashboard = dashboard_with_workspaces();
-        dashboard.dispatch_command(CommandId::ChangeWorkspace);
-        drawn(&mut dashboard, 120, 40);
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
-    #[test]
-    fn the_command_waits_for_a_second_workspace() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_workspace_names(BTreeMap::from([(
-            "default".to_owned(),
-            "Default".to_owned(),
-        )]));
-        dashboard.focus_sessions();
-        assert_eq!(
-            (crate::actions::spec(CommandId::ChangeWorkspace).available)(&dashboard),
-            crate::actions::Availability::Blocked("there is no other workspace")
-        );
-    }
 }

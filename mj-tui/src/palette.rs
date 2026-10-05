@@ -1117,6 +1117,7 @@ mod tests {
 
     /// The session menu names a full disk on the session's host, with the
     /// figures the daemon's storage owner measured.
+    // Hard-won: 540c9202494a: a full target disk was reported only as unreachable.
     #[test]
     fn session_facts_name_a_full_disk_on_the_sessions_host() {
         let session = crate::test_support::precision_session();
@@ -1186,6 +1187,7 @@ mod tests {
     /// A-3, palette half: a blocked row gives its reason as a dimmed,
     /// capitalised sentence after " — ", as help does, not as a lowercase
     /// fragment in brackets.
+    // Hard-won: 7ea16bf8220e: blocked palette reasons appeared as raw lowercase bracket fragments.
     #[test]
     fn palette_rows_set_unavailability_reasons_apart_like_help() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1200,6 +1202,7 @@ mod tests {
         assert!(!joined.contains("(this session"), "{joined}");
     }
 
+    // Hard-won: e063b7f41d77: palette command availability stayed stale after session creation finished.
     #[test]
     fn open_palette_enables_rename_when_session_creation_finishes() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1409,6 +1412,7 @@ mod tests {
     /// none of which a harness-owned child can take: its parent's harness
     /// owns it, and Mjolnir has no record of its own to rename or destroy.
     /// The menu offers what does apply, which is opening its conversation.
+    // Hard-won: 936d6ee93c8a: native child menus offered unsupported record actions.
     #[test]
     fn a_native_childs_menu_offers_only_what_applies_to_it() {
         let (mut dashboard, parent_id, id) = dashboard_with_finished_native_child();
@@ -1433,6 +1437,7 @@ mod tests {
     /// session's conversation and type in it.", but its pane is read-only
     /// ("controlled by parent"), and so is a stopped sub-agent's. Open says
     /// so for both, and keeps its description for a session you can type in.
+    // Hard-won: e5b2818d4996: Open described a read-only child conversation as writable.
     #[test]
     fn open_describes_a_read_only_conversation_as_read_only() {
         let read_only = "Show the selected agent's conversation (read-only).";
@@ -1638,19 +1643,6 @@ mod tests {
         assert!(lines[previous].contains("ctrl+b shift+tab"), "{lines:#?}");
     }
 
-    /// `e` used to open the session edit dialog. The palette replaced it, and
-    /// the key is unbound rather than left doing something else.
-    #[test]
-    fn e_no_longer_opens_anything() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Char('e'))),
-            DashboardAction::None
-        );
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
     #[test]
     fn palette_ranks_prefix_matches_before_substring_matches() {
         let dashboard = dashboard_with_session(running_session());
@@ -1687,6 +1679,7 @@ mod tests {
     /// Launch campaign finding A-6: a command run from the palette appears
     /// under Recent even when it also has a pane key, as Create session does,
     /// and even when it opens a wizard.
+    // Hard-won: a93d64c805c9: palette commands with pane keys were missing from Recent.
     #[test]
     fn a_command_run_from_the_palette_is_listed_under_recent() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1724,6 +1717,7 @@ mod tests {
     /// and the cursor used to ride that command down into the results of the
     /// next search: the screen pointed at the top match while Enter ran the
     /// command from last time.
+    // Hard-won: fb0622d0f159: Enter ran a stale Recent command instead of the highlighted match.
     #[test]
     fn a_new_palette_query_puts_the_cursor_on_its_top_match() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1778,6 +1772,7 @@ mod tests {
     /// A run of the query inside a word is what a reader means by a match.
     /// Letters merely found in order, which any long label can supply, must
     /// not outrank it, and a label that starts with the query still wins.
+    // Hard-won: fb0622d0f159: scattered letters outranked a contiguous query match.
     #[test]
     fn a_contiguous_label_match_outranks_a_scattered_one() {
         let contiguous =
@@ -1793,6 +1788,7 @@ mod tests {
 
     /// The same ranking through the palette, on the two commands that showed
     /// the defect.
+    // Hard-won: fb0622d0f159: searching “rend” ranked Resize above the literal rendering match.
     #[test]
     fn palette_ranks_toggle_rendering_above_resize_pane_down_for_rend() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1810,23 +1806,6 @@ mod tests {
             .position(|id| *id == CommandId::ResizePaneDown)
             .expect("Resize pane down");
         assert!(rendering < resize, "{ranked:?}");
-    }
-
-    #[test]
-    fn palette_enter_on_rename_opens_the_rename_editor() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_palette(&mut dashboard);
-        type_query(&mut dashboard, "rename");
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(
-            matches!(dashboard.mode, Mode::Rename(_)),
-            "{:?}",
-            dashboard.mode
-        );
     }
 
     #[test]

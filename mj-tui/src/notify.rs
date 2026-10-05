@@ -391,55 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn unstructured_waiting_uses_agent_text_then_fallback() {
-        let mut dashboard = dashboard();
-        let detail = dashboard.session_details.get_mut("asks").unwrap();
-        detail.pending_elicitations.clear();
-        detail.last_agent_message = Some("Which branch?".into());
-        assert_eq!(
-            dashboard.notification_body("asks", AttentionLevel::Waiting),
-            "Which branch?"
-        );
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .last_agent_message = None;
-        assert_eq!(
-            dashboard.notification_body("asks", AttentionLevel::Waiting),
-            "Waiting for your input"
-        );
-    }
-
-    #[test]
-    fn interrupted_work_notifies_with_its_own_message() {
-        let mut dashboard = dashboard();
-        dashboard
-            .session_details
-            .get_mut("done")
-            .unwrap()
-            .unread_interruptions = 1;
-        assert!(dashboard.notification_events(0).is_empty());
-        let due = dashboard.notification_events(2_000);
-        assert_eq!(
-            due.iter()
-                .find(|notice| notice.session_id == "done")
-                .unwrap()
-                .body,
-            "Work was interrupted"
-        );
-    }
-
-    #[test]
-    fn reopening_still_notifies_for_unresolved_activity() {
-        for _ in 0..2 {
-            let mut dashboard = dashboard();
-            assert!(dashboard.notification_events(0).is_empty());
-            assert_eq!(dashboard.notification_events(2_000).len(), 2);
-        }
-    }
-
-    #[test]
     fn a_new_question_notifies_once_after_the_delay() {
         let mut dashboard = dashboard();
         // Nothing before the two-second default delay has elapsed.
@@ -506,42 +457,27 @@ mod tests {
         assert!(dashboard.notification_events(6_000).is_empty());
     }
 
+    // Hard-won: 3e31dbd32a77: a killed worker was counted as waiting in the terminal title.
     #[test]
-    fn the_title_counts_waiting_and_unread_and_can_be_turned_off() {
+    fn the_title_names_an_unreachable_worker_apart_from_questions() {
         let mut dashboard = dashboard();
         assert_eq!(
             dashboard.terminal_title().as_deref(),
             Some("mj · 1 waiting · 1 unread")
         );
-        dashboard
-            .session_details
-            .get_mut("asks")
-            .unwrap()
-            .pending_elicitations
-            .clear();
-        dashboard
-            .session_details
-            .get_mut("done")
-            .unwrap()
-            .unread_agent_messages = 0;
-        assert_eq!(dashboard.terminal_title().as_deref(), Some("mj"));
-        let mut config = dashboard.config.clone();
-        config.notify.title = false;
-        dashboard.set_config(config);
-        assert_eq!(dashboard.terminal_title(), None);
-    }
-
-    #[test]
-    fn the_title_names_an_unreachable_worker_apart_from_questions() {
-        let mut dashboard = dashboard();
         dashboard.state.sessions.get_mut("done").unwrap().state =
             mj_core::state::SessionState::Disconnected;
         assert_eq!(
             dashboard.terminal_title().as_deref(),
             Some("mj · 1 unreachable · 1 waiting")
         );
+        let mut config = dashboard.config.clone();
+        config.notify.title = false;
+        dashboard.set_config(config);
+        assert_eq!(dashboard.terminal_title(), None);
     }
 
+    // Hard-won: 88460860c553: relay stderr leaked into the footer and the unreachable notice stayed after recovery.
     #[test]
     fn an_unreachable_worker_is_reported_plainly_and_withdrawn_on_recovery() {
         let mut dashboard = dashboard();

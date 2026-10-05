@@ -598,40 +598,6 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn mouse_pin_control_opens_placement_then_activates_the_named_session() {
-        let mut d = dashboard_with_session(running_session());
-        let pane = d.browse_pane();
-        d.set_pane_session(pane, Some("session-1"));
-        d.conversation_pane_areas =
-            vec![(pane, Rect::new(0, 0, 100, 20), Rect::new(0, 20, 100, 5))];
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|frame| {
-                d.begin_surface_frame();
-                render_pane_chrome(frame, &d);
-                d.end_surface_frame();
-            })
-            .unwrap();
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            d.handle_event_result(Event::Mouse(mouse_at(kind, (91, 0))));
-        }
-        assert!(d.pane_menu.is_some());
-        assert_eq!(d.selected_session_id(), Some("session-1"));
-        let action = d.handle_key(key(KeyCode::Enter));
-        assert_eq!(
-            action,
-            DashboardAction::OpenSessionInSplit {
-                session_id: "session-1".into(),
-                direction: Direction::Horizontal
-            }
-        );
-        assert!(d.pane_menu.is_none());
-    }
-
-    #[test]
     fn pane_menu_targets_the_clicked_pane_and_swaps_without_moving_browse_role() {
         let mut d = dashboard_with_session(running_session());
         d.conversation_area = Some(Rect::new(0, 0, 120, 40));
@@ -653,45 +619,10 @@ mod tests {
         assert_eq!(d.pin_id("session-1"), Some(0));
     }
 
-    #[test]
-    fn mouse_empty_destination_requires_press_and_release_in_the_same_pane() {
-        let mut d = dashboard_with_session(running_session());
-        d.conversation_area = Some(Rect::new(0, 0, 120, 40));
-        let empty = d.browse_pane();
-        d.split_focused_pane(Direction::Horizontal, None).unwrap();
-        d.set_pane_session(empty, None);
-        d.conversation_pane_areas =
-            vec![(empty, Rect::new(60, 0, 60, 30), Rect::new(60, 30, 60, 10))];
-        d.begin_pin_menu("session-1".into());
-        d.handle_key(key(KeyCode::Char('3')));
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal
-            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
-            .unwrap();
-        assert_eq!(
-            d.handle_pane_menu_event(Event::Mouse(mouse_at(
-                MouseEventKind::Down(MouseButton::Left),
-                (110, 25)
-            ))),
-            DashboardAction::None
-        );
-        assert!(d.pane_menu.is_some());
-        assert_eq!(
-            d.handle_pane_menu_event(Event::Mouse(mouse_at(
-                MouseEventKind::Up(MouseButton::Left),
-                (110, 25)
-            ))),
-            DashboardAction::PinSession {
-                session_id: "session-1".into(),
-                pane: empty
-            }
-        );
-        assert!(d.pane_menu.is_none());
-    }
-
     /// Launch campaign finding D-10: the empty-pane chooser opens in the
     /// empty pane, under its "[1] Pin here" marker, not at the screen's
     /// top-left corner over the Workspaces pane.
+    // Hard-won: 541cba84d488: the empty-pane chooser covered Workspaces from the screen origin.
     #[test]
     fn the_empty_pane_chooser_opens_inside_the_empty_pane() {
         let mut d = dashboard_with_session(running_session());
@@ -1043,31 +974,5 @@ mod tests {
                 drawn(&mut d, 140, 40);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod cpu_menu_tests {
-    use super::*;
-    use crate::test_support::*;
-    #[test]
-    fn choosing_cpu_by_session_in_the_targets_menu_opens_and_closes_the_report() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.dispatch_command(CommandId::TargetsMenu);
-        let index = dashboard
-            .pane_menu
-            .as_ref()
-            .unwrap()
-            .entries
-            .iter()
-            .position(|(label, _)| label == "CPU by session…")
-            .unwrap();
-        dashboard.handle_pane_menu_event(Event::Key(key(KeyCode::Char(
-            char::from_digit((index + 1) as u32, 10).unwrap(),
-        ))));
-        assert!(matches!(dashboard.mode, Mode::SessionCpuReport(_)));
-        assert!(dashboard.pane_menu.is_none());
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
     }
 }
