@@ -180,6 +180,14 @@ impl Controller {
         // A reviewer on a ChatGPT Codex profile must not fall back to an API
         // key any more than a session may.
         let excluded_environment = profile.exclude_harness_environment(&mut environment);
+        // A Podman session runs as uid 0, where Claude Code rejects
+        // bypassPermissions unless told it is already sandboxed. The session's
+        // own launch sets this only when the session itself runs Claude.
+        if backend.container_engine() == Some("podman")
+            && profile.kind == mj_core::config::HarnessKind::Claude
+        {
+            environment.insert("IS_SANDBOX".into(), "1".into());
+        }
         Ok(ReviewerLaunchConfig {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -749,6 +757,42 @@ mod tests {
     }
 
     // Hard-won: c5deb2a59c0c: an unconstrained Muse reviewer could bypass Guardian approvals on the host.
+    #[test]
+    fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
+        let directory = tempfile::tempdir().unwrap();
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        let podman = mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+            workspace_storage: Default::default(),
+        };
+        let docker = mj_core::state::TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id,
+        };
+        for (locator, profile_id, sandboxed) in [
+            (podman.clone(), "claude", true),
+            (podman, "codex", false),
+            (docker, "claude", false),
+        ] {
+            let (controller, session_id) = fixture(directory.path(), locator);
+            let config = controller
+                .stage_reviewer_profile_controlled(
+                    &session_id,
+                    profile_id,
+                    0,
+                    &[],
+                    &RecordingExecutor::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                config.environment.get("IS_SANDBOX").map(String::as_str),
+                sandboxed.then_some("1"),
+                "{profile_id}"
+            );
+        }
+    }
+
     #[test]
     fn an_unconstrained_reviewer_is_refused_for_a_session_that_runs_with_approvals() {
         let directory = tempfile::tempdir().unwrap();
