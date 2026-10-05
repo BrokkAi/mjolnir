@@ -78,6 +78,7 @@ fn golden_mj_update_output() {
             "=== {label} update notice (stdout) ===\n{notice}\n\n"
         ));
     }
+    output.pop();
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mj-update-output", &output);
 }
 

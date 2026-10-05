@@ -200,6 +200,7 @@ fn golden_path_completion() {
             "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
         ));
     }
+    output.pop();
 
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "path-completion", &output);
 }

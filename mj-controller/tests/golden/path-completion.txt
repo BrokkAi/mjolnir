@@ -15,4 +15,3 @@
   "insert": "/fixture/projects/",
   "truncated": false
 }
-
