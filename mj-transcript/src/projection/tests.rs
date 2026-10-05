@@ -209,6 +209,63 @@ fn golden_session_title_projection() {
         &backfilled,
     );
 
+    for (command_id, command, outcome) in [
+        (
+            "shell-exit",
+            "cargo test -p mj-transcript",
+            mj_core::relay::UserShellResult {
+                command: "cargo test -p mj-transcript".into(),
+                stdout: "2 passed".into(),
+                stderr: "one expected warning".into(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                exit_code: Some(7),
+                signal: None,
+                duration_ms: 1_234,
+                status: mj_core::relay::UserShellStatus::Exited,
+                error: None,
+            },
+        ),
+        (
+            "shell-signal",
+            "long-running generator",
+            mj_core::relay::UserShellResult {
+                command: "long-running generator".into(),
+                stdout: "partial output".into(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                exit_code: None,
+                signal: Some("SIGTERM".into()),
+                duration_ms: 2_345,
+                status: mj_core::relay::UserShellStatus::Signaled,
+                error: None,
+            },
+        ),
+    ] {
+        let mut shell = MaterializedSession::empty("session-1");
+        apply_observation(
+            &mut shell,
+            RelayObservation::CommandQueued {
+                command_id: command_id.into(),
+                command: RelayCommand::RunUserShell {
+                    command: command.into(),
+                },
+                created_at_ms: 300,
+            },
+        );
+        apply_observation(
+            &mut shell,
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: Some(mj_core::relay::RelayCommandKind::RunUserShell),
+                command_id: command_id.into(),
+                outcome: RelayCommandOutcome::UserShell { result: outcome },
+            },
+        );
+        append_transcript_state(&mut output, command_id, &shell);
+    }
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "session-title-projection",

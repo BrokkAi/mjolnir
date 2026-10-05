@@ -799,6 +799,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_persisted_index_title_uses_its_stable_fallback_id() {
+        let legacy_title =
+            include_str!("../tests/fixtures/legacy-indexed-tool-call.txt").trim_end();
+
+        let (call, terminals) = indexed_tool_call(legacy_title, "legacy-tool-17");
+
+        assert_eq!(
+            call,
+            json!({
+                "toolCallId": "legacy-tool-17",
+                "title": "Terminal",
+                "status": "completed"
+            })
+        );
+        assert!(terminals.is_empty());
+    }
+
+    #[test]
     fn ninth_call_demotes_first_and_late_updates_do_not_promote_it() {
         let mut summary = TranscriptSummary::default();
         summary.push_user("test the change");
