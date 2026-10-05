@@ -2391,7 +2391,8 @@ fn append_active_golden_state(
         buffer.area.width, buffer.area.height
     )
     .expect("write state label");
-    output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+    let lines = crate::golden::buffer_lines(buffer);
+    output.push_str(&lines.join("\n"));
     output.push('\n');
     for detail in details {
         writeln!(output, "{detail}").expect("write state detail");

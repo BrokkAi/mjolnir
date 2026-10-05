@@ -1258,7 +1258,7 @@ action: GoLaunch { recipe: GoRecipe { profile_id: "codex-1", target_id: "podman"
 │ default ×1                         ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Destroying                                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │
-│ Create   Open   Filter: _____________││Elapsed: 57d10h · Profile: codex-1                        │
+│ Create   Open   Filter: _____________││Elapsed: 0s · Profile: codex-1                            │
 │hel ──────────────────────────────────││                                                          │
 │› × ACP pretty name Destroying · w◇ ⋯ ││                                                          │
 │                                      ││                                                          │

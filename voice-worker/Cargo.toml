@@ -29,5 +29,5 @@ tokio-util.workspace = true
 libloading = "0.8"
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["golden"] }
+mj-core = { path = "../mj-core", package = "brokk-mj-core", features = ["golden"] }
 tempfile.workspace = true

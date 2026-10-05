@@ -139,7 +139,9 @@ fn tool_definition() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::{BufRead, BufReader, Write};
+    #[cfg(unix)]
     use std::sync::{Arc, Mutex};
 
     #[cfg(unix)]

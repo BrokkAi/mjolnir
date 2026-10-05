@@ -2241,6 +2241,14 @@ mod tests {
         .unwrap();
     }
 
+    fn pin_combined_golden_operation_clock(dashboard: &mut DashboardState) {
+        dashboard
+            .session_operations
+            .get_mut("session-1")
+            .expect("golden session operation")
+            .started_at_epoch_seconds = u64::MAX;
+    }
+
     #[test]
     fn golden_combined_dashboard_render() {
         use std::fmt::Write as _;
@@ -2248,6 +2256,7 @@ mod tests {
         let mut output = String::new();
         let mut standby = dashboard_with_session(running_session());
         standby.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+        pin_combined_golden_operation_clock(&mut standby);
         standby.focus_prompt();
         let lines = render_combined_golden(&mut standby, 100, 40);
         append_combined_golden(&mut output, "empty standby composer", 100, 40, &lines);
@@ -2259,12 +2268,14 @@ mod tests {
             SessionOperationKind::Suspending,
             None,
         );
+        pin_combined_golden_operation_clock(&mut suspending);
         let lines = render_combined_golden(&mut suspending, 100, 40);
         append_combined_golden(&mut output, "suspending status panel", 100, 40, &lines);
         append_pane_geometry(&mut output, &suspending);
 
         let mut draft = dashboard_with_session(running_session());
         draft.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+        pin_combined_golden_operation_clock(&mut draft);
         draft.seed_standby_prompt("session-1", "a\nb\nc\nd\ne\nf\ng".into());
         draft.focus_prompt();
         let desired = draft
@@ -2278,6 +2289,7 @@ mod tests {
         writeln!(output, "desired prompt height: {desired}").unwrap();
         draft.finish_session_operation("session-1");
         draft.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
+        pin_combined_golden_operation_clock(&mut draft);
         writeln!(
             output,
             "standby prompt during suspension: {}",
@@ -2290,6 +2302,7 @@ mod tests {
         priority.set_pane_size(SupportPane::Targets, PaneSize::Maximized);
         priority.set_pane_size(SupportPane::Quota, PaneSize::Standard);
         priority.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+        pin_combined_golden_operation_clock(&mut priority);
         priority.seed_standby_prompt("session-1", "first\nsecond\nthird".into());
         priority.focus_prompt();
         let lines = render_combined_golden(&mut priority, 100, 40);
@@ -2413,9 +2426,15 @@ mod tests {
         let mut failed_session = running_session();
         failed_session.state = mj_core::state::SessionState::Destroying;
         failed_session.last_error = Some("Podman exited before the workspace was removed".into());
-        // A future durable timestamp keeps the rendered elapsed clock at 0s.
-        failed_session.updated_at = "2099-01-01T00:00:00Z".into();
+        let failed_session_id = failed_session.id.clone();
         let mut failed = dashboard_with_session(failed_session);
+        // The shared fixture resets updated_at, so pin the clock after building the dashboard.
+        failed
+            .state
+            .sessions
+            .get_mut(&failed_session_id)
+            .expect("failed destroy session remains in the dashboard")
+            .updated_at = "2099-01-01T00:00:00Z".into();
         let lines = render_combined_golden(&mut failed, 100, 40);
         append_combined_golden(
             &mut output,
