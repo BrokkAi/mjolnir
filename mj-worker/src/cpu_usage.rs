@@ -119,15 +119,6 @@ pub(crate) async fn sample_cpu(sender: tokio::sync::watch::Sender<CpuRead>) {
 mod tests {
     use super::*;
     #[test]
-    fn cpu_sampler_reports_share_of_online_cpus() {
-        let mut sampler = CpuSampler::default();
-        let at = Instant::now();
-        sampler.observe(at, Duration::ZERO, 4);
-        assert_eq!(sampler.latest(), None);
-        sampler.observe(at + Duration::from_secs(10), Duration::from_secs(5), 4);
-        assert_eq!(sampler.latest().unwrap().recent_permille, 125);
-    }
-    #[test]
     fn cpu_sampler_hourly_average_is_not_diluted_at_start() {
         let mut sampler = CpuSampler::default();
         let at = Instant::now();

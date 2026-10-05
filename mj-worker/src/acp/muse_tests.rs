@@ -265,6 +265,7 @@ for line in sys.stdin:
     }
 }
 
+// Hard-won: c5deb2a: Older Muse containers stopped working after upgrades when their adapter withheld MCP servers.
 #[tokio::test]
 async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them() {
     let opened = open_muse("granted", false).await;
@@ -289,6 +290,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
     );
 }
 
+// Hard-won: c5deb2a: A Muse reviewer could run without the analyzer tools required to review safely.
 #[tokio::test]
 async fn a_muse_reviewer_without_its_analyzer_tools_does_not_start() {
     let opened = open_muse("granted", true).await;

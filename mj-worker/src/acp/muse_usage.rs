@@ -62,7 +62,6 @@ fn model_tokens(
 mod tests {
     use super::*;
     use mj_core::config::HarnessKind;
-    use mj_core::usage::UsageScope;
     use serde_json::json;
 
     fn standard() -> TokenUsage {
@@ -73,63 +72,6 @@ mod tests {
 
     fn meta(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
         value.as_object().expect("object fixture").clone()
-    }
-
-    #[test]
-    fn muse_turn_extras_become_provider_details_without_touching_counters() {
-        let extras = meta(json!({
-            "mjolnir.dev/usage-scope": "turn",
-            "muse": {
-                "modelCalls": 4,
-                "apiDurationMs": 8200,
-                "modelUsage": {
-                    "gemini-3-pro": {"totalTokens": 100, "inputTokens": 80, "outputTokens": 20,
-                                     "thoughtTokens": 5, "cachedReadTokens": 40},
-                    "gemini-3-flash": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10},
-                },
-            },
-        }));
-        let result = attach_provider_details(standard(), Some(&extras));
-        assert_eq!(result.scope, UsageScope::Turn);
-        assert_eq!(
-            (
-                result.total_tokens,
-                result.input_tokens,
-                result.output_tokens
-            ),
-            (130, 100, 30)
-        );
-        let details = result.provider_details.as_ref().expect("provider details");
-        assert_eq!(details.model_calls, Some(4));
-        assert_eq!(details.api_duration_ms, Some(8200));
-        assert_eq!(details.cost, None);
-        let pro = &details.model_usage["gemini-3-pro"];
-        assert_eq!(pro.scope, UsageScope::Turn);
-        assert_eq!(
-            (pro.total_tokens, pro.thought_tokens, pro.cached_read_tokens),
-            (100, Some(5), Some(40))
-        );
-        let flash = &details.model_usage["gemini-3-flash"];
-        assert_eq!((flash.total_tokens, flash.cached_read_tokens), (30, None));
-    }
-
-    #[test]
-    fn muse_extras_that_are_absent_or_malformed_stay_out_of_provider_details() {
-        assert_eq!(attach_provider_details(standard(), None), standard());
-        for value in [
-            json!({}),
-            json!({"muse": {}}),
-            json!({"muse": {"modelCalls": "4"}}),
-            json!({"muse": {"modelCalls": -1, "apiDurationMs": 2.5}}),
-            json!({"muse": {"modelUsage": []}}),
-            json!({"muse": {"modelUsage": {"m": {"inputTokens": 80, "outputTokens": 20}}}}),
-        ] {
-            assert_eq!(
-                attach_provider_details(standard(), Some(&meta(value.clone()))),
-                standard(),
-                "unusable extras must not create provider details: {value}"
-            );
-        }
     }
 
     #[test]

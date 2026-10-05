@@ -207,6 +207,7 @@ mod tests {
         );
     }
 
+    // Hard-won: a02d1c6: Claude child task updates became warning rows in the parent transcript.
     #[test]
     fn ignores_child_async_task_updates_but_leaves_the_parents_alone() {
         let mut router = NativeAgentRouter::default();
