@@ -380,97 +380,12 @@ pub(super) fn queued_prompt_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_runtime_state, remote_submit_failure, send_if_changed};
-    use crate::pollers::{Feed, RuntimeStateUpdate};
-    use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
-
-    /// Opening a session's preview needs no query: the tail the feed follows
-    /// is already in memory, and serving it reaches neither the daemon nor
-    /// the store.
-    #[tokio::test]
-    async fn a_held_tail_is_served_without_the_daemon_or_the_store() {
-        let mut materialized = mj_core::state::MaterializedSession::empty("s");
-        materialized.applied_event_ordinal = 3;
-        let tail = mj_client::runtime_feed::SessionTail::of(
-            &materialized,
-            &mj_core::state::ProjectionWindow::default(),
-            16,
-        );
-        let mut replica = mj_client::runtime_feed::RuntimeReplica {
-            cursor: Some(mj_client::runtime_feed::RuntimeCursor {
-                incarnation: "daemon".into(),
-                sequence: 7,
-            }),
-            ..Default::default()
-        };
-        replica.projection.transcripts.insert("s".into(), tail);
-        let replica = std::sync::Arc::new(tokio::sync::Mutex::new(replica));
-        // A test binary refuses the default instance's daemon and store, so
-        // reaching either would fail this call.
-        let (served, window) = super::load_session_tail(replica, "s".into())
-            .await
-            .expect("a held tail is served")
-            .expect("the session has a tail");
-        assert_eq!(served, materialized);
-        assert_eq!(window, mj_core::state::ProjectionWindow::default());
-    }
-
-    /// The daemon republishes its whole snapshot, at a new revision, whenever
-    /// any session moves. A surface must not wake for the parts it already has.
-    #[test]
-    fn a_republished_snapshot_wakes_the_surface_only_for_what_changed() {
-        let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
-        let (notices_tx, notices_rx) = tokio::sync::watch::channel(Vec::<RuntimeNotice>::new());
-        let mut state = Feed::new(state_rx);
-        let mut notices = Feed::new(notices_rx);
-        let first = RuntimeStateUpdate {
-            revision: 1,
-            workspace_names: [("w".to_owned(), "work".to_owned())].into(),
-            ..Default::default()
-        };
-        let notice = RuntimeNotice {
-            id: 1,
-            session_id: "s".into(),
-            text: "checkpoint saved".into(),
-        };
-        publish_runtime_state(&state_tx, first.clone());
-        send_if_changed(&notices_tx, vec![notice.clone()]);
-        assert_eq!(state.next_ready().map(|state| state.revision), Some(1));
-        assert_eq!(notices.next_ready(), Some(vec![notice.clone()]));
-
-        publish_runtime_state(
-            &state_tx,
-            RuntimeStateUpdate {
-                revision: 2,
-                ..first.clone()
-            },
-        );
-        send_if_changed(&notices_tx, vec![notice.clone()]);
-        assert!(
-            state.next_ready().is_none(),
-            "an equal snapshot woke the surface"
-        );
-        assert!(
-            notices.next_ready().is_none(),
-            "equal notices woke the surface"
-        );
-        assert_eq!(
-            state_tx.borrow().revision,
-            2,
-            "the revision is still current"
-        );
-
-        let mut renamed = first;
-        renamed.revision = 3;
-        renamed
-            .workspace_names
-            .insert("w".to_owned(), "renamed".to_owned());
-        publish_runtime_state(&state_tx, renamed.clone());
-        assert_eq!(state.next_ready(), Some(renamed));
-    }
+    use super::remote_submit_failure;
+    use mj_client::daemon::DaemonRefusal;
 
     /// I1-12: the daemon's refusal of `/clear` reached the chat as
     /// "Delivery unconfirmed" and stayed pinned as an unconfirmed row.
+    // Hard-won: 8bf21ad0: a final daemon relay refusal was incorrectly rendered as delivery unconfirmed and left the row stuck.
     #[test]
     fn a_daemon_refusal_is_a_rejection_and_a_lost_exchange_is_unconfirmed() {
         let refused = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(

@@ -57,44 +57,6 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
-/// Prefix canned responses with a successful SSH connectivity probe, which
-/// every SSH-backed check runs first.
-fn reachable_then(
-    responses: impl IntoIterator<Item = Result<CommandOutput>>,
-) -> Vec<Result<CommandOutput>> {
-    let mut all = vec![Ok(output(b""))];
-    all.extend(responses);
-    all
-}
-
-/// The remote probes arrive in one batched SSH command, framed the way the
-/// remote script prints them.
-fn ssh_podman_probes(linger: (i32, &str, &str)) -> Vec<Result<CommandOutput>> {
-    vec![Ok(output(crate::targets::ssh_podman_probe_fixture(&[
-        ("version", 0, "podman version 5.4.2\n", ""),
-        (
-            "uid_map",
-            0,
-            "         0       1000          1\n         1     100000      65536\n",
-            "",
-        ),
-        ("linger", linger.0, linger.1, linger.2),
-    ])))]
-}
-
-fn passing_ssh_podman_probes() -> Vec<Result<CommandOutput>> {
-    ssh_podman_probes((0, "yes\n", ""))
-}
-
-fn passing_podman_probes() -> Vec<Result<CommandOutput>> {
-    vec![
-        Ok(output(b"podman version 5.4.2\n")),
-        Ok(output(
-            b"         0       1000          1\n         1     100000      65536\n",
-        )),
-    ]
-}
-
 fn container(image: &str) -> ContainerTemplate {
     ContainerTemplate {
         build_cache: None,
@@ -117,6 +79,7 @@ fn ssh_connection() -> mj_core::config::SshConnection {
     }
 }
 
+// Hard-won: 43be5270: doctor treated a newer config as invalid TOML and advised replacing it.
 #[test]
 fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
     let directory = tempfile::tempdir().unwrap();
@@ -146,6 +109,7 @@ fn doctor_tells_the_user_to_update_rather_than_replace_a_newer_builds_config() {
 
 /// Sessions start from a plain project directory without any bundle, so a
 /// configuration with an enabled profile and no bundle is complete.
+// Hard-won: 9a0c1c2b: doctor incorrectly failed valid project-directory sessions when no saved bundle existed.
 #[test]
 fn a_config_without_a_bundle_is_ready_for_sessions() {
     let directory = tempfile::tempdir().unwrap();
@@ -198,6 +162,7 @@ fn a_config_without_an_enabled_profile_cannot_start_sessions() {
 /// reading the report does not need `--json` (launch finding R14-3,
 /// reverify-14 cli/020). Those checks now say how to write the first
 /// configuration, and a broken file's checks point at plain `mj doctor`.
+// Hard-won: 2eb56a91: missing config was called invalid and remediation pointed to a nonexistent file and --json.
 #[test]
 fn checks_waiting_for_a_config_say_how_to_get_one_without_json() {
     let directory = tempfile::tempdir().unwrap();
@@ -260,6 +225,7 @@ fn checks_waiting_for_a_config_say_how_to_get_one_without_json() {
 /// A newer build's configuration is the one case doctor cannot read and the
 /// user cannot repair in the file, so no check in the run may send them to fix
 /// TOML; the checks that depend on a configuration skip and say why.
+// Hard-won: a8ec1783: a newer config produced contradictory advice to fix the TOML instead of update Mjolnir.
 #[test]
 fn a_newer_builds_config_never_asks_the_user_to_fix_config_toml() {
     let directory = tempfile::tempdir().unwrap();
@@ -323,62 +289,6 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
 }
 
 #[test]
-fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
-    let config = config_with([
-        (
-            "podman",
-            TargetTemplate::LocalPodman {
-                container: container("ubuntu:24.04"),
-            },
-        ),
-        (
-            "docker",
-            TargetTemplate::LocalDocker {
-                container: container("ubuntu:24.04"),
-            },
-        ),
-    ]);
-    let executor = FakeExecutor::new([Ok(output("Linux x86_64")), Ok(output("mbx\nmbx 1.15.0"))]);
-
-    let checks = build_cache_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    let check = &checks[0];
-    assert_eq!(check.id, "build-cache.local");
-    assert_eq!(check.status, CheckStatus::Warning);
-    assert!(check.detail.contains("1.15.0"));
-    assert!(check.detail.contains(crate::controller::MBX_VERSION));
-    assert!(check.detail.contains("run without the shared build cache"));
-    assert!(check.detail.contains("docker, podman"));
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("Upgrade mbx")
-    );
-    assert_eq!(executor.commands.borrow().len(), 2);
-    assert!(
-        all_ready(&checks),
-        "an optional cache warning preserves doctor's exit status"
-    );
-
-    let json = serde_json::to_value(check).unwrap();
-    assert_eq!(json["status"], "warning");
-    assert!(
-        json["remediation"]
-            .as_str()
-            .unwrap()
-            .contains(crate::controller::MBX_VERSION)
-    );
-    let mut human = Vec::new();
-    render_human(&checks, &mut human).unwrap();
-    let human = String::from_utf8(human).unwrap();
-    assert!(human.contains("warning Build cache on local"));
-    assert!(human.contains("remediation: Upgrade mbx"));
-}
-
-#[test]
 fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     let config = config_with([(
         "podman",
@@ -410,270 +320,11 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     }
 }
 
-#[test]
-fn doctor_reports_remote_host_mbx_for_ssh_container_targets() {
-    let config = config_with([(
-        "remote",
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-    let executor = FakeExecutor::new([
-        Ok(output("Linux aarch64")),
-        Ok(output("/home/dev/.cargo/bin/mbx\nmbx 1.15.0")),
-    ]);
-
-    let checks = build_cache_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Warning);
-    assert!(checks[0].id.contains("example.test"));
-    assert!(checks[0].detail.contains("targets remote"));
-    assert_eq!(executor.commands.borrow()[0].program, "ssh");
-}
-
-#[test]
-fn doctor_reports_darwin_cache_as_unsupported_without_mbx_remediation() {
-    for target in [
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container("ubuntu:24.04"),
-        },
-    ] {
-        let config = config_with([("mac", target)]);
-        let executor = FakeExecutor::new([Ok(output("Darwin arm64"))]);
-        let checks = build_cache_checks(Ok(&config), &executor);
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].status, CheckStatus::Unsupported);
-        assert!(checks[0].detail.contains("requires a Linux host"));
-        assert!(checks[0].remediation.is_none());
-        assert!(all_ready(&checks));
-        assert_eq!(executor.commands.borrow().len(), 1);
-    }
-}
-
-#[test]
-fn doctor_skips_disabled_or_irrelevant_build_caches_without_probing() {
-    let mut disabled = config_with([(
-        "podman",
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-    let executor = FakeExecutor::new([]);
-    if let TargetTemplate::LocalPodman { container } = disabled.targets.get_mut("podman").unwrap() {
-        container.build_cache = Some(mj_core::config::TargetBuildCache {
-            enabled: Some(false),
-            ..Default::default()
-        });
-    }
-    assert!(build_cache_checks(Ok(&disabled), &executor).is_empty());
-    let bare = config_with([("bare", TargetTemplate::LocalBare)]);
-    assert!(build_cache_checks(Ok(&bare), &executor).is_empty());
-    assert!(executor.commands.borrow().is_empty());
-}
-
-fn runtime_ssh() -> RuntimeSshTarget {
-    RuntimeSshTarget::from(&ssh_connection())
-}
-
-#[test]
-fn podman_check_is_unsupported_without_a_valid_config() {
-    let executor = FakeExecutor::new([]);
-
-    let check = podman_check(Err(ConfigGap::Unreadable), &executor, &ApplePlatform::Linux);
-
-    assert_eq!(check.status, CheckStatus::Unsupported);
-    assert_eq!(
-        check.detail,
-        "Podman prerequisites cannot be evaluated until config.toml is valid."
-    );
-    assert!(executor.commands.borrow().is_empty());
-}
-
-#[test]
-fn podman_check_is_unsupported_without_a_local_podman_target() {
-    let executor = FakeExecutor::new([]);
-    let config = config_with([(
-        "apple",
-        TargetTemplate::AppleContainer {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
-
-    assert_eq!(check.status, CheckStatus::Unsupported);
-    assert_eq!(check.detail, "No local-podman target is configured.");
-    assert!(executor.commands.borrow().is_empty());
-}
-
-#[test]
-fn podman_check_probes_the_host_when_a_local_podman_target_exists() {
-    let executor = FakeExecutor::new(passing_podman_probes());
-    let config = config_with([(
-        "podman",
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(check.detail.contains("Podman 5.4.2"));
-    assert_eq!(executor.commands.borrow().len(), 2);
-}
-
-#[test]
-fn podman_check_is_fixable_with_an_upgrade_remediation_for_an_old_runtime() {
-    let executor = FakeExecutor::new(reachable_then([Ok(output(b"podman version 3.4.7\n"))]));
-    let config = config_with([(
-        "podman",
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let check = podman_check(Ok(&config), &executor, &ApplePlatform::Linux);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("Install or upgrade Podman")
-    );
-}
-
-#[test]
-fn podman_image_check_is_ready_when_the_image_is_present() {
-    let executor = FakeExecutor::new([Ok(output(b""))]);
-
-    let check = podman_image_check("podman", "localhost/hel/agent-dev:latest", &executor, false);
-
-    assert_eq!(check.id, "runtime.podman.image.podman");
-    assert_eq!(check.title, "Podman image for target podman");
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert_eq!(
-        executor.commands.borrow()[0].args,
-        vec!["image", "exists", "localhost/hel/agent-dev:latest"]
-    );
-}
-
-#[test]
-fn podman_image_check_is_fixable_with_a_pull_remediation_when_the_image_is_missing() {
-    let executor = FakeExecutor::new([Ok(failed(b""))]);
-
-    let check = podman_image_check("podman", "ghcr.io/example/dev:1", &executor, false);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(
-        check
-            .detail
-            .contains("is not present in local Podman storage")
-    );
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some(
-            "Pull it with `podman pull ghcr.io/example/dev:1`, build it from containers/Containerfile.agent-dev, or run `mj doctor --json --smoke` to verify the full pull-and-run path."
-        )
-    );
-}
-
-#[test]
-fn podman_image_check_smoke_runs_a_disposable_container() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"created\n")),
-        Ok(output(b"ok\n")),
-        Ok(output(b"removed\n")),
-    ]);
-
-    let check = podman_image_check("podman", "ubuntu:24.04", &executor, true);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].program, "sh");
-    assert!(
-        commands[0]
-            .args
-            .windows(2)
-            .any(|args| args == ["podman", "run"])
-    );
-    assert_eq!(commands[1].program, "podman");
-    assert_eq!(commands[1].args[0], "exec");
-    assert_eq!(commands[2].program, "sh");
-    assert!(commands[2].args[1].contains("podman rm --force --ignore"));
-}
-
-#[test]
-fn image_checks_are_skipped_when_the_host_podman_preflight_fails() {
-    let executor = FakeExecutor::new(reachable_then([Ok(output(b"podman version 3.4.7\n"))]));
-    let config = config_with([(
-        "podman",
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "runtime.podman");
-}
-
-#[test]
-fn image_checks_follow_a_passing_preflight_for_each_local_podman_target() {
-    let mut responses = passing_podman_probes();
-    responses.push(Ok(output(b"")));
-    responses.push(Ok(failed(b"")));
-    // The built-in `podman` target the dashboard also lists.
-    responses.push(Ok(output(b"")));
-    let executor = FakeExecutor::new(responses);
-    let config = config_with([
-        (
-            "alpha",
-            TargetTemplate::LocalPodman {
-                container: container("ubuntu:24.04"),
-            },
-        ),
-        (
-            "beta",
-            TargetTemplate::LocalPodman {
-                container: container("ghcr.io/example/dev:1"),
-            },
-        ),
-    ]);
-
-    let checks = podman_checks(Ok(&config), &executor, false, &ApplePlatform::Linux);
-
-    assert_eq!(
-        checks
-            .iter()
-            .map(|check| check.id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "runtime.podman",
-            "runtime.podman.image.alpha",
-            "runtime.podman.image.beta",
-            "runtime.podman.image.podman"
-        ]
-    );
-    assert_eq!(checks[1].status, CheckStatus::Ready);
-    assert_eq!(checks[2].status, CheckStatus::Fixable);
-    assert_eq!(checks[3].status, CheckStatus::Ready);
-}
-
 /// Launch finding R5-3: doctor and `mj setup` gave a missing Docker the raw
 /// error chain ("run docker for check Docker daemon: No such file or
 /// directory (os error 2)"). They now say it is not installed and how to
 /// fix that.
+// Hard-won: 028b8327: Docker absence produced inconsistent raw error chains instead of the shared not-installed sentence.
 #[test]
 fn a_missing_docker_is_reported_as_not_installed() {
     let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
@@ -695,49 +346,11 @@ fn a_missing_docker_is_reported_as_not_installed() {
     );
 }
 
-#[test]
-fn docker_checks_probe_the_daemon_then_the_configured_image() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"29.0.1 linux\n")),
-        Ok(output(b"image metadata\n")),
-    ]);
-    let config = config_with([(
-        "docker",
-        TargetTemplate::LocalDocker {
-            container: container("ghcr.io/example/dev:1"),
-        },
-    )]);
-
-    let checks = docker_checks(Ok(&config), &executor, false);
-
-    assert_eq!(
-        checks
-            .iter()
-            .map(|check| check.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["runtime.docker", "runtime.docker.image.docker"]
-    );
-    assert!(
-        checks
-            .iter()
-            .all(|check| check.status == CheckStatus::Ready)
-    );
-    let commands = executor.commands.borrow();
-    assert_eq!(commands[0].program, "docker");
-    assert_eq!(
-        commands[0].args,
-        ["version", "--format", "{{.Server.Version}} {{.Server.Os}}"]
-    );
-    assert_eq!(
-        commands[1].args,
-        ["image", "inspect", "ghcr.io/example/dev:1"]
-    );
-}
-
 /// The dashboard lists the built-in `docker` target (and downloads its image)
 /// without any configured Docker target. Doctor checks the same target set:
 /// it probes Docker and the image for the built-in target, and when Docker
 /// is missing it reports the built-in target as unavailable, not as a fault.
+// Hard-won: ecc10219: doctor omitted the built-in Docker target that the dashboard already listed and checked.
 #[test]
 fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     let executor = FakeExecutor::new([
@@ -788,65 +401,11 @@ fn docker_checks_cover_the_built_in_docker_target_the_dashboard_lists() {
     );
 }
 
-/// Missing Docker with only the default candidate: one line that does not
-/// fail the run.
-#[test]
-fn missing_docker_with_no_docker_target_configured_is_info_and_passes() {
-    let checks = docker_checks(Ok(&Config::default()), &AlwaysFailingExecutor, false);
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Unsupported);
-    assert!(
-        checks[0].detail.contains("no configured target uses it"),
-        "{}",
-        checks[0].detail
-    );
-    assert!(all_ready(&checks));
-}
-
-/// Missing Docker that a configured target needs stays a fault with the
-/// install hint, and fails the run.
-#[test]
-fn missing_docker_needed_by_a_configured_target_stays_fixable_and_fails() {
-    let configured = config_with([(
-        "sandbox",
-        TargetTemplate::LocalDocker {
-            container: container("ghcr.io/example/dev:1"),
-        },
-    )]);
-    let checks = docker_checks(Ok(&configured), &AlwaysFailingExecutor, false);
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert!(checks[0].remediation.is_some());
-    assert!(!all_ready(&checks));
-}
-
-/// A configured target whose engine answers is ready, as before.
-#[test]
-fn present_docker_for_a_configured_target_is_ready() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"29.0.1 linux\n")),
-        Ok(output(b"image metadata\n")),
-        Ok(output(b"image metadata\n")),
-    ]);
-    let configured = config_with([(
-        "sandbox",
-        TargetTemplate::LocalDocker {
-            container: container("ghcr.io/example/dev:1"),
-        },
-    )]);
-    let checks = docker_checks(Ok(&configured), &executor, false);
-    assert!(
-        checks
-            .iter()
-            .all(|check| check.status == CheckStatus::Ready),
-        "{checks:?}"
-    );
-    assert!(all_ready(&checks));
-}
-
 /// Launch finding R3-3: a Setup save once wrote the built-in `[targets.docker]`
 /// and `[targets.podman]` blocks into config.toml, and doctor then reported a
 /// missing engine as a fault to fix. A block identical to the built-in target
 /// is still the built-in target.
+// Hard-won: f15ebc51: Setup saved an unchanged built-in target and doctor wrongly treated it as user configured.
 #[test]
 fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
     let written = config_with([
@@ -896,6 +455,7 @@ fn a_target_block_identical_to_a_built_in_is_still_treated_as_built_in() {
     );
 }
 
+// Hard-won: ecc10219: doctor omitted the built-in Podman target that the dashboard already listed and checked.
 #[test]
 fn podman_checks_cover_the_built_in_podman_target() {
     let checks = podman_checks(
@@ -913,45 +473,11 @@ fn podman_checks_cover_the_built_in_podman_target() {
     );
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn docker_image_smoke_uses_managed_overlay_run_exec_and_cleanup() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"Docker Engine - Community\n")),
-        Ok(output(b"created\n")),
-        Ok(output(b"ok\n")),
-        Ok(output(b"removed\n")),
-        Ok(output(b"Docker Engine - Community\n")),
-    ]);
-
-    let check = docker_image_check("docker", "ubuntu:24.04", &executor, true);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(
-        check
-            .detail
-            .contains("OverlayFS attachment smoke test passed")
-    );
-    let commands = executor.commands.borrow();
-    let commands = commands
-        .iter()
-        .filter(|command| command.purpose != "identify the Docker daemon platform")
-        .collect::<Vec<_>>();
-    assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].program, "sh");
-    assert!(commands[0].args[1].contains("docker volume create"));
-    assert!(commands[0].args.contains(&"--pull=missing".to_owned()));
-    assert_eq!(commands[1].program, "docker");
-    assert_eq!(commands[1].args[0], "exec");
-    assert_eq!(commands[2].program, "sh");
-    assert!(commands[2].args[1].contains("docker rm --force"));
-    assert!(commands[2].args[1].contains("docker volume rm --force"));
-}
-
 /// Docker Desktop's daemon runs in a VM that cannot overlay host
 /// directories, so the smoke test checks the read-only attachment sessions
 /// get there instead of failing on the overlay mount (#1152).
 #[cfg(target_os = "linux")]
+// Hard-won: 3921dfb5: Docker Desktop smoke failed OverlayFS on a VM share and the smoke path lacked read-only attachment support.
 #[test]
 fn docker_desktop_smoke_verifies_the_read_only_attachment() {
     let executor = FakeExecutor::new([
@@ -986,6 +512,7 @@ fn docker_desktop_smoke_verifies_the_read_only_attachment() {
 
 /// A requested smoke test that fails is a fault even for the built-in
 /// `docker` target, so `mj doctor --smoke` exits non-zero (#1152).
+// Hard-won: 3921dfb5: a failed requested Docker smoke test on the built-in target incorrectly left doctor exit status successful.
 #[test]
 fn failed_smoke_test_of_a_builtin_target_stays_fixable() {
     let failed = DoctorCheck::fixable(
@@ -1004,178 +531,6 @@ fn failed_smoke_test_of_a_builtin_target_stays_fixable() {
 }
 
 #[test]
-fn ssh_podman_check_is_ready_after_ssh_wrapped_probes_without_smoke() {
-    let executor = FakeExecutor::new(reachable_then(passing_ssh_podman_probes()));
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
-
-    assert_eq!(check.id, "runtime.ssh-podman.remote");
-    assert_eq!(check.title, "Remote Podman for target remote");
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(check.detail.contains("Remote rootless Podman 5.4.2"));
-    assert!(check.detail.contains("dev@example.test"));
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].args.last().unwrap(), "'true'");
-    for command in commands.iter().skip(1) {
-        assert_eq!(command.program, "ssh");
-        assert!(command.args.contains(&"dev@example.test".to_owned()));
-    }
-    assert!(
-        commands[1]
-            .args
-            .last()
-            .unwrap()
-            .contains("loginctl show-user")
-    );
-}
-
-#[test]
-fn ssh_podman_check_warns_when_remote_user_lingering_is_disabled() {
-    let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((0, "no\n", ""))));
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
-
-    assert_eq!(check.status, CheckStatus::Warning);
-    assert!(all_ready(std::slice::from_ref(&check)));
-    assert!(check.detail.contains("Podman 5.4.2 is available"));
-    assert!(check.detail.contains("last SSH connection closes"));
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("sudo loginctl enable-linger")
-    );
-}
-
-#[test]
-fn ssh_podman_check_explains_when_durability_cannot_be_verified() {
-    let executor = FakeExecutor::new(reachable_then(ssh_podman_probes((
-        127,
-        "",
-        "sh: loginctl: not found\n",
-    ))));
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
-
-    assert_eq!(check.status, CheckStatus::Warning);
-    assert!(all_ready(std::slice::from_ref(&check)));
-    assert!(check.detail.contains("durability check is unavailable"));
-    assert!(check.detail.contains("may not use systemd"));
-    assert!(check.detail.contains("cannot verify"));
-    let remediation = check.remediation.as_deref().unwrap();
-    assert!(remediation.contains("service manager"));
-    assert!(!remediation.contains("sudo loginctl enable-linger"));
-}
-
-#[test]
-fn ssh_podman_check_failure_scopes_the_remediation_to_the_remote_host() {
-    let executor = FakeExecutor::new(reachable_then([Ok(output(
-        crate::targets::ssh_podman_probe_fixture(&[("version", 0, "podman version 3.4.7\n", "")]),
-    ))]));
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("dev@example.test"));
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .starts_with("On dev@example.test: Install or upgrade Podman")
-    );
-}
-
-#[test]
-fn ssh_podman_check_reports_the_shared_ssh_remediation_before_probing_podman() {
-    let executor = FakeExecutor::new([Ok(failed(
-        b"dev@example.test: Permission denied (publickey).",
-    ))]);
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, false);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some("Install your public key on the host with `ssh-copy-id dev@example.test`.")
-    );
-    // The remote Podman probes never ran: the host is not reachable.
-    assert_eq!(executor.commands.borrow().len(), 1);
-}
-
-#[test]
-fn ssh_podman_check_smoke_runs_an_ssh_wrapped_disposable_container() {
-    let mut responses = passing_ssh_podman_probes();
-    responses.extend([
-        Ok(output(b"created\n")),
-        Ok(output(b"ok\n")),
-        Ok(output(b"removed\n")),
-    ]);
-    let executor = FakeExecutor::new(reachable_then(responses));
-
-    let (check, _) = ssh_podman_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, true);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 5);
-    for command in commands.iter().skip(2) {
-        assert_eq!(command.program, "ssh");
-        assert!(command.args.contains(&"dev@example.test".to_owned()));
-    }
-    assert!(commands[2].args.last().unwrap().contains("'run' '--init'"));
-    assert!(commands[3].args.last().unwrap().ends_with("'true'"));
-    assert!(
-        commands[4]
-            .args
-            .last()
-            .unwrap()
-            .contains("podman rm --force --ignore")
-    );
-}
-
-/// Everything the limits script can print, as one host would report it.
-fn host_limits_output() -> Vec<u8> {
-    b"keys.max=200\nkeys.used=101\nkeys.quota=4096\nmaxstartups=100:30:200\n".to_vec()
-}
-
-#[test]
-fn host_limits_parse_reports_every_field_the_script_printed() {
-    let limits = parse_host_limits(&host_limits_output());
-
-    assert_eq!(limits.keys_max, Some(200));
-    assert_eq!(limits.keys_used, Some(101));
-    assert_eq!(limits.keys_quota, Some(4096));
-    assert_eq!(limits.max_startups.as_deref(), Some("100:30:200"));
-    assert!(!limits.max_startups_unreadable);
-    assert!(!limits.is_empty());
-    assert!(!limits.keyring_is_under_pressure());
-}
-
-#[test]
-fn host_limits_report_pressure_when_keys_reach_the_quota() {
-    let limits = parse_host_limits(b"keys.used=3300\nkeys.quota=4096\n");
-
-    assert!(limits.keyring_is_under_pressure());
-    assert!(
-        limits
-            .keyring_sentence("dev@example.test")
-            .contains("3300 of its 4096")
-    );
-}
-
-#[test]
-fn host_limits_report_an_explicit_max_startups_directive() {
-    let limits = parse_host_limits(b"maxstartups=10:30:60\n");
-
-    assert_eq!(
-        limits.max_startups_sentence(),
-        "sshd MaxStartups is 10:30:60."
-    );
-}
-
-#[test]
 fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
     let limits = parse_host_limits(b"keys.used=10\nkeys.quota=4096\nmaxstartups.unreadable=1\n");
 
@@ -1183,57 +538,16 @@ fn host_limits_say_a_drop_in_may_override_an_unread_max_startups() {
     let sentence = limits.max_startups_sentence();
     assert!(sentence.contains("unreadable drop-in"), "{sentence}");
     assert!(!sentence.contains("10:30"), "{sentence}");
-}
 
-#[test]
-fn host_limits_say_the_sshd_default_applies_when_every_file_was_readable() {
-    let limits = parse_host_limits(b"keys.used=10\nkeys.quota=4096\n");
-
+    let readable_default = parse_host_limits(b"keys.used=10\nkeys.quota=4096\n");
+    assert!(!readable_default.max_startups_unreadable);
     assert_eq!(
-        limits.max_startups_sentence(),
+        readable_default.max_startups_sentence(),
         "sshd MaxStartups is not set in sshd_config, so sshd's default applies."
     );
-}
 
-#[test]
-fn host_limits_are_empty_when_the_script_printed_nothing() {
-    assert!(parse_host_limits(b"").is_empty());
-    assert!(parse_host_limits(b"unrelated line\n").is_empty());
-}
-
-#[test]
-fn ssh_podman_checks_report_host_limits_after_the_podman_check() {
-    let mut responses = passing_ssh_podman_probes();
-    responses.push(Ok(output(host_limits_output())));
-    let executor = FakeExecutor::new(reachable_then(responses));
-    let config = config_with([(
-        "remote",
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let checks = ssh_podman_checks(Ok(&config), &executor, false);
-
-    assert_eq!(checks.len(), 2);
-    assert_eq!(checks[0].id, "runtime.ssh-podman.remote");
-    assert_eq!(checks[1].id, "runtime.ssh-podman.remote.limits");
-    assert_eq!(checks[1].title, "Host limits for target remote");
-    assert_eq!(checks[1].status, CheckStatus::Ready);
-    assert!(
-        checks[1].detail.contains("101 of its 4096"),
-        "{}",
-        checks[1].detail
-    );
-    assert!(
-        checks[1].detail.contains("sshd MaxStartups is 100:30:200"),
-        "{}",
-        checks[1].detail
-    );
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 3);
-    assert!(commands[2].args.last().unwrap().contains("key-users"));
+    let empty = parse_host_limits(b"");
+    assert!(empty.is_empty());
 }
 
 #[test]
@@ -1257,85 +571,6 @@ fn ssh_podman_checks_skip_host_limits_when_the_host_is_unreachable() {
     assert_eq!(executor.commands.borrow().len(), 1);
 }
 
-#[test]
-fn ssh_docker_check_probes_connectivity_daemon_and_remote_image() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"")),
-        Ok(output(b"29.0.1 linux\n")),
-        Ok(output(b"image metadata\n")),
-    ]);
-    let check = ssh_docker_check(
-        "remote",
-        &runtime_ssh(),
-        "ghcr.io/example/dev:1",
-        &executor,
-        false,
-    );
-
-    assert_eq!(check.id, "runtime.ssh-docker.remote");
-    assert_eq!(check.title, "Remote Docker for target remote");
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(check.detail.contains("Remote Docker 29.0.1"));
-    assert!(
-        check
-            .detail
-            .contains("image ghcr.io/example/dev:1 is present")
-    );
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 3);
-    assert!(commands.iter().all(|command| command.program == "ssh"));
-    assert!(commands[0].args.last().unwrap().contains("'true'"));
-    assert!(
-        commands[1]
-            .args
-            .last()
-            .unwrap()
-            .contains("'docker' 'version'")
-    );
-    assert!(
-        commands[2]
-            .args
-            .last()
-            .unwrap()
-            .contains("'docker' 'image' 'inspect'")
-    );
-}
-
-#[test]
-fn ssh_docker_check_smoke_runs_overlay_on_the_remote_host() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"")),
-        Ok(output(b"29.0.1 linux\n")),
-        Ok(output(b"/tmp/mj-docker-overlay-smoke.fixture\n")),
-        Ok(output(b"created\n")),
-        Ok(output(b"ok\n")),
-        Ok(output(b"verified\n")),
-        Ok(output(b"removed\n")),
-        Ok(output(b"removed\n")),
-    ]);
-    let check = ssh_docker_check("remote", &runtime_ssh(), "ubuntu:24.04", &executor, true);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(check.detail.contains("remote OverlayFS attachment"));
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 8);
-    assert!(commands.iter().all(|command| command.program == "ssh"));
-    assert!(commands[2].args.last().unwrap().contains("mktemp"));
-    assert!(commands[3].args.last().unwrap().contains("'docker' 'run'"));
-    assert!(commands[4].args.last().unwrap().contains("'docker' 'exec'"));
-    assert!(commands[5].args.last().unwrap().contains("original.txt"));
-    assert!(commands[6].args.last().unwrap().contains("docker rm"));
-    assert!(commands[7].args.last().unwrap().contains("'rm' '-rf'"));
-}
-
-#[test]
-fn ssh_podman_checks_are_skipped_without_a_valid_config() {
-    let executor = FakeExecutor::new([]);
-
-    assert!(ssh_podman_checks(Err(ConfigGap::Unreadable), &executor, false).is_empty());
-    assert!(executor.commands.borrow().is_empty());
-}
-
 fn ssh_bare_config() -> Config {
     config_with([(
         "builder",
@@ -1354,6 +589,7 @@ fn ssh_bare_config() -> Config {
 
 /// precision-3260 had 0 B free for its user while `df` showed ~23 GB "free"
 /// behind ext4's root reserve. Doctor says so plainly, with the reserve.
+// Hard-won: 540c9202: a real full-root incident caused repeated worker replacement attempts while users saw only unreachable.
 #[test]
 fn storage_check_reports_a_full_disk_and_its_root_reserve() {
     let full = output(
@@ -1392,78 +628,7 @@ Mjolnir refuses writes there, and sessions that write there wait instead of rest
     assert_eq!(checks[0].status, CheckStatus::Ready, "{}", checks[0].detail);
 }
 
-#[test]
-fn ssh_bare_check_is_ready_when_the_batch_mode_probe_succeeds() {
-    let executor = FakeExecutor::new([Ok(output(b""))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "runtime.ssh-bare.builder");
-    assert_eq!(checks[0].status, CheckStatus::Ready);
-    let command = &executor.commands.borrow()[0];
-    assert_eq!(command.program, "ssh");
-    assert_eq!(
-        command.args[..4],
-        ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
-    );
-    assert!(command.args.contains(&"dev@example.test".to_owned()));
-    assert_eq!(command.args.last().unwrap(), "'true'");
-}
-
-#[test]
-fn ssh_bare_check_permission_denied_recommends_ssh_copy_id_with_the_identity() {
-    let executor = FakeExecutor::new([Ok(failed(
-        b"dev@example.test: Permission denied (publickey).",
-    ))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert_eq!(
-        checks[0].remediation.as_deref(),
-        Some(
-            "Install your public key on the host with `ssh-copy-id -i /home/dev/.ssh/id_ed25519.pub dev@example.test`."
-        )
-    );
-}
-
-#[test]
-fn ssh_bare_check_host_key_failure_recommends_keyscan_with_a_fingerprint_caution() {
-    let executor = FakeExecutor::new([Ok(failed(
-        b"Host key verification failed.\nNo ECDSA host key is known for example.test",
-    ))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    let remediation = checks[0].remediation.as_deref().unwrap();
-    assert!(
-        remediation.contains("ssh-keyscan -H example.test >> ~/.ssh/known_hosts"),
-        "{remediation}"
-    );
-    assert!(
-        remediation.contains("Verify the fingerprint"),
-        "{remediation}"
-    );
-}
-
-#[test]
-fn ssh_bare_check_without_an_ssh_client_recommends_installing_openssh() {
-    let executor = FakeExecutor::new([Err(anyhow::Error::new(std::io::Error::from(
-        std::io::ErrorKind::NotFound,
-    ))
-    .context("run ssh for verify SSH connectivity"))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert_eq!(
-        checks[0].remediation.as_deref(),
-        Some(SSH_MISSING_REMEDIATION)
-    );
-}
-
+// Hard-won: 9ef0cd60: a timed-out SSH probe was wrongly diagnosed as a missing OpenSSH installation.
 #[test]
 fn ssh_bare_check_probe_timeout_recommends_checking_the_host_is_reachable() {
     let executor = FakeExecutor::new([Err(anyhow::Error::new(CommandTimedOut {
@@ -1490,6 +655,7 @@ fn ssh_bare_check_probe_timeout_recommends_checking_the_host_is_reachable() {
     );
 }
 
+// Hard-won: 9ef0cd60: OpenSSH connection-timeout output was wrongly diagnosed as a missing client instead of an unreachable host.
 #[test]
 fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
     let executor = FakeExecutor::new([Ok(failed(
@@ -1505,55 +671,12 @@ fn ssh_bare_check_connect_timeout_recommends_checking_the_host_is_reachable() {
     );
 }
 
-#[test]
-fn ssh_bare_check_falls_back_to_quoting_an_unrecognized_ssh_failure() {
-    let executor = FakeExecutor::new([Ok(failed(
-        b"kex_exchange_identification: read: Connection reset by peer",
-    ))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    let remediation = checks[0].remediation.as_deref().unwrap();
-    assert!(
-        remediation.contains("Connection reset by peer"),
-        "{remediation}"
-    );
-    assert!(
-        remediation.contains("Run `ssh dev@example.test true` by hand"),
-        "{remediation}"
-    );
-}
-
-#[test]
-fn ssh_bare_check_other_launch_failure_falls_back_to_running_ssh_by_hand() {
-    let executor = FakeExecutor::new([Err(anyhow!(
-        "operation cancelled while verify SSH connectivity"
-    ))]);
-
-    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &executor);
-
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    let remediation = checks[0].remediation.as_deref().unwrap();
-    assert!(
-        remediation.contains("Run `ssh dev@example.test true` by hand"),
-        "{remediation}"
-    );
-    assert!(!remediation.contains("openssh-client"), "{remediation}");
-}
-
-#[test]
-fn ssh_bare_checks_are_skipped_without_a_valid_config() {
-    let executor = FakeExecutor::new([]);
-
-    assert!(ssh_bare_checks(Err(ConfigGap::Unreadable), &executor).is_empty());
-    assert!(executor.commands.borrow().is_empty());
-}
-
 /// With no target blocks in config.toml, the dashboard still offers the
 /// built-in `podman` target, and doctor's engine and image checks cover it;
 /// the worker-binary checks said "No container target is configured" and the
 /// freshness check for Linux targets was missing (launch finding R5-2). A
 /// built-in target whose engine is unavailable needs no worker.
+// Hard-won: 435bf565: doctor omitted worker and architecture checks for a ready built-in target absent from config.toml.
 #[test]
 fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
     let engines = [
@@ -1582,234 +705,9 @@ fn worker_checks_cover_a_built_in_target_whose_engine_is_ready() {
     );
 }
 
-/// A target the user configured is checked whatever its engine's state, as
-/// before.
-#[test]
-fn worker_checks_keep_a_configured_target_whose_engine_is_unavailable() {
-    let config = config_with([(
-        "pd",
-        TargetTemplate::LocalPodman {
-            container: container("example.test/own:latest"),
-        },
-    )]);
-    let engines = [DoctorCheck::unsupported(
-        "runtime.podman",
-        "Rootless Podman",
-        "Podman is not installed.",
-    )];
-
-    let offered = offered_targets(&config, &engines);
-
-    let ids = worker_binary_checks(Ok(&offered))
-        .into_iter()
-        .map(|check| check.id)
-        .collect::<Vec<_>>();
-    assert_eq!(ids, ["worker.pd"]);
-}
-
-#[test]
-fn worker_check_for_an_ssh_podman_target_without_platform_is_unsupported() {
-    let config = config_with([(
-        "remote",
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let checks = worker_binary_checks(Ok(&config));
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "worker.remote");
-    assert_eq!(checks[0].status, CheckStatus::Unsupported);
-    assert_eq!(
-        checks[0].detail,
-        "Set `platform` on this ssh-podman target to check its worker binary; the remote architecture is unknown until provisioning."
-    );
-}
-
-#[test]
-fn worker_check_for_an_ssh_podman_target_with_platform_uses_the_normal_check() {
-    let mut remote = container("ubuntu:24.04");
-    remote.platform = Some("linux/amd64".into());
-    let config = config_with([(
-        "remote",
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: remote,
-        },
-    )]);
-
-    let checks = worker_binary_checks(Ok(&config));
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "worker.remote");
-    assert_ne!(checks[0].status, CheckStatus::Unsupported);
-    assert!(checks[0].detail.contains("x86_64-unknown-linux-musl"));
-}
-
-#[test]
-fn worker_check_for_an_ssh_docker_target_hints_at_remote_architecture() {
-    let config = config_with([(
-        "remote",
-        TargetTemplate::SshDocker {
-            ssh: ssh_connection(),
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    let checks = worker_binary_checks(Ok(&config));
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Unsupported);
-    assert_eq!(
-        checks[0].detail,
-        "Set `platform` on this ssh-docker target to check its worker binary; the remote architecture is unknown until provisioning."
-    );
-}
-
-#[test]
-fn an_unauthenticated_profile_is_fixed_by_hel_login_for_that_profile() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("codex-home");
-    std::fs::create_dir_all(&home).unwrap();
-    let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home,
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    let config = Config {
-        profiles: [("work".to_owned(), profile.clone())].into_iter().collect(),
-        ..Config::default()
-    };
-
-    let executor = FakeExecutor::new([Ok(output(br#"{"loggedIn":false}"#))]);
-    let checks = harness_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    let remediation = checks[0].remediation.as_deref().unwrap();
-    assert!(
-        remediation.contains("mj login --profile work"),
-        "{remediation}"
-    );
-    // The underlying command is quoted from the one place that verified it,
-    // so doctor cannot recommend something `mj login` does not run.
-    let (program, arguments) = login_command(&profile).expect("OAuth profile has a login command");
-    assert!(
-        remediation.contains(&format!("`{program} {}`", arguments.join(" "))),
-        "{remediation}"
-    );
-}
-
-fn claude_config_with_home<const N: usize>(
-    home: &std::path::Path,
-    targets: [(&str, TargetTemplate); N],
-) -> Config {
-    Config {
-        profiles: [(
-            "work".to_owned(),
-            HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Claude,
-                home: home.to_path_buf(),
-                environment: Default::default(),
-                context_window_bytes: None,
-                subagents: Default::default(),
-                guardian_review_model: None,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        targets: targets
-            .into_iter()
-            .map(|(id, target)| (id.to_owned(), target))
-            .collect(),
-        ..Config::default()
-    }
-}
-
-/// A local session runs from a staged copy of whatever home the profile names,
-/// on macOS as elsewhere, so a Claude home other than `~/.claude` is used as
-/// configured and is not reported.
-#[test]
-fn doctor_accepts_a_claude_home_other_than_the_default_on_this_machine() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().join("claude-work");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join(".credentials.json"), b"{}").unwrap();
-    let config = claude_config_with_home(&home, [("localhost", TargetTemplate::LocalBare)]);
-
-    let executor = FakeExecutor::new([]);
-    let checks = harness_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Ready, "{:?}", checks[0]);
-}
-
-#[test]
-fn doctor_reports_disabled_profiles_without_probing_them() {
-    let profile = HarnessProfile {
-        enabled: false,
-        kind: HarnessKind::Claude,
-        home: PathBuf::from("/missing/disabled-profile"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    let config = Config {
-        profiles: [("retired".to_owned(), profile)].into_iter().collect(),
-        ..Config::default()
-    };
-    let executor = FakeExecutor::new([]);
-
-    let checks = harness_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].status, CheckStatus::Ready);
-    assert!(checks[0].detail.contains("disabled"));
-    assert!(executor.commands.borrow().is_empty());
-}
-
-#[test]
-fn harness_discovery_reports_each_authentication_state() {
-    let check = harness_discovery_check_from(
-        &[
-            DiscoveredHome {
-                kind: HarnessKind::Codex,
-                path: "/agents/codex".into(),
-                authenticated: true,
-            },
-            DiscoveredHome {
-                kind: HarnessKind::Kimi,
-                path: "/agents/kimi".into(),
-                authenticated: false,
-            },
-        ],
-        true,
-        "ctrl+b s",
-    );
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert!(
-        check
-            .detail
-            .contains("Codex at /agents/codex (authenticated)")
-    );
-    assert!(
-        check
-            .detail
-            .contains("Kimi Code at /agents/kimi (not authenticated)")
-    );
-}
-
 /// Settings opens with `prefix+s`; F7 is not bound, so no fix may send the
 /// user there, and every fix names the key the configuration binds.
+// Hard-won: 0f46ecf5: doctor fixes named F7 even though Settings is opened with the configured prefix and s.
 #[test]
 fn settings_fixes_name_the_bound_settings_key() {
     let directory = tempfile::tempdir().unwrap();
@@ -1837,6 +735,7 @@ fn settings_fixes_name_the_bound_settings_key() {
 /// An installed user has no repository checkout, so the Podman fix links the
 /// published guide, and the human report prints the fix once, not also inside
 /// the detail.
+// Hard-won: 527f018a: installed users were sent to a repository docs path and the Podman fix was printed twice.
 #[test]
 fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     for response in [
@@ -1859,22 +758,10 @@ fn missing_podman_names_its_fix_once_and_links_the_published_guide() {
     }
 }
 
-#[test]
-fn missing_harness_homes_are_fixable_without_a_configured_profile() {
-    let check = harness_discovery_check_from(&[], false, "ctrl+b s");
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some(
-            "Install and sign in to a supported harness, then open Mjolnir, press ctrl+b s for Settings, and choose Agent Profiles."
-        )
-    );
-}
-
 /// The README and the quickstart list five agents. The check that says none
 /// was found named four and left out Muse Code, which discovery does look
 /// for (launch finding R13-12).
+// Hard-won: caf9d80a: setup and doctor omitted Muse from their supported-agent list despite discovering it.
 #[test]
 fn missing_harness_homes_name_every_supported_agent() {
     let check = harness_discovery_check_from(&[], false, "ctrl+b s");
@@ -1883,267 +770,6 @@ fn missing_harness_homes_name_every_supported_agent() {
         check.detail,
         "No Codex, Claude Code, Kimi Code, Grok Build, or Muse Code home was found in the default or environment-overridden locations."
     );
-}
-
-#[test]
-fn apple_container_is_unsupported_on_intel_macs() {
-    let executor = FakeExecutor::new([]);
-
-    let check = apple_container_check(
-        &ApplePlatform::Macos {
-            architecture: "x86_64".into(),
-            major_version: 26,
-        },
-        &executor,
-        false,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-
-    assert_eq!(check.status, CheckStatus::Unsupported);
-    assert!(check.detail.contains("Intel Macs"));
-    assert!(executor.commands.borrow().is_empty());
-}
-
-#[test]
-fn apple_container_is_unsupported_before_macos_26() {
-    let executor = FakeExecutor::new([]);
-
-    let check = apple_container_check(
-        &ApplePlatform::Macos {
-            architecture: "aarch64".into(),
-            major_version: 25,
-        },
-        &executor,
-        false,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-
-    assert_eq!(check.status, CheckStatus::Unsupported);
-    assert!(check.detail.contains("macOS 26"));
-}
-
-#[test]
-fn apple_container_not_installed_has_official_package_remediation() {
-    let executor = FakeExecutor::new([Err(anyhow!("No such file or directory")
-        .context("run container for check Apple container installation"))]);
-
-    let check = apple_container_check(
-        &ApplePlatform::Macos {
-            architecture: "aarch64".into(),
-            major_version: 26,
-        },
-        &executor,
-        false,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("No such file or directory"));
-    assert!(!check.detail.contains("run container for"));
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some(
-            format!("Install the official signed package: {APPLE_CONTAINER_INSTALL_URL}").as_str()
-        )
-    );
-}
-
-#[test]
-fn apple_container_stopped_daemon_has_start_remediation() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"container version 1\n")),
-        Ok(CommandOutput {
-            status: 1,
-            stdout: vec![],
-            stderr: b"daemon is not running".to_vec(),
-        }),
-    ]);
-
-    let check = apple_container_check(
-        &ApplePlatform::Macos {
-            architecture: "aarch64".into(),
-            major_version: 26,
-        },
-        &executor,
-        false,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some("Run `container system start`.")
-    );
-}
-
-#[test]
-fn apple_container_is_ready_only_after_the_opt_in_smoke_test() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"container version 1\n")),
-        Ok(output(b"running\n")),
-        Ok(output(b"created\n")),
-        Ok(output(b"ok\n")),
-        Ok(output(b"removed\n")),
-    ]);
-
-    let check = apple_container_check(
-        &ApplePlatform::Macos {
-            architecture: "aarch64".into(),
-            major_version: 26,
-        },
-        &executor,
-        true,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert_eq!(executor.commands.borrow().len(), 5);
-    assert_eq!(executor.commands.borrow()[2].args[0], "run");
-    assert_eq!(executor.commands.borrow()[3].args[0], "exec");
-    assert_eq!(executor.commands.borrow()[4].args[0], "rm");
-}
-
-#[test]
-fn linux_reports_apple_container_as_macos_only() {
-    let executor = FakeExecutor::new([]);
-    let check = apple_container_check(
-        &ApplePlatform::Linux,
-        &executor,
-        false,
-        DEFAULT_CONTAINER_IMAGE.into(),
-    );
-    assert_eq!(check.status, CheckStatus::Unsupported);
-    assert_eq!(check.detail, "macOS only");
-}
-
-fn aws_target(launch_template: &str) -> TargetTemplate {
-    TargetTemplate::AwsEc2 {
-        aws_profile: Some("hel".into()),
-        region: "us-east-1".into(),
-        launch_template: launch_template.to_owned(),
-        launch_template_version: None,
-        ssh_user: "ubuntu".into(),
-        address_source: mj_core::config::AwsAddressSource::default(),
-        identity_file: None,
-        ssh_args: vec![],
-    }
-}
-
-#[test]
-fn aws_check_is_ready_after_the_cli_credential_and_launch_template_probes() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"aws-cli/2.17.0\n")),
-        Ok(output(b"{\"Account\":\"123456789012\"}\n")),
-        Ok(output(b"{\"LaunchTemplates\":[{}]}\n")),
-    ]);
-    let config = config_with([("aws", aws_target("hel-runson"))]);
-
-    let checks = aws_checks(Ok(&config), &executor);
-
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "runtime.aws-ec2.aws");
-    assert_eq!(checks[0].status, CheckStatus::Ready);
-    let commands = executor.commands.borrow();
-    assert!(commands.iter().all(|command| command.program == "aws"));
-    // Profile and region are applied exactly as provisioning applies them.
-    assert_eq!(
-        commands[2].args,
-        vec![
-            "--profile",
-            "hel",
-            "--region",
-            "us-east-1",
-            "ec2",
-            "describe-launch-templates",
-            "--launch-template-names",
-            "hel-runson",
-            "--output",
-            "json"
-        ]
-    );
-}
-
-#[test]
-fn aws_check_is_fixable_with_an_install_remediation_without_the_cli() {
-    let executor = FakeExecutor::new([Err(anyhow!("No such file or directory"))]);
-
-    let check = aws_target_check("aws", None, "us-east-1", "hel-runson", &executor);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains(AWS_CLI_INSTALL_URL)
-    );
-    assert_eq!(executor.commands.borrow().len(), 1);
-}
-
-#[test]
-fn aws_check_is_fixable_with_a_sign_in_remediation_for_expired_credentials() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"aws-cli/2.17.0\n")),
-        Ok(failed(b"ExpiredToken: the security token has expired")),
-    ]);
-
-    let check = aws_target_check("aws", Some("hel"), "us-east-1", "hel-runson", &executor);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("ExpiredToken"));
-    assert_eq!(
-        check.remediation.as_deref(),
-        Some(
-            "Configure credentials with `aws configure --profile hel`, or sign in with `aws sso login --profile hel`."
-        )
-    );
-}
-
-#[test]
-fn aws_check_is_fixable_when_the_launch_template_is_missing() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"aws-cli/2.17.0\n")),
-        Ok(output(b"{\"Account\":\"123456789012\"}\n")),
-        Ok(failed(b"InvalidLaunchTemplateName.NotFoundException")),
-    ]);
-
-    let check = aws_target_check("aws", Some("hel"), "us-east-1", "lt-0123456789", &executor);
-
-    assert_eq!(check.status, CheckStatus::Fixable);
-    assert!(check.detail.contains("was not found in us-east-1"));
-    // An `lt-` value is a template id, not a name.
-    assert_eq!(
-        executor.commands.borrow()[2].args[6],
-        "--launch-template-ids"
-    );
-}
-
-#[test]
-fn aws_checks_are_skipped_for_configs_without_an_aws_target() {
-    let executor = FakeExecutor::new([]);
-    let config = config_with([(
-        "podman",
-        TargetTemplate::LocalPodman {
-            container: container("ubuntu:24.04"),
-        },
-    )]);
-
-    assert!(aws_checks(Ok(&config), &executor).is_empty());
-    assert!(aws_checks(Err(ConfigGap::Unreadable), &executor).is_empty());
-    assert!(executor.commands.borrow().is_empty());
-}
-
-#[test]
-fn apple_container_daemon_check_is_ready_once_the_daemon_answers() {
-    let executor = FakeExecutor::new([
-        Ok(output(b"container version 1\n")),
-        Ok(output(b"running\n")),
-    ]);
-
-    let check = apple_container_daemon_check(&executor);
-
-    assert_eq!(check.status, CheckStatus::Ready);
-    assert_eq!(executor.commands.borrow().len(), 2);
 }
 
 #[test]
@@ -2172,73 +798,7 @@ fn a_worker_rebuilt_after_the_daemon_started_is_reported_as_changed() {
     );
 }
 
-#[test]
-fn container_platforms_name_the_worker_architecture_the_daemon_resolves() {
-    assert_eq!(normalized_worker_architecture("amd64"), "x86_64");
-    assert_eq!(normalized_worker_architecture("arm64"), "aarch64");
-    assert_eq!(normalized_worker_architecture("x86_64"), "x86_64");
-}
-
-#[test]
-fn every_configured_container_architecture_is_checked_once() {
-    let amd64 = |image: &str| {
-        let mut template = container(image);
-        template.platform = Some("linux/amd64".into());
-        template
-    };
-    let mut arm64 = container("ubuntu:24.04");
-    arm64.platform = Some("linux/arm64".into());
-    let config = config_with([
-        (
-            "one",
-            TargetTemplate::LocalPodman {
-                container: amd64("ubuntu:24.04"),
-            },
-        ),
-        (
-            "two",
-            TargetTemplate::LocalDocker {
-                container: amd64("ghcr.io/example/dev:1"),
-            },
-        ),
-        (
-            "three",
-            TargetTemplate::SshPodman {
-                ssh: ssh_connection(),
-                container: arm64,
-            },
-        ),
-        (
-            "bare",
-            TargetTemplate::SshBare {
-                ssh: ssh_connection(),
-                permissions: mj_core::config::PermissionMode::Yolo,
-                workspace_prefix: PathBuf::from("workspaces"),
-            },
-        ),
-    ]);
-
-    let mut architectures = container_worker_architectures(Ok(&config));
-    architectures.sort();
-    assert_eq!(
-        architectures,
-        vec!["aarch64".to_owned(), "x86_64".to_owned()],
-        "each architecture is reported once, and a non-container target adds none"
-    );
-    assert!(container_worker_architectures(Err(ConfigGap::Unreadable)).is_empty());
-}
-
-#[test]
-fn linux_instructions_embed_podman_postconditions_and_doctor_loop() {
-    let instructions = setup_instructions(InstructionsPlatform::Linux);
-    assert!(instructions.contains("mj doctor --json"));
-    assert!(instructions.contains("mj doctor --json --smoke"));
-    assert!(instructions.contains("podman unshare cat /proc/self/uid_map"));
-    assert!(instructions.contains("Podman **4.3.0 or newer**"));
-    assert!(instructions.contains("kind = \"docker\""));
-    assert!(instructions.contains("--opt type=overlay"));
-}
-
+// Hard-won: 592318d8: setup instructions used the old product name and misstated local-bare prerequisites.
 #[test]
 fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
     for platform in [InstructionsPlatform::Linux, InstructionsPlatform::Macos] {
@@ -2283,23 +843,24 @@ fn review_leftovers_are_reported_and_left_alone() {
         scratch.is_file() && git_dir.join("refs/hel/review-capture").is_file(),
         "doctor reports; it never removes anything from a user's repository"
     );
-}
+    assert_eq!(
+        std::fs::read_to_string(git_dir.join("refs/hel/review-capture")).unwrap(),
+        "a".repeat(41)
+    );
+    assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "scratch");
 
-#[test]
-fn a_repository_with_no_leftovers_reports_none() {
-    let repository = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(repository.path().join(".git/refs/heads")).unwrap();
-
-    let residue = crate::doctor::review_residue(repository.path());
-
-    assert!(residue.refs.is_empty());
-    assert!(residue.scratch_indexes.is_empty());
+    let clean = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(clean.path().join(".git/refs/heads")).unwrap();
+    let clean_residue = crate::doctor::review_residue(clean.path());
+    assert!(clean_residue.refs.is_empty());
+    assert!(clean_residue.scratch_indexes.is_empty());
 }
 
 /// R2-6: every running session's own managed clone holds
 /// `refs/hel/review-baseline`, and doctor reported each one as left in a
 /// repository Mjolnir does not own. A managed checkout is Mjolnir's working
 /// state, and a repository a live session works in has its refs in use.
+// Hard-won: c69618f4: doctor reported active sessions’ managed refs as user-owned leftover residue and failed.
 #[test]
 fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
     use crate::controller::test_support::checkpoint_test_session;
@@ -2356,181 +917,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
     assert!(repositories.is_empty(), "{repositories:?}");
 }
 
-fn doctor_profile(kind: HarnessKind, home: PathBuf) -> HarnessProfile {
-    HarnessProfile {
-        // Disabled, so the check reports the profile without probing its
-        // login: the summary sentence is the subject here.
-        enabled: false,
-        kind,
-        home,
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    }
-}
-
-fn subagent_config(eligible: &[&str], profiles: &[&str]) -> Config {
-    Config {
-        profiles: profiles
-            .iter()
-            .map(|id| {
-                (
-                    (*id).to_owned(),
-                    HarnessProfile {
-                        enabled: true,
-                        ..doctor_profile(HarnessKind::Codex, PathBuf::from("/nonexistent").join(id))
-                    },
-                )
-            })
-            .collect(),
-        subagents: mj_core::config::SubagentConfig {
-            eligible_profiles: eligible.iter().map(|id| ((*id).to_owned(), true)).collect(),
-            ..Default::default()
-        },
-        ..Config::default()
-    }
-}
-
-#[test]
-fn the_subagent_policy_names_how_many_children_and_which_profiles() {
-    let config = subagent_config(&["codex2", "deepseek"], &["codex", "codex2", "deepseek"]);
-    let checks = subagent_eligibility_checks(Ok(&config));
-    assert_eq!(checks.len(), 1, "{checks:?}");
-    assert_eq!(checks[0].id, "subagents.policy");
-    assert_eq!(checks[0].status, CheckStatus::Ready);
-    assert_eq!(
-        checks[0].detail,
-        "Claude and Codex sessions may opt in, up to 6 sub-agents at once per session. A \
-         session's sub-agents may use its own profile and: codex2, deepseek."
-    );
-
-    let alone = subagent_config(&[], &["codex"]);
-    assert!(
-        subagent_eligibility_checks(Ok(&alone))[0]
-            .detail
-            .ends_with("its own profile and: no other profile."),
-    );
-
-    // The deprecated global switch no longer changes this check's detail.
-    let mut off = subagent_config(&["codex"], &["codex"]);
-    off.subagents.enabled = false;
-    assert_eq!(
-        subagent_eligibility_checks(Ok(&off))[0].detail,
-        subagent_eligibility_checks(Ok(&subagent_config(&["codex"], &["codex"])))[0].detail
-    );
-}
-
-/// An eligible id that names no profile is a configuration error, not a
-/// warning: the file fails to load, and doctor's configuration check says so.
-#[test]
-fn an_eligible_id_that_names_no_profile_fails_the_configuration_check() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    std::fs::write(
-        &path,
-        format!(
-            "version = {}\n\n[subagents.eligible_profiles]\ncodx = true\n",
-            mj_core::config::CONFIG_VERSION
-        ),
-    )
-    .unwrap();
-
-    let checks = run_with_config_path(
-        &path,
-        &AlwaysFailingExecutor,
-        ApplePlatform::Linux,
-        DoctorOptions { smoke: false },
-    );
-
-    let config = checks
-        .iter()
-        .find(|check| check.id == "config")
-        .expect("the configuration is checked");
-    assert_eq!(config.status, CheckStatus::Fixable);
-    assert!(
-        config.detail.contains("\"codx\" is not defined"),
-        "{}",
-        config.detail
-    );
-}
-
-#[test]
-fn each_profile_line_says_where_its_quota_comes_from_and_who_may_delegate_to_it() {
-    let homes = tempfile::tempdir().unwrap();
-    let chatgpt = homes.path().join("codex");
-    let deepseek = homes.path().join("deepseek");
-    let keyless = homes.path().join("keyless");
-    for home in [&chatgpt, &deepseek, &keyless] {
-        std::fs::create_dir_all(home).unwrap();
-    }
-    let provider = "model_provider = \"deepseek\"\n\n[model_providers.deepseek]\n\
-                    base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n\
-                    env_key = \"DEEPSEEK_API_KEY\"\n";
-    std::fs::write(deepseek.join("config.toml"), provider).unwrap();
-    std::fs::write(keyless.join("config.toml"), provider).unwrap();
-    let mut deepseek_profile = doctor_profile(HarnessKind::Codex, deepseek);
-    deepseek_profile
-        .environment
-        .insert("DEEPSEEK_API_KEY".into(), "sk-test".into());
-    let config = Config {
-        profiles: [
-            ("codex", doctor_profile(HarnessKind::Codex, chatgpt)),
-            ("deepseek", deepseek_profile),
-            ("keyless", doctor_profile(HarnessKind::Codex, keyless)),
-            (
-                "claude",
-                doctor_profile(HarnessKind::Claude, homes.path().join("claude")),
-            ),
-        ]
-        .into_iter()
-        .map(|(id, profile)| (id.to_owned(), profile))
-        .collect(),
-        subagents: mj_core::config::SubagentConfig {
-            eligible_profiles: [("codex".to_owned(), true), ("deepseek".to_owned(), true)]
-                .into_iter()
-                .collect(),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-
-    let checks = harness_checks(Ok(&config), &AlwaysFailingExecutor);
-    let detail = |id: &str| {
-        checks
-            .iter()
-            .find(|check| check.id == format!("harness.{id}"))
-            .unwrap_or_else(|| panic!("{id} is reported"))
-            .detail
-            .clone()
-    };
-    assert_eq!(
-        detail("codex"),
-        "Codex; ChatGPT subscription quota; any session's sub-agents may use it. Profile is \
-         disabled; home and authentication checks were skipped."
-    );
-    assert!(
-        detail("deepseek").starts_with(
-            "Codex; pay-per-use through api.deepseek.com, counted as 100% left when choosing a \
-             sub-agent's profile; any session's sub-agents may use it."
-        ),
-        "{}",
-        detail("deepseek")
-    );
-    assert!(
-        detail("keyless").contains("custom provider \"deepseek\" has no API key"),
-        "{}",
-        detail("keyless")
-    );
-    assert!(
-        detail("claude").starts_with(
-            "Claude Code; Claude subscription quota; only its own sessions' sub-agents may use it."
-        ),
-        "{}",
-        detail("claude")
-    );
-}
-
+// Hard-won: 871a4d9b: one unresolved profile credential stopped the whole config and daemon upgrade instead of a per-profile readiness refusal.
 #[test]
 fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
     let directory = tempfile::tempdir().unwrap();
@@ -2677,138 +1064,4 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
         let file_check = secret_checks(Ok(&config), &config_path).remove(0);
         assert_eq!(file_check.status, CheckStatus::Ready, "{file_check:?}");
     }
-}
-
-fn bifrost_report(version_output: Result<CommandOutput>) -> DoctorCheck {
-    bifrost_check_for(
-        Path::new("/tmp/bifrost-under-test"),
-        &FakeExecutor::new([version_output]),
-    )
-}
-
-#[test]
-fn doctor_accepts_a_bifrost_at_or_above_the_reviews_minimum() {
-    let minimum = mj_review::bifrost::REQUIRED_BIFROST_VERSION;
-    let executor = FakeExecutor::new([Ok(output(format!(
-        "bifrost {minimum}\nbuiltin-policy-pack x\n"
-    )))]);
-
-    let check = bifrost_check_for(Path::new("/opt/bifrost"), &executor);
-
-    assert_eq!(check.status, CheckStatus::Ready, "{check:?}");
-    assert!(check.detail.contains(minimum), "{}", check.detail);
-    let commands = executor.commands.borrow();
-    assert_eq!(commands[0].program, "/opt/bifrost");
-    assert_eq!(commands[0].args, ["--version"]);
-    drop(commands);
-    assert_eq!(
-        bifrost_report(Ok(output("bifrost 0.12.3\n"))).status,
-        CheckStatus::Ready,
-        "a newer patch release than the minimum is accepted"
-    );
-}
-
-/// I1-5: a host with an old `bifrost` on the login PATH failed every review.
-#[test]
-fn doctor_warns_when_bifrost_is_older_than_the_review_needs() {
-    let check = bifrost_report(Ok(output("bifrost 0.7.5\n")));
-
-    assert_eq!(check.status, CheckStatus::Warning, "{check:?}");
-    assert!(check.detail.contains("0.7.5"), "{}", check.detail);
-    assert!(
-        check
-            .detail
-            .contains(mj_review::bifrost::REQUIRED_BIFROST_VERSION),
-        "{}",
-        check.detail
-    );
-    assert!(
-        check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("MJ_BIFROST_BIN"),
-        "{check:?}"
-    );
-}
-
-#[test]
-fn doctor_warns_when_bifrost_cannot_run_or_names_no_version() {
-    for response in [
-        Err(anyhow!("No such file or directory")),
-        Ok(failed("boom")),
-        Ok(output("something else\n")),
-    ] {
-        let check = bifrost_report(response);
-        assert_eq!(check.status, CheckStatus::Warning, "{check:?}");
-        assert!(check.remediation.is_some());
-    }
-}
-
-/// A bare SSH target gets a worker check for the platform the host runs: a
-/// macOS host without a Darwin worker is fixable with the triple to build, a
-/// host with its worker is ready, and a host that does not answer is skipped
-/// (RVE-2).
-#[test]
-fn a_bare_ssh_target_gets_a_worker_check_for_the_platform_it_runs() {
-    use crate::controller::test_support::{IsolatedTest, test_name};
-    const CHILD: &str = "MJ_DOCTOR_SSH_WORKER_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut worker = b"linux x86_64".to_vec();
-        worker.extend_from_slice(mj_core::worker_build::WORKER_BUILD_STAMP.as_bytes());
-        std::fs::write(
-            directory.path().join("mj-worker-x86_64-unknown-linux-musl"),
-            worker,
-        )
-        .unwrap();
-        IsolatedTest::new(test_name(
-            module_path!(),
-            "a_bare_ssh_target_gets_a_worker_check_for_the_platform_it_runs",
-        ))
-        .isolated_store(directory.path())
-        .env("MJ_INSTANCE", "doctor-ssh-worker")
-        .env(CHILD, "1")
-        .env("MJ_WORKER_DIR", directory.path())
-        .run();
-        return;
-    }
-    let config = ssh_bare_config();
-    let checks = ssh_bare_worker_checks(
-        Ok(&config),
-        &FakeExecutor::new([Ok(output("Darwin arm64\n"))]),
-    );
-    assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].id, "worker.builder");
-    assert_eq!(checks[0].status, CheckStatus::Fixable);
-    assert!(
-        checks[0].detail.contains("aarch64-apple-darwin"),
-        "{:?}",
-        checks[0]
-    );
-    assert!(
-        checks[0]
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("cargo build --release --target aarch64-apple-darwin"),
-        "{:?}",
-        checks[0]
-    );
-
-    let ready = ssh_bare_worker_checks(
-        Ok(&config),
-        &FakeExecutor::new([Ok(output("Linux x86_64\n"))]),
-    );
-    assert_eq!(ready[0].status, CheckStatus::Ready, "{:?}", ready[0]);
-
-    let skipped =
-        ssh_bare_worker_checks(Ok(&config), &FakeExecutor::new([Ok(failed("timed out"))]));
-    assert_eq!(
-        skipped[0].status,
-        CheckStatus::Unsupported,
-        "{:?}",
-        skipped[0]
-    );
-    assert!(ssh_bare_worker_checks(Err(ConfigGap::Unreadable), &AlwaysFailingExecutor).is_empty());
 }

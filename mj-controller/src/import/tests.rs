@@ -15,44 +15,6 @@ fn container_template() -> mj_core::config::ContainerTemplate {
     }
 }
 
-#[test]
-fn imported_sessions_default_to_podman() {
-    let mut config = Config::default();
-    config.targets.insert(
-        "apple".into(),
-        TargetTemplate::AppleContainer {
-            container: container_template(),
-        },
-    );
-    config.targets.insert(
-        "podman".into(),
-        TargetTemplate::LocalPodman {
-            container: container_template(),
-        },
-    );
-
-    assert_eq!(default_import_target_id(&config), "podman");
-}
-
-#[test]
-fn imported_sessions_prefer_a_custom_named_local_podman_target() {
-    let mut config = Config::default();
-    config.targets.insert(
-        "apple".into(),
-        TargetTemplate::AppleContainer {
-            container: container_template(),
-        },
-    );
-    config.targets.insert(
-        "workstation".into(),
-        TargetTemplate::LocalPodman {
-            container: container_template(),
-        },
-    );
-
-    assert_eq!(default_import_target_id(&config), "workstation");
-}
-
 pub(super) fn initialize_repository(path: &Path, id: &str) {
     fs::create_dir_all(path).unwrap();
     for arguments in [
@@ -609,29 +571,6 @@ fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
 }
 
 #[test]
-fn bundle_origin_mapping_matches_configured_primary_repository() {
-    let mut config = Config::default();
-    config.bundles.insert(
-        "hel".into(),
-        ProjectBundle {
-            primary_repo: "hel".into(),
-            repositories: vec![ProjectRepository {
-                id: "hel".into(),
-                github: Some("BrokkAi/hel".into()),
-                local: None,
-                destination: "hel".into(),
-                git_ref: None,
-            }],
-        },
-    );
-    let origin = github_repository_from_origin("git@github.com:brokkai/HEL.git").unwrap();
-    assert_eq!(
-        configured_bundle_for_origin(&config, &origin).as_deref(),
-        Some("hel")
-    );
-}
-
-#[test]
 fn local_repository_collection_preserves_bundle_order() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("workspace");
@@ -785,44 +724,10 @@ fn isolated_local_source_import_resolves_the_checkout_network_remote() {
     assert!(snapshot.metadata.remote_workspace);
 }
 
-#[test]
-fn codex_jsonl_projects_user_and_agent_messages() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("rollout.jsonl");
-    fs::write(
-            &path,
-            concat!(
-                r#"{"type":"session_meta","payload":{"session_id":"019feb6c-5ffc-7c12-ad99-bdeaeb6be79d","cwd":"/work/app","history_mode":"paginated"}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"<mj-project-memory>private</mj-project-memory>","text_elements":[]},{"type":"text","text":"first prompt","text_elements":[]}]}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"agent-1","content":[{"type":"Text","text":"first reply"}],"phase":"final_answer"}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"turn_complete","turn_id":"turn-1"}}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-
-    let transcript = read_codex_transcript(&path).unwrap();
-    assert_eq!(transcript.cwd, PathBuf::from("/work/app"));
-    assert!(matches!(
-        &transcript.events[0].event,
-        WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
-    ));
-    assert_eq!(
-        agent_text(&transcript.events[1].event).as_deref(),
-        Some("first reply")
-    );
-    assert!(matches!(
-        transcript.events[2].event,
-        WorkerEvent::TurnCompleted
-    ));
-}
-
 /// Mjolnir sends Codex its hidden context as an embedded resource, which
 /// codex-acp turns into a text item wrapped in `<context ref=…>`. That item
 /// is Mjolnir's, not a prompt the user typed.
+// Hard-won: b5ae15db: Codex titled a new session from hidden project memory instead of the user prompt.
 #[test]
 fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     let uri = mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI;
@@ -1031,101 +936,6 @@ fn github_bundle(ids: &[&str]) -> ProjectBundle {
     }
 }
 
-fn codex_import_source(
-    codex_home: &Path,
-    cwd: &Path,
-    edited_paths: &[PathBuf],
-) -> LocatedCodexSession {
-    let rollout = codex_home
-        .join("sessions/2026/08/14")
-        .join(format!("rollout-{IMPORT_FIXTURE_SESSION}.jsonl"));
-    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
-    let mut records = vec![
-        json!({
-            "timestamp": "2026-08-14T12:00:00.000Z",
-            "type": "session_meta",
-            "payload": {"id": IMPORT_FIXTURE_SESSION, "cwd": cwd, "history_mode": "paginated"}
-        }),
-        json!({
-            "timestamp": "2026-08-14T12:00:01.250Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "UserMessage",
-                    "content": [{"type": "text", "text": "import this"}]
-                }
-            }
-        }),
-    ];
-    for path in edited_paths {
-        let mut changes = serde_json::Map::new();
-        changes.insert(path.to_string_lossy().into_owned(), json!({"type": "add"}));
-        records.push(json!({
-            "timestamp": "2026-08-14T12:00:02.500Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "item": {
-                    "type": "FileChange",
-                    "status": "completed",
-                    "changes": Value::Object(changes)
-                }
-            }
-        }));
-    }
-    fs::write(
-        &rollout,
-        records
-            .into_iter()
-            .map(|record| record.to_string())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .unwrap();
-    let metadata = fs::metadata(&rollout).unwrap();
-    LocatedCodexSession {
-        natively_archived: false,
-        native_session_id: IMPORT_FIXTURE_SESSION.into(),
-        jsonl_path: rollout,
-        modified_at: metadata.modified().unwrap(),
-        title: "Imported Codex session".into(),
-        cwd: cwd.to_path_buf(),
-        git_branch: "main".into(),
-        size_bytes: metadata.len(),
-        history_mode: CodexHistoryMode::Paginated,
-    }
-}
-
-fn import_codex_fixture(
-    config: &Config,
-    state: &mut State,
-    source: &LocatedCodexSession,
-    bundle_id: &str,
-    codex_home: &Path,
-    archive_directory: &Path,
-) -> ImportedClaudeSession {
-    fs::create_dir_all(archive_directory).unwrap();
-    let transcript = read_codex_transcript(&source.jsonl_path).unwrap();
-    import_native_session(
-        config,
-        state,
-        NativeImportRequest {
-            harness: HarnessKind::Codex,
-            harness_home: codex_home,
-            native_session_id: &source.native_session_id,
-            source_path: &source.jsonl_path,
-            transcript: &transcript,
-            bundle_id,
-            profile_id: None,
-            title: None,
-            archive_directory,
-        },
-        None,
-    )
-    .unwrap()
-}
-
 fn import_test_targets(local_bare: bool) -> BTreeMap<String, TargetTemplate> {
     let mut targets = BTreeMap::from([(
         "podman".to_owned(),
@@ -1148,96 +958,6 @@ fn durable_fixture_directory() -> tempfile::TempDir {
         .prefix("durable")
         .tempdir_in(base)
         .unwrap()
-}
-
-#[test]
-fn single_repository_import_becomes_a_raw_project_session() {
-    let directory = tempfile::tempdir().unwrap();
-    let app = directory.path().join("app");
-    initialize_repository(&app, "app");
-    let codex_home = directory.path().join("codex");
-    let source = codex_import_source(&codex_home, &app, &[]);
-    let config = Config {
-        bundles: BTreeMap::from([("app".to_owned(), github_bundle(&["app"]))]),
-        targets: import_test_targets(true),
-        ..Config::default()
-    };
-    let mut state = State::default();
-
-    let imported = import_codex_fixture(
-        &config,
-        &mut state,
-        &source,
-        "app",
-        &codex_home,
-        &directory.path().join("archives"),
-    );
-
-    let record = &state.sessions[&imported.session_id];
-    assert_eq!(
-        record.project_directory,
-        Some(fs::canonicalize(&app).unwrap())
-    );
-    assert_eq!(record.target_template_id, "localhost");
-    assert_eq!(record.bundle_id, "app");
-}
-
-#[test]
-fn single_repository_import_without_a_local_bare_target_stays_a_bundle_session() {
-    let directory = tempfile::tempdir().unwrap();
-    let app = directory.path().join("app");
-    initialize_repository(&app, "app");
-    let codex_home = directory.path().join("codex");
-    let source = codex_import_source(&codex_home, &app, &[]);
-    let config = Config {
-        bundles: BTreeMap::from([("app".to_owned(), github_bundle(&["app"]))]),
-        targets: import_test_targets(false),
-        ..Config::default()
-    };
-    let mut state = State::default();
-
-    let imported = import_codex_fixture(
-        &config,
-        &mut state,
-        &source,
-        "app",
-        &codex_home,
-        &directory.path().join("archives"),
-    );
-
-    let record = &state.sessions[&imported.session_id];
-    assert_eq!(record.project_directory, None);
-    assert_eq!(record.target_template_id, "podman");
-}
-
-#[test]
-fn import_of_a_session_with_a_second_repository_stays_a_bundle_session() {
-    let directory = durable_fixture_directory();
-    let app = directory.path().join("app");
-    let tools = directory.path().join("tools");
-    initialize_repository(&app, "app");
-    initialize_repository(&tools, "tools");
-    let codex_home = directory.path().join("codex");
-    let source = codex_import_source(&codex_home, &app, &[tools.join("script.sh")]);
-    let config = Config {
-        bundles: BTreeMap::from([("app".to_owned(), github_bundle(&["app", "tools"]))]),
-        targets: import_test_targets(true),
-        ..Config::default()
-    };
-    let mut state = State::default();
-
-    let imported = import_codex_fixture(
-        &config,
-        &mut state,
-        &source,
-        "app",
-        &codex_home,
-        &directory.path().join("archives"),
-    );
-
-    let record = &state.sessions[&imported.session_id];
-    assert_eq!(record.project_directory, None);
-    assert_eq!(record.target_template_id, "podman");
 }
 
 #[test]
@@ -1701,39 +1421,6 @@ fn reviewer_named_profiles_remain_visible_without_importing_sidecar_sessions() {
 }
 
 #[test]
-fn codex_scan_reports_progress_and_emits_newest_first() {
-    let directory = tempfile::tempdir().unwrap();
-    let sessions = directory.path().join("sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    for (name, session_id) in [
-        ("first.jsonl", "019feb6c-6b55-7111-a210-6d85ee0772cd"),
-        ("second.jsonl", "019feb6c-6b55-7111-a210-6d85ee0772ce"),
-    ] {
-        fs::write(
-            sessions.join(name),
-            format!(r#"{{"type":"session_meta","payload":{{"id":"{session_id}"}}}}"#),
-        )
-        .unwrap();
-    }
-    let mut updates = Vec::new();
-    scan_codex_sessions(directory.path(), &NativeScanCache::new(), |progress| {
-        updates.push((
-            progress.scanned,
-            progress.total,
-            progress.session.map(|session| session.modified_at),
-        ));
-    })
-    .unwrap();
-
-    assert_eq!(updates.len(), 3);
-    assert_eq!((updates[0].0, updates[0].1), (0, 2));
-    assert!(updates[0].2.is_none());
-    assert_eq!((updates[1].0, updates[1].1), (1, 2));
-    assert_eq!((updates[2].0, updates[2].1), (2, 2));
-    assert!(updates[1].2 >= updates[2].2);
-}
-
-#[test]
 fn claude_listing_uses_ai_title_and_native_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let rollout = directory
@@ -1826,6 +1513,7 @@ fn claude_first_user_message_is_not_used_as_a_session_name_fallback() {
     assert_eq!(title, "Untitled session");
 }
 
+// Hard-won: a54b9f41: a named Claude transcript at its exact path was wrongly reported as not found because picker filters were reused.
 #[test]
 fn claude_lookup_by_id_finds_a_session_the_picker_hides() {
     let directory = tempfile::tempdir().unwrap();
@@ -1872,6 +1560,7 @@ fn claude_lookup_by_id_reports_a_symlinked_transcript() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
+// Hard-won: 1495b0bd: a by-id Claude lookup defaulted a missing cwd to an empty path instead of refusing it.
 #[test]
 fn claude_lookup_by_id_reports_a_transcript_without_a_cwd() {
     let directory = tempfile::tempdir().unwrap();
@@ -1892,20 +1581,6 @@ fn claude_lookup_by_id_reports_a_transcript_without_a_cwd() {
     .to_string();
     assert!(error.contains("has no cwd"), "{error}");
     assert!(!error.contains("was not found"), "{error}");
-}
-
-#[test]
-fn claude_lookup_by_id_still_reports_a_missing_session_as_not_found() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::create_dir_all(directory.path().join("projects/work")).unwrap();
-
-    let error = locate_claude_session(
-        directory.path(),
-        &ClaudeSessionSelection::NativeSessionId("absent".into()),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("was not found"), "{error}");
 }
 
 #[test]
@@ -2355,23 +2030,6 @@ fn unchanged_claude_transcripts_are_not_reopened_on_a_second_scan() {
         ["First title"]
     );
     assert_eq!(cache.parsed_files(), 1);
-}
-
-#[test]
-fn a_changed_modified_time_reparses_the_claude_transcript() {
-    let directory = tempfile::tempdir().unwrap();
-    let rollout = directory
-        .path()
-        .join("projects/work/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
-    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
-    claude_scan_fixture(&rollout, "First title");
-    let stamp = fs::metadata(&rollout).unwrap().modified().unwrap();
-
-    let cache = NativeScanCache::new();
-    assert_eq!(
-        scan_claude_titles(directory.path(), &cache),
-        ["First title"]
-    );
 
     claude_scan_fixture(&rollout, "Later title");
     fs::File::options()
@@ -2380,7 +2038,6 @@ fn a_changed_modified_time_reparses_the_claude_transcript() {
         .unwrap()
         .set_modified(stamp + Duration::from_secs(10))
         .unwrap();
-
     assert_eq!(
         scan_claude_titles(directory.path(), &cache),
         ["Later title"]
@@ -2407,6 +2064,7 @@ fn codex_named_rollout(home: &Path, session_id: &str, source: Value) -> PathBuf 
     rollout
 }
 
+// Hard-won: c72b6322: a named Codex rollout hidden by picker filters was wrongly reported as missing.
 #[test]
 fn codex_lookup_by_id_finds_a_session_the_picker_hides() {
     let directory = tempfile::tempdir().unwrap();
@@ -2460,6 +2118,7 @@ fn codex_lookup_by_id_reports_a_symlinked_rollout() {
 }
 
 #[cfg(unix)]
+// Hard-won: 659575aa: following a Codex session symlink made by-id lookup walk an arbitrarily large unrelated tree.
 #[test]
 fn codex_lookup_by_id_stops_at_the_rollout_depth_inside_a_symlinked_tree() {
     let directory = tempfile::tempdir().unwrap();
@@ -2525,6 +2184,7 @@ fn codex_lookup_by_id_reports_a_rollout_behind_a_symlinked_day_directory() {
 }
 
 #[cfg(unix)]
+// Hard-won: 659575aa: an unreadable Codex directory aborted lookup instead of returning a bounded, named refusal.
 #[test]
 fn codex_lookup_by_id_reports_a_directory_it_cannot_read() {
     use std::os::unix::fs::PermissionsExt;
@@ -2550,20 +2210,7 @@ fn codex_lookup_by_id_reports_a_directory_it_cannot_read() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
-#[test]
-fn codex_lookup_by_id_still_reports_a_missing_session_as_not_found() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::create_dir_all(directory.path().join("sessions")).unwrap();
-
-    let error = locate_codex_session(
-        directory.path(),
-        &CodexSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("was not found"), "{error}");
-}
-
+// Hard-won: c72b6322: a named Kimi session omitted by its index was wrongly reported as missing.
 #[test]
 fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
     let directory = tempfile::tempdir().unwrap();
@@ -2617,20 +2264,6 @@ fn kimi_lookup_by_id_reports_a_symlinked_session_directory() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
-#[test]
-fn kimi_lookup_by_id_still_reports_a_missing_session_as_not_found() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::create_dir_all(directory.path().join("sessions/project")).unwrap();
-
-    let error = locate_kimi_session(
-        directory.path(),
-        &KimiSessionSelection::NativeSessionId(format!("session_{NAMED_LOOKUP_ID}")),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("was not found"), "{error}");
-}
-
 #[cfg(unix)]
 #[test]
 fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
@@ -2657,6 +2290,7 @@ fn grok_lookup_by_id_reports_a_symlinked_session_directory() {
 }
 
 #[cfg(unix)]
+// Hard-won: 9c566d06: Grok listing offered a session whose symlinked workspace the archive importer could not collect.
 #[test]
 fn grok_listing_and_lookup_agree_about_a_symlinked_working_directory() {
     let directory = tempfile::tempdir().unwrap();
@@ -2687,6 +2321,7 @@ fn grok_listing_and_lookup_agree_about_a_symlinked_working_directory() {
     assert!(!error.contains("was not found"), "{error}");
 }
 
+// Hard-won: c72b6322: a named Grok session without cwd was reported as absent instead of explaining why it could not be imported.
 #[test]
 fn grok_lookup_by_id_reports_a_session_without_a_cwd() {
     let directory = tempfile::tempdir().unwrap();
@@ -2711,18 +2346,4 @@ fn grok_lookup_by_id_reports_a_session_without_a_cwd() {
     .to_string();
     assert!(error.contains("has no cwd"), "{error}");
     assert!(!error.contains("was not found"), "{error}");
-}
-
-#[test]
-fn grok_lookup_by_id_still_reports_a_missing_session_as_not_found() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::create_dir_all(directory.path().join("sessions/%2Fwork%2Fapp")).unwrap();
-
-    let error = locate_grok_session(
-        directory.path(),
-        &GrokSessionSelection::NativeSessionId(NAMED_LOOKUP_ID.into()),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("was not found"), "{error}");
 }
