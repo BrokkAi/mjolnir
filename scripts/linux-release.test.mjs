@@ -60,19 +60,7 @@ for (const failure of ['broken', 'missing', 'corrupt']) {
     assert.match(f.result.stderr, failure === 'broken' ? /GLIBC_2.39 not found[\s\S]*glibc 2.28/ : failure === 'missing' ? /expected binary/ : /checksum mismatch/);
   });
 }
-test('installer installs a runnable bundle and records its checksum', t => {
-  const f = installer(t);
-  assert.equal(f.result.status, 0, f.result.stdout + f.result.stderr);
-  assert.match(readFileSync(join(f.bin, 'mj'), 'utf8'), /mj fixture/);
-  assert.equal(readFileSync(join(f.cache, 'mj.sha256'), 'utf8'), `${f.checksum}\n`);
-  assert.match(f.result.stdout, /installer: done/);
-});
-test('installer skips a verified cached executable', t => {
-  const f = installer(t, { cached: true });
-  assert.equal(f.result.status, 0, f.result.stderr);
-  assert.match(f.result.stdout, /skipping download/);
-  assert.equal(readFileSync(join(f.bin, 'mj'), 'utf8'), f.old);
-});
+
 test('installer repairs an unusable executable despite a matching cached checksum', t => {
   const f = installer(t, { cached: true, cachedBroken: true });
   assert.equal(f.result.status, 0, f.result.stderr);

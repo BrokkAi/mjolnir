@@ -299,6 +299,7 @@ test('a project directory suggests paths on its own host and a URL never searche
 
 // The project list finishing re-renders the step and replaces the field. A
 // slow machine makes that land after the person has typed.
+// Hard-won: eef1275: a project-step redraw dropped the current path suggestion reply on slow machines.
 test('path suggestions survive the step re-rendering while a reply is pending', async ({ page }) => {
   const state = await mount(page);
   let finishCatalog;

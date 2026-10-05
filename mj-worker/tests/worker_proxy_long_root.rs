@@ -50,6 +50,7 @@ fn accept_within(listener: &UnixListener, wait: Duration, proxy: &mut Child) -> 
     }
 }
 
+// Hard-won: d1744be: a worker socket could not connect when its root exceeded the platform socket path limit.
 #[test]
 fn a_proxy_connects_to_a_worker_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().expect("create a proxy test root");

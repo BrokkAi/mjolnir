@@ -571,6 +571,7 @@ fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> 
         .1
 }
 
+// Hard-won: fedacb5: the first container turn ran without the synchronized GitHub token after re-exec.
 #[test]
 fn container_worker_has_the_container_github_token_when_it_starts() {
     // The worker re-executes itself with a cleared environment before it sets

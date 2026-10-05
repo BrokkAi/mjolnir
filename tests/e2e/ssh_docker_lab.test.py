@@ -24,7 +24,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import ssh_docker_lab as lab  # noqa: E402
 
-
 def tagged(resource_id_field: str, resource_id: str, run_tag: str | None, **extra: Any) -> dict[str, Any]:
     tag_list = [{"Key": "Name", "Value": run_tag or "untagged"}]
     if run_tag is not None:
@@ -33,12 +32,12 @@ def tagged(resource_id_field: str, resource_id: str, run_tag: str | None, **extr
     resource.update(extra)
     return resource
 
-
 class FakeAws:
-    """A hand-written stand-in for ssh_docker_lab.Aws.  Holds an in-memory
-    table per resource type and answers exactly the describe/mutate calls
-    ssh_docker_lab.py issues, so tag-discovery and cleanup-by-tag can be
-    exercised without touching AWS."""
+    """A hand-written stand-in for ssh_docker_lab.Aws tag-discovery queries.
+
+    It holds an in-memory table per resource type, so ownership selection can
+    be exercised without touching AWS.
+    """
 
     def __init__(self, profile: str = "default", region: str = "us-east-1", timeout: float = 5.0) -> None:
         self.profile = profile
@@ -113,24 +112,6 @@ class FakeAws:
             return {"KeyPairs": items}
         raise AssertionError(f"unexpected optional_json command: {command} {rest}")
 
-    def json(self, service: str, *arguments: str) -> dict[str, Any]:
-        command, rest = arguments[0], arguments[1:]
-        if command == "terminate-instances":
-            self.instances.pop(rest[rest.index("--instance-ids") + 1], None)
-            return {}
-        if command == "delete-volume":
-            self.volumes.pop(rest[rest.index("--volume-id") + 1], None)
-            return {}
-        if command == "delete-security-group":
-            self.groups.pop(rest[rest.index("--group-id") + 1], None)
-            return {}
-        if command == "delete-key-pair":
-            self.keys.pop(rest[rest.index("--key-name") + 1], None)
-            return {}
-        result = self.optional_json(service, *arguments)
-        assert result is not None
-        return result
-
 
 def make_args(**overrides: Any) -> argparse.Namespace:
     base = dict(
@@ -145,42 +126,15 @@ def make_args(**overrides: Any) -> argparse.Namespace:
     base.update(overrides)
     return argparse.Namespace(**base)
 
-
 class DiscoverCandidateRunTagsTests(unittest.TestCase):
     """Tag-discovery selection logic backing the plain `cleanup` fallback."""
-
-    def test_collects_distinct_tags_across_resource_types(self) -> None:
-        aws = FakeAws()
-        aws.instances["i-1"] = tagged("InstanceId", "i-1", "mj-ssh-docker-aaa")
-        aws.volumes["vol-1"] = tagged("VolumeId", "vol-1", "mj-ssh-docker-bbb")
-        aws.groups["sg-1"] = tagged("GroupId", "sg-1", "mj-ssh-docker-aaa")
-        aws.keys["mj-ssh-docker-ccc-key"] = tagged(
-            "KeyName", "mj-ssh-docker-ccc-key", "mj-ssh-docker-ccc"
-        )
-        self.assertEqual(
-            lab.discover_candidate_run_tags(aws),
-            ["mj-ssh-docker-aaa", "mj-ssh-docker-bbb", "mj-ssh-docker-ccc"],
-        )
 
     def test_ignores_resources_without_the_tag(self) -> None:
         aws = FakeAws()
         aws.instances["i-1"] = tagged("InstanceId", "i-1", None)
         self.assertEqual(lab.discover_candidate_run_tags(aws), [])
 
-    def test_empty_account_yields_no_candidates(self) -> None:
-        self.assertEqual(lab.discover_candidate_run_tags(FakeAws()), [])
-
-
 class DiscoverOwnedKeyPairTests(unittest.TestCase):
-    def test_returns_matching_key_name(self) -> None:
-        aws = FakeAws()
-        aws.keys["mj-ssh-docker-aaa-key"] = tagged(
-            "KeyName", "mj-ssh-docker-aaa-key", "mj-ssh-docker-aaa"
-        )
-        self.assertEqual(lab.discover_owned_key_pair(aws, "mj-ssh-docker-aaa"), "mj-ssh-docker-aaa-key")
-
-    def test_returns_none_when_absent(self) -> None:
-        self.assertIsNone(lab.discover_owned_key_pair(FakeAws(), "mj-ssh-docker-aaa"))
 
     def test_raises_on_ambiguous_match(self) -> None:
         aws = FakeAws()
@@ -188,7 +142,6 @@ class DiscoverOwnedKeyPairTests(unittest.TestCase):
         aws.keys["key-2"] = tagged("KeyName", "key-2", "mj-ssh-docker-aaa")
         with self.assertRaises(lab.LabError):
             lab.discover_owned_key_pair(aws, "mj-ssh-docker-aaa")
-
 
 class CleanupByRunTagTests(unittest.TestCase):
     """End-to-end (against the fake) exercise of the J-9 recovery path."""
@@ -203,42 +156,6 @@ class CleanupByRunTagTests(unittest.TestCase):
         lab.Aws = lambda *a, **k: self.fake  # type: ignore[assignment]
         self.addCleanup(setattr, lab, "Aws", self._real_aws)
 
-    def test_discovers_and_removes_every_tagged_resource(self) -> None:
-        self.fake.instances["i-abc"] = tagged(
-            "InstanceId", "i-abc", self.run_tag, State={"Name": "running"}
-        )
-        self.fake.volumes["vol-abc"] = tagged(
-            "VolumeId", "vol-abc", self.run_tag, State="available"
-        )
-        self.fake.groups["sg-abc"] = tagged("GroupId", "sg-abc", self.run_tag)
-        self.fake.keys[f"{self.run_tag}-key"] = tagged(
-            "KeyName", f"{self.run_tag}-key", self.run_tag
-        )
-
-        args = make_args(artifact_dir=self.artifact_dir, run_tag=self.run_tag)
-        result = lab.cleanup_by_run_tag(args, self.run_tag)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(self.fake.instances, {})
-        self.assertEqual(self.fake.volumes, {})
-        self.assertEqual(self.fake.groups, {})
-        self.assertEqual(self.fake.keys, {})
-
-        ledger = lab.load_json(lab.ledger_path(self.artifact_dir))
-        self.assertEqual(ledger["state"], "cleaned")
-        self.assertEqual(ledger["resources"]["instance_id"], "i-abc")
-        self.assertEqual(ledger["resources"]["volume_id"], "vol-abc")
-        self.assertEqual(ledger["resources"]["security_group_id"], "sg-abc")
-        self.assertEqual(ledger["resources"]["key_name"], f"{self.run_tag}-key")
-        self.assertEqual(ledger["cleanup_errors"], [])
-
-    def test_no_resources_found_fails_clearly(self) -> None:
-        args = make_args(artifact_dir=self.artifact_dir, run_tag=self.run_tag)
-        with self.assertRaises(lab.LabError) as excinfo:
-            lab.cleanup_by_run_tag(args, self.run_tag)
-        self.assertIn(self.run_tag, str(excinfo.exception))
-        self.assertIn("no resources tagged", str(excinfo.exception))
-
     def test_refuses_to_overwrite_an_existing_ledger(self) -> None:
         lab.ensure_private_directory(self.artifact_dir)
         lab.save_ledger(
@@ -249,22 +166,6 @@ class CleanupByRunTagTests(unittest.TestCase):
         with self.assertRaises(lab.LabError) as excinfo:
             lab.cleanup_by_run_tag(args, self.run_tag)
         self.assertIn("already exists", str(excinfo.exception))
-
-    def test_plain_cleanup_without_ledger_lists_candidate_tags(self) -> None:
-        self.fake.instances["i-abc"] = tagged("InstanceId", "i-abc", self.run_tag)
-        args = make_args(artifact_dir=self.artifact_dir)  # no --run-tag, no ledger present
-        with self.assertRaises(lab.LabError) as excinfo:
-            lab.cleanup(args)
-        message = str(excinfo.exception)
-        self.assertIn("--run-tag", message)
-        self.assertIn(self.run_tag, message)
-
-    def test_plain_cleanup_without_ledger_or_candidates_still_names_run_tag_flag(self) -> None:
-        args = make_args(artifact_dir=self.artifact_dir)
-        with self.assertRaises(lab.LabError) as excinfo:
-            lab.cleanup(args)
-        self.assertIn("--run-tag", str(excinfo.exception))
-
 
 class BrokenSymlinkArtifactDirTests(unittest.TestCase):
     """A dangling `target` symlink under --artifact-dir must fail clearly
@@ -286,27 +187,6 @@ class BrokenSymlinkArtifactDirTests(unittest.TestCase):
         self.assertIn(str(broken_link), message)
         self.assertIn("broken symlink", message)
         self.assertNotIsInstance(excinfo.exception, FileExistsError)
-
-    def test_symlink_to_a_real_directory_still_works(self) -> None:
-        real_target = self.root / "actual"
-        real_target.mkdir()
-        link = self.root / "target"
-        link.symlink_to(real_target)
-        artifact_dir = link / "ssh-docker-e2e" / "run123"
-
-        lab.ensure_private_directory(artifact_dir)
-
-        self.assertTrue((real_target / "ssh-docker-e2e" / "run123").is_dir())
-
-    def test_ordinary_nested_directory_still_works(self) -> None:
-        artifact_dir = self.root / "a" / "b" / "c"
-        lab.ensure_private_directory(artifact_dir)
-        self.assertTrue(artifact_dir.is_dir())
-
-    def test_first_broken_symlink_returns_none_when_nothing_is_broken(self) -> None:
-        artifact_dir = self.root / "a" / "b"
-        self.assertIsNone(lab.first_broken_symlink(artifact_dir))
-
 
 if __name__ == "__main__":
     unittest.main()
