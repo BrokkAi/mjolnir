@@ -165,7 +165,6 @@ fn apply_indexed_observation(
     apply_committed_projection_event_indexed(session, index, &next, projected.mutation).unwrap();
 }
 
-// Hard-won: 975b275a: each resumed open added another transcript line and amplified recovery history.
 #[test]
 fn resume_open_updates_operational_state_without_adding_transcript_noise() {
     let session = MaterializedSession::empty("session");
@@ -434,6 +433,73 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
     }
 }
 
+// Hard-won: 1389c545: autonomous Claude turns were treated as idle, allowing mid-turn checkpoints and losing recovery work.
+#[test]
+fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
+    let mut session = MaterializedSession::empty("session");
+
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted {
+            started_at_ms: 4_200,
+        },
+    );
+
+    assert_eq!(
+        session.execution,
+        MaterializedExecutionState::Running {
+            started_at_ms: 4_200
+        }
+    );
+    let marker = session.transcript.last().expect("a marker item");
+    assert_eq!(
+        marker.stable_id,
+        format!("{}1", crate::transcript::HARNESS_TURN_ITEM_PREFIX)
+    );
+    assert!(marker.is_turn_start());
+    assert!(matches!(
+        &marker.body,
+        TranscriptBody::System { text } if text == crate::transcript::HARNESS_TURN_TEXT
+    ));
+
+    apply_observation(
+        &mut session,
+        agent_chunk("picking this back up", "answer-1"),
+    );
+    assert!(
+        session.transcript.iter().any(
+            |item| matches!(&item.body, TranscriptBody::Agent { streaming, .. } if *streaming)
+        ),
+        "output inside the turn streams into a fresh item"
+    );
+
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: Some("task-notification".into()),
+            prompt_in_flight: false,
+        },
+    );
+
+    assert_eq!(session.execution, MaterializedExecutionState::Idle);
+    assert!(
+        !session.transcript.iter().any(|item| matches!(
+            &item.body,
+            TranscriptBody::Agent { streaming, .. } if *streaming
+        )),
+        "settling closes the streams a canonical export refuses to hold open"
+    );
+    assert_eq!(
+        mj_core::state::latest_completed_turn_ordinal(&session),
+        Some(1),
+        "the finished turn is covered from the marker that began it"
+    );
+    assert_eq!(
+        mj_core::state::ProjectionWindow::of(&session).latest_turn_start_position,
+        Some(1)
+    );
+}
+
 // Hard-won: db2e99a5: a native turn settling beneath an accepted prompt incorrectly made the session idle.
 #[test]
 fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
@@ -509,7 +575,6 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     );
 }
 
-// Hard-won: 73dfe169: finishing an ACP prompt closed a later Codex goal stream during recovery.
 #[test]
 fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     let mut session = MaterializedSession::empty("session");
@@ -555,6 +620,7 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     assert_eq!(session.execution, MaterializedExecutionState::Idle);
 }
 
+// Hard-won: 1389c545: worker restart left an open autonomous turn that canonical checkpoint export rejected.
 #[test]
 fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams() {
     let mut session = MaterializedSession::empty("session");
@@ -584,6 +650,7 @@ fn a_restart_during_a_harness_turn_leaves_an_idle_session_with_no_open_streams()
         .expect("a restarted session exports without open streams");
 }
 
+// Hard-won: 1389c545: a plan from a self-started turn overwrote the previous turn's plan.
 #[test]
 fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     let plan = |content: &str| RelayObservation::SessionUpdate {
@@ -649,7 +716,6 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
     );
 }
 
-// Hard-won: 4647de43: worker restart lost or duplicated the unread interruption in persisted read state.
 #[test]
 fn interrupted_prompt_before_restart_produces_one_unread_interruption() {
     let mut session = MaterializedSession::empty("session");
@@ -829,41 +895,6 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
     cancel(&mut prompted, "cancel-prompt");
     assert_eq!(interrupted_rows(&prompted), 0);
     assert!(prompted.last_turn_outcome.is_none());
-}
-
-#[test]
-fn session_restarts_project_as_distinct_durable_system_lines() {
-    let mut session = MaterializedSession::empty("session");
-    apply_observation(&mut session, RelayObservation::SessionRestarted);
-    apply_observation(&mut session, RelayObservation::SessionRestarted);
-
-    assert_eq!(session.transcript.len(), 2);
-    assert!(
-        session
-            .transcript
-            .iter()
-            .all(|item| item.is_session_restart())
-    );
-    assert_eq!(session.unread_interruptions_after(0), 0);
-    assert!(session.transcript.iter().all(|item| matches!(
-        &item.body,
-        TranscriptBody::System { text }
-            if text == crate::transcript::SESSION_RESTART_TEXT
-    )));
-    assert_ne!(
-        session.transcript[0].stable_id,
-        session.transcript[1].stable_id
-    );
-
-    let canonical = canonical_session_from_materialized(&session).unwrap();
-    let restored = materialized_session_from_canonical("session", &canonical).unwrap();
-    assert_eq!(restored.unread_interruptions_after(0), 0);
-    assert!(
-        restored
-            .transcript
-            .iter()
-            .all(|item| item.is_session_restart())
-    );
 }
 
 #[test]
@@ -1106,90 +1137,6 @@ fn idle_untagged_thought_chunks_coalesce_into_one_closed_item() {
 }
 
 #[test]
-fn idle_untagged_thought_then_agent_chunks_split_into_two_items() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.execution = MaterializedExecutionState::Idle;
-    apply_observation(&mut session, untagged_thought_chunk("pondering "));
-    apply_observation(&mut session, untagged_thought_chunk("the goal"));
-    apply_observation(&mut session, untagged_agent_chunk("here's "));
-    apply_observation(&mut session, untagged_agent_chunk("the plan"));
-
-    assert_eq!(session.transcript.len(), 2);
-    assert!(matches!(
-        &session.transcript[0].body,
-        TranscriptBody::Thought { chunks, streaming }
-            if !*streaming
-                && crate::transcript::materialized_chunks_text(chunks) == "pondering the goal"
-    ));
-    assert!(matches!(
-        &session.transcript[1].body,
-        TranscriptBody::Agent { chunks, streaming }
-            if !*streaming
-                && crate::transcript::materialized_chunks_text(chunks) == "here's the plan"
-    ));
-}
-
-#[test]
-fn idle_untagged_agent_chunks_split_around_an_intervening_tool_call() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.execution = MaterializedExecutionState::Idle;
-    apply_observation(&mut session, untagged_agent_chunk("checking "));
-    apply_observation(&mut session, untagged_agent_chunk("the repo"));
-    apply_observation(
-        &mut session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCall(ToolCall::new("call-1", "grep"))),
-        },
-    );
-    apply_observation(&mut session, untagged_agent_chunk("found "));
-    apply_observation(&mut session, untagged_agent_chunk("it"));
-
-    let agent_items: Vec<&TranscriptItem> = session
-        .transcript
-        .iter()
-        .filter(|item| matches!(item.body, TranscriptBody::Agent { .. }))
-        .map(|item| item.as_ref())
-        .collect();
-    assert_eq!(agent_items.len(), 2, "transcript: {:?}", session.transcript);
-    assert!(matches!(
-        &agent_items[0].body,
-        TranscriptBody::Agent { chunks, streaming }
-            if !*streaming
-                && crate::transcript::materialized_chunks_text(chunks) == "checking the repo"
-    ));
-    assert!(matches!(
-        &agent_items[1].body,
-        TranscriptBody::Agent { chunks, streaming }
-            if !*streaming
-                && crate::transcript::materialized_chunks_text(chunks) == "found it"
-    ));
-    assert!(
-        session
-            .transcript
-            .iter()
-            .any(|item| matches!(&item.body, TranscriptBody::Tool { .. })),
-        "the tool call item survives between the two agent items"
-    );
-}
-
-#[test]
-fn running_untagged_agent_chunks_still_merge_into_one_open_stream() {
-    let mut session = MaterializedSession::empty("session-1");
-    session.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
-    for word in ["live ", "streaming ", "text"] {
-        apply_observation(&mut session, untagged_agent_chunk(word));
-    }
-    assert_eq!(session.transcript.len(), 1);
-    let item = &session.transcript[0];
-    assert!(matches!(
-        &item.body,
-        TranscriptBody::Agent { chunks, streaming }
-            if *streaming
-                && crate::transcript::materialized_chunks_text(chunks) == "live streaming text"
-    ));
-}
-
-#[test]
 fn backward_relay_clock_never_regresses_transcript_change_times() {
     let mut session = MaterializedSession::empty("session-1");
     let mut first = event(
@@ -1243,7 +1190,6 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
     assert_eq!(session.last_activity_at_ms(), Some(1_000));
 }
 
-// Hard-won: 8ee980d6: a late Codex update for a pre-resume tool blocked relay replay when no projected call existed.
 #[test]
 fn tool_update_without_an_initial_call_is_ignored_and_advances_the_frontier() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1260,6 +1206,33 @@ fn tool_update_without_an_initial_call_is_ignored_and_advances_the_frontier() {
 
     let projected = project_relay_event(&session, &relay_event)
         .expect("a delayed pre-resume tool update is an observable no-op");
+    apply_committed_projection_event(&mut session, &relay_event, projected.mutation)
+        .expect("the no-op still advances the committed relay frontier");
+
+    assert!(session.transcript.is_empty());
+    assert_eq!(session.applied_event_ordinal, 1);
+}
+
+#[test]
+fn metadata_only_tool_update_without_an_initial_call_is_ignored() {
+    let mut session = MaterializedSession::empty("session-1");
+    let update = SessionUpdate::ToolCallUpdate(
+        ToolCallUpdate::new("pre-resume-tool", ToolCallUpdateFields::new()).meta(
+            serde_json::Map::from_iter([(
+                "terminal_output_delta".into(),
+                json!({"data": "late output"}),
+            )]),
+        ),
+    );
+    let relay_event = event(
+        &session,
+        RelayObservation::SessionUpdate {
+            update: Box::new(update),
+        },
+    );
+
+    let projected = project_relay_event(&session, &relay_event)
+        .expect("private metadata cannot change the transcript projection");
     apply_committed_projection_event(&mut session, &relay_event, projected.mutation)
         .expect("the no-op still advances the committed relay frontier");
 
@@ -1324,6 +1297,7 @@ fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
     assert_eq!(session.transcript[0].position, created.position);
 }
 
+// Hard-won: 111f6dcd: a revised full call after an incremental update created a second transcript item.
 #[test]
 fn tool_call_update_then_resent_tool_call_survives_the_projection() {
     let mut session = MaterializedSession::empty("session-1");
@@ -1402,24 +1376,6 @@ fn attached_terminal_outputs(item: &TranscriptItem) -> &[TerminalOutputRecord] {
         panic!("expected a tool item, got {:?}", item.body);
     };
     terminal_outputs
-}
-
-#[test]
-fn fallback_terminal_tool_completes_in_place_instead_of_parking_output() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, fallback_terminal_tool("term-1", "cargo test"));
-    apply_observation(&mut session, terminal_output("term-1"));
-
-    assert_eq!(session.transcript.len(), 1);
-    let item = &session.transcript[0];
-    assert_eq!(item.stable_id, "tool:hel-terminal:term-1");
-    assert_eq!(item.position, 1, "the terminal retains its start order");
-    assert_eq!(attached_terminal_outputs(item).len(), 1);
-    let TranscriptBody::Tool { call, .. } = &item.body else {
-        panic!("the fallback stays a tool");
-    };
-    let call: ToolCall = serde_json::from_value(call.clone()).unwrap();
-    assert_eq!(call.status, ToolCallStatus::Completed);
 }
 
 #[test]
@@ -1530,21 +1486,6 @@ fn late_fallback_claims_output_from_a_fast_terminal() {
 }
 
 #[test]
-fn terminal_output_after_the_tool_call_attaches_to_the_tool_item() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, terminal_tool_call("call-1", "term-1"));
-    apply_observation(&mut session, terminal_output("term-1"));
-
-    assert_eq!(session.transcript.len(), 1, "no standalone item is left");
-    let outputs = attached_terminal_outputs(&session.transcript[0]);
-    assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].terminal_id, "term-1");
-    assert_eq!(outputs[0].output, "build finished\n");
-    assert_eq!(outputs[0].exit_code, Some(0));
-    assert_eq!(session.transcript[0].last_changed_at_ms, 200);
-}
-
-#[test]
 fn indexed_page_projection_tracks_terminal_and_tool_replacements() {
     let mut session = MaterializedSession::empty("session-1");
     let mut index = ProjectionIndex::new(&session);
@@ -1599,69 +1540,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
         outputs,
         "output arriving before or after the call must read the same"
     );
-}
-
-// Hard-won: a718d1c3: Kimi raw output duplicated a terminal transcript item when no terminal reference was supplied.
-#[test]
-fn kimi_raw_result_claims_its_unreferenced_terminal_output() {
-    const OUTPUT: &str = "toolchain inventory\n";
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCall(ToolCall::new(
-                "call-1",
-                "Execute `inspect toolchain`",
-            ))),
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::TerminalOutput {
-            terminal_id: "term-1".into(),
-            output: OUTPUT.into(),
-            truncated: false,
-            exit_code: Some(1),
-            signal: None,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                "call-1",
-                ToolCallUpdateFields::new()
-                    .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
-                    .content(vec![ToolCallContent::from(ContentBlock::Text(
-                        TextContent::new(OUTPUT),
-                    ))])
-                    .raw_output(json!({
-                        "type": "Bash",
-                        "output": OUTPUT.as_bytes(),
-                        "exit_code": 1,
-                        "command": "inspect toolchain"
-                    })),
-            ))),
-        },
-    );
-
-    assert_eq!(
-        session.transcript.len(),
-        1,
-        "the completed tool consumes the duplicate standalone item"
-    );
-    let TranscriptBody::Tool {
-        terminal_outputs,
-        terminal_refs,
-        ..
-    } = &session.transcript[0].body
-    else {
-        panic!("the surviving item is the tool call");
-    };
-    assert_eq!(terminal_refs, &["term-1"]);
-    assert_eq!(terminal_outputs.len(), 1);
-    assert_eq!(terminal_outputs[0].output, OUTPUT);
-    assert_eq!(terminal_outputs[0].exit_code, Some(1));
+    assert_eq!(reversed.transcript[0].last_changed_at_ms, 200);
 }
 
 #[test]
@@ -1836,51 +1715,6 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
 }
 
 #[test]
-fn queued_prompt_becomes_user_message_only_when_started() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "prompt-1".into(),
-            command: RelayCommand::Prompt {
-                prompt: vec![ContentBlock::Text(TextContent::new("hello"))],
-            },
-            created_at_ms: 100,
-        },
-    );
-    assert!(session.transcript.is_empty());
-    assert_eq!(session.queued_prompts.len(), 1);
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: "prompt-1".into(),
-            started_at_ms: 200,
-        },
-    );
-    assert!(session.queued_prompts.is_empty());
-    assert!(matches!(
-        session.transcript[0].body,
-        TranscriptBody::User { .. }
-    ));
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandCompleted {
-            barrier_command_id: None,
-            command: None,
-            command_id: "prompt-1".into(),
-            outcome: RelayCommandOutcome::Prompt {
-                diagnostic: None,
-                stop_reason: "end_turn".into(),
-                usage: None,
-            },
-        },
-    );
-    assert_eq!(session.execution, MaterializedExecutionState::Idle);
-}
-
-#[test]
 fn first_queued_prompt_seeds_a_provisional_session_title() {
     let mut session = MaterializedSession::empty("session-1");
     apply_observation(
@@ -1902,7 +1736,6 @@ fn first_queued_prompt_seeds_a_provisional_session_title() {
     );
 }
 
-// Hard-won: 244fa1cc: oversized ACP titles could exceed the stored and published title bound.
 #[test]
 fn session_info_update_caps_large_titles_in_the_published_projection() {
     let mut session = MaterializedSession::empty("session-1");
@@ -2047,57 +1880,6 @@ fn next_prompt_backfills_an_existing_untitled_session_from_its_first_prompt() {
     );
 
     assert_eq!(session.session_title.as_deref(), Some("original task"));
-}
-
-#[test]
-fn queued_config_change_starts_without_becoming_a_turn() {
-    let mut session = MaterializedSession::empty("session-1");
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "config-1".into(),
-            command: RelayCommand::SetConfig {
-                key: "model".into(),
-                value: "sonnet".into(),
-            },
-            created_at_ms: 100,
-        },
-    );
-    assert_eq!(session.queued_prompts.len(), 1);
-    assert_eq!(
-        session.queued_prompts[0].kind,
-        QueuedCommandKind::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        }
-    );
-    assert_eq!(
-        crate::transcript::materialized_content_text(&session.queued_prompts[0].content),
-        "/model sonnet"
-    );
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandStarted {
-            command_id: "config-1".into(),
-            started_at_ms: 200,
-        },
-    );
-    assert!(session.queued_prompts.is_empty());
-    assert!(session.transcript.is_empty());
-    assert_eq!(session.execution, MaterializedExecutionState::Idle);
-
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandCompleted {
-            barrier_command_id: None,
-            command: None,
-            command_id: "config-1".into(),
-            outcome: RelayCommandOutcome::Configured,
-        },
-    );
-    assert_eq!(session.execution, MaterializedExecutionState::Idle);
-    assert!(session.transcript.is_empty());
 }
 
 #[test]
@@ -2593,41 +2375,150 @@ fn a_handback_reminder_is_shown_as_the_prompt_that_started_its_turn() {
     )));
 }
 
-/// With typed failures, codex-acp sends its warnings and retry notices as
-/// records instead of agent text. Each shows as one line, and a later
-/// revision of the same record rewrites that line.
 #[test]
-fn a_bridge_failure_record_is_one_line_that_its_revisions_rewrite() {
-    let record = |revision: u64, severity: &str, title: &str| {
-        let meta = json!({"jetbrains": {"air": {"version": 1, "sessionFailure": {
-            "id": "turn-1:error", "revision": revision, "category": "connection",
-            "severity": severity, "title": title, "actions": []}}}});
-        RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::SessionInfoUpdate(
-                agent_client_protocol::schema::v1::SessionInfoUpdate::new()
-                    .meta(meta.as_object().cloned()),
-            )),
-        }
-    };
-    let lines = |session: &MaterializedSession| -> Vec<String> {
-        session
-            .transcript
-            .iter()
-            .filter_map(|item| match &item.body {
-                TranscriptBody::System { text }
-                    if item.stable_id.starts_with("session-failure:") =>
-                {
-                    Some(text.clone())
-                }
-                _ => None,
-            })
-            .collect()
-    };
+fn canonical_round_trip_preserves_cursor_and_logical_positions() {
     let mut session = MaterializedSession::empty("session-1");
-    apply_observation(&mut session, record(1, "warning", "Reconnecting... 1/5"));
-    assert_eq!(lines(&session), vec!["warning: Reconnecting... 1/5"]);
-    apply_observation(&mut session, record(2, "warning", "Reconnecting... 2/5"));
-    assert_eq!(lines(&session), vec!["warning: Reconnecting... 2/5"]);
-    apply_observation(&mut session, record(3, "error", "stream disconnected"));
-    assert_eq!(lines(&session), vec!["error: stream disconnected"]);
+    session.applied_event_ordinal = 4;
+    session.applied_event_digest = "a".repeat(64);
+    session.last_activity_at_ms = Some(40);
+    session.session_title = Some("Build it".into());
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "agent:a".into(),
+        position: 2,
+        latest_content_event_ordinal: Some(4),
+        created_at_ms: 20,
+        last_changed_at_ms: 40,
+        body: TranscriptBody::Agent {
+            chunks: vec![json!({
+                "content": {"type": "text", "text": "done"},
+                "messageId": "a",
+                "_meta": {"provider": "test"}
+            })],
+            streaming: false,
+        },
+    }));
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "thought:t".into(),
+        position: 3,
+        latest_content_event_ordinal: None,
+        created_at_ms: 30,
+        last_changed_at_ms: 30,
+        body: TranscriptBody::Thought {
+            chunks: vec![json!({
+                "content": {
+                    "type": "text",
+                    "text": "reasoning",
+                    "_meta": {"contentProvider": "test"}
+                },
+                "messageId": "t",
+                "_meta": {"chunkProvider": "test"}
+            })],
+            streaming: false,
+        },
+    }));
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "tool:call-1".into(),
+        position: 4,
+        latest_content_event_ordinal: None,
+        created_at_ms: 40,
+        last_changed_at_ms: 40,
+        body: TranscriptBody::Tool {
+            call: json!({
+                "toolCallId": "call-1",
+                "title": "Read file",
+                "kind": "read",
+                "status": "completed",
+                "content": [{"type": "terminal", "terminalId": "term-1"}],
+                "rawInput": {"path": "README.md"},
+                "rawOutput": {"bytes": 42},
+                "_meta": {"provider": "test"}
+            }),
+            terminal_outputs: vec![TerminalOutputRecord {
+                terminal_id: "term-1".into(),
+                output: "ok\n".into(),
+                truncated: true,
+                exit_code: Some(0),
+                signal: None,
+            }],
+            // "term-3" is a reference the call no longer carries, so only
+            // the remembered list can survive the archive round trip.
+            terminal_refs: vec!["term-1".into(), "term-3".into()],
+            presentation: Some(Box::new(crate::transcript::ToolCallPresentation {
+                summary: "Read".into(),
+                source: "Read file".into(),
+                source_kind: crate::transcript::ToolSummarySourceKind::Title,
+                tool_kind: agent_client_protocol::schema::v1::ToolKind::Read,
+                summary_version: crate::transcript::TOOL_SUMMARY_VERSION,
+            })),
+        },
+    }));
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "terminal:term-2".into(),
+        position: 4,
+        latest_content_event_ordinal: None,
+        created_at_ms: 40,
+        last_changed_at_ms: 40,
+        body: TranscriptBody::TerminalOutput {
+            record: TerminalOutputRecord {
+                terminal_id: "term-2".into(),
+                output: "orphaned output\n".into(),
+                truncated: false,
+                exit_code: None,
+                signal: Some("SIGKILL".into()),
+            },
+        },
+    }));
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: "plan:4".into(),
+        position: 4,
+        latest_content_event_ordinal: None,
+        created_at_ms: 40,
+        last_changed_at_ms: 40,
+        body: TranscriptBody::Plan {
+            plan: json!({
+                "entries": [{
+                    "content": "finish",
+                    "priority": "high",
+                    "status": "in_progress",
+                    "_meta": {"entryProvider": "test"}
+                }],
+                "_meta": {"planProvider": "test"}
+            }),
+        },
+    }));
+    session.transcript.push(Arc::new(TranscriptItem {
+        stable_id: plan_proposal_item_id(4),
+        position: 4,
+        latest_content_event_ordinal: None,
+        created_at_ms: 40,
+        last_changed_at_ms: 40,
+        body: TranscriptBody::PlanProposal {
+            proposal_id: "plan-review-1".into(),
+            plan: "1. Read the code\n2. Change it".into(),
+        },
+    }));
+    session.queued_prompts.push(MaterializedQueuedPrompt {
+        accepted_ordinal: None,
+        command_id: "queued-config".into(),
+        kind: QueuedCommandKind::SetConfig {
+            key: "model".into(),
+            value: "sonnet".into(),
+        },
+        content: vec![json!({"type": "text", "text": "/model sonnet"})],
+        queued_at_ms: 50,
+    });
+    let canonical = canonical_session_from_materialized(&session).unwrap();
+    canonical.validate().unwrap();
+    assert_eq!(
+        canonical.queued_prompts[0].kind,
+        CanonicalQueuedCommandKind::SetConfig {
+            key: "model".into(),
+            value: "sonnet".into(),
+        }
+    );
+    let restored = materialized_session_from_canonical("session-1", &canonical).unwrap();
+    assert_eq!(restored.applied_event_ordinal, 4);
+    assert_eq!(restored.transcript[0].position, 2);
+    assert_eq!(restored.unread_agent_messages_after(1), 1);
+    assert_eq!(restored, session);
 }

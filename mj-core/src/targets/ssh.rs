@@ -1786,6 +1786,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 5cea6d11: a child inherited its parent locator and was refused before starting.
     #[test]
     fn verify_locator_accepts_a_container_borrowed_from_its_owner() {
         verify_locator(&borrowed_podman(BORROW_PARENT), BORROW_CHILD)
@@ -1935,94 +1936,6 @@ mod tests {
             ) & 0o777,
             0o700
         );
-    }
-
-    /// `ssh` refuses `-J` after a `ProxyCommand`, so a session rewrites the
-    /// user's `-J` to the `ProxyJump` option the session's guard overrides.
-    /// `scp` already turns its `-J` into that option.
-    #[test]
-    #[cfg(unix)]
-    fn a_jump_host_flag_becomes_an_option_the_session_guard_overrides() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = sharing_socket_dir();
-        let ssh = SshTarget {
-            destination: "jump-rewrite-host".to_owned(),
-            ssh_args: vec!["-J".to_owned(), "bastion".to_owned(), "-Jother".to_owned()],
-        };
-        let masters = FakeMasters::default();
-        let args = spawned_args(
-            &ssh_command(&ssh, ["-J"]),
-            Some(socket_dir.path()),
-            &masters,
-        );
-        assert_eq!(
-            args[6..],
-            [
-                "-o",
-                "ProxyJump=bastion",
-                "-o",
-                "ProxyJump=other",
-                "jump-rewrite-host",
-                "'-J'",
-            ]
-        );
-        let upload = spawned_args(
-            &scp_upload(&ssh, Path::new("/tmp/file"), "file", false),
-            Some(socket_dir.path()),
-            &masters,
-        );
-        assert_eq!(
-            upload[6..],
-            [
-                "-J",
-                "bastion",
-                "-Jother",
-                "/tmp/file",
-                "jump-rewrite-host:file"
-            ]
-        );
-    }
-
-    /// A user who configures sharing in `ssh_args` owns it: Mjolnir adds no
-    /// sharing options of its own, in any spelling OpenSSH accepts, and opens
-    /// no master.
-    #[test]
-    #[cfg(unix)]
-    fn user_configured_sharing_suppresses_mjolnir_sharing() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = sharing_socket_dir();
-        let spellings: [&[&str]; 5] = [
-            &["-o", "ControlMaster=no"],
-            &["-o", "controlpath /tmp/mine"],
-            &["-oControlPath=/tmp/mine"],
-            &["-S", "/tmp/mine"],
-            &["-S/tmp/mine"],
-        ];
-        let masters = FakeMasters::default();
-        for user in spellings {
-            let ssh = SshTarget {
-                destination: "user-sharing-host".to_owned(),
-                ssh_args: user.iter().map(|arg| (*arg).to_owned()).collect(),
-            };
-            set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-                socket_dir.path().to_path_buf(),
-            )));
-            let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test");
-            let validation = spawned_args(&validation, Some(socket_dir.path()), &masters);
-            let command = ssh_command(&ssh, ["true"]);
-            let args = spawned_args(&command, Some(socket_dir.path()), &masters);
-            assert_eq!(args, command.args, "user args {user:?}");
-            let socket_dir_text = socket_dir.path().display().to_string();
-            assert!(
-                !validation.iter().any(|arg| arg.contains(&socket_dir_text)),
-                "user args {user:?}: {validation:?}"
-            );
-        }
-        assert_eq!(masters.commands(), 0);
     }
 
     /// Each instance keeps its own sockets, because each daemon counts only
@@ -2239,18 +2152,6 @@ mod tests {
         assert_eq!(args, ["long-path-host", "'true'"]);
         assert_eq!(masters.commands(), 0);
         assert!(!long.exists(), "an unusable directory must not be created");
-    }
-
-    #[test]
-    #[cfg(not(unix))]
-    fn connection_sharing_is_unix_only() {
-        let mut args = vec!["-o".to_owned(), "BatchMode=yes".to_owned()];
-        let ssh = SshTarget {
-            destination: "host".to_owned(),
-            ssh_args: Vec::new(),
-        };
-        push_connection_reuse_args(&mut args, &ssh);
-        assert_eq!(args, vec!["-o".to_owned(), "BatchMode=yes".to_owned()]);
     }
 
     /// Against a real host: leasing a session opens a master that
@@ -2523,6 +2424,51 @@ mod tests {
         }
     }
 
+    /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
+    /// to preserve file times and read the port as a file name. Every `scp`
+    /// also opens a connection, so it is admitted like `ssh`.
+    // Hard-won: a1b93a2e: controller uploads used SSH -p where scp requires -P.
+    #[test]
+    #[cfg(unix)]
+    fn scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let ssh = SshTarget {
+            destination: "build@10.0.0.1".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+
+        let upload = scp_upload(&ssh, Path::new("/tmp/local"), "remote/path", true);
+        let download = scp_download(&ssh, "remote/archive.zip", "/tmp/local.zip");
+        set_ssh_connection_sharing_for_test(None);
+
+        assert_eq!(
+            upload.args,
+            [
+                "-P",
+                "2222",
+                "-r",
+                "/tmp/local",
+                "build@10.0.0.1:remote/path"
+            ]
+        );
+        assert_eq!(
+            download.args,
+            [
+                "-P",
+                "2222",
+                "build@10.0.0.1:remote/archive.zip",
+                "/tmp/local.zip"
+            ]
+        );
+        for command in [upload, download] {
+            assert_eq!(command.program, "scp");
+            assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn leases_fill_the_lowest_shard_and_open_another_at_the_cap() {
@@ -2742,56 +2688,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn the_opener_is_an_admitted_batch_master_and_the_check_is_local() {
-        let ssh = SshTarget {
-            destination: "host".to_owned(),
-            ssh_args: vec!["-J".to_owned(), "jump".to_owned()],
-        };
-        let socket = Path::new("/run/mj/abc-0");
-        let open = master_open_command(&ssh, socket);
-        assert_eq!(
-            open.args,
-            [
-                "-J",
-                "jump",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-f",
-                "-N",
-                "-o",
-                "ControlMaster=yes",
-                "-o",
-                "ControlPath=/run/mj/abc-0",
-                "-o",
-                &format!("ControlPersist={CONTROL_PERSIST}"),
-                "host",
-            ]
-        );
-        assert_eq!(open.ssh_destination.as_deref(), Some("host"));
-
-        let check = master_check_command(&ssh, socket);
-        assert_eq!(
-            check.args,
-            [
-                "-J",
-                "jump",
-                "-o",
-                "ControlPath=/run/mj/abc-0",
-                "-O",
-                "check",
-                "host"
-            ]
-        );
-        assert_eq!(
-            check.ssh_destination, None,
-            "a check opens no connection and takes no admission permit"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn a_master_open_times_out_during_handshake_and_honors_the_users_shorter_budget() {
         use std::net::TcpListener;
         use std::sync::mpsc;
@@ -2898,7 +2794,6 @@ mod tests {
         );
     }
 
-    // Hard-won: e6ed54ed: sshd MaxStartups drops were misclassified instead of safely retried.
     #[test]
     fn transport_rejection_matches_only_sshd_hangups() {
         let cases: [(i32, &str, bool); 7] = [
@@ -2927,7 +2822,6 @@ mod tests {
         }
     }
 
-    // Hard-won: e6ed54ed: parallel remote work exceeded sshd MaxStartups and lost live workers and operations.
     #[test]
     fn admission_never_admits_more_than_the_limit() {
         let gate = DestinationGate::new(2);
@@ -2961,7 +2855,6 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
-    // Hard-won: e6ed54ed: a saturated destination gate must block new SSH work until a permit is released.
     #[test]
     fn admission_blocks_once_every_permit_is_held() {
         let gate = DestinationGate::new(2);

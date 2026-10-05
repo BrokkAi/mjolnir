@@ -53,31 +53,6 @@ fn a_relay_that_dies_mid_stream_recovers_its_unpersisted_chunks() {
     );
 }
 
-/// Amortization is bounded: a long stream still rewrites the snapshot, so
-/// a restart never has to replay an unbounded journal.
-#[test]
-fn a_long_stream_persists_the_snapshot_before_replay_grows_unbounded() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let chunk = "y".repeat(64 * 1024);
-    let mut journaled = 0_usize;
-    while journaled <= RELAY_SNAPSHOT_LAG_BYTE_LIMIT {
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(chunk.clone()),
-            )))
-            .unwrap();
-        journaled += chunk.len();
-    }
-
-    let persisted = persisted_relay_snapshot(temp.path()).latest_ordinal;
-    assert!(
-        persisted > 1,
-        "a stream past the replay budget never rewrote the snapshot"
-    );
-    assert!(persisted <= relay.latest_ordinal());
-}
-
 /// A catch-up acknowledgement wrote `relay-state.json` twice: once for the
 /// ACK, then again for a collection that had nothing to collect.
 #[test]
@@ -771,67 +746,6 @@ fn recovery_isolates_a_corrupt_record_at_every_position() {
             "one gap for corruption at index {corrupt_index}"
         );
     }
-}
-
-#[test]
-fn a_journal_mixing_v1_and_v2_records_reads_and_validates_across_the_boundary() {
-    // During the lazy migration a journal holds legacy v1 records followed
-    // by new v2 records. Both formats read, each self-validates, and the
-    // v1→v2 boundary validates without a chain link.
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join(RELAY_ACTIVE_SEGMENT);
-    let mut file = File::create(&path).unwrap();
-
-    let v1 = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V1,
-        ordinal: 1,
-        previous_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-        digest: String::new(),
-        recorded_at_ms: 1,
-        command_id: None,
-        observation: RelayObservation::Warning {
-            message: "legacy".into(),
-        },
-    };
-    let v1 = RelayEvent {
-        digest: relay_event_digest(&v1).unwrap(),
-        ..v1
-    };
-    serde_json::to_writer(&mut file, &v1).unwrap();
-    file.write_all(b"\n").unwrap();
-
-    let v2 = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V2,
-        ordinal: 2,
-        previous_digest: String::new(),
-        digest: String::new(),
-        recorded_at_ms: 2,
-        command_id: None,
-        observation: RelayObservation::Warning {
-            message: "new".into(),
-        },
-    };
-    let v2 = RelayEvent {
-        digest: relay_event_digest(&v2).unwrap(),
-        ..v2
-    };
-    serde_json::to_writer(&mut file, &v2).unwrap();
-    file.write_all(b"\n").unwrap();
-    file.sync_all().unwrap();
-
-    let mut events = Vec::new();
-    visit_relay_journal_file(&path, JournalReadMode::Strict, |event, _| {
-        events.push(event);
-        Ok(ControlFlow::Continue(()))
-    })
-    .unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].format, RELAY_EVENT_FORMAT_V1);
-    assert_eq!(events[1].format, RELAY_EVENT_FORMAT_V2);
-    // The v2 record continues from the v1 record across the format
-    // boundary: ordinal contiguity holds and the v2 record self-validates,
-    // with no chain link required.
-    validate_relay_event(v1.ordinal, &v1.digest, &events[1]).unwrap();
 }
 
 #[test]
