@@ -359,23 +359,39 @@ fn codex_request_log(log: &Path) -> Vec<Value> {
 }
 
 #[cfg(unix)]
+fn codex_quota_request(
+    directory: &Path,
+    environment: BTreeMap<String, String>,
+) -> QuotaRefreshRequest {
+    QuotaRefreshRequest {
+        native_openai: true,
+        profile_id: "codex".into(),
+        harness: HarnessKind::Codex,
+        source_home: directory.to_path_buf(),
+        environment,
+        cwd: directory.to_path_buf(),
+        provider: None,
+    }
+}
+
+/// How many times the fake app-server has started. Each start appends a line
+/// to `<request log>.starts`.
+#[cfg(unix)]
+fn codex_starts(log: &Path) -> usize {
+    let mut path = log.as_os_str().to_owned();
+    path.push(".starts");
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
 async fn poll_codex_profile(
     directory: &Path,
     environment: BTreeMap<String, String>,
 ) -> QuotaRefreshOutcome {
-    let (outcome, client) = refresh_profile(
-        QuotaRefreshRequest {
-            native_openai: true,
-            profile_id: "codex".into(),
-            harness: HarnessKind::Codex,
-            source_home: directory.to_path_buf(),
-            environment,
-            cwd: directory.to_path_buf(),
-            provider: None,
-        },
-        None,
-    )
-    .await;
+    let (outcome, client) =
+        refresh_profile(codex_quota_request(directory, environment), None).await;
     if let Some(client) = client {
         client.shutdown().await;
     }
@@ -506,6 +522,109 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":40,"wind
         outcome.report.five_hour_window().unwrap().remaining_percent,
         Some(60)
     );
+}
+
+/// A rotation that fails in an app-server this poll started ends the poll:
+/// starting another one for the quota read would repeat the failure (#1224).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_rotation_in_a_new_app_server_ends_the_poll() {
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(600),
+        Duration::from_secs(3_000),
+    );
+    let (environment, log) = fake_codex_app_server(
+        directory.path(),
+        r#"#!/bin/sh
+printf 'start\n' >> "$CODEX_USAGE_TEST_LOG.starts"
+read_and_log() {
+IFS= read -r line || exit 1
+printf '%s\n' "$line" >> "$CODEX_USAGE_TEST_LOG"
+}
+read_and_log
+printf '%s\n' '{"id":1,"result":{}}'
+read_and_log
+read_and_log
+printf '%s\n' '{"id":2,"result":{"account":null}}'
+IFS= read -r line
+"#,
+    );
+
+    let outcome = poll_codex_profile(directory.path(), environment).await;
+
+    assert_eq!(
+        outcome.report.error.as_deref(),
+        Some("not signed in with ChatGPT")
+    );
+    assert_eq!(codex_starts(&log), 1);
+    let messages = codex_request_log(&log);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2]["params"]["refreshToken"], true);
+}
+
+/// The #1224 case: a cached app-server whose rotation fails stays signed out
+/// until it restarts. The poll replaces it and reads the quota with the new
+/// one, which reads the credential file again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_rotation_in_a_cached_app_server_recovers_in_the_same_poll() {
+    let directory = tempfile::tempdir().unwrap();
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(10 * 3_600),
+        Duration::from_secs(3_600),
+    );
+    let (environment, log) = fake_codex_app_server(
+        directory.path(),
+        r#"#!/bin/sh
+starts="$CODEX_USAGE_TEST_LOG.starts"
+started_before=no
+[ -e "$starts" ] && started_before=yes
+printf 'start\n' >> "$starts"
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line || exit 1
+IFS= read -r line || exit 1
+printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
+IFS= read -r line || exit 1
+if [ "$started_before" = no ]; then
+    printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'
+    IFS= read -r line || exit 1
+    printf '%s\n' '{"id":4,"result":{"account":null}}'
+else
+    printf '%s\n' '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":29,"windowDurationMins":10080}}}}'
+fi
+IFS= read -r line
+"#,
+    );
+
+    let (first, client) = refresh_profile(
+        codex_quota_request(directory.path(), environment.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(first.report.error, None);
+    assert!(client.is_some(), "the first poll caches its app-server");
+
+    write_codex_auth(
+        directory.path(),
+        Duration::from_secs(600),
+        Duration::from_secs(3_000),
+    );
+    let (second, client) =
+        refresh_profile(codex_quota_request(directory.path(), environment), client).await;
+    if let Some(client) = client {
+        client.shutdown().await;
+    }
+
+    assert_eq!(second.report.error, None);
+    assert_eq!(
+        second.report.weekly_window().unwrap().remaining_percent,
+        Some(71)
+    );
+    assert_eq!(codex_starts(&log), 2);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::Instrument;
 
 use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
@@ -243,7 +244,10 @@ impl QuotaManager {
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {
             let client = self.codex_clients.remove(&request.profile_id);
-            tasks.spawn(refresh_profile(request, client));
+            // Probes run concurrently, so the span is what ties a quota
+            // client's log lines to its profile.
+            let span = tracing::info_span!("quota_probe", profile_id = %request.profile_id);
+            tasks.spawn(refresh_profile(request, client).instrument(span));
         }
 
         while let Some(result) = tasks.join_next().await {
@@ -410,7 +414,15 @@ async fn refresh_profile(
             }
         }
         HarnessKind::Codex => {
+            // A poll starts at most one app-server. A failed rotation drops its
+            // client. When that client was cached from an earlier poll, a new
+            // one may still read the quota, which is how a login that the old
+            // process gave up on recovers (#1224). When this poll started it,
+            // another start would only repeat the failure, so the next poll
+            // tries again instead.
+            let mut failed_rotation = None;
             if codex_login_is_near_expiry(&credential_path).await {
+                let started_here = codex_client.is_none();
                 match codex_usage::refresh_login(
                     &mut codex_client,
                     cwd.clone(),
@@ -422,14 +434,22 @@ async fn refresh_profile(
                         profile_id = %profile_id,
                         "refreshed Codex login ahead of expiry"
                     ),
-                    Err(error) => tracing::warn!(
-                        profile_id = %profile_id,
-                        %error,
-                        "could not refresh the Codex login ahead of expiry"
-                    ),
+                    Err(failure) => {
+                        tracing::warn!(
+                            profile_id = %profile_id,
+                            error = %failure.detail,
+                            "could not refresh the Codex login ahead of expiry"
+                        );
+                        if started_here && codex_client.is_none() {
+                            failed_rotation = Some(failure.reason);
+                        }
+                    }
                 }
             }
-            let status = codex_usage::refresh(&mut codex_client, cwd, environment).await;
+            let status = match failed_rotation {
+                Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
+                None => codex_usage::refresh(&mut codex_client, cwd, environment).await,
+            };
             match status {
                 CodexUsageStatus::Available(report) => Ok(ProfileQuota {
                     banked_resets: report.banked_resets.filter(|_| native_openai),
