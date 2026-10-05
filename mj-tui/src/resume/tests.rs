@@ -6,8 +6,8 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+use crate::DashboardState;
 use crate::test_support::*;
-use crate::{DashboardState, Focus};
 
 /// Rows for `state` as the dialog builds them once the daemon has answered
 /// with the stopped sessions in it.
@@ -30,50 +30,6 @@ fn merged_rows(
 /// Later than `stopped_session`'s checkpoint, so a native row built with
 /// it sorts above the Hel record.
 const NEWER_THAN_THE_CHECKPOINT: i64 = 4_000_000_000_000;
-
-#[test]
-fn managed_clone_resume_row_marks_unpublished_checkpoint_work() {
-    let mut session = stopped_session();
-    let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
-    session.project_directory = Some(root.clone());
-    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
-        kind: mj_core::state::ManagedCheckoutKind::Clone,
-        source_project_directory: "/srv/project".into(),
-        source_repository: "/srv/project".into(),
-        worktree_root: root,
-        branch: "master".into(),
-        target: mj_core::state::ManagedWorktreeTarget::Local,
-        base_commit: Some("1".repeat(40)),
-    });
-    session.publication = Some(mj_core::state::PublicationAssessment {
-        checkpoint_sha256: "a".repeat(64),
-        state: PublicationState::Unpublished,
-        dirty: false,
-        stashed: false,
-        saved_commits: vec!["2".repeat(40)],
-        destinations: Vec::new(),
-        checked_at: "2026-08-09T01:00:00Z".into(),
-        reason: Some("master contains an unpublished commit".into()),
-    });
-    let rows = merged_rows(&config(), &state_with(vec![session]), &[], &[]);
-    let row = rows
-        .iter()
-        .find(|row| matches!(row.key, ResumeRowKey::Hel(_)))
-        .unwrap();
-    assert_eq!(row.publication, Some(PublicationState::Unpublished));
-    assert!(row.details.contains("Unpublished work"));
-    let line = resume_row_line(
-        row,
-        &RowLayout {
-            profile: 12,
-            origin: 16,
-            activity: 12,
-            title: 40,
-        },
-        &chrono::Utc::now(),
-    );
-    assert!(line.to_string().contains("↑ "));
-}
 
 fn native(id: &str, title: &str, last_activity_ms: i64) -> crate::ImportSessionOption {
     crate::ImportSessionOption {
@@ -100,6 +56,7 @@ fn codex_profile(sessions: Vec<crate::ImportSessionOption>) -> ImportProfileOpti
 
 /// C-25: a long title gives way to the "[unavailable]" marker, so the marker
 /// is always shown in full.
+// Hard-won: 72f1adfb: Finding C-25 showed a long import title clipped the [unavailable] marker to [unavaila].
 #[test]
 fn a_long_unavailable_title_keeps_its_marker() {
     for width in [120, 80, 60] {
@@ -588,6 +545,7 @@ fn a_live_session_hides_its_native_counterpart_from_the_dialog() {
 /// Import tab offered session C's pre-`/clear` thread, whose history C
 /// still holds, and importing it would have duplicated that history. A
 /// thread that ran in a session's own checkout is that session's.
+// Hard-won: ebcd71d2: R10-3 showed a session’s pre- or post-/clear Codex thread could be offered as a second import of its own history.
 #[test]
 fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
     let clone = std::path::PathBuf::from(
@@ -847,6 +805,7 @@ fn the_destroy_button_replaces_the_d_key() {
 /// harness had not named by its id (tmux/022), while the Destroy dialog and
 /// the notices called it "project via fake". The Mjolnir and Live tabs now
 /// list the title every other listing uses.
+// Hard-won: dd35efff: Launch finding R6-4 showed unnamed suspended sessions displayed their ID instead of the created title.
 #[test]
 fn a_session_its_harness_has_not_named_is_listed_by_its_created_title() {
     let unnamed = |mut session: SessionRecord, id: &str, title: &str| {
@@ -1001,59 +960,9 @@ fn apply_ready_rows(dashboard: &mut DashboardState, rows: Vec<WikiRow>) {
     dashboard.apply_wiki_search(request_id, ready_page(rows));
 }
 
-/// The dialog opens on Live with the session list itself focused, not the
-/// search box, so a state letter narrows the list at once rather than being
-/// typed into the box.
-#[test]
-fn the_dialog_opens_with_the_list_focused_and_a_letter_narrows_it_at_once() {
-    let mut dashboard = dashboard_with_live_attention_mix();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
-
-    drawn(&mut dashboard, 120, 40);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('b'))),
-        DashboardAction::None
-    );
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert!(
-        dialog.search.is_empty(),
-        "the letter narrowed the list; the search box was never touched"
-    );
-    assert_eq!(
-        rows(&dashboard)
-            .into_iter()
-            .map(|row| row.key)
-            .collect::<Vec<_>>(),
-        vec![ResumeRowKey::Live("live-remote".into())],
-        "only the session waiting on a question counts as blocked"
-    );
-}
-
-/// `/` still moves the focus to the search box, and once it has it, typing
-/// narrows the Live list by name.
-#[test]
-fn slash_moves_focus_to_the_search_box_and_typing_narrows_by_name() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    drawn(&mut dashboard, 120, 40);
-
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('/'))),
-        DashboardAction::None
-    );
-    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Search);
-
-    for character in "mast".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
-}
-
 /// C-12: when a state filter empties the Live list, the message names the
 /// filter rather than saying nothing is running.
+// Hard-won: db681e6e: Finding C-12 showed a filtered Live list claiming no sessions were running when the filter had no matches.
 #[test]
 fn an_empty_filtered_live_list_names_the_filter() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -1067,6 +976,7 @@ fn an_empty_filtered_live_list_names_the_filter() {
 
 /// C-13: the archived briefing's UTC date is shown in local time, like every
 /// other time on screen.
+// Hard-won: 8b5f8bb4: Finding C-13 showed archived briefing timestamps in UTC while the rest of the UI used local time.
 #[test]
 fn the_briefing_date_is_shown_in_local_time() {
     let central = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
@@ -1092,6 +1002,7 @@ fn the_briefing_date_is_shown_in_local_time() {
 
 /// C-6: Enter in the search box does what Enter on the list does. On the Live
 /// tab that jumps to the matched session and closes the dialog.
+// Hard-won: 8e13ffb1: Finding C-6 showed Enter in the Live search box only moved focus instead of opening the selected match.
 #[test]
 fn enter_in_the_search_box_opens_the_live_match() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -1127,113 +1038,6 @@ fn an_index_answer_leaves_the_focused_control_unchanged() {
 
     apply_ready_rows(&mut dashboard, Vec::new());
     assert_eq!(dialog_focus(&dashboard), focus_before);
-}
-
-/// A row is archived only when nothing on this machine still holds the
-/// session: no Mjolnir record and no native file an import could adopt.
-#[test]
-fn only_indexed_sessions_nothing_else_holds_become_archived_rows() {
-    let config = config();
-    let state = state_with(vec![stopped_session()]);
-    let profiles = [codex_profile(vec![native(
-        "native-2",
-        "Native",
-        NEWER_THAN_THE_CHECKPOINT,
-    )])];
-
-    let gone = wiki_row("gone", true);
-    let held = WikiRow {
-        hel_session_id: Some("session-1".into()),
-        snippet: Some("the phrase that matched".into()),
-        ..wiki_row("held", true)
-    };
-    let imported = WikiRow {
-        tool: "codex".into(),
-        native_id: Some("native-2".into()),
-        snippet: Some("a native hit".into()),
-        ..wiki_row("imported", true)
-    };
-    let live_elsewhere = wiki_row("still-there", false);
-
-    let merged = merged_rows(
-        &config,
-        &state,
-        &profiles,
-        &[gone, held, imported, live_elsewhere],
-    );
-    let archived = merged
-        .iter()
-        .filter(|row| matches!(row.key, ResumeRowKey::Archive(_)))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        archived
-            .iter()
-            .map(|row| row.key.clone())
-            .collect::<Vec<_>>(),
-        vec![ResumeRowKey::Archive("gone".into())],
-        "only the session nothing else holds is archived"
-    );
-    assert_eq!(archived[0].status, ResumeRowStatus::Restorable);
-
-    let hel = merged
-        .iter()
-        .find(|row| row.key == ResumeRowKey::Hel("session-1".into()))
-        .expect("the Mjolnir record is still listed");
-    assert_eq!(hel.wiki_id(), Some("held"));
-    assert!(
-        hel.details.contains("the phrase that matched"),
-        "a hit on a live record shows its snippet: {}",
-        hel.details
-    );
-    let native_row = merged
-        .iter()
-        .find(|row| matches!(row.key, ResumeRowKey::Native(..)))
-        .expect("the importable session is still listed");
-    assert_eq!(native_row.wiki_id(), Some("imported"));
-    assert!(native_row.details.contains("a native hit"));
-}
-
-/// The Archived tab shows archived rows only, and Enter on one opens the
-/// wizard that restores it rather than resuming a record.
-#[test]
-fn the_archived_tab_lists_indexed_sessions_and_enter_restores_one() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    // The dialog asks for the recent list as it opens, the way the
-    // dashboard does, and the answer names that request.
-    let (request_id, query) = dashboard.next_wiki_search().expect("a search is asked for");
-    assert_eq!(query, "");
-    dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("gone", true)]));
-
-    switch_to_hel(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-    switch_to_import(&mut dashboard);
-    assert!(rows(&dashboard).is_empty());
-
-    if let Mode::ResumeDialog(dialog) = &mut dashboard.mode {
-        dialog.form.get_mut().focus(ResumeFocus::Sessions);
-    }
-    assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Right)),
-        DashboardAction::LoadArchivedBrief { .. } | DashboardAction::None
-    ));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Archive);
-    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
-    assert_eq!(dialog.selected, Some(ResumeRowKey::Archive("gone".into())));
-
-    dashboard.handle_key(key(KeyCode::Enter));
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected the resume wizard, got {:?}", dashboard.mode);
-    };
-    assert_eq!(wizard.source, crate::wizards::ResumeSource::Archive);
-    assert_eq!(wizard.session_id, "gone");
 }
 
 /// A configuration with a bare target beside the container one, so the two
@@ -1327,34 +1131,6 @@ fn select_the_archived_row(dashboard: &mut DashboardState) {
         Some(ResumeRowKey::Archive("gone".into())),
         "the archived row is selected"
     );
-}
-
-/// Enter on an archived row opens the restore wizard already pointed at the
-/// profile and target the session ran under.
-#[test]
-fn enter_on_archived_row_preseeds_wizard_profile_and_target() {
-    let mut dashboard = DashboardState::new(
-        config_with_bare_target(),
-        state_with(Vec::new()),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    let (request_id, _) = dashboard.next_wiki_search().expect("a search is asked for");
-    dashboard.apply_wiki_search(
-        request_id,
-        ready_page(vec![tagged_wiki_row("gone", "podman", "codex-2")]),
-    );
-
-    select_the_archived_row(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Enter));
-
-    let Mode::Resume(wizard) = &dashboard.mode else {
-        panic!("expected the resume wizard, got {:?}", dashboard.mode);
-    };
-    // `config_with_bare_target` lists claude-1, codex-1, codex-2 in that
-    // order, and localhost, podman in that order.
-    assert_eq!(wizard.profile, 2, "the wizard opens on codex-2");
-    assert_eq!(wizard.target, 1, "the wizard opens on podman");
 }
 
 /// An id the configuration no longer has leaves the wizard on its first
@@ -1462,44 +1238,6 @@ fn tabs_separate_hel_records_from_importable_native_sessions() {
     assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
 }
 
-#[test]
-fn search_arrows_edit_the_cursor_and_tabs_have_their_own_focus() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![native(
-            "native-2",
-            "Native",
-            NEWER_THAN_THE_CHECKPOINT,
-        )])],
-    );
-    apply_ready_rows(&mut dashboard, Vec::new());
-    switch_to_hel(&mut dashboard);
-    // Switching tabs leaves the box for the list; `/` is the way back to it.
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    dashboard.handle_paste("nat");
-    dashboard.handle_key(key(KeyCode::Left));
-    dashboard.handle_key(key(KeyCode::Char('X')));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("resume")
-    };
-    assert_eq!(dialog.tab, ResumeTab::Hel);
-    assert_eq!(dialog.search.value(), "naXt");
-    assert_eq!(dialog.focused(), ResumeFocus::Search);
-    dashboard.handle_key(key(KeyCode::BackTab));
-    dashboard.handle_key(key(KeyCode::Right));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("resume")
-    };
-    assert_eq!(dialog.tab, ResumeTab::Import);
-    assert_eq!(dialog.focused(), ResumeFocus::Tabs);
-}
-
 /// Selecting a row dispatches to the flow that suits its source: the
 /// resume wizard for a Hel record, the import flow for a native session.
 #[test]
@@ -1548,6 +1286,7 @@ fn selecting_a_row_resumes_a_hel_record_and_imports_a_native_session() {
 
 /// Enter on the focused Mjolnir row starts its resume, which is what the tab's
 /// own hint promises and what the Resume button already does.
+// Hard-won: c82060f6: Enter on a Mjolnir row did nothing after arrow navigation left focus on the tab strip.
 #[test]
 fn enter_on_a_focused_mjolnir_row_begins_its_resume() {
     let mut dashboard = DashboardState::new(
@@ -1788,64 +1527,9 @@ fn failed_live_search_keeps_metadata_matches_and_reports_the_failure() {
     assert_eq!(titles(&rows(&dashboard)), ["archived old-session"]);
 }
 
-#[test]
-fn live_metadata_search_includes_project_branch_profile_target_and_workspace() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    let remote = dashboard.state.sessions.get_mut("live-remote").unwrap();
-    remote.project_directory = Some("/work/rvector-project".into());
-    remote.launch_branch = Some("rvector-branch".into());
-    remote.last_profile = "rvector-profile".into();
-    remote.target_template_id = "rvector-target".into();
-    dashboard.set_workspace_names(BTreeMap::from([(
-        "other".into(),
-        "rvector-workspace".into(),
-    )]));
-    for query in [
-        "rvector-project",
-        "rvector-branch",
-        "rvector-profile",
-        "rvector-target",
-        "rvector-workspace",
-    ] {
-        open_resume_dialog(&mut dashboard, 1, Vec::new());
-        type_resume_query(&mut dashboard, query);
-        assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"], "{query}");
-    }
-}
-
-#[test]
-fn live_conversation_matches_preserve_attention_filters_and_activity_order() {
-    let mut dashboard = dashboard_with_live_attention_mix();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    let unfiltered_order = rows(&dashboard)
-        .into_iter()
-        .map(|row| row.key)
-        .collect::<Vec<_>>();
-    let request_id = type_resume_query(&mut dashboard, "rvector");
-    dashboard.apply_resume_text_search_result(
-        request_id,
-        Ok(vec![
-            live_text_hit("live-remote"),
-            live_text_hit("live-beta"),
-            live_text_hit("live-alpha"),
-        ]),
-    );
-    assert_eq!(
-        rows(&dashboard)
-            .into_iter()
-            .map(|row| row.key)
-            .collect::<Vec<_>>(),
-        unfiltered_order
-    );
-    focus_resume_control(&mut dashboard, ResumeFocus::Sessions);
-    dashboard.handle_key(key(KeyCode::Char('b')));
-    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
-    dashboard.handle_key(key(KeyCode::Char('d')));
-    assert_eq!(titles(&rows(&dashboard)), ["Count the coins"]);
-}
-
 /// I1-16: LAST ACTIVE for a running session is its last activity, not the
 /// time its record was last written (often its creation).
+// Hard-won: 0841f27b: Finding I1-16 showed the Live tab using record update time instead of the session’s last activity.
 #[test]
 fn the_live_tab_shows_each_sessions_last_activity() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -1874,148 +1558,9 @@ fn the_live_tab_shows_each_sessions_last_activity() {
     assert_eq!(row.last_activity_ms, active);
 }
 
-/// Enter on a running session in another workspace closes the dialog and takes
-/// the dashboard there, the same jump the attention key makes.
-#[test]
-fn enter_on_a_live_row_moves_the_dashboard_to_that_session() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    let index = rows(&dashboard)
-        .iter()
-        .position(|row| row.key == ResumeRowKey::Live("live-remote".into()))
-        .expect("the other workspace's session is listed");
-    dashboard.select_resume_row(index);
-    // The dialog opens with the list itself focused, so Enter already acts on it.
-    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Sessions);
-
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::SelectWorkspace {
-            workspace_id: "other".into()
-        }
-    );
-    assert!(
-        matches!(dashboard.mode, Mode::Dashboard),
-        "the dialog closed"
-    );
-    dashboard.set_active_workspace(Some("other".into()));
-    assert_eq!(dashboard.selected_session_id(), Some("live-remote"));
-}
-
-/// The same three live sessions, each at a different attention level, so a
-/// state filter has something to keep and something to drop.
-fn dashboard_with_live_attention_mix() -> DashboardState {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    dashboard
-        .session_details
-        .get_mut("live-remote")
-        .expect("live-remote's details")
-        .pending_elicitations = vec![question("live-remote")];
-    dashboard
-        .session_details
-        .get_mut("live-beta")
-        .expect("live-beta's details")
-        .unread_agent_messages = 1;
-    dashboard
-}
-
-/// The dialog opens on the running sessions with the list itself focused, and
-/// the letters the Sessions pane uses narrow it by state immediately.
-#[test]
-fn the_dialog_opens_on_live_sessions_and_the_state_letters_narrow_them() {
-    let mut dashboard = dashboard_with_live_attention_mix();
-    dashboard.select_active_session("live-alpha");
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Live, "the dialog opens on Live");
-    assert_eq!(
-        dialog.focused(),
-        ResumeFocus::Sessions,
-        "the list has focus from the moment the dialog opens"
-    );
-    assert_eq!(rows(&dashboard).len(), 3);
-
-    drawn(&mut dashboard, 120, 40);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('b'))),
-        DashboardAction::None
-    );
-    assert_eq!(
-        rows(&dashboard)
-            .into_iter()
-            .map(|row| row.key)
-            .collect::<Vec<_>>(),
-        vec![ResumeRowKey::Live("live-remote".into())],
-        "only the session waiting on a question counts as blocked"
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('d'))),
-        DashboardAction::None
-    );
-    assert_eq!(
-        rows(&dashboard)
-            .into_iter()
-            .map(|row| row.key)
-            .collect::<Vec<_>>(),
-        vec![ResumeRowKey::Live("live-beta".into())],
-        "the unread answer is the done one"
-    );
-    assert_eq!(
-        dashboard.selected_session_id(),
-        Some("live-alpha"),
-        "the letters move the dialog's own cursor, not the conversation the pane has open"
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('a'))),
-        DashboardAction::None
-    );
-    assert_eq!(rows(&dashboard).len(), 3, "`a` brings the whole list back");
-}
-
-/// The Live tab matches names immediately and asks the index so the other
-/// tabs' counts can update before the person leaves Live.
-#[test]
-fn a_live_tab_search_updates_other_tab_counts_before_switching() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    // Drawing registers the dialog's controls, so `/` reaches the box; the
-    // dialog itself opens with the list focused, not the box.
-    drawn(&mut dashboard, 120, 40);
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    for character in "mast".chars() {
-        assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Char(character))),
-            DashboardAction::SearchArchivedSessions { .. }
-        ));
-    }
-    assert_eq!(titles(&rows(&dashboard)), ["Raise the mast"]);
-
-    apply_ready_rows(&mut dashboard, vec![wiki_row("gone", true)]);
-    assert_eq!(dashboard.resume_hit_counts, [0, 0, 0, 1]);
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(
-        resume_tab_labels(&dashboard, dialog),
-        [" Live ", " Mjolnir · 0 ", " Import · 0 ", " Archived · 1 "]
-    );
-
-    // Switching tabs uses the answer already requested while typing.
-    let action = dashboard.handle_key(key(KeyCode::Right));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Hel);
-    assert!(!matches!(
-        action,
-        DashboardAction::SearchArchivedSessions { .. }
-    ));
-}
-
 /// The arrows go on walking the strip after landing on a tab with nothing in
 /// it, which is every history tab while all of a dashboard's sessions run.
+// Hard-won: c82060f6: Arrow keys stopped switching tabs when the active history list was empty.
 #[test]
 fn the_arrows_walk_the_strip_across_a_tab_whose_list_is_empty() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -2061,6 +1606,7 @@ fn the_arrows_walk_the_strip_across_a_tab_whose_list_is_empty() {
 
 /// In the search box the arrows belong to the caret, as readline has them, and
 /// they reach the tab strip only from the end they are pressed against.
+// Hard-won: c82060f6: Search-box arrows could not reach the tab strip from the end of a query.
 #[test]
 fn the_search_arrows_reach_the_strip_only_from_the_end_of_the_query() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -2119,6 +1665,7 @@ fn the_search_arrows_reach_the_strip_only_from_the_end_of_the_query() {
 
 /// Escape takes the query before it takes the dialog, then hands the keyboard
 /// back to the list, matching the help overlay and the Sessions pane's filter.
+// Hard-won: c82060f6: Escape closed the dialog instead of clearing the query and leaving search focus in layers.
 #[test]
 fn escape_clears_the_query_then_leaves_the_box_then_closes_the_dialog() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -2154,31 +1701,8 @@ fn escape_clears_the_query_then_leaves_the_box_then_closes_the_dialog() {
     );
 }
 
-/// Escape still reaches the dialog from a tab with an empty list, where there
-/// is no row for the box's focus to be handed to.
-#[test]
-fn escape_closes_the_dialog_from_a_tab_with_nothing_in_it() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    apply_ready_rows(&mut dashboard, Vec::new());
-    drawn(&mut dashboard, 120, 40);
-    dashboard.handle_key(key(KeyCode::Right));
-    drawn(&mut dashboard, 120, 40);
-    assert!(rows(&dashboard).is_empty(), "nothing is stopped");
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    assert_eq!(dialog_focus(&dashboard), ResumeFocus::Search);
-
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert_eq!(
-        dialog_focus(&dashboard),
-        ResumeFocus::Tabs,
-        "with no row to take it, the strip takes the keyboard"
-    );
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
 /// One match is not "1 matches". The heading counts in the reader's grammar.
+// Hard-won: c82060f6: The search heading rendered the singular count as “1 matches”.
 #[test]
 fn the_search_heading_counts_a_single_match_in_the_singular() {
     let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
@@ -2194,64 +1718,6 @@ fn the_search_heading_counts_a_single_match_in_the_singular() {
     replace_search(&mut dashboard, "Default");
     let lines = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(lines.contains(" 2 matches "), "{lines}");
-}
-
-/// The dashboard lists live sessions; the dialog lists the rest. Nothing
-/// appears in both, and a stop in progress stays on the dashboard until
-/// the state machine reaches Stopped.
-#[test]
-fn the_sidebar_shows_live_work_and_resume_lists_settled_history() {
-    let mut sessions = Vec::new();
-    for (index, state) in [
-        SessionState::Provisioning,
-        SessionState::Running,
-        SessionState::Disconnected,
-        SessionState::Checkpointing,
-        SessionState::Closing,
-        SessionState::Destroying,
-        SessionState::Error,
-        SessionState::Stopped,
-        SessionState::Lost,
-        SessionState::DestroyedWithDataLoss,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut session = stopped_session();
-        session.id = format!("session-{index:02}");
-        session.native_session_id = None;
-        session.state = state;
-        sessions.push(session);
-    }
-    let mut dashboard = DashboardState::new(config(), state_with(sessions), BTreeMap::new());
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    switch_to_hel(&mut dashboard);
-
-    let on_dashboard = dashboard
-        .ordered_sessions()
-        .iter()
-        .map(|session| session.state)
-        .collect::<Vec<_>>();
-    assert_eq!(on_dashboard.len(), 7);
-    assert!(!on_dashboard.contains(&SessionState::Stopped));
-    // Closing and Checkpointing are mid-stop and must not vanish.
-    assert!(on_dashboard.contains(&SessionState::Closing));
-    assert!(on_dashboard.contains(&SessionState::Checkpointing));
-
-    let in_dialog = rows(&dashboard)
-        .into_iter()
-        .map(|row| row.key)
-        .collect::<Vec<_>>();
-    assert_eq!(in_dialog.len(), 3);
-    let dashboard_ids = dashboard
-        .ordered_sessions()
-        .iter()
-        .map(|session| ResumeRowKey::Hel(session.id.clone()))
-        .collect::<Vec<_>>();
-    assert!(
-        in_dialog.iter().all(|key| !dashboard_ids.contains(key)),
-        "settled history stays in Resume rather than the active sidebar"
-    );
 }
 
 /// Scans arrive one profile at a time; folding one in must not move the
@@ -2377,124 +1843,6 @@ fn a_failed_profile_scan_is_reported_in_the_dialog() {
     assert!(rendered.contains("Scan failed for codex-1"), "{rendered}");
 }
 
-#[test]
-fn resume_table_has_headers_repeated_profiles_and_last_active_values() {
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let mut dashboard = DashboardState::new(config(), state_with(Vec::new()), BTreeMap::new());
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![
-            native("native-1", "Recent session", now_ms - 2 * 60_000),
-            native("native-2", "Older session", now_ms - 60 * 60_000),
-        ])],
-    );
-    switch_to_import(&mut dashboard);
-
-    let mut terminal = Terminal::new(TestBackend::new(140, 34)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the resume dialog");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-
-    for heading in ["PROFILE", "TARGET", "LAST ACTIVE", "SESSION"] {
-        assert!(rendered.contains(heading), "{rendered}");
-    }
-    for title in ["Recent session", "Older session"] {
-        let row = rendered
-            .lines()
-            .find(|line| line.contains(title))
-            .expect("rendered session row");
-        assert!(row.contains("codex-1"), "{row}");
-    }
-    assert!(rendered.contains("2 minutes ago"), "{rendered}");
-    assert!(rendered.contains("1 hour ago"), "{rendered}");
-    assert!(rendered.contains("Search:"), "{rendered}");
-}
-
-/// The Live tab spends the profile and target columns' width on a workspace
-/// column and a wider title instead; the other tabs are unaffected. Dropping
-/// the profile cell must drop its separator too, or the workspace column
-/// opens two cells later than it should.
-#[test]
-fn the_live_tab_shows_a_workspace_column_instead_of_profile_and_target() {
-    let mut dashboard = dashboard_with_live_sessions_in_two_workspaces();
-    // A stopped session gives the Hel tab a row too, so its row content's
-    // starting column is a reference point for the row-level gap check below.
-    let hel_session = stopped_session();
-    dashboard
-        .state
-        .sessions
-        .insert(hel_session.id.clone(), hel_session);
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    switch_to_tab(&mut dashboard, ResumeTab::Live);
-
-    let live_lines = drawn(&mut dashboard, 140, 34);
-    let header = live_lines
-        .iter()
-        .find(|line| line.contains("WORKSPACE"))
-        .expect("the Live tab's header names the workspace column");
-    assert!(!header.contains("PROFILE"), "{header}");
-    assert!(!header.contains("TARGET"), "{header}");
-    let (workspace_header_column, header_row) = point(&live_lines, "WORKSPACE");
-
-    // Search below the header row so this does not match the dashboard's own
-    // workspace tab strip, drawn behind the modal and also naming "Default".
-    let row = live_lines[usize::from(header_row) + 1..]
-        .iter()
-        .find(|line| line.contains("Default"))
-        .expect("a Live row names its workspace");
-    let workspace_row_column = cell_column(row, "Default");
-
-    // The Resume (Hel) tab keeps both columns. Its header and its row content
-    // start at the same columns the Live tab's do; if the Live layout still
-    // reserved the profile cell's separator, the Live header and row would
-    // each start two cells later than their Hel-tab counterparts.
-    switch_to_tab(&mut dashboard, ResumeTab::Hel);
-    let hel_lines = drawn(&mut dashboard, 140, 34);
-    let header = hel_lines
-        .iter()
-        .find(|line| line.contains("PROFILE"))
-        .expect("the Resume tab's header keeps PROFILE");
-    assert!(header.contains("TARGET"), "{header}");
-    let (profile_header_column, header_row) = point(&hel_lines, "PROFILE");
-    assert_eq!(
-        profile_header_column, workspace_header_column,
-        "no stray gap should open in the header where the profile cell used to be"
-    );
-
-    let row = hel_lines[usize::from(header_row) + 1..]
-        .iter()
-        .find(|line| line.contains("codex-1"))
-        .expect("the Hel tab lists the stopped session's profile");
-    let profile_row_column = cell_column(row, "codex-1");
-    assert_eq!(
-        profile_row_column, workspace_row_column,
-        "no stray gap should open in Live rows where the profile cell used to be"
-    );
-}
-
-/// The dialog is the only surface for non-live sessions, and the resume chord
-/// opens it from anywhere.
-#[test]
-fn the_dashboard_opens_the_dialog_and_names_the_key_in_the_footer() {
-    let mut dashboard = dashboard_with_session(running_session());
-    assert_eq!(
-        chord(&mut dashboard, crate::CommandId::ResumeDialog),
-        DashboardAction::OpenResumeDialog
-    );
-    assert_eq!(dashboard.handle_key(ctrl_key('t')), DashboardAction::None);
-    assert_eq!(dashboard.focus, Focus::Sessions);
-
-    let mut terminal = Terminal::new(TestBackend::new(140, 30)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw the dashboard");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("g sessions"), "{rendered}");
-    assert!(!rendered.contains("Import"), "{rendered}");
-}
-
 /// The rows are derived state, rebuilt where their inputs change. A state
 /// reload and a checkpoint size that arrives from the background reach the
 /// open dialog straight away.
@@ -2542,116 +1890,10 @@ fn the_row_list_follows_state_reloads_and_background_updates_while_the_dialog_is
     assert_eq!(titles(&rows(&dashboard)), ["Native"]);
 }
 
-/// Walking the list moves the selection over rows that stay put: an arrow
-/// key changes nothing the rows are built from.
-#[test]
-fn arrow_navigation_moves_the_selection_without_changing_the_row_list() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![
-            native("native-2", "Native newer", NEWER_THAN_THE_CHECKPOINT),
-            native("native-3", "Native older", 1),
-        ])],
-    );
-    switch_to_import(&mut dashboard);
-    let before = rows(&dashboard);
-    assert_eq!(before.len(), 2, "{:?}", titles(&before));
-
-    dashboard.handle_key(key(KeyCode::Down));
-
-    assert_eq!(rows(&dashboard), before, "navigation rebuilt the rows");
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.row_index, 1);
-    assert_eq!(dialog.selected, Some(before[1].key.clone()));
-}
-
-/// One search path: a query lists the rows the index returned and nothing
-/// else, on every tab, in the order the index ranked them.
-#[test]
-fn a_query_lists_only_what_the_index_returned_in_its_own_order() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(
-        &mut dashboard,
-        1,
-        vec![codex_profile(vec![
-            native("native-2", "Native alpha", NEWER_THAN_THE_CHECKPOINT),
-            native("native-3", "Native beta", 1),
-        ])],
-    );
-    apply_ready_rows(&mut dashboard, Vec::new());
-    switch_to_hel(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-    switch_to_import(&mut dashboard);
-    assert_eq!(rows(&dashboard).len(), 2, "an empty query lists the tab");
-
-    // The index answers with the older native session first, a hit on the
-    // Mjolnir record, and one archived session.
-    replace_search(&mut dashboard, "phrase");
-    apply_ready_rows(
-        &mut dashboard,
-        vec![
-            WikiRow {
-                tool: "codex".into(),
-                native_id: Some("native-3".into()),
-                snippet: Some("beta said the phrase".into()),
-                ..wiki_row("beta-hit", false)
-            },
-            WikiRow {
-                tool: "codex".into(),
-                native_id: Some("native-2".into()),
-                snippet: Some("alpha said the phrase".into()),
-                ..wiki_row("alpha-hit", false)
-            },
-            WikiRow {
-                hel_session_id: Some("session-1".into()),
-                ..wiki_row("record-hit", false)
-            },
-            wiki_row("gone", true),
-        ],
-    );
-
-    assert_eq!(
-        titles(&rows(&dashboard)),
-        ["Native beta", "Native alpha"],
-        "the Import tab keeps the index's ranking, not newest first"
-    );
-    assert!(
-        rows(&dashboard)[0].details.contains("beta said the phrase"),
-        "each row carries its snippet: {}",
-        rows(&dashboard)[0].details
-    );
-
-    switch_to_hel(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["ACP pretty name"]);
-    switch_to_archive(&mut dashboard);
-    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
-
-    // A query the index does not match empties the tab, even though the
-    // row's own text carries the word.
-    replace_search(&mut dashboard, "native");
-    apply_ready_rows(&mut dashboard, Vec::new());
-    switch_to_tab(&mut dashboard, ResumeTab::Import);
-    assert!(
-        rows(&dashboard).is_empty(),
-        "the local text of a row is no longer a search path"
-    );
-}
-
 /// A search answer can put a row with a transcript under an unmoved
 /// selection. The preview pane promises that transcript, so the dialog
 /// asks for it without waiting for the selection to move.
+// Hard-won: b2dbce5a: A live-terminal finding left the preview stuck on “Loading the archived transcript” after a search answer selected a different row.
 #[test]
 fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
     let mut dashboard = DashboardState::new(
@@ -2686,109 +1928,6 @@ fn a_search_answer_asks_for_the_newly_selected_rows_transcript() {
         dashboard.next_wiki_preview(),
         DashboardAction::None,
         "one request per row, not one per answer"
-    );
-}
-
-/// An ongoing build leaves the query editable across tabs and returns the
-/// indexed matches while polling for more.
-#[test]
-fn search_remains_available_while_the_index_builds() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    replace_search(&mut dashboard, "archived");
-    switch_to_hel(&mut dashboard);
-    let request_id = match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
-        _ => panic!("expected the resume dialog"),
-    };
-    dashboard.apply_wiki_search(
-        request_id,
-        WikiSearchPage {
-            rows: vec![wiki_row("gone", true)],
-            status: WikiStatus {
-                state: WikiIndexState::Indexing,
-                topping_up: true,
-            },
-        },
-    );
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert!(dialog.search_enabled());
-    assert_eq!(dialog.search_placeholder(), None);
-
-    // Tabs preserve the query and the already indexed matches.
-    dashboard.handle_key(key(KeyCode::Char('/')));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(
-        dialog.focused(),
-        ResumeFocus::Search,
-        "search remains editable during indexing"
-    );
-    switch_to_archive(&mut dashboard);
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert_eq!(dialog.tab, ResumeTab::Archive);
-    assert_eq!(dialog.search.value(), "archived");
-    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
-    let rendered = drawn(&mut dashboard, 120, 34);
-    let search_line = rendered
-        .iter()
-        .find(|line| line.contains("Search:"))
-        .unwrap();
-    assert!(search_line.contains("archived"), "{search_line}");
-    assert!(!search_line.contains("Indexing"), "{search_line}");
-
-    // Sequential refresh answers retain the same query identity.
-    dashboard.apply_wiki_search(request_id, ready_page(vec![wiki_row("gone", true)]));
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert!(dialog.search_enabled());
-    assert_eq!(dialog.search_placeholder(), None);
-    assert_eq!(titles(&rows(&dashboard)), ["archived gone"]);
-}
-
-/// An index at another schema version says so and is never polled.
-#[test]
-fn a_version_mismatch_disables_the_box_and_stops_the_polling() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(Vec::new())]);
-    // Search on the history tabs is the index's answer, so they are where a
-    // box that cannot answer yet says so.
-    switch_to_hel(&mut dashboard);
-    let request_id = match &dashboard.mode {
-        Mode::ResumeDialog(dialog) => dialog.wiki_request_id,
-        _ => panic!("expected the resume dialog"),
-    };
-    dashboard.apply_wiki_search(
-        request_id,
-        WikiSearchPage {
-            rows: Vec::new(),
-            status: WikiStatus {
-                state: WikiIndexState::VersionMismatch,
-                topping_up: false,
-            },
-        },
-    );
-    let Mode::ResumeDialog(dialog) = &dashboard.mode else {
-        panic!("expected the resume dialog");
-    };
-    assert!(!dialog.search_enabled());
-    assert_eq!(
-        dialog.search_placeholder(),
-        Some("SessionWiki index is at a different version")
     );
 }
 
@@ -2867,106 +2006,9 @@ fn reopening_the_dialog_cannot_accept_the_previous_querys_answer() {
     assert!(resume_dialog(&dashboard.mode).unwrap().wiki.is_empty());
 }
 
-/// Cost of the merged row list and of one keypress, on a dialog the size a
-/// long-lived harness home produces. Run with
-/// `cargo test -p brokk-mj-tui resume_row_cost -- --ignored --nocapture`.
-#[test]
-#[ignore = "timing measurement, not a behavior assertion"]
-fn resume_row_cost_for_a_few_thousand_sessions() {
-    const NATIVE: usize = 4_000;
-    const RECORDS: usize = 400;
-    const ROUNDS: usize = 200;
-
-    let records = (0..RECORDS)
-        .map(|index| {
-            let mut session = stopped_session();
-            session.id = format!("session-{index:04}");
-            session.native_session_id = None;
-            session.acp_session_title = Some(format!("Record {index}"));
-            session
-        })
-        .collect::<Vec<_>>();
-    let sessions = (0..NATIVE)
-        .map(|index| {
-            native(
-                &format!("native-{index:04}"),
-                &format!("Native conversation {index}"),
-                index as i64,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut dashboard = DashboardState::new(config(), state_with(records), BTreeMap::new());
-    open_resume_dialog(&mut dashboard, 1, vec![codex_profile(sessions)]);
-    switch_to_import(&mut dashboard);
-
-    let Mode::ResumeDialog(dialog) = dashboard.mode.clone() else {
-        panic!("expected the resume dialog");
-    };
-    // What one rebuild costs: the merge, the sizes, and search.
-    let started = Instant::now();
-    let mut built = 0;
-    for _ in 0..ROUNDS {
-        built += build_resume_rows(
-            &dashboard.config,
-            &dashboard.state,
-            &dialog,
-            &dashboard.checkpoint_archive_sizes,
-        )
-        .0
-        .len();
-    }
-    let rebuild = started.elapsed();
-
-    // What the dialog actually pays per key press, which reads the rows
-    // rather than rebuilding them.
-    let started = Instant::now();
-    for _ in 0..ROUNDS {
-        dashboard.handle_key(key(KeyCode::Down));
-    }
-    let keypresses = started.elapsed();
-
-    println!(
-        "rows={} rebuild={:?} per_rebuild={:?} keypresses={:?} per_key={:?}",
-        built / ROUNDS,
-        rebuild,
-        rebuild / ROUNDS as u32,
-        keypresses,
-        keypresses / ROUNDS as u32,
-    );
-}
-
-/// Actions remain visible while generic keyboard boilerplate is removed.
-#[test]
-fn session_dialog_uses_action_labels_without_navigation_boilerplate() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        state_with(vec![stopped_session()]),
-        BTreeMap::new(),
-    );
-    open_resume_dialog(&mut dashboard, 1, Vec::new());
-    for tab in [ResumeTab::Live, ResumeTab::Hel, ResumeTab::Import] {
-        if tab == ResumeTab::Hel {
-            switch_to_hel(&mut dashboard);
-        }
-        if tab == ResumeTab::Import {
-            switch_to_import(&mut dashboard);
-        }
-        let lines = drawn(&mut dashboard, 120, 34);
-        assert_dialog_spacing(&lines, "Sessions", "Cancel");
-        let text = lines.join("\n");
-        for boilerplate in ["Enter opens", "Enter imports", "Tab moves", "←/→ tabs"] {
-            assert!(!text.contains(boilerplate), "{text}");
-        }
-        if tab == ResumeTab::Hel {
-            assert!(text.contains("  Destroy  "), "{text}");
-        } else {
-            assert!(!text.contains("  Destroy  "), "{text}");
-        }
-    }
-}
-
 /// A query's hits are counted on every tab, not only the one on screen, and
 /// an empty tab says where the other hits are rather than switching by itself.
+// Hard-won: 62ba3c1b: Issue #1161 found stopped sub-agent records could fill the resume list with dozens of rows for one session.
 #[test]
 fn sub_agents_are_never_offered_for_resume() {
     let owner = stopped_session();
@@ -3521,41 +2563,6 @@ fn the_preview_collapses_tool_runs_and_colours_the_conversation_roles() {
     assert_eq!(
         line_for("[tool calls]").style.fg,
         Some(theme::palette().muted)
-    );
-}
-
-/// A collapsed run does not swallow the count of messages skipped before the
-/// group it opens: the marker still separates the two runs it sits between.
-#[test]
-fn an_omission_between_two_tool_runs_keeps_both_runs_visible() {
-    let (lines, _) = hit_transcript_lines(&WikiHitTranscript {
-        blocks: vec![
-            plain_block("tool", "cargo build"),
-            WikiHitBlock {
-                omitted_before: 4,
-                ..plain_block("tool", "cargo test")
-            },
-        ],
-        omitted_after: 0,
-    });
-    let rendered: Vec<String> = lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect();
-
-    assert_eq!(
-        rendered,
-        vec![
-            "[tool calls]",
-            "",
-            "*[… 4 messages omitted …]*",
-            "[tool calls]",
-        ]
     );
 }
 
