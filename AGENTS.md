@@ -343,6 +343,15 @@ not a reason to validate there.
 
 Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
 
+When work takes several rounds, such as review fixes or follow-up changes, run
+only the tests for what changed in each round: the affected modules or test
+names, with `cargo test -p <crate> <filter>`. Run the full validation, meaning
+workspace `cargo clippy --all-targets -- -D warnings` and the full suites of
+every touched crate, once, after the last round. When a test fails, fix it and
+rerun only the failing tests; do not rerun a whole suite to confirm one fix.
+Agents that delegate work to other agents should ask for this pattern
+explicitly instead of asking for full validation in every round.
+
 ## GitHub Authentication
 
 Do not run `gh auth login` or ask the user to reauthenticate because a sandboxed authentication check failed. Run normal GitHub push and PR operations with escalated sandbox permissions; treat authentication as blocked only when the actual escalated operation returns an explicit authentication error.
