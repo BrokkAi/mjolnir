@@ -599,6 +599,7 @@ mod tests {
         assert_eq!(current.last_turn_outcome.unwrap().accepted_ordinal, Some(1));
     }
 
+    // Hard-won: be5abcca: launch failure reasons were absent from the user-visible event stream.
     #[test]
     fn a_lifecycle_save_that_records_a_launch_failure_emits_one_error_event() {
         // The launch-failure path persists through `save_lifecycle_session`

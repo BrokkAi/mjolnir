@@ -482,6 +482,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 04d4b7f0: a completed move naming a removed harness stopped daemon startup.
     #[test]
     fn bulk_load_skips_a_move_intent_whose_harness_no_longer_decodes() {
         let directory = tempfile::tempdir().unwrap();
@@ -561,6 +562,7 @@ mod tests {
         assert!(!legacy.in_place);
     }
 
+    // Hard-won: 61db26ba: close failed on a completed move row after its harness was removed.
     #[test]
     fn per_session_load_treats_an_intent_whose_harness_no_longer_decodes_as_absent() {
         // The stop, checkpoint, recovery, and new-move paths each read the one
@@ -594,6 +596,7 @@ mod tests {
         );
     }
 
+    // Hard-won: c5f1cbad: completed removed-harness move rows wedged daemon startup.
     #[test]
     fn reaping_deletes_a_finished_move_only_once_its_checkpoint_archive_is_gone() {
         let directory = tempfile::tempdir().unwrap();
