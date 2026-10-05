@@ -509,6 +509,66 @@ mod tests {
         assert_eq!(recent, 30, "every log started in the window is kept");
     }
 
+    // Hard-won: 1d6a27cb: A burst of short-lived CLI logs could prune the older live daemon log.
+    #[test]
+    fn prune_logs_retains_per_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..12 {
+            let name = format!("mj-cli-202601{index:02}T000000.000Z-{OTHER_PID}.log");
+            fs::write(directory.path().join(&name), "cli").unwrap();
+        }
+        let daemon_name = format!("mj-daemon-20260101T000000.000Z-{OTHER_PID}.log");
+        fs::write(directory.path().join(&daemon_name), "daemon").unwrap();
+
+        prune_logs(directory.path(), RETAINED_LOGS - 1, None).unwrap();
+
+        assert!(
+            directory.path().join(&daemon_name).exists(),
+            "the single daemon log must survive even though 12 cli logs are newer by name"
+        );
+        let remaining_cli = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("mj-cli-"))
+            })
+            .count();
+        assert_eq!(remaining_cli, RETAINED_LOGS - 1);
+    }
+
+    // Hard-won: 1d6a27cb: Legacy CLI log names could still crowd out the live daemon log after filename versioning.
+    #[test]
+    fn prune_logs_treats_legacy_filenames_as_cli() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_names: Vec<String> = (0..12)
+            .map(|index| format!("mj-202601{index:02}T000000.000Z-{OTHER_PID}.log"))
+            .collect();
+        for name in &legacy_names {
+            fs::write(directory.path().join(name), "legacy").unwrap();
+        }
+        let daemon_name = format!("mj-daemon-20260101T000000.000Z-{OTHER_PID}.log");
+        fs::write(directory.path().join(&daemon_name), "daemon").unwrap();
+
+        prune_logs(directory.path(), RETAINED_LOGS - 1, None).unwrap();
+
+        assert!(
+            directory.path().join(&daemon_name).exists(),
+            "legacy cli-shaped logs must not crowd out the daemon's retained window"
+        );
+        let remaining_legacy = legacy_names
+            .iter()
+            .filter(|name| directory.path().join(name).exists())
+            .count();
+        assert_eq!(
+            remaining_legacy,
+            RETAINED_LOGS - 1,
+            "legacy filenames are pruned in the same group as mj-cli-* files"
+        );
+    }
+
     #[test]
     fn remove_expired_log_ignores_a_candidate_removed_by_another_process() {
         let directory = tempfile::tempdir().unwrap();

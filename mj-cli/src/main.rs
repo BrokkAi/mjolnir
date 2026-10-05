@@ -2388,6 +2388,22 @@ mod tests {
         assert!(!format!("{other:#}").contains("not installed"));
     }
 
+    // Hard-won: 594e6f27: Claude auth status accepted a made-up setup token by exit code alone.
+    #[test]
+    fn the_verification_reads_which_credential_claude_code_actually_used() {
+        assert_eq!(
+            reported_auth_method(br#"{"loggedIn":true,"authMethod":"oauth_token"}"#).as_deref(),
+            Some("oauth_token")
+        );
+        assert_eq!(
+            reported_auth_method(br#"{"loggedIn":true,"authMethod":"claudeai"}"#).as_deref(),
+            Some("claudeai")
+        );
+        // Output that names no method leaves the exit code as the only check.
+        assert_eq!(reported_auth_method(b"Logged in as someone\n"), None);
+        assert_eq!(reported_auth_method(br#"{"loggedIn":true}"#), None);
+    }
+
     /// The human report already prints every fix, so its closing line must
     /// point at them rather than send the user to `--json` for the same text.
     // Hard-won: 36382afd92: Launch finding J-5 found human doctor output printed fixes then pointed users to JSON; the test checks the closing guidance refers to the printed remediations.
