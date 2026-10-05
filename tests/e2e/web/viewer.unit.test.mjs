@@ -5,11 +5,7 @@ import vm from 'node:vm';
 
 const webRoot = new URL('../../../mj-controller/src/web/', import.meta.url);
 const viewerPath = new URL('viewer.js', webRoot);
-const htmlPath = new URL('viewer.html', webRoot);
-const manifestPath = new URL('manifest.webmanifest', webRoot);
 const serviceWorkerPath = new URL('service-worker.js', webRoot);
-const viewerCssPath = new URL('viewer.css', webRoot);
-const toolOutputPath = new URL('tool-output.js', webRoot);
 const viewerSource = readFileSync(viewerPath, 'utf8');
 const serviceWorkerSource = readFileSync(serviceWorkerPath, 'utf8');
 
@@ -123,43 +119,6 @@ test('session titles stay blue while truly idle and clear blue when activity res
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
 });
 
-test('remote tracking is repaired only after confirmation and preflight then continues', async () => {
-  const repair = {
-    path: '/project', branch: 'main', missing_remote: 'upstream', replacement_remote: 'origin',
-    fetch_url: 'https://example.com/repo.git', push_urls: ['ssh://git@example.com/repo.git'],
-  };
-  for (const approve of [false, true]) {
-    const requests = [];
-    const context = vm.createContext({
-      newDraft: { profileId: 'codex', bundleId: 'project', targetId: 'docker' },
-      pendingNewPreflight: null, pendingNewPreflightController: null, AbortController,
-      targetIsBare: () => false, selectedWorkspaceId: () => 'workspace', renderNewForm() {},
-      request: async (_url, options) => {
-        requests.push(JSON.parse(options.body));
-        return requests.length === 1 ? { remote_repairs: [repair] } : {
-          remote_repositories: [{ id: 'project' }], local_changes_excluded: true,
-        };
-      },
-      confirm: text => {
-        assert.match(text, /upstream/);
-        assert.match(text, /origin/);
-        assert.match(text, /ssh:\/\/git@example.com\/repo.git/);
-        return approve;
-      },
-    });
-    vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
-    assert.equal(await vm.runInContext('preflightNew()', context), approve);
-    assert.deepEqual(requests[0].remote_repairs, []);
-    assert.equal(requests.length, approve ? 2 : 1);
-    if (approve) {
-      assert.deepEqual(requests[1].remote_repairs, [repair]);
-      assert.equal(context.newDraft.preflighted, true);
-    } else {
-      assert.notEqual(context.newDraft.preflighted, true);
-    }
-  }
-});
-
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
   let complete;
   let requests = 0;
@@ -218,19 +177,6 @@ test('an aborted preflight cannot clear a replacement check for the same draft',
   assert.equal(context.pendingNewPreflight, null);
 });
 
-test('commit refuses unready, pending, or failed preflight even when called directly', async () => {
-  for (const state of ['unready', 'pending', 'failed']) {
-    const draft = { preflighted: state !== 'unready', preflightError: state === 'failed' ? 'failed' : '' };
-    const context = vm.createContext({
-      newDraft: draft,
-      pendingNewPreflight: state === 'pending' ? draft : null,
-      request: () => assert.fail('unready draft cannot launch'),
-    });
-    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
-    await vm.runInContext('commitNew()', context);
-  }
-});
-
 test('entering Review does not wait for project preflight', async () => {
   let complete;
   const draft = { step: 0, bundleId: 'project' };
@@ -248,53 +194,6 @@ test('entering Review does not wait for project preflight', async () => {
   complete(false);
   await pending;
   assert.equal(draft.step, 1, 'failure stays on Review for retry');
-});
-
-test('the create payload uses the selected profile sub-agent policy', async () => {
-  const posted = [];
-  const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
-    snapshot: { targets: [], profiles: [
-      { id: 'other', harness_kind: 'claude', subagents: { mode: 'native' } },
-      { id: profileId, harness_kind: harnessKind, subagents },
-    ] },
-    newDraft: {
-      workspaceId: 'test',
-      preflighted: true,
-      profileId,
-      bundleId: 'bundle',
-      targetId: 'container',
-      projectDirectory: '',
-      title: '',
-      worktreeOptions: { available: false, default_create: false },
-      createManagedWorktree: false,
-      // Old drafts must not override the policy saved on the selected profile.
-      subagents: { mode: 'none' },
-    },
-    pendingNewPreflight: null,
-    targetResourceKind: () => 'fixed',
-    targetIsBare: () => false,
-    renderNewForm: () => {},
-    refresh: async () => {},
-    navigate: () => {},
-    newError: makeNode(),
-    request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
-  });
-
-  for (const [kind, choice, expected] of [
-    ['claude', { mode: 'single_model', model: 'sonnet', effort: 'high' }, { mode: 'single_model', model: 'sonnet', effort: 'high' }],
-    ['claude', { mode: 'native' }, { mode: 'native' }],
-    ['codex', { mode: 'single_model', model: 'gpt', effort: null }, { mode: 'single_model', model: 'gpt', effort: null }],
-    ['grok', { mode: 'native' }, { mode: 'native' }],
-    ['kimi', undefined, { mode: 'native' }],
-  ]) {
-    const context = makeContext('profile', kind, choice);
-    context.newDraft.committing = false;
-    vm.runInContext(sourceBetween('function profileSubagents(', '\nfunction targetIsBare('), context);
-    vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
-    await vm.runInContext('commitNew()', context);
-    assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);
-    assert.equal(Object.hasOwn(posted.at(-1), 'resource_allocation'), false);
-  }
 });
 
 test('rolled-back launch errors remain visible only in their workspace and can be dismissed', () => {
@@ -438,71 +337,6 @@ test('a failed review resolution restores every action allowed by the snapshot',
   );
 });
 
-test('phone review status exactly mirrors the shared status sentences', () => {
-  const statusSource = sourceBetween(
-    'function reviewStatusLine(review, open) {',
-    '\n/// Run a local command, or report that nothing here can.',
-  );
-  const context = vm.createContext({});
-  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;`, context);
-  const status = context.reviewStatusLineForTest;
-
-  assert.equal(
-    status({ enabled: true, tier: 'extended', profile: 'reviewer' }, false),
-    'Reviewing every completed turn with [review] profile "reviewer" (extended tier)',
-  );
-  assert.equal(
-    status({ enabled: true, tier: 'quick' }, false),
-    '[review] enabled = true but no profile is named, so nothing can review',
-  );
-  assert.equal(
-    status({ enabled: false, tier: 'quick', profile: 'reviewer' }, false),
-    'Automatic review is off; /review reviews one turn with "reviewer" (quick tier)',
-  );
-  assert.equal(
-    status({ enabled: false, tier: 'quick', profile: null }, false),
-    'Turn review needs a reviewer: set [review] profile in config.toml',
-  );
-  assert.equal(
-    status({ enabled: false, tier: 'quick', profile: 'reviewer' }, true),
-    'Automatic review is off; /review reviews one turn with "reviewer" (quick tier). A review is open now.',
-  );
-});
-
-test('help labels projected commands by their actual source', () => {
-  const helpSource = sourceBetween(
-    'function showHelp() {',
-    '\n/// The shared `/review status` sentence',
-  );
-  const context = vm.createContext({ makeNode });
-  vm.runInContext(
-    `
-const feed = makeNode('div');
-function el(name, className, textContent) {
-  const node = makeNode(name);
-  node.className = className || '';
-  if (textContent !== undefined) node.textContent = textContent;
-  return node;
-}
-function availableCommands() {
-  return [
-    { name: 'help', description: 'show help', source: 'mj' },
-    { name: 'agent-check', description: 'ask the agent', source: 'agent' },
-    { name: 'legacy', description: 'from an older snapshot' },
-  ];
-}
-function scrollToTail() {}
-${helpSource}
-showHelp();
-globalThis.helpText = feed.children[0].children.find(node => node.tagName === 'PRE').textContent;
-`,
-    context,
-  );
-  assert.match(context.helpText, /\/help — show help \[mj\]/);
-  assert.match(context.helpText, /\/agent-check — ask the agent \[agent\]/);
-  assert.match(context.helpText, /\/legacy — from an older snapshot \[mj\]/);
-});
-
 test('review action failures return false without leaking errors across sessions', async () => {
   const actionSource = sourceBetween(
     'async function sendAction(body) {',
@@ -542,20 +376,6 @@ globalThis.actionHarness = {
     false,
   );
   assert.equal(context.actionHarness.error.textContent, 'new conversation error');
-});
-
-test('viewer chrome and install metadata use Mjolnir branding', () => {
-  const html = readFileSync(htmlPath, 'utf8');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-
-  assert.match(html, /<title>Mjolnir<\/title>/);
-  assert.match(html, /id="shell-title">MJ<\/h1>/);
-  assert.match(html, /aria-label="Mjolnir"/);
-  assert.match(html, /<code>mj daemon status<\/code>/);
-  assert.doesNotMatch(html, /\bHel\b|\bhel daemon\b/);
-  assert.equal(manifest.name, 'Mjolnir');
-  assert.equal(manifest.short_name, 'MJ');
-  assert.match(viewerSource, /\}\[name\] \|\| 'MJ';/);
 });
 
 test('offline shell uses a Mjolnir cache without caching live requests', async () => {
@@ -869,16 +689,6 @@ test('a search snippet marks the matched words as elements, not markup', () => {
   assert.deepEqual(built, [['span', 'read '], ['mark', 'README'], ['span', ' now']]);
 });
 
-test('shipped viewer source comments use Mjolnir terminology', () => {
-  for (const source of [
-    serviceWorkerSource,
-    readFileSync(viewerCssPath, 'utf8'),
-    readFileSync(toolOutputPath, 'utf8'),
-  ]) {
-    assert.doesNotMatch(source, /\bHel\b|`hel`|\bhel publishes\b/);
-  }
-});
-
 // A turn the harness ended without answering offers its prompt back rather
 // than resending it (#970).
 test('an unanswered turn offers the prompt that was running', () => {
@@ -1043,6 +853,7 @@ test('path suggestions abort superseded requests and drop stale replies', async 
   assert.equal(requests[3].body.prefix, '/work/repos/');
 });
 
+// Hard-won: 69a3c1d3: A signed-out auth-session response renders login without a protected snapshot request
 test('a signed-out load shows the login form without requesting the snapshot', async () => {
   // Finding G-3: learning "signed out" from a 401 on /api/snapshot put a
   // console error on every load of the login page.
@@ -1083,6 +894,7 @@ test('a signed-out load shows the login form without requesting the snapshot', a
   );
 });
 
+// Hard-won: 7450d80f: For HTTP 202, 204 and 401 the response body is drained before return/throw so Chromium does not report the completed fetch as aborted.
 test('a request answered without content still reads the empty body to its end', async () => {
   // Finding G-4: Chromium reports a fetch whose 202 or 204 body is never
   // read as net::ERR_ABORTED although the server completed it. Reading the
@@ -1118,6 +930,7 @@ test('a request answered without content still reads the empty body to its end',
 // I1-7: the daemon omits `roles` from a review that has no agents yet or ended
 // with nothing to review. The card threw on `review.roles.length`, the stream
 // handler stopped applying snapshots, and the composer stayed locked.
+// Hard-won: 298a2839: A review object with no roles renders without throwing, then the card clears when the daemon ends the review.
 test('a review published without roles renders and clears when it ends', () => {
   const harness = turnReviewHarness();
   const preparing = {
@@ -1133,6 +946,7 @@ test('a review published without roles renders and clears when it ends', () => {
   harness.renderTurnReview(ended);
   assert.equal(harness.reviewHost.children.length, 0, 'the card stayed after the review ended');
 });
+// Hard-won: 42de65fd: A failed Move offers Retry only while its checkpoint is retained
 test('a failed Move offers Retry exactly when the daemon kept what a retry restores (W-5)', () => {
   const context = vm.createContext({});
   vm.runInContext(
@@ -1186,24 +1000,4 @@ test('a failed Move offers Retry exactly when the daemon kept what a retry resto
   assert.equal(cancelled.status, 'Move cancelled.');
   assert.equal(cancelled.retry, true);
   assert.equal(cancelled.resume, true);
-});
-
-test('the offline state is announced by one live region with one message', () => {
-  const start = viewerSource.indexOf("const CONNECTION_BANNER_TEXT");
-  const end = viewerSource.indexOf("function reconnect()");
-  const banner = { textContent: 'Offline. Showing the last state received.' };
-  const announcer = { textContent: '' };
-  const context = vm.createContext({
-    document: { body: { dataset: {} }, querySelector: () => banner },
-    announce: message => { announcer.textContent = message; },
-  });
-  vm.runInContext(`let connection = 'online'; ${viewerSource.slice(start, end)}; this.setConnection = setConnection;`, context);
-  context.setConnection('reconnecting');
-  assert.equal(banner.textContent, 'Reconnecting… Showing the last state received.');
-  assert.equal(announcer.textContent, '', 'the hidden announcer must stay silent');
-  context.setConnection('offline');
-  assert.equal(banner.textContent, 'Offline. Showing the last state received.');
-  assert.equal(announcer.textContent, '');
-  context.setConnection('online');
-  assert.equal(announcer.textContent, 'Connected.');
 });

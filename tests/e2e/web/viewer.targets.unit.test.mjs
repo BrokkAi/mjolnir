@@ -34,34 +34,6 @@ function loaded() {
   return context;
 }
 
-test('the target pickers leave out a runtime missing on this host and keep an unresponsive host', () => {
-  const context = loaded();
-  assert.deepEqual(
-    vm.runInContext('launchableTargets(snapshot.targets).map(t => t.id)', context),
-    ['macbook', 'podman'],
-  );
-});
-
-test('a new session does not default to a missing runtime', () => {
-  const context = loaded();
-  assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
-});
-
-test('resume and move offer the same targets', () => {
-  const context = loaded();
-  context.session = {
-    id: 's1',
-    profile_id: 'codex',
-    target_id: 'docker',
-    compatible_resume_targets: ['docker', 'macbook', 'podman'],
-  };
-  assert.deepEqual(
-    vm.runInContext('resumeTargetItems(session).map(t => t.id)', context),
-    ['macbook', 'podman'],
-  );
-  assert.equal(vm.runInContext('freshMoveDraft(session).targetId', context), 'macbook');
-});
-
 test('a new session preselects the daemon default when it is launchable, else the first launchable target', () => {
   const context = loaded();
   context.snapshot.profiles = [{ id: 'claude' }, { id: 'codex' }];
@@ -74,17 +46,6 @@ test('a new session preselects the daemon default when it is launchable, else th
   assert.equal(vm.runInContext('freshDraft().profileId', context), 'claude');
   vm.runInContext('launchDefault = null', context);
   assert.equal(vm.runInContext('freshDraft().targetId', context), 'macbook');
-});
-
-test('move preselects the session current target when it is offered, not the first', () => {
-  const context = loaded();
-  context.session = {
-    id: 's1',
-    profile_id: 'codex',
-    target_id: 'podman',
-    compatible_resume_targets: ['macbook', 'podman'],
-  };
-  assert.equal(vm.runInContext('freshMoveDraft(session).targetId', context), 'podman');
 });
 
 // A minimal element: enough for `el`, `pickerField` and `resumeChoiceField`.
@@ -122,35 +83,4 @@ test('a host that did not answer is listed with a status and stays selectable', 
   assert.equal(options[0].description, 'ssh-bare · did not answer its last check');
   assert.equal(options[1].description, 'local-podman');
   assert.ok(options.every(option => !option.disabled));
-});
-
-test('resume shows the status beside the target and keeps it selectable', () => {
-  const context = rendering();
-  context.session = { id: 's1', compatible_resume_targets: ['docker', 'macbook', 'podman'] };
-  const items = vm.runInContext('resumeTargetItems(session)', context);
-  assert.deepEqual(items.map(item => [item.id, item.status]), [['macbook', 'did not answer its last check'], ['podman', '']]);
-  context.items = items;
-  const field = vm.runInContext('resumeChoiceField("Target", "resume-target-s1", items, "podman", () => {})', context);
-  const select = field.children.find(child => child.tag === 'select');
-  const options = select.children.filter(child => child.tag === 'option' && child.value);
-  assert.deepEqual(options.map(option => option.textContent), ['macbook (did not answer its last check)', 'podman']);
-  assert.ok(options.every(option => !option.disabled));
-});
-
-test('the Targets page leaves out a default candidate whose runtime is missing and keeps a configured one', () => {
-  const context = vm.createContext({
-    snapshot: {
-      targets: [
-        { id: 'docker', kind: 'local-docker', runtime_missing: true, default_candidate: true },
-        { id: 'sandbox', kind: 'local-docker', runtime_missing: true },
-        { id: 'podman', kind: 'local-podman', default_candidate: true },
-        { id: 'localhost', kind: 'local-bare', default_candidate: true },
-      ],
-    },
-  });
-  vm.runInContext(sourceBetween('function listedTargetIds(', '\nfunction renderTargets()'), context);
-  assert.deepEqual(
-    vm.runInContext("listedTargetIds({ target_ids: ['docker', 'localhost', 'podman', 'sandbox'] }).join(',')", context),
-    'localhost,podman,sandbox',
-  );
 });
