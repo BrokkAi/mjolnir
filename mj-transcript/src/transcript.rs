@@ -1363,6 +1363,7 @@ mod tests {
 
     /// I1-18: Claude's question tool is titled with the question itself. Its
     /// row showed only "Which"; it must show the whole question.
+    // Hard-won: e570799ccc: a question-tool row displayed only its first word.
     #[test]
     fn a_question_tool_is_summarized_by_its_whole_question() {
         let call = ToolCall::new("ask", "Which file name should I use for the new file?")
@@ -1426,19 +1427,6 @@ mod tests {
         let mut silent = record(None, Some("SIGTERM"), false);
         silent.output.clear();
         assert_eq!(terminal_output_detail(&silent), "killed by SIGTERM");
-    }
-
-    #[test]
-    fn execute_shell_summary_keeps_commands_and_control_operators() {
-        let call = ToolCall::new("call-1", "Bash")
-            .kind(ToolKind::Execute)
-            .raw_input(json!({
-                "command": "cd dir && python x.py | cat | wc ; print ok"
-            }));
-
-        let presentation = tool_call_presentation(&call);
-        assert_eq!(presentation.summary, "cd && python | cat | wc ; print");
-        assert_eq!(presentation.source_kind, ToolSummarySourceKind::RawInput);
     }
 
     #[test]
@@ -1686,6 +1674,15 @@ mod tests {
 
     #[test]
     fn shell_summary_keeps_list_pipeline_and_background_operators() {
+        let simple = ToolCall::new("call-1", "Bash")
+            .kind(ToolKind::Execute)
+            .raw_input(json!({
+                "command": "cd dir && python x.py | cat | wc ; print ok"
+            }));
+        let presentation = tool_call_presentation(&simple);
+        assert_eq!(presentation.summary, "cd && python | cat | wc ; print");
+        assert_eq!(presentation.source_kind, ToolSummarySourceKind::RawInput);
+
         let call = ToolCall::new("operators", "Bash")
             .kind(ToolKind::Execute)
             .raw_input(json!({

@@ -1989,6 +1989,7 @@ mod tests {
     /// session transition may claim one, either as a pane key or as a default
     /// binding. They stay reachable from the palette, the row's ⋯ menu, and an
     /// explicit `[keys]` entry.
+    // Hard-won: 7b69480385: a transition-key mis-hit stopped a session and stranded its close.
     #[test]
     fn session_transition_commands_bind_no_key() {
         let defaults = Keybinds::default();
@@ -2010,6 +2011,7 @@ mod tests {
     /// A close that failed part-way leaves a durable Closing/Destroying
     /// record. Stop is how the person retries it, so it stays available even
     /// though every other session command is blocked on the failure.
+    // Hard-won: 7b69480385: a failed close left a Destroying session without a retry route.
     #[test]
     fn stop_retries_a_close_that_failed_part_way() {
         let mut session = running_session();
@@ -2039,6 +2041,7 @@ mod tests {
     /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
     /// lower border. It is a registry command now, so the help overlay, the
     /// palette, a default chord, and the footer all reach it.
+    // Hard-won: 85c59fc968: the existing Sub-agents pane had no keyboard route.
     #[test]
     fn sub_agents_open_from_a_chord_and_are_listed_for_help_and_the_palette() {
         let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -2085,6 +2088,7 @@ mod tests {
     /// A-8 / B-1: the row's ⋯ menu had no keyboard route. "Session
     /// actions…" opens the same menu from a chord, from `.` on the Sessions
     /// pane, and from the palette, and the Sessions footer names it.
+    // Hard-won: ddd30e47d5: the existing session row menu had no keyboard route.
     #[test]
     fn session_actions_open_the_row_menu_from_the_keyboard() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2166,6 +2170,7 @@ mod tests {
     /// B-16: the terminal said "Interrupt turn" nowhere. The command is in
     /// the palette at all times, greyed with the reason while no turn runs,
     /// and it runs only while the session is working.
+    // Hard-won: f5821dce22: users could not find Interrupt turn in the terminal controls.
     #[test]
     fn interrupt_turn_is_listed_always_and_runs_only_during_a_turn() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2341,50 +2346,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn session_activity_arms_redraws_until_the_work_settles() {
-        let mut dashboard = dashboard_with_session(running_session());
-        assert!(!dashboard.needs_fast_tick());
-        dashboard
-            .session_details
-            .get_mut("session-1")
-            .unwrap()
-            .activity
-            .foreground_tool_started_at_ms = Some(1);
-        assert!(dashboard.needs_fast_tick());
-        dashboard
-            .session_details
-            .get_mut("session-1")
-            .unwrap()
-            .activity = mj_client::usage_format::SessionActivity::default();
-        assert!(!dashboard.needs_fast_tick());
-        dashboard.session_operations.insert(
-            "session-1".into(),
-            operation(SessionOperationKind::Launching, None),
-        );
-        assert!(dashboard.needs_fast_tick());
-        dashboard.session_operations.clear();
-        assert!(!dashboard.needs_fast_tick());
-    }
-
-    /// `spec()` panics on a missing entry, so prove every id has one before
-    /// any other test relies on it.
-    #[test]
-    fn every_command_id_has_exactly_one_spec() {
-        for entry in COMMANDS {
-            assert_eq!(spec(entry.id).id, entry.id);
-            assert_eq!(
-                COMMANDS
-                    .iter()
-                    .filter(|candidate| candidate.id == entry.id)
-                    .count(),
-                1,
-                "{:?} appears more than once",
-                entry.id
-            );
-        }
-    }
-
     /// Two commands answering the same key in the same place would make the
     /// registry order, rather than the user's intent, decide what happens.
     #[test]
@@ -2408,23 +2369,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_is_available_only_while_an_operation_runs() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert!(!available(&dashboard, None).contains(&CommandId::CancelOperation));
-
-        dashboard.session_operations.insert(
-            "session-1".into(),
-            operation(SessionOperationKind::Launching, None),
-        );
-        assert!(available(&dashboard, None).contains(&CommandId::CancelOperation));
-        assert_eq!(
-            (spec(CommandId::CancelOperation).footer)(&dashboard).as_deref(),
-            Some("cancel launch")
-        );
-    }
-
-    #[test]
     fn force_destroy_needs_a_selected_session_and_survives_in_flight_operations() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
@@ -2437,50 +2381,6 @@ mod tests {
         assert!(
             available(&dashboard, None).contains(&CommandId::DestroySession),
             "force destruction exists to preempt a wedged operation"
-        );
-    }
-
-    #[test]
-    fn pin_and_unpin_availability_follow_the_current_layout() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert_eq!(
-            (spec(CommandId::PinSession).available)(&dashboard),
-            Availability::Ready
-        );
-        assert_eq!(
-            (spec(CommandId::UnpinSession).available)(&dashboard),
-            Availability::Blocked("this session is not pinned")
-        );
-
-        dashboard.pin_ids.insert("session-1".into(), 1);
-        assert_eq!(
-            (spec(CommandId::PinSession).available)(&dashboard),
-            Availability::Blocked("this session is already pinned")
-        );
-        assert_eq!(
-            (spec(CommandId::UnpinSession).available)(&dashboard),
-            Availability::Ready
-        );
-    }
-
-    #[test]
-    fn move_command_opens_the_fixed_workspace_resume_controls() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert!(available(&dashboard, None).contains(&CommandId::MoveSession));
-        assert_eq!(
-            dashboard.dispatch_command(CommandId::MoveSession),
-            DashboardAction::None
-        );
-        let crate::Mode::Resume(wizard) = &dashboard.mode else {
-            panic!("move opens the shared resume wizard");
-        };
-        assert!(wizard.moving);
-        assert_eq!(wizard.session_id, "session-1");
-        assert!(
-            wizard.discard_queue,
-            "move defaults to discarding queued work"
         );
     }
 

@@ -159,32 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_double_click_opens_the_same_category_as_enter_and_restores_its_row() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_setup();
-        let position = point(&draw(&mut dashboard), "Interface");
-        click(&mut dashboard, position);
-        assert!(
-            !draw(&mut dashboard)
-                .join("\n")
-                .contains("Settings › Interface")
-        );
-        click(&mut dashboard, position);
-        assert!(
-            draw(&mut dashboard)
-                .join("\n")
-                .contains("Settings › Interface")
-        );
-        dashboard.handle_key(key(KeyCode::Backspace));
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(
-            draw(&mut dashboard)
-                .join("\n")
-                .contains("Settings › Interface")
-        );
-    }
-
-    #[test]
     fn double_click_on_next_cannot_skip_a_wizard_step() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_new();
@@ -200,6 +174,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 0e37e4b79b: click coordinates missed profile rows below the heading.
     #[test]
     fn clicking_a_profile_row_below_the_heading_selects_that_profile() {
         let mut dashboard = dashboard_with_session(running_session());

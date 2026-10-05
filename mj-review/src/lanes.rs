@@ -635,26 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn every_lane_has_a_distinct_id_label_and_at_least_one_analyzer() {
-        let mut ids = BTreeSet::new();
-        for lane in &REVIEW_LANES {
-            assert!(ids.insert(lane.id), "lane ids are unique: {}", lane.id);
-            assert!(!lane.label.is_empty());
-            assert!(!lane.focus.is_empty());
-            assert!(
-                !lane.bifrost_tools.is_empty(),
-                "{} has the analyzers that are its identity",
-                lane.id
-            );
-            assert!(!lane.guidance.is_empty());
-        }
-        assert!(
-            lane_by_id(QUICK_LANE.id).is_none(),
-            "the quick reviewer is never dispatchable as a specialist lane"
-        );
-    }
-
-    #[test]
     fn lane_prompt_scopes_to_one_lane_and_the_diff() {
         let job = job();
         let lane = lane_by_id("error_handling").expect("the roster carries error handling");

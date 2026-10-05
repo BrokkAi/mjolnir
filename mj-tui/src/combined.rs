@@ -1812,6 +1812,7 @@ mod tests {
     /// unlabeled first chord over the "ctrl+b then " label, so the row read
     /// "g sessionsn g sessions". The label and the chord after it must read
     /// as one intact hint at every width the campaign captured.
+    // Hard-won: 125232cbba: the first chord overwrote the composer footer label.
     #[tokio::test]
     async fn composer_footer_keeps_the_chord_label_and_first_chord_apart() {
         let session = running_session();
@@ -1868,6 +1869,7 @@ mod tests {
     /// here" hint on the first inside row was drawn over the splash at 79
     /// and 60 columns. The splash keeps clear of that row, and is dropped
     /// when the pane is too short for both.
+    // Hard-won: 0f6de648aa: the pin hint overlaid the empty-pane splash.
     #[test]
     fn the_splash_keeps_clear_of_the_pin_hint_row() {
         for height in 3..=16 {
@@ -1902,6 +1904,7 @@ mod tests {
 
     /// Launch campaign finding A-15: the "Opening session" advice kept a
     /// hard-coded "·" in ASCII symbol mode.
+    // Hard-won: 987af2e4b4: an open transcript kept stale Unicode glyphs after symbol mode changed.
     #[test]
     fn the_opening_advice_uses_the_symbol_set_in_force() {
         let dashboard = dashboard_with_session(running_session());
@@ -1926,21 +1929,18 @@ mod tests {
     }
 
     #[test]
-    fn minimized_sessions_use_two_content_lines_per_visible_item() {
+    fn minimized_sessions_cap_content_lines_at_four_short_and_ten_tall() {
         assert_eq!(minimized_session_rows(40, 0), 1);
         assert_eq!(minimized_session_rows(40, 1), 1);
         assert_eq!(minimized_session_rows(40, 3), 3);
         assert_eq!(minimized_session_rows(40, 4), 4);
-    }
-
-    #[test]
-    fn minimized_sessions_cap_content_lines_at_four_short_and_ten_tall() {
         assert_eq!(minimized_session_rows(39, 6), 4);
         assert_eq!(minimized_session_rows(39, 100), 4);
         assert_eq!(minimized_session_rows(40, 15), 10);
         assert_eq!(minimized_session_rows(100, 100), 10);
     }
 
+    // Hard-won: 7e71f7eccce4: focusing a mode-two pane changed the prompt split size.
     #[test]
     fn prompt_target_clamps_between_the_minimum_and_a_third() {
         // Below the minimum is raised to it; within range is kept; above a
@@ -2009,6 +2009,7 @@ mod tests {
     /// A launch that has not registered yet draws the same pair of panels a
     /// Starting transition does, with the launch standby in the band, so the
     /// typing has somewhere visible to go before the session exists.
+    // Hard-won: c8d6442496: pre-registration typing went to the previously selected session.
     #[test]
     fn a_launch_being_prepared_draws_the_launch_standby() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2108,6 +2109,7 @@ mod tests {
     /// Launch findings B-2 / D-1 for Suspending: the transition panel's title
     /// started under the pane chrome label, so the row read
     /// "Conversation g". It starts after the label, as the chat title does.
+    // Hard-won: 8bdf82815c: transition titles were covered by pane chrome.
     #[test]
     fn the_pane_chrome_does_not_cover_the_transition_title() {
         for (kind, word) in [

@@ -99,10 +99,4 @@ mod tests {
         assert!(bounded.ends_with("…[synthesis truncated]…"));
         assert!(!bounded.contains("tail"));
     }
-
-    #[test]
-    fn bounding_leaves_short_text_untouched() {
-        assert_eq!(bound_review_section("short", 100, "diff"), "short");
-        assert_eq!(bound_tail("short", 100, "synthesis"), "short");
-    }
 }

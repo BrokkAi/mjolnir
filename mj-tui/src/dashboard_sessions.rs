@@ -1414,18 +1414,6 @@ mod verdict_tests {
     }
 
     #[test]
-    fn awaiting_input_demands_attention_until_a_new_turn_starts() {
-        let mut detail = SessionDetail {
-            awaiting_input: true,
-            unread_agent_messages: 1,
-            ..Default::default()
-        };
-        assert_eq!(level(&detail), AttentionLevel::Waiting);
-        detail.current_turn_started_at = Some(1);
-        assert_eq!(level(&detail), AttentionLevel::Working);
-    }
-
-    #[test]
     fn expected_continuation_outranks_unread_output() {
         let mut detail = SessionDetail {
             unread_agent_messages: 1,

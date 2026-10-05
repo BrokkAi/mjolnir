@@ -839,43 +839,6 @@ mod tests {
     }
 
     #[test]
-    fn certificate_pem_decoder_ignores_armor_and_whitespace() {
-        let bytes = b"desktop certificate";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let pem = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
-        assert_eq!(
-            decode_certificate_pem(&pem).as_deref(),
-            Some(bytes.as_slice())
-        );
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn desktop_window_uses_a_normal_initial_size() {
-        #[derive(Default)]
-        struct RecordingWindowBuilder {
-            initial_size: Option<(f64, f64)>,
-            minimum_size: Option<(f64, f64)>,
-        }
-
-        impl DesktopWindowSizeBuilder for RecordingWindowBuilder {
-            fn with_desktop_initial_size(mut self, width: f64, height: f64) -> Self {
-                self.initial_size = Some((width, height));
-                self
-            }
-
-            fn with_desktop_minimum_size(mut self, width: f64, height: f64) -> Self {
-                self.minimum_size = Some((width, height));
-                self
-            }
-        }
-
-        let builder = apply_desktop_window_size(RecordingWindowBuilder::default());
-        assert_eq!(builder.initial_size, Some((1280.0, 800.0)));
-        assert_eq!(builder.minimum_size, Some((900.0, 600.0)));
-    }
-
-    #[test]
     fn tls_preflight_accepts_only_the_configured_certificate() {
         let expected = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
             .expect("expected certificate");

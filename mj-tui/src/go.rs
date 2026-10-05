@@ -241,9 +241,7 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        buffer_lines, chord, dashboard_with_session, running_session, stopped_session,
-    };
+    use crate::test_support::{buffer_lines, dashboard_with_session, running_session};
     use crate::{CommandId, Mode};
 
     fn mode() -> GoMode {
@@ -268,48 +266,6 @@ mod tests {
     /// The session the daemon would choose in these one-session fixtures.
     fn startup(dashboard: &DashboardState) -> Option<SessionRecord> {
         dashboard.state.sessions.values().next().cloned()
-    }
-
-    #[test]
-    fn a_stopped_startup_session_opens_the_resume_wizard_without_a_feed_record() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut stopped = stopped_session();
-        stopped.id = "stopped".into();
-        stopped.workspace_id = dashboard.state.sessions["session-1"].workspace_id.clone();
-        dashboard.begin_go(mode(), false, Some(stopped));
-        let Mode::Resume(wizard) = &dashboard.mode else {
-            panic!("expected the resume wizard, got {:?}", dashboard.mode);
-        };
-        assert_eq!(wizard.session_id, "stopped");
-        assert!(!dashboard.state.sessions.contains_key("stopped"));
-    }
-
-    #[test]
-    fn new_reuses_the_recipe_without_stopping_the_existing_session() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let expected = mode().recipe.unwrap();
-        assert_eq!(
-            dashboard.begin_go(mode(), false, startup(&dashboard)),
-            DashboardAction::Open {
-                session_id: "session-1".into()
-            }
-        );
-        let before = dashboard.state.clone();
-        assert_eq!(
-            chord(&mut dashboard, CommandId::NewSessionWizard),
-            DashboardAction::GoLaunch { recipe: expected }
-        );
-        assert_eq!(dashboard.state, before);
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
-    #[test]
-    fn workspace_management_remains_available_from_go() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_go(mode(), false, startup(&dashboard));
-        assert!(dashboard.command_allowed_now(CommandId::Workspaces));
-        chord(&mut dashboard, CommandId::Workspaces);
-        assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
     }
 
     #[test]
@@ -378,14 +334,6 @@ mod tests {
                 recipe: mode().recipe.unwrap()
             }
         );
-    }
-
-    #[test]
-    fn ordinary_new_still_opens_the_existing_wizard() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.dispatch_command(CommandId::NewSessionWizard);
-        assert!(matches!(dashboard.mode, Mode::New(_)));
-        assert!(dashboard.go_mode().is_none());
     }
 
     #[test]

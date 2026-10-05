@@ -945,6 +945,7 @@ mod tests {
     /// Scrolling stops once the last line is on screen. A body that already
     /// fits cannot scroll at all: pushing past it used to take the prefix line
     /// and the group heading off the top, leaving one match over blank rows.
+    // Hard-won: a04ad008e6: help scrolled past fitting rows and Esc closed an emptied filter.
     #[test]
     fn help_does_not_scroll_a_body_that_already_fits() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1134,6 +1135,7 @@ mod tests {
     /// Launch campaign finding A-1: a query of several words matches a row
     /// when each word appears somewhere in it, in any order, so "split pane"
     /// finds "Split right" in the Panes group even offline.
+    // Hard-won: 976eb36bce: a multi-word help query failed across separate row fields.
     #[test]
     fn help_filter_matches_each_word_anywhere_in_the_row() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1151,6 +1153,7 @@ mod tests {
     /// Launch campaign finding A-3: an unavailability reason is its own
     /// clause, set off from the description and capitalised, the same way
     /// "Not available here." reads.
+    // Hard-won: ddc6a6026d: an unavailability reason ran into the help description.
     #[test]
     fn help_rows_set_unavailability_reasons_apart_from_the_description() {
         let mut dashboard = dashboard_with_session(running_session());
