@@ -764,6 +764,7 @@ fn converted_prefix(session: &MaterializedSession, chat: &ChatState) -> Vec<Chat
     )
 }
 
+// Hard-won: 2b229f70: opening a large session blocked the dashboard for seconds.
 #[test]
 fn opening_a_long_session_converts_only_the_tail() {
     let items = TAIL_SEED_ITEMS as u64 + 400;
@@ -782,6 +783,86 @@ fn opening_a_long_session_converts_only_the_tail() {
         short_chat.entries,
         materialized_chat_entries(&short_session),
         "the threshold keeps shorter conversations fully available"
+    );
+}
+
+#[test]
+fn materialized_tool_and_plan_conversion_preserves_more_than_eight_details() {
+    let tool_content = (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "type": "content",
+                "content": {"type": "text", "text": format!("result-{index}")}
+            })
+        })
+        .collect::<Vec<_>>();
+    let locations = (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "path": format!("src/file-{index}.rs"),
+                "line": index + 1
+            })
+        })
+        .collect::<Vec<_>>();
+    let plan = (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "content": format!("step-{index}"),
+                "priority": "medium",
+                "status": "pending"
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut session = MaterializedSession::empty("session-rich-details");
+    session.applied_event_ordinal = 2;
+    session.applied_event_digest = "a".repeat(64);
+    session.transcript = vec![
+        Arc::new(TranscriptItem {
+            stable_id: "tool:inspect".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::Tool {
+                call: serde_json::json!({
+                    "toolCallId": "inspect",
+                    "title": "inspect",
+                    "status": "completed",
+                    "content": tool_content,
+                    "locations": locations
+                }),
+                terminal_outputs: Vec::new(),
+                terminal_refs: Vec::new(),
+                presentation: None,
+            },
+        }),
+        Arc::new(TranscriptItem {
+            stable_id: "plan:current".into(),
+            position: 2,
+            latest_content_event_ordinal: None,
+            created_at_ms: 2,
+            last_changed_at_ms: 2,
+            body: TranscriptBody::Plan {
+                plan: serde_json::json!({"entries": plan}),
+            },
+        }),
+    ];
+
+    let entries = materialized_chat_entries(&session);
+    assert_eq!(entries[0].tool_content.len(), 12);
+    assert_eq!(entries[0].tool_locations.len(), 12);
+    assert_eq!(entries[1].plan.len(), 12);
+
+    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
+    // The remote viewer mirrors the TUI's Rich feed, so a tool entry is its
+    // title alone: neither the content details nor the locations belong
+    // there, however many the projection kept for Raw mode.
+    assert_eq!(browser.entries[0].lines, ["inspect"]);
+    assert!(
+        browser.entries[1]
+            .lines
+            .iter()
+            .any(|line| line == "○ step-11")
     );
 }
 
@@ -2416,9 +2497,10 @@ fn the_wheel_over_an_empty_transcript_has_nothing_to_scroll() {
 #[test]
 fn scrolled_history_stays_put_while_new_messages_stream_in() {
     let mut chat = numbered_chat(40);
-    let _ = drawn_transcript(&mut chat, 40, 24);
+    let _ = drawn_transcript(&mut chat, 60, 24);
     chat.handle_key(key(KeyCode::PageUp));
-    let before = drawn_transcript(&mut chat, 40, 24);
+    let before = drawn_transcript(&mut chat, 60, 24);
+    assert!(shows(&before, "End to follow"));
 
     for index in 40..50 {
         chat.entries.push(ChatEntry::plain(
@@ -2429,7 +2511,7 @@ fn scrolled_history_stays_put_while_new_messages_stream_in() {
     }
     chat.entries
         .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
-    let after = drawn_transcript(&mut chat, 40, 24);
+    let after = drawn_transcript(&mut chat, 60, 24);
 
     assert_eq!(
         visible_messages(&before),
@@ -2437,6 +2519,10 @@ fn scrolled_history_stays_put_while_new_messages_stream_in() {
         "appending messages must not move a scrolled-back viewport"
     );
     assert!(!visible_messages(&after).is_empty());
+    assert!(
+        shows(&after, "End to follow"),
+        "the scrolled reader remains marked as behind the tail"
+    );
     assert!(!shows(&after, "late reply"));
 }
 
@@ -3674,6 +3760,7 @@ fn clicking_a_non_web_link_copies_it_instead_of_opening_it() {
     );
 }
 
+// Hard-won: 743ae5d4: underlined transcript links did nothing on click, including wrapped spans.
 #[test]
 fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
     let mut chat = ChatState::new(&snapshot(), &[]);

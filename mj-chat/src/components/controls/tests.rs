@@ -19,6 +19,76 @@ fn click(form: &mut Form<u8>, x: u16, y: u16) -> Option<Interaction<u8>> {
         .action
 }
 
+fn row_text(width: u16, align: RowAlign) -> String {
+    let mut form = Form::<u8>::new();
+    form.declare(1, ControlKind::Button);
+    form.declare(2, ControlKind::Button);
+    form.end_frame(1);
+    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+    terminal
+        .draw(|frame| {
+            form.begin_frame();
+            ButtonRow::render_aligned(
+                frame,
+                frame.area(),
+                &[(1, "First", true), (2, "Last", true)],
+                &mut form,
+                align,
+            );
+            form.end_frame(1);
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn a_row_wider_than_its_area_ignores_right_alignment() {
+    assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
+}
+
+fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
+    let mut form = Form::<u8>::new();
+    form.declare(1, ControlKind::Button);
+    form.declare(2, ControlKind::Button);
+    form.declare(3, ControlKind::Button);
+    form.end_frame(focused);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            form.begin_frame();
+            ButtonColumn::render(
+                frame,
+                frame.area(),
+                &[(1, "First", true), (2, "Widest", true), (3, "Last", true)],
+                &mut form,
+            );
+            form.end_frame(focused);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (buffer.area.y..buffer.area.bottom())
+        .map(|y| {
+            (buffer.area.x..buffer.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_column_too_short_for_its_buttons_scrolls_to_the_focused_one() {
+    assert_eq!(
+        column_lines(16, 1, 3),
+        [format!("{}  Last    ", " ".repeat(6))]
+    );
+}
+
 #[test]
 fn tabbing_to_a_clipped_button_scrolls_it_into_view() {
     let mut form = Form::new();
