@@ -418,11 +418,12 @@ moved, which stages it like any other. Until then its credentials and skills are
 not synchronized.
 
 Those sessions also left their project-memory replicas under `projects/hel-*` in
-the profile home. When the daemon starts, it removes each replica whose session
-has ended. It keeps a replica while its session is in this instance's store or
-a running process names the session, so it does not remove one that another
-Mjolnir instance still uses. A Claude Code project directory also holds the
-session's native transcripts; those stay.
+the profile home. Mjolnir does not remove them: several Mjolnir instances can
+share a profile home, and one instance cannot tell another's stopped session
+from an ended one. The project memory itself is kept in Mjolnir's data
+directory, so you can delete a leftover `projects/hel-*` directory by hand once
+its session is closed. In a Claude Code project directory, keep the session's
+native transcripts.
 
 Credential bytes travel only in direct controller-to-worker messages. They are
 excluded from the durable event journal and recovery archives. Fingerprints and
